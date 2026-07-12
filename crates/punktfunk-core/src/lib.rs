@@ -30,6 +30,11 @@ mod abr;
 pub mod audio;
 #[cfg(feature = "quic")]
 pub mod client;
+/// Client-side shared-clipboard transport: the per-session task that runs the fetch-stream accept
+/// loop, drives outbound fetches, and serves inbound ones — surfaced to the embedder as poll
+/// events. Wire codecs live in [`quic`]; the OS pasteboard integration lives in the native client.
+#[cfg(feature = "quic")]
+pub mod clipboard;
 pub mod config;
 pub mod crypto;
 pub mod error;
@@ -61,7 +66,11 @@ pub use stats::Stats;
 /// TTL of a v2 envelope; `punktfunk_connection_next_rumble` is unchanged and drops it). Additive —
 /// the wire is backward-compatible (the envelope is a length-tolerant tail on 0xCA), so
 /// [`WIRE_VERSION`] is unchanged.
-pub const ABI_VERSION: u32 = 5;
+/// v6: added the shared-clipboard client surface — `punktfunk_connection_host_caps` and
+/// `punktfunk_connection_clipboard_{control,offer,fetch,serve,cancel}` +
+/// `punktfunk_connection_next_clipboard`. Additive; the wire grows only backward-compatible control
+/// messages (0x40-0x44) and a new `Welcome::host_caps` bit, so [`WIRE_VERSION`] is unchanged.
+pub const ABI_VERSION: u32 = 6;
 
 /// The punktfunk/1 **wire** version — what `Hello`/`Welcome` carry and hosts equality-check.
 /// Deliberately its own constant: [`ABI_VERSION`] tracks the embeddable **C surface**
