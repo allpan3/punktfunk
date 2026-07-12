@@ -20,6 +20,11 @@
 
 mod audio;
 mod capture;
+/// Host-side shared-clipboard backend. The wire protocol + client live in `punktfunk-core`; this
+/// drives the host session's real clipboard (`design/clipboard-and-file-transfer.md` §4). Linux uses
+/// Wayland data-control / Mutter; Windows uses the Win32 clipboard (delayed rendering).
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod clipboard;
 mod config;
 mod discovery;
 mod wol;

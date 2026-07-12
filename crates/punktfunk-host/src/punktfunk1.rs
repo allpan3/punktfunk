@@ -32,9 +32,10 @@ use punktfunk_core::config::{
 use punktfunk_core::input::{InputEvent, InputKind};
 use punktfunk_core::packet::{FLAG_PIC, FLAG_PROBE, FLAG_SOF};
 use punktfunk_core::quic::{
-    endpoint, io, BitrateChanged, ClockEcho, ClockProbe, ColorInfo, Hello, LossReport,
-    PairChallenge, PairProof, PairRequest, PairResult, ProbeRequest, ProbeResult, Reconfigure,
-    Reconfigured, RequestKeyframe, RfiRequest, SetBitrate, Start, Welcome,
+    endpoint, io, BitrateChanged, ClipControl, ClipFetchHdr, ClipOffer, ClipState, ClockEcho,
+    ClockProbe, ColorInfo, Hello, LossReport, PairChallenge, PairProof, PairRequest, PairResult,
+    ProbeRequest, ProbeResult, Reconfigure, Reconfigured, RequestKeyframe, RfiRequest, SetBitrate,
+    Start, Welcome,
 };
 use punktfunk_core::transport::UdpTransport;
 use punktfunk_core::Session;
@@ -474,6 +475,86 @@ fn fec_static_override() -> Option<u8> {
         .ok()
         .and_then(|s| s.trim().parse::<u8>().ok())
         .map(|p| p.min(90))
+}
+
+/// Operator clipboard policy from `PUNKTFUNK_CLIPBOARD` (`design/clipboard-and-file-transfer.md`
+/// §4.2): `off` (default — the whole feature is dark), `on` / `1` (text + files), `text-only` /
+/// `no-files` (text/RTF/HTML/image only). Returns `None` when clipboard is off (the host neither
+/// advertises the cap nor accepts fetch streams); otherwise the permitted-format
+/// [`punktfunk_core::quic::CLIP_POLICY_TEXT`] / `CLIP_POLICY_FILES` bitfield.
+///
+/// The policy gates the advertised capability and whether the [`crate::clipboard::session`]
+/// coordinator (Linux data-control backend) starts. `off` keeps the whole feature dark.
+fn clipboard_policy() -> Option<u8> {
+    use punktfunk_core::quic::{CLIP_POLICY_FILES, CLIP_POLICY_TEXT};
+    match std::env::var("PUNKTFUNK_CLIPBOARD")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "" | "0" | "off" | "false" => None,
+        "text-only" | "no-files" | "text" => Some(CLIP_POLICY_TEXT),
+        _ => Some(CLIP_POLICY_TEXT | CLIP_POLICY_FILES), // "on" / "1" / anything truthy
+    }
+}
+
+/// Whether the shared clipboard is enabled at all for this host (policy not `off`).
+fn clipboard_enabled() -> bool {
+    clipboard_policy().is_some()
+}
+
+/// A command from the session control loop into the host clipboard coordinator
+/// (`crate::clipboard::session`, Linux data-control). Defined here — portable — so the control loop
+/// compiles on every host platform; the coordinator that consumes it is Linux-only.
+pub(crate) enum ClipCoordCmd {
+    /// The client toggled sync. When enabled, the coordinator (re)announces the current host
+    /// clipboard; when disabled, it drops any selection it owns and stops forwarding host copies.
+    SetEnabled(bool),
+    /// The client copied: install its offered wire MIMEs as a lazy host selection (empty = clear).
+    RemoteOffer { seq: u32, mimes: Vec<String> },
+}
+
+/// Handle to the host clipboard coordinator, held by the session control loop.
+struct ClipCoord {
+    /// Whether a real backend is live. `false` on gamescope / older GNOME / non-Linux; the control
+    /// loop then answers an enable request with `CLIP_REASON_BACKEND_UNAVAILABLE` and a defensive
+    /// decline loop handles any stray fetch stream.
+    available: bool,
+    cmd_tx: tokio::sync::mpsc::UnboundedSender<ClipCoordCmd>,
+    /// Host-copy announcements from the coordinator → control loop → client.
+    offer_rx: tokio::sync::mpsc::UnboundedReceiver<ClipOffer>,
+}
+
+/// Open the host clipboard backend (when the operator policy allows it, this session mirrors a real
+/// compositor, and the platform has a backend) and spawn its coordinator, returning a handle.
+/// Otherwise the handle is inert (`available = false`, channels dropped) so the caller's control loop
+/// stays platform-agnostic. `has_compositor` is false for the synthetic protocol-test source, which
+/// has no display/clipboard to share — keeping it out of the real session clipboard.
+async fn start_clip_coord(
+    conn: quinn::Connection,
+    clip_enabled: Arc<AtomicBool>,
+    has_compositor: bool,
+) -> ClipCoord {
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (offer_tx, offer_rx) = tokio::sync::mpsc::unbounded_channel();
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    let available = if has_compositor && clipboard_enabled() {
+        crate::clipboard::session::start(conn, clip_enabled, cmd_rx, offer_tx).await
+    } else {
+        drop((conn, clip_enabled, cmd_rx, offer_tx));
+        false
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    let available = {
+        let _ = (conn, clip_enabled, cmd_rx, offer_tx, has_compositor);
+        false
+    };
+    ClipCoord {
+        available,
+        cmd_tx,
+        offer_rx,
+    }
 }
 
 /// Adaptive-FEC band + starting point. Every recovery shard is extra wire bytes AND an extra
@@ -1069,8 +1150,19 @@ async fn serve_session(
             // assuming HEVC.
             codec: codec_bit,
             // This host applies sequence-gated gamepad-state snapshots (InputKind::GamepadState),
-            // so capable clients send those instead of the loss-fragile per-transition events.
-            host_caps: punktfunk_core::quic::HOST_CAP_GAMEPAD_STATE,
+            // so capable clients send those instead of the loss-fragile per-transition events. The
+            // clipboard bit is advertised only when the operator policy enables it (design
+            // clipboard-and-file-transfer.md §3.1) AND this platform has a backend (Linux
+            // data-control / Mutter, or the Win32 clipboard) — the client greys the toggle out
+            // otherwise. A Linux host whose compositor lacks data-control still advertises it and
+            // answers a later enable with BACKEND_UNAVAILABLE, so the client can surface *why* it's
+            // unavailable.
+            host_caps: punktfunk_core::quic::HOST_CAP_GAMEPAD_STATE
+                | if clipboard_enabled() && cfg!(any(target_os = "linux", target_os = "windows")) {
+                    punktfunk_core::quic::HOST_CAP_CLIPBOARD
+                } else {
+                    0
+                },
         };
         io::write_msg(&mut send, &welcome.encode()).await?;
 
@@ -1145,8 +1237,26 @@ async fn serve_session(
     let adaptive_fec = fec_static_override().is_none();
     let fec_target = Arc::new(AtomicU8::new(welcome.fec.fec_percent));
     let fec_target_ctl = fec_target.clone();
+    // Shared-clipboard enable state (client `ClipControl` → host). The coordinator reads it to decide
+    // whether to forward host copies; the control loop flips it on each `ClipControl`.
+    let clip_enabled = Arc::new(AtomicBool::new(false));
+    let clip_enabled_ctl = clip_enabled.clone();
+    // Start the host clipboard coordinator (Linux data-control backend). On success it watches the
+    // session clipboard, forwards host copies as `ClipOffer`s (`clip_offer_rx` → this control loop →
+    // client), installs client offers as a lazy source, and owns the fetch-stream accept loop.
+    // `available` is false when there's no backend (gamescope / older GNOME / non-Linux) — the
+    // control loop then answers `ClipControl` with `BACKEND_UNAVAILABLE` and the defensive decline
+    // loop below handles stray fetch streams.
+    let ClipCoord {
+        available: clip_available,
+        cmd_tx: clip_cmd_tx,
+        offer_rx: mut clip_offer_rx,
+    } = start_clip_coord(conn.clone(), clip_enabled.clone(), compositor.is_some()).await;
     tokio::spawn(async move {
         let mut active = hello.mode;
+        // Set once `clip_offer_rx` closes (coordinator gone / inert handle) so its `select!` branch
+        // stops firing on a perpetually-ready `None`.
+        let mut clip_offer_closed = false;
         // Host-side switch rate limit (a backstop against a hostile/broken client spamming
         // Reconfigure into pipeline-rebuild churn — the drain-to-newest in the data plane already
         // coalesces a well-behaved resize drag; compliant clients self-limit to ≥ 1 s).
@@ -1285,6 +1395,44 @@ async fn serve_session(
                         if io::write_msg(&mut ctrl_send, &echo.encode()).await.is_err() {
                             break;
                         }
+                    } else if let Ok(ctl) = ClipControl::decode(&msg) {
+                        // Shared clipboard enable/disable (design/clipboard-and-file-transfer.md
+                        // §3.1). Reply with the resolved state; the operator policy is authoritative
+                        // over the client's request. When the policy allows it but no backend bound
+                        // (gamescope / older GNOME), enable is refused with BACKEND_UNAVAILABLE so the
+                        // client can say *why*. The resolved `enabled` gates the coordinator.
+                        let policy = clipboard_policy();
+                        let (enabled, resolved_policy, reason) = match policy {
+                            None => (false, 0, punktfunk_core::quic::CLIP_REASON_POLICY_DISABLED),
+                            Some(p) if ctl.enabled && !clip_available => {
+                                (false, p, punktfunk_core::quic::CLIP_REASON_BACKEND_UNAVAILABLE)
+                            }
+                            Some(p) => {
+                                let files_ok = p & punktfunk_core::quic::CLIP_POLICY_FILES != 0;
+                                let wants_files = ctl.flags & punktfunk_core::quic::CLIP_FLAG_FILES != 0;
+                                let reason = if wants_files && !files_ok {
+                                    punktfunk_core::quic::CLIP_REASON_NO_FILES
+                                } else {
+                                    punktfunk_core::quic::CLIP_REASON_OK
+                                };
+                                (ctl.enabled, p, reason)
+                            }
+                        };
+                        clip_enabled_ctl.store(enabled, Ordering::SeqCst);
+                        // Drive the coordinator: enable re-announces the current host clipboard,
+                        // disable drops any selection we own. A dropped send (inert handle) is fine.
+                        let _ = clip_cmd_tx.send(ClipCoordCmd::SetEnabled(enabled));
+                        tracing::info!(enabled, files = enabled && resolved_policy & punktfunk_core::quic::CLIP_POLICY_FILES != 0, "clipboard control");
+                        let state = ClipState { enabled, policy: resolved_policy, reason };
+                        if io::write_msg(&mut ctrl_send, &state.encode()).await.is_err() {
+                            break;
+                        }
+                    } else if let Ok(offer) = ClipOffer::decode(&msg) {
+                        // The client copied: hand its lazy format list to the coordinator, which
+                        // installs a host-side source that fetches from the client on host paste.
+                        tracing::debug!(seq = offer.seq, kinds = offer.kinds.len(), "clipboard offer from client");
+                        let mimes = offer.kinds.iter().map(|k| k.mime.clone()).collect();
+                        let _ = clip_cmd_tx.send(ClipCoordCmd::RemoteOffer { seq: offer.seq, mimes });
                     } else {
                         tracing::warn!("unknown control message — ignoring");
                     }
@@ -1293,6 +1441,21 @@ async fn serve_session(
                     let Some(result) = result else { break }; // data plane gone
                     if io::write_msg(&mut ctrl_send, &result.encode()).await.is_err() {
                         break;
+                    }
+                }
+                offer = clip_offer_rx.recv(), if !clip_offer_closed => {
+                    // Host copied → the coordinator minted a `ClipOffer`; forward it to the client
+                    // (only while sync is on — a race with a just-received disable would otherwise
+                    // leak a stale offer). `None` = coordinator gone; disable this branch.
+                    match offer {
+                        Some(offer) => {
+                            if clip_enabled_ctl.load(Ordering::SeqCst)
+                                && io::write_msg(&mut ctrl_send, &offer.encode()).await.is_err()
+                            {
+                                break;
+                            }
+                        }
+                        None => clip_offer_closed = true,
                     }
                 }
                 correction = reconfig_result_rx.recv() => {
@@ -1375,6 +1538,43 @@ async fn serve_session(
             "client datagram stream ended"
         );
     });
+
+    // Clipboard fetch-stream accept loop (design/clipboard-and-file-transfer.md §3.3, §4.2). When a
+    // backend is live the coordinator (spawned above) owns `accept_bi` and serves real host
+    // clipboard bytes. This is the *fallback*: the operator allowed the cap but no backend bound
+    // (gamescope / older GNOME / a not-yet-implemented platform), so a stray or hostile fetch stream
+    // is answered `CLIP_FETCH_UNAVAILABLE` instead of hanging. Exactly one `accept_bi` consumer runs
+    // (this OR the coordinator). The control stream is the FIRST bi-stream (already accepted at the
+    // handshake), so this loop only ever sees clipboard fetch streams; it dies with the connection.
+    if !clip_available && clipboard_enabled() {
+        let clip_conn = conn.clone();
+        tokio::spawn(async move {
+            use punktfunk_core::quic::clipstream;
+            while let Ok((mut send, mut recv)) = clip_conn.accept_bi().await {
+                tokio::spawn(async move {
+                    // Validate the stream header + request; a malformed/unknown stream is dropped.
+                    match clipstream::read_stream_header(&mut recv).await {
+                        Ok(k) if k == clipstream::CLIP_STREAM_KIND_FETCH => {}
+                        _ => {
+                            let _ = send.reset(clipstream::cancelled_code());
+                            return;
+                        }
+                    }
+                    if clipstream::read_fetch(&mut recv).await.is_err() {
+                        return;
+                    }
+                    let _ = clipstream::write_fetch_hdr(
+                        &mut send,
+                        &ClipFetchHdr {
+                            status: punktfunk_core::quic::CLIP_FETCH_UNAVAILABLE,
+                            total_size: 0,
+                        },
+                    )
+                    .await;
+                });
+            }
+        });
+    }
 
     // Stop signal: stream duration elapsed or the client went away.
     let stop = Arc::new(AtomicBool::new(false));
@@ -5356,6 +5556,138 @@ mod tests {
         // SAFETY: `conn4` came from `punktfunk_connect` and is unused after this; `close` frees it once.
         unsafe { punktfunk_connection_close(conn4) };
 
+        host.join().unwrap().unwrap();
+    }
+
+    /// Shared clipboard end to end over a real synthetic session
+    /// (`design/clipboard-and-file-transfer.md`): with the operator policy enabled, the host
+    /// advertises the capability, acknowledges an enable with a `ClipState`, and — a synthetic
+    /// session mirrors no compositor, so no data-control backend binds — declines a fetch with an
+    /// `Error` the client surfaces. Exercises the whole 0x40-0x44 control+fetch path across two real
+    /// endpoints (client `NativeClient` ↔ host `serve_session`). The live-backend paths (a real
+    /// compositor) are covered by the on-glass test against GNOME/Hyprland.
+    #[test]
+    fn clipboard_control_and_fetch_decline_over_session() {
+        let _serial = SESSION_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        use punktfunk_core::client::NativeClient;
+        use punktfunk_core::clipboard::ClipEventCore;
+        use punktfunk_core::quic::{
+            CLIP_FILE_INDEX_NONE, CLIP_FLAG_FILES, CLIP_POLICY_FILES, HOST_CAP_CLIPBOARD,
+        };
+
+        // Restore the env even on a panicking assert (the poisoned lock is recovered above, so a
+        // leaked var could otherwise reach the next session test).
+        struct EnvGuard(&'static str);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                std::env::remove_var(self.0);
+            }
+        }
+        let _env = EnvGuard("PUNKTFUNK_CLIPBOARD");
+        // Operator policy on. Session tests serialize on SESSION_TEST_LOCK, and only serve_session
+        // (a session test) reads this env, so the mutation is race-free here.
+        std::env::set_var("PUNKTFUNK_CLIPBOARD", "1");
+
+        let host = std::thread::spawn(|| {
+            run(Punktfunk1Options {
+                port: 19781,
+                source: Punktfunk1Source::Synthetic,
+                seconds: 0,
+                frames: 600, // keep the session alive well past the control exchange
+                max_sessions: 1,
+                max_concurrent: 1,
+                require_pairing: false,
+                allow_pairing: false,
+                pairing_pin: None,
+                paired_store: None,
+                data_port: None,
+                idle_timeout: None,
+                mdns: false,
+            })
+        });
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        let mode = punktfunk_core::Mode {
+            width: 1280,
+            height: 720,
+            refresh_hz: 60,
+        };
+        let client = NativeClient::connect(
+            "127.0.0.1",
+            19781,
+            mode,
+            CompositorPref::Auto,
+            GamepadPref::Auto,
+            0,    // bitrate_kbps
+            0,    // video_caps
+            2,    // audio_channels
+            0,    // video_codecs (HEVC-only)
+            0,    // preferred_codec
+            None, // display_hdr
+            None, // launch
+            None, // pin (TOFU)
+            None, // identity (host doesn't require pairing)
+            std::time::Duration::from_secs(10),
+        )
+        .expect("client connects to synthetic host");
+
+        assert_ne!(
+            client.host_caps() & HOST_CAP_CLIPBOARD,
+            0,
+            "an enabled host advertises HOST_CAP_CLIPBOARD"
+        );
+
+        // A bounded poll over the clipboard event plane.
+        let poll = |pred: &dyn Fn(&ClipEventCore) -> bool| -> Option<ClipEventCore> {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                match client.next_clip(std::time::Duration::from_millis(200)) {
+                    Ok(ev) if pred(&ev) => return Some(ev),
+                    Ok(_) => {}
+                    Err(punktfunk_core::PunktfunkError::NoFrame) => {}
+                    Err(_) => break, // session closed
+                }
+            }
+            None
+        };
+
+        // Enable sync (requesting files) → the host acks with a ClipState. A synthetic session
+        // mirrors no compositor, so no data-control backend binds: the host refuses the enable with
+        // `BACKEND_UNAVAILABLE` while still reporting the operator policy (files permitted).
+        client.clip_control(true, CLIP_FLAG_FILES).unwrap();
+        let state = poll(&|e| matches!(e, ClipEventCore::State { .. }))
+            .expect("host replies with a ClipState ack");
+        match state {
+            ClipEventCore::State {
+                enabled,
+                policy,
+                reason,
+            } => {
+                assert!(!enabled, "no backend for a synthetic session → not enabled");
+                assert_eq!(
+                    reason,
+                    punktfunk_core::quic::CLIP_REASON_BACKEND_UNAVAILABLE,
+                    "the refusal reason is BACKEND_UNAVAILABLE"
+                );
+                assert_ne!(
+                    policy & CLIP_POLICY_FILES,
+                    0,
+                    "PUNKTFUNK_CLIPBOARD=1 permits files"
+                );
+            }
+            _ => unreachable!(),
+        }
+
+        // Fetch the host clipboard: a synthetic session has no backend, so the host declines and
+        // the client surfaces an Error for that transfer id.
+        let xfer = client
+            .clip_fetch(1, "text/plain;charset=utf-8".into(), CLIP_FILE_INDEX_NONE)
+            .unwrap();
+        let err = poll(&|e| matches!(e, ClipEventCore::Error { id, .. } if *id == xfer))
+            .expect("host declines the fetch (no backend) → Error event");
+        assert!(matches!(err, ClipEventCore::Error { .. }));
+
+        drop(client);
         host.join().unwrap().unwrap();
     }
 

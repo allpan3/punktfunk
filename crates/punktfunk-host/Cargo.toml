@@ -88,9 +88,11 @@ openh264 = "0.9"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # `screencast` gates the ScreenCast portal module; `remote_desktop` adds the RemoteDesktop
-# portal we use for libei input on KWin/GNOME; `tokio` is the default runtime.
-# `open_pipe_wire_remote` is unconditional, so ashpd's own `pipewire` feature is not
-# needed — we drive PipeWire with the `pipewire` crate below.
+# portal we use for libei input on KWin/GNOME; `tokio` is the default runtime. `open_pipe_wire_remote`
+# is unconditional, so ashpd's own `pipewire` feature is not needed — we drive PipeWire with the
+# `pipewire` crate below. (The GNOME shared-clipboard backend uses Mutter's *direct*
+# `org.gnome.Mutter.RemoteDesktop.Session` clipboard via raw `ashpd::zbus` — NOT the xdg
+# `org.freedesktop.portal.Clipboard`, which needs interactive approval — so no `clipboard` feature.)
 ashpd = { version = "0.13", features = ["screencast", "remote_desktop"] }
 ffmpeg-next = "8"
 libc = "0.2"
@@ -115,7 +117,7 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 # `xdg-output` (zxdg_output_v1): the per-output *logical* geometry (post-scale size + global
 # position), used by the KWin fake_input backend to map absolute coordinates under display scaling.
-wayland-protocols = { version = "0.32", features = ["client"] }
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 # Codegen for KDE's `zkde_screencast_unstable_v1` (vendored in `protocols/`): create a KWin
 # virtual output sized to the client's resolution and get its PipeWire node (KRdp's path).
 # `wayland-backend` is referenced by the generated interface tables.
@@ -200,6 +202,11 @@ windows = { version = "0.62", features = [
     # See capture/windows/dxgi.rs `install_gpu_pref_hook`. No trampoline (we fully replace the fn) → no detour
     # crate / no C length-disassembler dep; a 12-byte absolute-jmp prologue patch suffices.
     "Win32_System_Memory",
+    # Shared-clipboard host backend (src/clipboard/windows.rs): the Win32 clipboard API
+    # (Open/Get/SetClipboardData, AddClipboardFormatListener, delayed rendering) plus the
+    # CLIPBOARD_FORMAT / CF_UNICODETEXT newtype from Ole (design/clipboard-and-file-transfer.md §3).
+    "Win32_System_DataExchange",
+    "Win32_System_Ole",
     # Per-monitor-v2 DPI awareness — IDXGIOutput5::DuplicateOutput1 (the modern capture path Apollo
     # uses; FP16/format-list, robust to overlay/format churn) requires the process to be DPI-aware.
     "Win32_UI_HiDpi",
