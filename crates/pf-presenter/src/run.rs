@@ -434,6 +434,40 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
     // `PUNKTFUNK_TOUCH_DEBUG=1` to log every raw finger AND mouse event: one run tells us
     // whether native wl_touch is being delivered (Finger* with direct=true) or intercepted.
     let touch_debug = std::env::var_os("PUNKTFUNK_TOUCH_DEBUG").is_some();
+    // Under the Deck's game-mode gamescope the session binary's stderr is swallowed by Steam's
+    // reaper, so ALSO mirror the debug lines to a file in the app data dir (host-visible at
+    // ~/.var/app/io.unom.Punktfunk/…), pulled over SSH after a run.
+    let mut touch_log: Option<std::fs::File> = touch_debug
+        .then(|| {
+            let dir = std::env::var_os("XDG_DATA_HOME")
+                .map(std::path::PathBuf::from)
+                .or_else(|| {
+                    std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share"))
+                })
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            let path = dir.join("punktfunk-touch-debug.log");
+            match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                Ok(f) => {
+                    tracing::info!(path = %path.display(), "touch-debug: mirroring to file");
+                    Some(f)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "touch-debug: file sink open failed");
+                    None
+                }
+            }
+        })
+        .flatten();
+    // Defined after `touch_log` so the literal identifier resolves to that local; a no-op when
+    // the sink is absent (env unset or open failed).
+    macro_rules! touch_file_log {
+        ($($arg:tt)*) => {
+            if let Some(f) = touch_log.as_mut() {
+                use std::io::Write;
+                let _ = writeln!(f, $($arg)*);
+            }
+        };
+    }
 
     let outcome = 'main: loop {
         // --- SDL events (input, window, gamepads) ---------------------------------------
@@ -567,6 +601,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                 Event::MouseMotion { xrel, yrel, .. } => {
                     if touch_debug {
                         tracing::info!(xrel, yrel, "touch-debug: MouseMotion");
+                        touch_file_log!("MouseMotion xrel={xrel} yrel={yrel}");
                     }
                     if let Some(cap) = stream.as_mut().and_then(|s| s.capture.as_mut()) {
                         cap.on_motion(xrel, yrel);
@@ -575,6 +610,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                 Event::MouseButtonDown { mouse_btn, .. } => {
                     if touch_debug {
                         tracing::info!(?mouse_btn, "touch-debug: MouseButtonDown");
+                        touch_file_log!("MouseButtonDown mouse_btn={mouse_btn:?}");
                     }
                     if let Some(cap) = stream.as_mut().and_then(|s| s.capture.as_mut()) {
                         if !cap.captured() {
@@ -589,6 +625,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                 Event::MouseButtonUp { mouse_btn, .. } => {
                     if touch_debug {
                         tracing::info!(?mouse_btn, "touch-debug: MouseButtonUp");
+                        touch_file_log!("MouseButtonUp mouse_btn={mouse_btn:?}");
                     }
                     if let Some(cap) = stream.as_mut().and_then(|s| s.capture.as_mut()) {
                         cap.on_button_up(mouse_btn);
@@ -622,6 +659,10 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                             direct = is_direct_touch(touch_id),
                             "touch-debug: FingerDown"
                         );
+                        touch_file_log!(
+                            "FingerDown touch_id={touch_id} finger_id={finger_id} x={x} y={y} direct={}",
+                            is_direct_touch(touch_id)
+                        );
                     }
                     if is_direct_touch(touch_id)
                         && dispatch_finger(
@@ -654,6 +695,10 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                             direct = is_direct_touch(touch_id),
                             "touch-debug: FingerMotion"
                         );
+                        touch_file_log!(
+                            "FingerMotion touch_id={touch_id} finger_id={finger_id} x={x} y={y} direct={}",
+                            is_direct_touch(touch_id)
+                        );
                     }
                     if is_direct_touch(touch_id)
                         && dispatch_finger(
@@ -685,6 +730,10 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                             y,
                             direct = is_direct_touch(touch_id),
                             "touch-debug: FingerUp"
+                        );
+                        touch_file_log!(
+                            "FingerUp touch_id={touch_id} finger_id={finger_id} x={x} y={y} direct={}",
+                            is_direct_touch(touch_id)
                         );
                     }
                     if is_direct_touch(touch_id)
