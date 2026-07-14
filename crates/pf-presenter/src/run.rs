@@ -427,6 +427,13 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
     // events on desktop, and the door Steam's on-screen keyboard types through under
     // gamescope). Toggled edge-wise — start/stop are not free on Wayland.
     let mut text_input_on = false;
+    // One-shot on-glass touch diagnostics. Under the Deck's game-mode gamescope, Steam Input
+    // owns the physical touchscreen and by default emulates it as a virtual trackpad/mouse —
+    // so the app may see MouseMotion/MouseButton instead of the Finger* events the touch-mode
+    // engine feeds on (which kills BOTH trackpad and passthrough at once). Set
+    // `PUNKTFUNK_TOUCH_DEBUG=1` to log every raw finger AND mouse event: one run tells us
+    // whether native wl_touch is being delivered (Finger* with direct=true) or intercepted.
+    let touch_debug = std::env::var_os("PUNKTFUNK_TOUCH_DEBUG").is_some();
 
     let outcome = 'main: loop {
         // --- SDL events (input, window, gamepads) ---------------------------------------
@@ -558,11 +565,17 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                     }
                 }
                 Event::MouseMotion { xrel, yrel, .. } => {
+                    if touch_debug {
+                        tracing::info!(xrel, yrel, "touch-debug: MouseMotion");
+                    }
                     if let Some(cap) = stream.as_mut().and_then(|s| s.capture.as_mut()) {
                         cap.on_motion(xrel, yrel);
                     }
                 }
                 Event::MouseButtonDown { mouse_btn, .. } => {
+                    if touch_debug {
+                        tracing::info!(?mouse_btn, "touch-debug: MouseButtonDown");
+                    }
                     if let Some(cap) = stream.as_mut().and_then(|s| s.capture.as_mut()) {
                         if !cap.captured() {
                             // The engaging click is suppressed toward the host.
@@ -574,6 +587,9 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                     }
                 }
                 Event::MouseButtonUp { mouse_btn, .. } => {
+                    if touch_debug {
+                        tracing::info!(?mouse_btn, "touch-debug: MouseButtonUp");
+                    }
                     if let Some(cap) = stream.as_mut().and_then(|s| s.capture.as_mut()) {
                         cap.on_button_up(mouse_btn);
                     }
@@ -597,6 +613,16 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                     timestamp,
                     ..
                 } => {
+                    if touch_debug {
+                        tracing::info!(
+                            touch_id,
+                            finger_id,
+                            x,
+                            y,
+                            direct = is_direct_touch(touch_id),
+                            "touch-debug: FingerDown"
+                        );
+                    }
                     if is_direct_touch(touch_id)
                         && dispatch_finger(
                             FingerPhase::Down,
@@ -619,6 +645,16 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                     timestamp,
                     ..
                 } => {
+                    if touch_debug {
+                        tracing::info!(
+                            touch_id,
+                            finger_id,
+                            x,
+                            y,
+                            direct = is_direct_touch(touch_id),
+                            "touch-debug: FingerMotion"
+                        );
+                    }
                     if is_direct_touch(touch_id)
                         && dispatch_finger(
                             FingerPhase::Move,
@@ -641,6 +677,16 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                     timestamp,
                     ..
                 } => {
+                    if touch_debug {
+                        tracing::info!(
+                            touch_id,
+                            finger_id,
+                            x,
+                            y,
+                            direct = is_direct_touch(touch_id),
+                            "touch-debug: FingerUp"
+                        );
+                    }
                     if is_direct_touch(touch_id)
                         && dispatch_finger(
                             FingerPhase::Up,
