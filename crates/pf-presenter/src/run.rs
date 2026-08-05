@@ -19,7 +19,8 @@
 use crate::input::{Capture, FingerPhase};
 use crate::overlay::{FrameCtx, Overlay, OverlayAction, OverlayFrame, SessionPhase};
 use crate::present_pace::{
-    Cadence, CadenceProbe, FrameStore, LatchClock, PresentGate, MARGIN_MAX_NS, MARGIN_STEP_NS,
+    Cadence, CadenceProbe, FrameStore, LatchClock, PresentGate, JUDDER_LOG_PERMILLE, MARGIN_MAX_NS,
+    MARGIN_STEP_NS,
 };
 use crate::touch::Abs;
 use crate::vk::{FrameInput, Presenter};
@@ -1821,6 +1822,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                 // a second `take_counters` would read zeros.
                 let (replaced, q_drop, q_dry) = st.store.take_counters();
                 let (gated, forced) = st.gate.take_counters();
+                let cadence = st.clock.take_cadence();
                 st.presented = PresentedWindow {
                     e2e_p50_ms: e2e_p50 as f32 / 1000.0,
                     e2e_p95_ms: e2e_p95 as f32 / 1000.0,
@@ -1834,6 +1836,8 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                     q_dry,
                     gated,
                     forced,
+                    judder_permille: cadence.map(|c| c.judder_permille).unwrap_or(0),
+                    cadence_mode: cadence.map(|c| c.mode_units).unwrap_or(0),
                 };
                 st.win_e2e_us.clear();
                 st.win_disp_us.clear();
@@ -1855,7 +1859,14 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                 // The 1 Hz presenter line (the Apple `pf-present` analogue): emitted
                 // when anything moved, or always under PUNKTFUNK_PRESENT_DEBUG=1 —
                 // the field-triage instrument for the intent engine.
-                if pacing_active && (present_debug || q_drop + q_dry + gated + forced > 0) {
+                // Judder joins the "something moved" triggers deliberately: a cadence
+                // defect shows NO drops, NO gate holds and healthy percentiles, so
+                // without this a stream can judder visibly and never emit a line.
+                if pacing_active
+                    && (present_debug
+                        || q_drop + q_dry + gated + forced > 0
+                        || st.presented.judder_permille >= JUDDER_LOG_PERMILLE)
+                {
                     tracing::info!(
                         smoothing = st.presented.smoothing,
                         mode = st.presented.mode,
@@ -1871,6 +1882,8 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                         latch_ms = st.presented.latch_ms,
                         period_us = st.clock.period_ns() / 1000,
                         margin_us = st.margin_ns / 1000,
+                        judder_permille = st.presented.judder_permille,
+                        cadence_mode = st.presented.cadence_mode,
                         "presenter window"
                     );
                 }
@@ -2368,6 +2381,14 @@ struct PresentedWindow {
     q_dry: u32,
     gated: u32,
     forced: u32,
+    /// The cadence (judder) statistic — the fraction of present intervals (‰) that missed
+    /// the modal spacing, and that modal spacing in whole refreshes. Every other number
+    /// here is a latency and none of them can see a pacing defect: alternating 1 and 3
+    /// refreshes has the same mean rate as a steady 2, better latency percentiles, and
+    /// looks broken. `mode 0` = not enough evidence this window.
+    /// See [`punktfunk_core::phase::PresentIntervals`].
+    judder_permille: u16,
+    cadence_mode: u8,
 }
 
 /// The capture hints (`ui_stream` parity — the words the user reads while released).

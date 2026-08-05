@@ -30,6 +30,12 @@ const STALE_REOPEN_NS: u64 = 100_000_000;
 pub(crate) const MARGIN_STEP_NS: u64 = 500_000;
 pub(crate) const MARGIN_MAX_NS: u64 = 2_500_000;
 
+/// Judder (‰ of present intervals off the modal spacing) that on its own justifies a 1 Hz
+/// presenter line. A cadence defect produces no drops, no gate holds and healthy latency
+/// percentiles, so it would otherwise stay silent until someone set the debug env var.
+/// Occasional single-frame slips are normal; a twentieth of a window is not.
+pub(crate) const JUDDER_LOG_PERMILLE: u16 = 50;
+
 /// The decoded-frame store between the wake channel and the present call.
 ///
 /// `capacity == 0` = newest-wins (latency intent): `submit` replaces, `take` clears.
@@ -183,6 +189,15 @@ pub(crate) struct LatchClock {
     pending_count: u32,
     grid: punktfunk_core::phase::PanelGrid,
     fallback_period_ns: u64,
+    /// The cadence (judder) statistic — the only stat we publish that is not a latency,
+    /// and the only one that can see a pacing defect. Lives here because this is where
+    /// the on-glass stamps and the learned grid it quantises against already meet.
+    ///
+    /// ⚠ These stamps are `CLOCK_REALTIME` (the module's domain), so a wall-clock step
+    /// would forge one hitch that never happened. It lands in the stall/disordered
+    /// counters rather than the judder ratio, which is why that split is worth having.
+    /// Android feeds the metric a raw monotonic stamp and has no such exposure.
+    intervals: punktfunk_core::phase::PresentIntervals,
 }
 
 /// Spacings per handoff to [`punktfunk_core::phase::PanelGrid`]. Small enough that a real
@@ -198,14 +213,29 @@ impl LatchClock {
             pending_count: 0,
             grid: punktfunk_core::phase::PanelGrid::seeded(refresh_hz as i32),
             fallback_period_ns: 1_000_000_000 / u64::from(refresh_hz.max(1)),
+            intervals: punktfunk_core::phase::PresentIntervals::new(),
         }
+    }
+
+    /// Drain the window's cadence summary — the 1 Hz stat boundary, beside the store and
+    /// gate counters.
+    pub(crate) fn take_cadence(&mut self) -> Option<punktfunk_core::phase::PresentCadence> {
+        self.intervals.take()
     }
 
     /// Fold on-glass stamps (ascending). Spacings are measured against the previous
     /// stamp whatever the batching, so the loop's one-sample-per-pass drain still feeds
     /// the learner.
     pub(crate) fn note_batch(&mut self, stamps: &[u64]) {
+        // Seeded-or-learned, so cadence is scored from the first window rather than only
+        // once the learner has converged. Held for the batch: a mid-batch period change
+        // would requantise a handful of samples for no benefit.
+        let period_ns = self.period_ns() as i64;
         for &s in stamps {
+            // Cadence sees EVERY stamp, including the sub-millisecond pairs the grid
+            // learner skips below: two presents inside one refresh is not a grid step,
+            // but it is very much a cadence event (it scores as a zero-refresh interval).
+            self.intervals.record(s as i64, period_ns);
             if self.last_ns != 0 && s > self.last_ns {
                 let d = s - self.last_ns;
                 // < 1 ms apart = a queued pair, not a grid step.
