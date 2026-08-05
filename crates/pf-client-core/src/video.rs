@@ -286,6 +286,9 @@ pub struct Decoder {
     /// The pump drains it and asks the host — under the infinite GOP there is no periodic
     /// keyframe, so a rebuilt/erroring decoder would otherwise stay gray/frozen forever.
     want_keyframe: bool,
+    /// Consecutive frames libavcodec concealed rather than decoded — see
+    /// [`Decoder::note_concealed`]. Separate from [`Self::vaapi_fails`] on purpose.
+    concealed_run: u32,
     /// The presenter has the win32 external-memory import path, so D3D11VA frames can reach
     /// the screen — kept for the mid-session Vulkan→D3D11VA demotion rung (the Windows
     /// analog of Linux's Vulkan→VAAPI rung).
@@ -435,12 +438,78 @@ pub fn decodable_codecs_for(vk: Option<&VulkanDecodeDevice>) -> u8 {
     bits
 }
 
+/// Count of libavcodec messages at `AV_LOG_ERROR` or worse since process start, written
+/// by [`pf_av_log`]. [`Decoder::decode_frame`] samples it around each AU: a backend that
+/// returns a frame while this moved decoded something libavcodec itself called broken.
+///
+/// Process-global because `av_log_set_callback` is. A second concurrent session would make
+/// the attribution fuzzy (both sessions' errors land in one counter) — the consequence is a
+/// spurious keyframe request on the other session, which is exactly what it would do for a
+/// real error anyway, so it is not worth a per-context registry.
+static AVCODEC_ERRORS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Does an `av_log` level mean "this decode is wrong", as opposed to chatter?
+///
+/// libavcodec's ladder is PANIC 0 / FATAL 8 / ERROR 16 / WARNING 24 / INFO 32 / VERBOSE 40.
+/// The cut is at ERROR deliberately: the reference-damage messages we are hunting
+/// (`Error constructing the frame RPS`, `First slice in a frame missing`, `Previous slice
+/// segment missing`) are all ERROR, while WARNING is full of benign noise like swscale's
+/// "deprecated pixel format used" — counting that would request a keyframe on every frame
+/// of a perfectly good session.
+fn counts_as_decode_error(level: std::os::raw::c_int) -> bool {
+    const AV_LOG_ERROR: std::os::raw::c_int = 16;
+    level <= AV_LOG_ERROR
+}
+
+/// libavcodec's `av_log` sink.
+///
+/// The `va_list` argument is deliberately typed `*mut c_void` and NEVER read — formatting
+/// it would need the unstable `c_variadic` feature, and we only want the level and the
+/// message identity. `fmt` is the static format string (`"Error constructing the frame
+/// RPS.\n"`), which is enough to say what happened; only the substituted values are lost.
+///
+/// # Safety
+/// Called by libavcodec from decoder threads. `fmt` is a NUL-terminated static string
+/// (libavcodec passes only string literals). We do not touch `avcl` or `vl`.
+unsafe extern "C" fn pf_av_log(
+    _avcl: *mut std::os::raw::c_void,
+    level: std::os::raw::c_int,
+    fmt: *const std::os::raw::c_char,
+    _vl: *mut std::os::raw::c_void,
+) {
+    if counts_as_decode_error(level) {
+        AVCODEC_ERRORS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    if fmt.is_null() {
+        return;
+    }
+    // SAFETY: libavcodec only ever passes a NUL-terminated static format string here.
+    let msg = unsafe { std::ffi::CStr::from_ptr(fmt) }
+        .to_string_lossy()
+        .trim_end()
+        .to_string();
+    // Route into tracing rather than the raw stderr libavcodec would otherwise write to:
+    // these lines are decode evidence and belong in the log a field report ships us.
+    if counts_as_decode_error(level) {
+        tracing::debug!(target: "ffmpeg", level, "{msg}");
+    } else {
+        tracing::trace!(target: "ffmpeg", level, "{msg}");
+    }
+}
+
 /// libavcodec logs reference-frame recovery to the process stderr very verbosely
 /// (`First slice in a frame missing`, `Could not find ref with POC …`, `Error
 /// constructing the frame RPS`) — normal chatter while the decoder waits for a keyframe
-/// after loss, but a raw flood in the user's terminal (it bypasses our tracing). Default
-/// it to fatal-only; `PUNKTFUNK_FFMPEG_LOG=<quiet|error|warning|info|debug>` restores it
-/// for decode debugging. Process-global; set once per decoder build (idempotent).
+/// after loss, but a raw flood in the user's terminal (it bypasses our tracing).
+///
+/// Two jobs. It sets the level (default fatal-only;
+/// `PUNKTFUNK_FFMPEG_LOG=<quiet|error|warning|info|debug>` restores it for decode
+/// debugging) AND installs [`pf_av_log`], which is what makes those messages *countable*.
+/// The level only gates libavcodec's own default sink; a custom callback is handed every
+/// message regardless, so quieting the terminal no longer means throwing the signal away —
+/// which is what it meant before, for the whole life of this decoder.
+///
+/// Process-global; set once per decoder build (idempotent).
 fn quiet_ffmpeg_log() {
     use ffmpeg::util::log::Level;
     let level = match std::env::var("PUNKTFUNK_FFMPEG_LOG").ok().as_deref() {
@@ -452,6 +521,33 @@ fn quiet_ffmpeg_log() {
         _ => Level::Fatal,
     };
     ffmpeg::util::log::set_level(level);
+
+    let cb: unsafe extern "C" fn(
+        *mut std::os::raw::c_void,
+        std::os::raw::c_int,
+        *const std::os::raw::c_char,
+        *mut std::os::raw::c_void,
+    ) = pf_av_log;
+    // The turbofish clippy asks for cannot be written here: the target type is whatever
+    // bindgen generated for `va_list` on THIS target (`*mut __va_list_tag` on Linux, a
+    // different type on Windows), so naming it would need a cfg ladder per platform and
+    // per arch — the exact portability problem this signature avoids.
+    #[allow(clippy::missing_transmute_annotations)]
+    // SAFETY: `av_log_set_callback` stores a function pointer libavcodec calls for every
+    // message; `pf_av_log` is a `extern "C"` fn with static lifetime, so it stays valid for
+    // the process. The transmute only retypes the 4th parameter from our `*mut c_void` to
+    // whatever bindgen named `va_list` on this target — that parameter is pointer-sized on
+    // every target we build (x86-64/aarch64 SysV pass the va_list struct indirectly; the
+    // Windows x64/arm64 ABI defines `va_list` as a plain `char *`), and `pf_av_log` never
+    // dereferences it, so no ABI-visible difference remains.
+    unsafe {
+        ffmpeg::ffi::av_log_set_callback(Some(std::mem::transmute(cb)))
+    };
+}
+
+/// Snapshot of [`AVCODEC_ERRORS`], for bracketing one decode call.
+fn avcodec_error_count() -> u64 {
+    AVCODEC_ERRORS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 impl Decoder {
@@ -492,6 +588,7 @@ impl Decoder {
                 vaapi_fails: 0,
                 first_fail: None,
                 want_keyframe: false,
+                concealed_run: 0,
                 #[cfg(windows)]
                 d3d11_import,
                 #[cfg(windows)]
@@ -711,6 +808,7 @@ impl Decoder {
             vaapi_fails: 0,
             first_fail: None,
             want_keyframe: false,
+            concealed_run: 0,
             // A PyroWave session never demotes (nothing else decodes it — a failure
             // renegotiates the codec instead), so the D3D11VA rebuild facts are unused
             // here; keep them well-formed rather than plumbing them in for nothing.
@@ -743,6 +841,47 @@ impl Decoder {
         Ok(())
     }
 
+    /// A decode that **succeeded loudly**: libavcodec logged an error and then concealed,
+    /// handing back a frame and a success code. HEVC does this for `Error constructing the
+    /// frame RPS` / `First slice in a frame missing` / `Previous slice segment missing`,
+    /// H.264 for its reference-list equivalents — every one of them means the picture was
+    /// built on references the decoder could not resolve, i.e. it is wrong on screen.
+    ///
+    /// Before this existed the `Ok` arm reset the streak, so this class was not merely
+    /// undetected but actively *erased* the evidence of the errors around it: a decoder
+    /// concealing every second frame looked perfectly healthy, never asked for an IDR, and
+    /// under the infinite GOP kept the damage for the life of the session.
+    ///
+    /// The response is the IDR request, which is the thing that actually repairs the
+    /// picture. It deliberately does NOT feed [`Self::vaapi_fails`], the hardware-demotion
+    /// streak: an ordinary packet loss makes the decoder conceal every AU until the
+    /// requested IDR lands, and at 120 fps a 100–300 ms round trip is 12–36 of them — far
+    /// past [`VAAPI_DEMOTE_AFTER`], and past [`HW_DEMOTE_MIN_STREAK`] too if that IDR is
+    /// itself lost. Counting concealment there would demote a perfectly good decoder for
+    /// the crime of surviving a lossy second. Its own counter keeps the evidence (and the
+    /// log line a field report needs) without arming that trigger.
+    fn note_concealed(&mut self) {
+        self.want_keyframe = true;
+        self.concealed_run = self.concealed_run.saturating_add(1);
+        // Every AU of a loss burst comes through here, so this is debug, not warn — the
+        // run length is the interesting number and it is on the line.
+        tracing::debug!(
+            run = self.concealed_run,
+            "decoder concealed a damaged frame (libavcodec logged an error but returned \
+             success) — requesting a keyframe"
+        );
+    }
+
+    /// Consecutive concealed frames, reset by the first clean decode. A healthy session
+    /// shows short runs that end when the requested IDR lands; a run that keeps climbing
+    /// across many IDR cycles is a decoder producing wrong pictures from good input, which
+    /// is the shape of the Windows FFmpeg-Vulkan field reports. Exposed so the pump can put
+    /// it on the stats line — nothing else can see it, because libavcodec reports this by
+    /// logging rather than by failing.
+    pub fn concealed_run(&self) -> u32 {
+        self.concealed_run
+    }
+
     /// Feed one access unit; returns the decoded frame (the host's streams are
     /// one-in/one-out). A software decode error after packet loss is survivable — log
     /// upstream and keep feeding. A VAAPI error re-requests an IDR and retries the hardware
@@ -769,6 +908,10 @@ impl Decoder {
         user_flags: u32,
         complete: bool,
     ) -> Result<Option<DecodedImage>> {
+        // Bracket the decode: libavcodec reports reference damage by LOGGING and then
+        // concealing, returning a frame and a success code. Without this the whole class is
+        // invisible to us — see `pf_av_log` and `note_concealed`.
+        let errors_before = avcodec_error_count();
         let result = match &mut self.backend {
             Backend::Vulkan(v) => {
                 debug_assert!(complete, "partial AUs are pyrowave-only");
@@ -792,8 +935,19 @@ impl Decoder {
         };
         match result {
             Ok(f) => {
-                self.vaapi_fails = 0;
-                self.first_fail = None;
+                if avcodec_error_count() > errors_before {
+                    self.note_concealed();
+                } else {
+                    if self.concealed_run > 0 {
+                        tracing::debug!(
+                            run = self.concealed_run,
+                            "decoder recovered — clean frame after a concealment run"
+                        );
+                        self.concealed_run = 0;
+                    }
+                    self.vaapi_fails = 0;
+                    self.first_fail = None;
+                }
                 Ok(f)
             }
             Err(e) => {
@@ -1130,6 +1284,82 @@ mod tests {
         // still land on D3D11VA in auto.
         assert!(!decode_device(0x8086, "Intel(R) Arc(TM) B580 Graphics").prefer_vulkan_first());
         assert!(!decode_device(0x8086, "Intel(R) Arc(TM) Pro Graphics").prefer_vulkan_first());
+    }
+
+    /// The cut that decides whether a libavcodec message arms a keyframe request. ERROR and
+    /// worse mean the picture is wrong; WARNING and below are chatter. Getting this wrong is
+    /// not subtle in either direction — too low and every session requests keyframes forever
+    /// off swscale's "deprecated pixel format used", too high and the concealment class this
+    /// whole mechanism exists to catch goes back to being invisible.
+    #[test]
+    fn only_error_and_worse_count_as_a_bad_decode() {
+        // PANIC / FATAL / ERROR
+        assert!(counts_as_decode_error(0));
+        assert!(counts_as_decode_error(8));
+        assert!(counts_as_decode_error(16));
+        // WARNING / INFO / VERBOSE / DEBUG / TRACE
+        assert!(!counts_as_decode_error(24));
+        assert!(!counts_as_decode_error(32));
+        assert!(!counts_as_decode_error(40));
+        assert!(!counts_as_decode_error(48));
+        assert!(!counts_as_decode_error(56));
+    }
+
+    /// The callback itself, through the same pointer libavcodec will call it by — the FFI
+    /// signature and the counter increment, not just the classifier. Deltas rather than
+    /// absolute values because the counter is process-global and tests run in parallel.
+    #[test]
+    fn the_log_callback_counts_errors_and_ignores_chatter() {
+        let msg = c"pf test message\n";
+
+        let before = avcodec_error_count();
+        // SAFETY: exactly what libavcodec does — a NUL-terminated static format string, a
+        // null context, and a va_list `pf_av_log` never reads (null is therefore fine).
+        unsafe { pf_av_log(std::ptr::null_mut(), 16, msg.as_ptr(), std::ptr::null_mut()) };
+        assert!(
+            avcodec_error_count() > before,
+            "an ERROR-level message must be counted"
+        );
+
+        let mid = avcodec_error_count();
+        // SAFETY: as above.
+        unsafe { pf_av_log(std::ptr::null_mut(), 24, msg.as_ptr(), std::ptr::null_mut()) };
+        assert_eq!(
+            avcodec_error_count(),
+            mid,
+            "a WARNING-level message must NOT be counted"
+        );
+
+        // A null fmt must not be dereferenced (defensive: libavcodec always passes one).
+        let pre_null = avcodec_error_count();
+        // SAFETY: the null-fmt path returns before any dereference — that is what is under test.
+        unsafe {
+            pf_av_log(
+                std::ptr::null_mut(),
+                16,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(avcodec_error_count(), pre_null + 1);
+    }
+
+    /// Installing the callback must succeed on whatever this platform's `va_list` is — the
+    /// transmute in `quiet_ffmpeg_log` is the one place the FFI signature could be wrong,
+    /// and a wrong one is a crash inside libavcodec rather than a compile error.
+    #[test]
+    fn installing_the_log_callback_is_safe_and_idempotent() {
+        quiet_ffmpeg_log();
+        quiet_ffmpeg_log();
+        // Drive a real message through libavcodec's own dispatcher, which now routes to
+        // `pf_av_log`: this is the end-to-end proof that the installed pointer is callable.
+        let before = avcodec_error_count();
+        // SAFETY: `av_log` with a literal format string and no varargs to substitute.
+        unsafe { ffmpeg::ffi::av_log(std::ptr::null_mut(), 16, c"pf install probe\n".as_ptr()) };
+        assert!(
+            avcodec_error_count() > before,
+            "libavcodec must reach our callback after quiet_ffmpeg_log()"
+        );
     }
 
     /// Lock the DRM FourCC magic numbers against typos — these are the exact values
