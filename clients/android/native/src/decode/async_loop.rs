@@ -28,6 +28,76 @@ use super::{
     NO_VIDEO_RETRY, PENDING_SPLIT_CAP,
 };
 
+/// How long a flagged AU waits for the host's 0xCF timing before being logged unattributed.
+/// Comfortably longer than the round the host takes to report, short enough that the line still
+/// lands near the event in the log.
+const SPIKE_ATTRIBUTE_WAIT_NS: i64 = 500_000_000;
+
+/// Bound on AUs awaiting attribution — a stream that spikes constantly must not grow this.
+const SPIKE_WATCH_CAP: usize = 64;
+
+/// One receipt-latency excursion, held until the host's own timing for the same AU arrives.
+///
+/// The point of this record is attribution. A window maximum cannot say WHERE a 90 ms frame
+/// spent its time — the per-stage maxima in a window are generally different frames — so the
+/// stage split has to be captured per AU, for the offending AU.
+struct SpikeWatch {
+    pts_ns: u64,
+    /// Capture → reassembled, skew-corrected: the host pipeline plus the wire.
+    hostnet_us: u64,
+    au_len: usize,
+    /// Since the previous AU was reassembled — separates "this frame was slow" from "the
+    /// stream stalled and then burst", which look identical in a latency percentile.
+    gap_us: u64,
+    idx: u32,
+    seen_mono: i64,
+}
+
+impl SpikeWatch {
+    /// `host_us` = the host's own capture→submit time for this AU (0xCF), or `None` when the
+    /// host never reported it. `net` is the remainder: wire + reassembly.
+    fn log(&self, host_us: Option<u64>) {
+        log::warn!(
+            target: "pf.spike",
+            "idx={} hostnetMs={:.1} hostMs={} netMs={} gapMs={:.1} bytes={}",
+            self.idx,
+            self.hostnet_us as f64 / 1000.0,
+            host_us.map_or("?".into(), |h| format!("{:.1}", h as f64 / 1000.0)),
+            host_us.map_or("?".into(), |h| format!(
+                "{:.1}",
+                self.hostnet_us.saturating_sub(h) as f64 / 1000.0
+            )),
+            self.gap_us as f64 / 1000.0,
+            self.au_len,
+        );
+    }
+}
+
+/// `debug.punktfunk.spike_ms` (1..=2000): log a per-AU stage breakdown for every receipt latency
+/// at or above this. Unset = off, so the instrument costs nothing until someone asks for it.
+fn spike_threshold_us() -> Option<u64> {
+    let mut buf = [0u8; 92]; // PROP_VALUE_MAX
+                             // SAFETY: __system_property_get with a valid name + PROP_VALUE_MAX buffer is always safe.
+    let n = unsafe {
+        libc::__system_property_get(
+            c"debug.punktfunk.spike_ms".as_ptr(),
+            buf.as_mut_ptr().cast(),
+        )
+    };
+    if n > 0 {
+        if let Ok(ms) = std::str::from_utf8(&buf[..n as usize])
+            .unwrap_or("")
+            .trim()
+            .parse::<u64>()
+        {
+            if (1..=2_000).contains(&ms) {
+                return Some(ms * 1_000);
+            }
+        }
+    }
+    None
+}
+
 /// One decoded output buffer ready to release: its codec buffer index + the pts the codec echoed
 /// (from the output callback's `BufferInfo`), used to pair the `decode` HUD stat, and the
 /// wall-clock instant the output callback fired — the spec's `decoded` point ("decoder output
@@ -584,6 +654,14 @@ fn feeder_loop(
     // Last logged phase-lock ACK (the host's applied capture hold, from the 0xCF tail) — logged
     // on change so `adb logcat -s pf.phase` shows the closed loop working (or not) at a glance.
     let mut last_phase_ack: Option<i32> = None;
+    // Latency-excursion watch (`debug.punktfunk.spike_ms`). Read once per stream: this is a
+    // field instrument, armed by setprop + reconnect, and off by default.
+    let spike_thresh_us = spike_threshold_us();
+    if let Some(t) = spike_thresh_us {
+        log::info!("decode: spike watch armed at {} ms (pf.spike)", t / 1000);
+    }
+    let mut spike_watch: VecDeque<SpikeWatch> = VecDeque::new();
+    let mut last_recv_mono: Option<i64> = None;
     while !shutdown.load(Ordering::Relaxed) {
         match client.next_frame(Duration::from_millis(5)) {
             Ok(frame) => {
@@ -599,6 +677,44 @@ fn feeder_loop(
                 // Park the receipt stamp (keyed by the pts the codec echoes) whenever the `decode`
                 // stage is consumed: the HUD, or the ABR decode signal (`measure_decode`). The
                 // HUD-only `received` point + host/network split stay gated on the overlay.
+                // The receipt latency is needed by the always-on spike watch below, so it is
+                // computed for every complete AU rather than only when the HUD is up.
+                let spike_lat_us = if frame.complete {
+                    let received_ns = if frame.received_ns > 0 {
+                        frame.received_ns as i128
+                    } else {
+                        now_realtime_ns()
+                    };
+                    let off = clock_offset.load(Ordering::Relaxed) as i128;
+                    let lat_ns = received_ns + off - frame.pts_ns as i128;
+                    (lat_ns > 0 && lat_ns < 10_000_000_000).then_some((lat_ns / 1000) as u64)
+                } else {
+                    None
+                };
+                if let (Some(thresh_us), Some(lat_us)) = (spike_thresh_us, spike_lat_us) {
+                    let now_mono = now_monotonic_ns();
+                    let gap_us = last_recv_mono
+                        .map(|p| ((now_mono - p) / 1000) as u64)
+                        .unwrap_or(0);
+                    last_recv_mono = Some(now_mono);
+                    if lat_us >= thresh_us {
+                        let au_len = frame.part.map_or(0, |p| p.offset as usize) + frame.data.len();
+                        // Held for the host's 0xCF timing for this pts, which is what splits the
+                        // excursion into host pipeline vs wire — the whole point. Emitted
+                        // unattributed if that never arrives (see the drain below).
+                        spike_watch.push_back(SpikeWatch {
+                            pts_ns: frame.pts_ns,
+                            hostnet_us: lat_us,
+                            au_len,
+                            gap_us,
+                            idx: frame.frame_index,
+                            seen_mono: now_mono,
+                        });
+                        if spike_watch.len() > SPIKE_WATCH_CAP {
+                            spike_watch.pop_front();
+                        }
+                    }
+                }
                 if (stats.enabled() || measure_decode) && frame.complete {
                     // Core reassembly-completion stamp (ABI v9), NOT the pull instant: stamping
                     // here would fold the hand-off queue wait into the network latency figure
@@ -632,27 +748,46 @@ fn feeder_loop(
                                 pending_split.pop_front();
                             }
                         }
-                        while let Ok(t) = client.next_host_timing(Duration::ZERO) {
-                            // Phase-lock closed-loop readout: the host's applied hold rides the
-                            // 0xCF tail; log transitions (~1 Hz worst case — the host updates it
-                            // once a second). None = a host without the tail (pre-phase-lock).
-                            if t.applied_phase_ns != last_phase_ack {
-                                log::info!(
-                                    target: "pf.phase",
-                                    "host applied_phase={:?}us",
-                                    t.applied_phase_ns.map(|n| n / 1000)
-                                );
-                                last_phase_ack = t.applied_phase_ns;
-                            }
-                            if let Some(i) = pending_split.iter().position(|&(p, _)| p == t.pts_ns)
-                            {
-                                let (_, hostnet_us) = pending_split.remove(i).unwrap();
-                                stats.note_host_split(
-                                    t.host_us as u64,
-                                    hostnet_us.saturating_sub(t.host_us as u64),
-                                );
-                            }
+                    }
+                }
+                // The 0xCF drain is OUTSIDE the HUD gate: it carries the host's own pipeline time
+                // per AU, which is what attributes a latency excursion to the host or the wire,
+                // and the phase-lock ack, which had no business being invisible with the HUD down.
+                while let Ok(t) = client.next_host_timing(Duration::ZERO) {
+                    // Phase-lock closed-loop readout: the host's applied hold rides the
+                    // 0xCF tail; log transitions (~1 Hz worst case — the host updates it
+                    // once a second). None = a host without the tail (pre-phase-lock).
+                    if t.applied_phase_ns != last_phase_ack {
+                        log::info!(
+                            target: "pf.phase",
+                            "host applied_phase={:?}us",
+                            t.applied_phase_ns.map(|n| n / 1000)
+                        );
+                        last_phase_ack = t.applied_phase_ns;
+                    }
+                    if stats.enabled() {
+                        if let Some(i) = pending_split.iter().position(|&(p, _)| p == t.pts_ns) {
+                            let (_, hostnet_us) = pending_split.remove(i).unwrap();
+                            stats.note_host_split(
+                                t.host_us as u64,
+                                hostnet_us.saturating_sub(t.host_us as u64),
+                            );
                         }
+                    }
+                    if let Some(i) = spike_watch.iter().position(|w| w.pts_ns == t.pts_ns) {
+                        let w = spike_watch.remove(i).unwrap();
+                        w.log(Some(t.host_us as u64));
+                    }
+                }
+                // Anything the host never reported on still gets logged, unattributed, rather
+                // than silently dropped — an old host has no 0xCF tail at all.
+                let now_mono = now_monotonic_ns();
+                while spike_watch
+                    .front()
+                    .is_some_and(|w| now_mono - w.seen_mono > SPIKE_ATTRIBUTE_WAIT_NS)
+                {
+                    if let Some(w) = spike_watch.pop_front() {
+                        w.log(None);
                     }
                 }
                 if ev_tx.send(DecodeEvent::Au(frame, gap)).is_err() {
