@@ -595,6 +595,11 @@ struct PresentIntervals {
     private static let maxUnits = 8
     /// Minimum intervals before a summary means anything (matches `circularLatch`'s bar).
     private static let minSamples = 8
+    /// A backwards step larger than this is a bogus timestamp, not a reordered delivery, so the
+    /// run re-anchors rather than holding the old instant. Without it, one garbage far-future
+    /// stamp latches the statistic and every later present scores as disordered for the whole
+    /// session — observed on glass on Android, 2026-08-05.
+    private static let reanchorNs: Int64 = 100_000_000
 
     private var lastPresentNs: Int64 = 0
     private var hist = [Int](repeating: 0, count: PresentIntervals.maxUnits + 1)
@@ -614,10 +619,14 @@ struct PresentIntervals {
         guard prev > 0, periodNs > 0 else { return }
         let spacing = presentNs - prev
         if spacing <= 0 {
-            // Keep the LATER instant so one disordered delivery cannot corrupt every
-            // following spacing.
+            // Hold the LATER instant so one reordered delivery cannot corrupt every following
+            // spacing — but only when the step back is small enough to BE a reordering. Beyond
+            // that the old instant is the bogus one (see `reanchorNs`) and the run re-anchors
+            // onto the new sample, which `lastPresentNs` already holds.
             disordered += 1
-            lastPresentNs = max(prev, presentNs)
+            if prev - presentNs < PresentIntervals.reanchorNs {
+                lastPresentNs = prev
+            }
             return
         }
         // Nearest whole refresh: a present is "on the grid" if it is closer to this vblank than

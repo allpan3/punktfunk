@@ -103,6 +103,26 @@ final class PresentIntervalsTests: XCTestCase {
             "keeping the later instant means the following spacings stay on the grid")
     }
 
+    /// The on-glass failure of 2026-08-05, pinned on both sides. A render callback can deliver a
+    /// garbage far-future timestamp on a session's first frames; holding "the later instant"
+    /// unconditionally latched onto it and scored EVERY subsequent present as disordered for the
+    /// whole session. One bad sample must cost one sample.
+    func testAGarbageFarFutureStampDoesNotWedgeTheRun() {
+        var pi = PresentIntervals()
+        var t: Int64 = 1_000_000_000
+        pi.record(presentNs: t, periodNs: Self.P)
+        pi.record(presentNs: t + 60 * 60 * 1_000_000_000, periodNs: Self.P)
+        for _ in 0..<20 {
+            t += Self.P
+            pi.record(presentNs: t, periodNs: Self.P)
+        }
+        let s = pi.summary()
+        XCTAssertEqual(s?.disordered, 1, "the garbage stamp cost exactly one sample")
+        XCTAssertEqual(s?.modeUnits, 1)
+        XCTAssertEqual(s?.judderPermille, 0)
+        XCTAssertEqual(s?.samples, 19, "every present after the re-anchor scored")
+    }
+
     func testAnUnknownGridScoresNothing() {
         var pi = PresentIntervals()
         var t: Int64 = 1_000_000_000

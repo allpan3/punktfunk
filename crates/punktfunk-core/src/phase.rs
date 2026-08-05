@@ -135,6 +135,13 @@ pub fn circular_latch(samples_us: &[u64], period_ns: i64) -> Option<(u64, u16)> 
 /// single hitch dominate the window.
 const CADENCE_MAX_UNITS: usize = 8;
 
+/// A backwards step larger than this is not a reordered delivery, it is a bogus timestamp, and
+/// the run re-anchors onto the new instant instead of holding the old one. Android's render
+/// callback is documented to carry a garbage far-future stamp on a session's first frames;
+/// without this bound, holding "the later instant" latches onto that stamp and every subsequent
+/// present scores as disordered for the rest of the session (observed on glass, 2026-08-05).
+const CADENCE_REANCHOR_NS: i64 = 100_000_000;
+
 /// Minimum intervals before a cadence summary means anything — same evidence bar as
 /// [`circular_latch`]. At any sane frame rate a 1 s window clears this many times over; it is
 /// there so a window truncated by a reanchor does not publish a judder figure off three samples.
@@ -212,10 +219,15 @@ impl PresentIntervals {
         }
         let spacing = present_ns - prev;
         if spacing <= 0 {
-            // A repeated or out-of-order callback. Keep the LATER instant as the predecessor so
-            // one disordered delivery cannot corrupt every following spacing.
+            // A repeated or out-of-order callback. Hold the LATER instant so one reordered
+            // delivery cannot corrupt every following spacing — but only when the step back is
+            // small enough to BE a reordering. Beyond that the old instant is the bogus one
+            // (see [`CADENCE_REANCHOR_NS`]) and the run re-anchors onto the new sample, which
+            // `last_present_ns` already holds.
             self.disordered += 1;
-            self.last_present_ns = prev.max(present_ns);
+            if prev - present_ns < CADENCE_REANCHOR_NS {
+                self.last_present_ns = prev;
+            }
             return;
         }
         // Round to the nearest whole refresh: a present is "on the grid" if it is closer to this
@@ -227,6 +239,15 @@ impl PresentIntervals {
         }
         self.hist[units as usize] += 1;
         self.samples += 1;
+    }
+
+    /// The window's raw counts `(samples, stalls, disordered)`, whatever the evidence bar.
+    ///
+    /// [`summary`](Self::summary) returning `None` is otherwise indistinguishable from a window
+    /// of perfectly smooth zeros in a log line, which makes "no cadence is being scored at all"
+    /// invisible — the exact failure this exists to diagnose.
+    pub fn pending(&self) -> (u32, u32, u32) {
+        (self.samples, self.stalls, self.disordered)
     }
 
     /// This window's summary, or `None` under [`CADENCE_MIN_SAMPLES`].
@@ -531,6 +552,27 @@ mod cadence_tests {
             s.judder_permille, 0,
             "keeping the later instant means the following spacings stay on the grid"
         );
+    }
+
+    /// The on-glass failure of 2026-08-05, pinned. Android's render callback can deliver a
+    /// garbage far-future timestamp on a session's first frames. Holding "the later instant"
+    /// unconditionally latched onto it and scored EVERY subsequent present as disordered —
+    /// `cadN=0 disorder=119` per second, for the whole session, with the period known and the
+    /// stream perfectly healthy. One bad sample must cost one sample, not the session.
+    #[test]
+    fn a_garbage_far_future_stamp_does_not_wedge_the_run() {
+        let mut pi = PresentIntervals::new();
+        let mut t = 1_000_000_000i64;
+        pi.record(t, P);
+        pi.record(t + 60 * 60 * 1_000_000_000, P); // a vendor's epoch-sized first stamp
+        for _ in 0..20 {
+            t += P;
+            pi.record(t, P);
+        }
+        let s = pi.summary().expect("the run recovers instead of wedging");
+        assert_eq!(s.disordered, 1, "the garbage stamp cost exactly one sample");
+        assert_eq!((s.mode_units, s.judder_permille), (1, 0));
+        assert_eq!(s.samples, 19, "every present after the re-anchor scored");
     }
 
     #[test]

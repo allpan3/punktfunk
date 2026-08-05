@@ -288,6 +288,7 @@ impl PresentMeter {
         Vec<u64>,
         Vec<u64>,
         Vec<u64>,
+        (u32, u32, u32),
         Option<punktfunk_core::phase::PresentCadence>,
     ) {
         let mut g = self
@@ -302,6 +303,7 @@ impl PresentMeter {
             std::mem::take(&mut g.feed_us),
             std::mem::take(&mut g.codec_us),
             std::mem::take(&mut g.e2e_us),
+            g.intervals.pending(),
             g.intervals.take(),
         )
     }
@@ -602,7 +604,7 @@ impl Presenter {
             return None;
         }
         self.last_flush = Instant::now();
-        let (latch, displays, feed, codec, e2e, cadence) = meter.drain();
+        let (latch, displays, feed, codec, e2e, cad_raw, cadence) = meter.drain();
         if self.released == 0 && displays == 0 {
             return None; // idle stream — nothing worth a line
         }
@@ -626,7 +628,7 @@ impl Presenter {
              feedMs p50={:.2} max={:.2} codecMs p50={:.2} max={:.2} \
              e2eMs p50={:.2} max={:.2} circ={:.2}ms coh={} \
              vsyncMs={:.2} panelMs={:.2} \
-             judder={}permille mode={}vsync stalls={} disorder={}",
+             judder={}permille mode={}vsync cadN={} stalls={} disorder={} cadPeriodMs={:.2}",
             self.released,
             displays,
             self.paced_drops,
@@ -651,8 +653,10 @@ impl Presenter {
             panel_ns as f64 / 1e6,
             cadence.map(|c| c.judder_permille).unwrap_or(0),
             cadence.map(|c| c.mode_units).unwrap_or(0),
-            cadence.map(|c| c.stalls).unwrap_or(0),
-            cadence.map(|c| c.disordered).unwrap_or(0),
+            cad_raw.0,
+            cad_raw.1,
+            cad_raw.2,
+            meter.panel_period_ns.load(Ordering::Relaxed) as f64 / 1e6,
         );
         self.released = 0;
         // Margin adaptation, off the MEASURED latch. A release targets the first grid point past
