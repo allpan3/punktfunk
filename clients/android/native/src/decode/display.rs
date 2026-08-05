@@ -185,7 +185,7 @@ unsafe extern "C" fn on_frame_rendered(
     let display_us = paired.and_then(|(d, _)| clamp(displayed_ns - d));
     let latch_us = paired.and_then(|(_, r)| clamp(displayed_ns - r));
     // Always-on half: the presenter's pf-present line reads these with the HUD off.
-    t.meter.note_latch(latch_us);
+    t.meter.note_latch(latch_us, system_nano);
     if !t.stats.enabled() {
         return; // HUD hidden — skip the skew math + the stats lock
     }

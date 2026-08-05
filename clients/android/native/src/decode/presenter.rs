@@ -22,7 +22,7 @@
 
 use ndk::media::media_codec::MediaCodec;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -152,6 +152,10 @@ pub(super) struct PresentMeter {
     /// This device delivers render callbacks at all (API ≥ 33 and the platform accepted the
     /// registration). Until one arrives, `undisplayed` is meaningless and the rail stays down.
     confirms: AtomicBool,
+    /// The learned panel period the cadence statistic quantises against, republished by
+    /// [`Presenter::pump`] (the callback thread has no access to the vsync clock). 0 until the
+    /// grid is known, which simply means cadence is not scored yet.
+    panel_period_ns: AtomicI64,
 }
 
 struct PresentMeterInner {
@@ -166,6 +170,9 @@ struct PresentMeterInner {
     /// Capture→decoded end-to-end µs (skew-corrected, clamped) — always on for the same reason:
     /// the wireless A/B's headline without having to reach the on-screen HUD.
     e2e_us: Vec<u64>,
+    /// The cadence (judder) statistic — the only stat here that is not a latency, and the only
+    /// one that can see a pacing defect. See [`punktfunk_core::phase::PresentIntervals`].
+    intervals: punktfunk_core::phase::PresentIntervals,
 }
 
 impl PresentMeter {
@@ -177,10 +184,17 @@ impl PresentMeter {
                 feed_us: Vec::with_capacity(256),
                 codec_us: Vec::with_capacity(256),
                 e2e_us: Vec::with_capacity(256),
+                intervals: punktfunk_core::phase::PresentIntervals::new(),
             }),
             undisplayed: AtomicI32::new(0),
             confirms: AtomicBool::new(false),
+            panel_period_ns: AtomicI64::new(0),
         }
+    }
+
+    /// Republish the learned panel period for the cadence statistic (presenter thread).
+    pub(super) fn set_panel_period(&self, period_ns: i64) {
+        self.panel_period_ns.store(period_ns, Ordering::Relaxed);
     }
 
     /// One displayed frame's release→displayed latch, µs. Callback thread; poison-proof.
@@ -188,8 +202,15 @@ impl PresentMeter {
     /// Also the glass budget's CONFIRM: this frame left the BufferQueue, so one outstanding
     /// release is settled. Clamped at zero — the legacy `arrival` path renders without going
     /// through [`Presenter::pump`], so confirms can outnumber counted releases.
-    pub(super) fn note_latch(&self, latch_us: Option<u64>) {
+    ///
+    /// `present_mono_ns` is SurfaceFlinger's own render timestamp, raw on `CLOCK_MONOTONIC` —
+    /// deliberately not the realtime-rebased instant the latency stats use. Cadence is a
+    /// statistic about *spacing*, and a realtime clock step (NTP) would forge a hitch that never
+    /// happened. Garbage stamps need no special handling here: an implausible one lands in the
+    /// stall or disordered counters rather than the judder ratio.
+    pub(super) fn note_latch(&self, latch_us: Option<u64>, present_mono_ns: i64) {
         self.confirms.store(true, Ordering::Relaxed);
+        let period_ns = self.panel_period_ns.load(Ordering::Relaxed);
         let _ = self
             .undisplayed
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
@@ -200,6 +221,7 @@ impl PresentMeter {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         g.displays += 1;
+        g.intervals.record(present_mono_ns, period_ns);
         if let Some(l) = latch_us {
             if g.latch_us.len() < 4096 {
                 g.latch_us.push(l);
@@ -258,7 +280,16 @@ impl PresentMeter {
     }
 
     #[allow(clippy::type_complexity)] // one caller unpacks it in place; a struct would be noise
-    fn drain(&self) -> (Vec<u64>, u64, Vec<u64>, Vec<u64>, Vec<u64>) {
+    fn drain(
+        &self,
+    ) -> (
+        Vec<u64>,
+        u64,
+        Vec<u64>,
+        Vec<u64>,
+        Vec<u64>,
+        Option<punktfunk_core::phase::PresentCadence>,
+    ) {
         let mut g = self
             .inner
             .lock()
@@ -271,6 +302,7 @@ impl PresentMeter {
             std::mem::take(&mut g.feed_us),
             std::mem::take(&mut g.codec_us),
             std::mem::take(&mut g.e2e_us),
+            g.intervals.take(),
         )
     }
 }
@@ -410,6 +442,11 @@ impl Presenter {
         stats: &crate::stats::VideoStats,
         now_mono_ns: i64,
     ) -> bool {
+        // The callback thread scores cadence but cannot see the vsync clock — republish the grid
+        // it quantises against. Relaxed: a period change is rare and one stale sample is noise.
+        if let Some(c) = clock {
+            meter.set_panel_period(c.panel_period_ns().max(c.period_ns()));
+        }
         // Budget bookkeeping first: reopen on the predicted latch, force-open on the backstop.
         if let Some(f) = &self.inflight {
             if now_mono_ns >= f.reopen_at_ns {
@@ -547,7 +584,11 @@ impl Presenter {
     /// `pace` (decoded→release) / `latch` (release→displayed) /
     /// `feed`+`codec` (the decode stage split: received→queued hand-off/slot wait + the
     /// codec-pure queued→decoded time) / `e2e` (capture→decoded, skew-corrected — the wireless
-    /// A/B headline) / `vsync` (the measured panel period).
+    /// A/B headline) / `vsync` (the measured panel period) /
+    /// `judder` (‰ of present intervals off the modal spacing — the cadence statistic, and the
+    /// only number here that can see a pacing defect) / `mode` (the modal spacing in refreshes:
+    /// 1 at panel rate, 2 for 60-on-120) / `stalls` + `disorder` (excluded from the ratio; see
+    /// [`punktfunk_core::phase::PresentIntervals`]).
     ///
     /// Returns this window's CIRCULAR latch statistics `(vector-mean latch ns mod panel period,
     /// coherence ‰)` when a window actually flushed — the phase-lock reporter's v2 error signal
@@ -561,7 +602,7 @@ impl Presenter {
             return None;
         }
         self.last_flush = Instant::now();
-        let (latch, displays, feed, codec, e2e) = meter.drain();
+        let (latch, displays, feed, codec, e2e, cadence) = meter.drain();
         if self.released == 0 && displays == 0 {
             return None; // idle stream — nothing worth a line
         }
@@ -584,7 +625,8 @@ impl Presenter {
              paceMs p50={:.2} max={:.2} latchMs p50={:.2} max={:.2} \
              feedMs p50={:.2} max={:.2} codecMs p50={:.2} max={:.2} \
              e2eMs p50={:.2} max={:.2} circ={:.2}ms coh={} \
-             vsyncMs={:.2} panelMs={:.2}",
+             vsyncMs={:.2} panelMs={:.2} \
+             judder={}permille mode={}vsync stalls={} disorder={}",
             self.released,
             displays,
             self.paced_drops,
@@ -607,6 +649,10 @@ impl Presenter {
             circ.map(|(_, c)| c).unwrap_or(0),
             period_ms,
             panel_ns as f64 / 1e6,
+            cadence.map(|c| c.judder_permille).unwrap_or(0),
+            cadence.map(|c| c.mode_units).unwrap_or(0),
+            cadence.map(|c| c.stalls).unwrap_or(0),
+            cadence.map(|c| c.disordered).unwrap_or(0),
         );
         self.released = 0;
         // Margin adaptation, off the MEASURED latch. A release targets the first grid point past

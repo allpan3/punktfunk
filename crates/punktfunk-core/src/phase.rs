@@ -129,6 +129,140 @@ pub fn circular_latch(samples_us: &[u64], period_ns: i64) -> Option<(u64, u16)> 
     Some((mean_ns, (r * 1000.0) as u16))
 }
 
+/// Largest present spacing still treated as cadence. Anything wider is a stall (a stream pause,
+/// an occluded window, a codec rebuild) and is counted separately: folding a 5-second gap in as
+/// "one irregular interval" would be true but useless, and folding it in as several would make a
+/// single hitch dominate the window.
+const CADENCE_MAX_UNITS: usize = 8;
+
+/// Minimum intervals before a cadence summary means anything — same evidence bar as
+/// [`circular_latch`]. At any sane frame rate a 1 s window clears this many times over; it is
+/// there so a window truncated by a reanchor does not publish a judder figure off three samples.
+const CADENCE_MIN_SAMPLES: u32 = 8;
+
+/// One window's present-cadence summary (see [`PresentIntervals`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PresentCadence {
+    /// The most common spacing, in whole panel refreshes. This is the stream's cadence ratio:
+    /// 1 when stream rate matches the panel, 2 for 60-on-120, 4 for 30-on-120.
+    pub mode_units: u8,
+    /// Fraction of intervals that were NOT the mode, in ‰ (same unit as the phase coherence).
+    /// **This is the judder number.** 0 = a perfectly regular cadence at any ratio.
+    pub judder_permille: u16,
+    /// Intervals folded into the histogram (excludes stalls and disordered samples).
+    pub samples: u32,
+    /// Spacings wider than [`CADENCE_MAX_UNITS`] — stalls, not judder. Reported so a window that
+    /// looks smooth *because the stream was paused* cannot be mistaken for a good one.
+    pub stalls: u32,
+    /// Present instants that did not advance (duplicate or out-of-order callbacks). A platform
+    /// bookkeeping signal, not a display defect — kept out of the judder ratio deliberately.
+    pub disordered: u32,
+}
+
+/// Present-interval distribution in whole panel refreshes — the cadence (judder) statistic.
+///
+/// Every other stat we publish is a latency: a difference between two points on one frame. No
+/// latency can see judder, because judder is a property of the *sequence*. A stream that shows
+/// each frame one refresh early and the next one late has excellent percentiles and looks
+/// broken; a stream whose every interval is exactly two refreshes has worse latency than one
+/// that alternates 1 and 3, and looks perfect. Quantising the spacing between consecutive
+/// on-glass instants onto the panel grid measures the thing the eye actually reacts to.
+///
+/// Scale-free by construction: it needs no reference clock, and the *mode* absorbs the cadence
+/// ratio, so 60-on-120 and 120-on-120 are both "smooth = one tall bucket" and comparable to each
+/// other. That is what makes it usable as one ruler across clients, refresh rates and stream
+/// rates — including for a feature-on/feature-off A/B on the same device.
+///
+/// Feed it the **measured on-glass instant**, never the instant a present was *requested*:
+/// requested times would measure our own intent and report a perfect cadence no matter what the
+/// display did with it. Every client has the real one (Android's `OnFrameRendered` system time,
+/// the desktop's `VK_KHR_present_wait` stamp, Apple's drawable `presentedTime`).
+///
+/// Pure state and arithmetic — no clock, no allocation. The caller owns the window: drain with
+/// [`take`](Self::take) on its own 1 s tumbling boundary, per `design/stats-unification.md`.
+#[derive(Debug, Clone, Default)]
+pub struct PresentIntervals {
+    last_present_ns: i64,
+    /// Counts indexed by whole refreshes, `0..=CADENCE_MAX_UNITS`.
+    hist: [u32; CADENCE_MAX_UNITS + 1],
+    samples: u32,
+    stalls: u32,
+    disordered: u32,
+}
+
+impl PresentIntervals {
+    pub fn new() -> PresentIntervals {
+        PresentIntervals::default()
+    }
+
+    /// Forget the previous instant without discarding the window's counts. Call on any
+    /// discontinuity where the next present is not a continuation of this cadence (reanchor,
+    /// codec rebuild, surface recreate) so the gap across it is not scored as a stall.
+    pub fn split(&mut self) {
+        self.last_present_ns = 0;
+    }
+
+    /// Fold one on-glass instant. `period_ns` is the learned panel period
+    /// ([`PanelGrid::period_ns`]); a non-positive one means the grid is not known yet and the
+    /// sample is held as the new predecessor without being scored.
+    pub fn record(&mut self, present_ns: i64, period_ns: i64) {
+        let prev = std::mem::replace(&mut self.last_present_ns, present_ns);
+        if prev <= 0 || period_ns <= 0 {
+            return; // first sample of a run, or no grid to quantise against
+        }
+        let spacing = present_ns - prev;
+        if spacing <= 0 {
+            // A repeated or out-of-order callback. Keep the LATER instant as the predecessor so
+            // one disordered delivery cannot corrupt every following spacing.
+            self.disordered += 1;
+            self.last_present_ns = prev.max(present_ns);
+            return;
+        }
+        // Round to the nearest whole refresh: a present is "on the grid" if it is closer to this
+        // vblank than the next, which is exactly what the display did with it.
+        let units = (spacing * 2 + period_ns) / (period_ns * 2);
+        if units as usize > CADENCE_MAX_UNITS {
+            self.stalls += 1;
+            return;
+        }
+        self.hist[units as usize] += 1;
+        self.samples += 1;
+    }
+
+    /// This window's summary, or `None` under [`CADENCE_MIN_SAMPLES`].
+    pub fn summary(&self) -> Option<PresentCadence> {
+        if self.samples < CADENCE_MIN_SAMPLES {
+            return None;
+        }
+        let (mode_units, mode_count) = self
+            .hist
+            .iter()
+            .enumerate()
+            .max_by_key(|&(_, c)| *c)
+            .map(|(i, &c)| (i as u8, c))?;
+        Some(PresentCadence {
+            mode_units,
+            judder_permille: (u64::from(self.samples - mode_count) * 1000 / u64::from(self.samples))
+                as u16,
+            samples: self.samples,
+            stalls: self.stalls,
+            disordered: self.disordered,
+        })
+    }
+
+    /// Drain the window: the summary (if it clears the evidence bar) and a reset of the counts.
+    /// The previous instant SURVIVES the drain — the cadence continues across a window boundary,
+    /// and dropping it would manufacture one unscored interval per window.
+    pub fn take(&mut self) -> Option<PresentCadence> {
+        let out = self.summary();
+        self.hist = [0; CADENCE_MAX_UNITS + 1];
+        self.samples = 0;
+        self.stalls = 0;
+        self.disordered = 0;
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,5 +426,156 @@ mod panel_grid_tests {
             g.observe(P120);
         }
         assert_eq!(g.period_ns(), P120, "and the real grid wins it back");
+    }
+}
+
+#[cfg(test)]
+mod cadence_tests {
+    use super::*;
+
+    const P: i64 = 8_333_333; // 120 Hz in ns
+
+    /// Fold `n` presents spaced by `spacings` in rotation, starting at an arbitrary instant.
+    fn cadence(spacings: &[i64], n: usize) -> PresentIntervals {
+        let mut pi = PresentIntervals::new();
+        let mut t = 1_000_000_000i64;
+        pi.record(t, P);
+        for i in 0..n {
+            t += spacings[i % spacings.len()];
+            pi.record(t, P);
+        }
+        pi
+    }
+
+    #[test]
+    fn a_regular_cadence_has_no_judder() {
+        let s = cadence(&[P], 60).summary().unwrap();
+        assert_eq!((s.mode_units, s.judder_permille), (1, 0));
+        assert_eq!(s.samples, 60);
+    }
+
+    /// The property that makes this one ruler across rates: a stream at half the panel rate is
+    /// SMOOTH, not judder — the mode absorbs the cadence ratio.
+    fn ratio_is_absorbed_not_penalised(mult: i64, expect_units: u8) {
+        let s = cadence(&[P * mult], 40).summary().unwrap();
+        assert_eq!((s.mode_units, s.judder_permille), (expect_units, 0));
+    }
+
+    #[test]
+    fn sixty_on_onetwenty_reads_smooth() {
+        ratio_is_absorbed_not_penalised(2, 2); // 60 fps on a 120 Hz panel
+        ratio_is_absorbed_not_penalised(4, 4); // 30 fps on a 120 Hz panel
+    }
+
+    /// D3's signature: the same mean spacing as `sixty_on_onetwenty_reads_smooth`, delivered as
+    /// alternating 1 and 3 refreshes. Identical average frame rate, identical latency
+    /// percentiles — and this is the one that looks broken.
+    #[test]
+    fn the_sawtooth_that_latency_stats_cannot_see() {
+        let s = cadence(&[P, P * 3], 40).summary().unwrap();
+        assert_eq!(s.judder_permille, 500);
+        assert!(matches!(s.mode_units, 1 | 3));
+    }
+
+    /// Sub-refresh jitter is not judder: the display quantises it away, so the metric must too.
+    /// Only a spacing that crosses the half-refresh boundary changes which vblank was used.
+    #[test]
+    fn jitter_inside_a_refresh_is_not_judder() {
+        let s = cadence(&[P + P * 2 / 5, P - P * 2 / 5], 40)
+            .summary()
+            .unwrap();
+        assert_eq!((s.mode_units, s.judder_permille), (1, 0));
+    }
+
+    #[test]
+    fn a_stall_is_counted_apart_from_judder() {
+        let mut pi = PresentIntervals::new();
+        let mut t = 1_000_000_000i64;
+        pi.record(t, P);
+        for _ in 0..20 {
+            t += P;
+            pi.record(t, P);
+        }
+        t += P * 400; // a pause, not a pacing defect
+        pi.record(t, P);
+        let s = pi.summary().unwrap();
+        assert_eq!((s.judder_permille, s.stalls, s.samples), (0, 1, 20));
+    }
+
+    #[test]
+    fn out_of_order_callbacks_do_not_corrupt_the_run() {
+        let mut pi = PresentIntervals::new();
+        let mut t = 1_000_000_000i64;
+        pi.record(t, P);
+        for _ in 0..10 {
+            t += P;
+            pi.record(t, P);
+        }
+        pi.record(t - P * 3, P); // a late/duplicate delivery
+        for _ in 0..10 {
+            t += P;
+            pi.record(t, P);
+        }
+        let s = pi.summary().unwrap();
+        assert_eq!(s.disordered, 1);
+        assert_eq!(
+            s.judder_permille, 0,
+            "keeping the later instant means the following spacings stay on the grid"
+        );
+    }
+
+    #[test]
+    fn an_unknown_grid_scores_nothing() {
+        let s = cadence(&[P], 60);
+        let mut pi = PresentIntervals::new();
+        let mut t = 1_000_000_000i64;
+        for _ in 0..60 {
+            t += P;
+            pi.record(t, 0); // PanelGrid has not learned a period yet
+        }
+        assert!(pi.summary().is_none());
+        assert!(s.summary().is_some(), "control");
+    }
+
+    #[test]
+    fn a_short_window_publishes_nothing() {
+        assert!(cadence(&[P], 5).summary().is_none());
+    }
+
+    /// The cadence continues across a window boundary — dropping the predecessor on drain would
+    /// silently discard one interval per window, every window.
+    #[test]
+    fn take_resets_the_counts_but_not_the_cadence() {
+        let mut pi = cadence(&[P], 20);
+        assert!(pi.take().is_some());
+        assert!(pi.summary().is_none(), "counts cleared");
+        let mut t = 1_000_000_000 + P * 20;
+        for _ in 0..10 {
+            t += P;
+            pi.record(t, P);
+        }
+        let s = pi.summary().unwrap();
+        assert_eq!(
+            s.samples, 10,
+            "the first post-drain present scored against the pre-drain one"
+        );
+    }
+
+    #[test]
+    fn split_forgets_the_predecessor() {
+        let mut pi = cadence(&[P], 20);
+        pi.take();
+        pi.split();
+        let mut t = 5_000_000_000i64; // a reanchor: the gap across it is meaningless
+        for _ in 0..10 {
+            t += P;
+            pi.record(t, P);
+        }
+        let s = pi.summary().unwrap();
+        assert_eq!(
+            (s.samples, s.stalls),
+            (9, 0),
+            "the gap was not scored at all"
+        );
     }
 }
