@@ -474,6 +474,7 @@ private final class DeadlineLinkDelegate: NSObject, CAMetalDisplayLinkDelegate {
         // The link's own pipeline depth, measured: how far ahead of glass this vend runs.
         let leadS = update.targetPresentationTimestamp - CACurrentMediaTime()
         stats?.vendLead(ms: leadS * 1000)
+        stats?.notePanelTarget(mediaTime: update.targetPresentationTimestamp)
         // Same measurement into the floor meter (as a LatencyMeter sample: end = now, start =
         // now − lead) — its 1 s p50 is the OS present floor SessionModel shaves off.
         if leadS > 0, let floorMeter {
@@ -562,6 +563,103 @@ final class PresentGate: @unchecked Sendable {
     }
 }
 
+/// One window's present-cadence summary (see `PresentIntervals`).
+struct PresentCadence: Equatable {
+    /// The most common spacing, in whole panel refreshes: 1 at panel rate, 2 for 60-on-120.
+    let modeUnits: Int
+    /// Fraction of intervals that were NOT the mode, in ‰. **The judder number.**
+    let judderPermille: Int
+    let samples: Int
+    /// Spacings wider than `maxUnits` — stalls, not judder.
+    let stalls: Int
+    /// Present instants that did not advance (duplicate/out-of-order callbacks).
+    let disordered: Int
+}
+
+/// Present-interval distribution in whole panel refreshes — the cadence (judder) statistic.
+///
+/// A **verbatim port of `punktfunk_core::phase::PresentIntervals`**, in the same spirit as
+/// `PhaseReporter.circularLatch` above: the three clients must publish the SAME statistic, so the
+/// numbers can be compared across platforms and so a feature-on/off A/B uses one ruler. Any change
+/// here belongs in the Rust original first — including the tie-break, which is spelled out on both
+/// sides precisely because the two languages' `max` disagree about which equal element wins.
+///
+/// Every other stat we publish is a latency: a difference between two points on one frame. No
+/// latency can see judder, because judder is a property of the *sequence*. A stream that shows each
+/// frame one refresh early and the next one late has excellent percentiles and looks broken.
+///
+/// Fed the MEASURED on-glass instant, never the requested present time — the latter would measure
+/// our own intent and report a perfect cadence no matter what the display did.
+struct PresentIntervals {
+    /// Largest spacing still treated as cadence; wider is a stall, counted apart.
+    private static let maxUnits = 8
+    /// Minimum intervals before a summary means anything (matches `circularLatch`'s bar).
+    private static let minSamples = 8
+
+    private var lastPresentNs: Int64 = 0
+    private var hist = [Int](repeating: 0, count: PresentIntervals.maxUnits + 1)
+    private var samples = 0
+    private var stalls = 0
+    private var disordered = 0
+
+    /// Forget the previous instant without discarding the window's counts — a discontinuity where
+    /// the next present does not continue this cadence.
+    mutating func split() { lastPresentNs = 0 }
+
+    /// Fold one on-glass instant. A non-positive `periodNs` means the grid is not known yet and
+    /// the sample is held as the new predecessor without being scored.
+    mutating func record(presentNs: Int64, periodNs: Int64) {
+        let prev = lastPresentNs
+        lastPresentNs = presentNs
+        guard prev > 0, periodNs > 0 else { return }
+        let spacing = presentNs - prev
+        if spacing <= 0 {
+            // Keep the LATER instant so one disordered delivery cannot corrupt every
+            // following spacing.
+            disordered += 1
+            lastPresentNs = max(prev, presentNs)
+            return
+        }
+        // Nearest whole refresh: a present is "on the grid" if it is closer to this vblank than
+        // the next, which is exactly what the display did with it.
+        let units = Int((spacing * 2 + periodNs) / (periodNs * 2))
+        if units > PresentIntervals.maxUnits {
+            stalls += 1
+            return
+        }
+        hist[units] += 1
+        samples += 1
+    }
+
+    /// This window's summary, or nil under `minSamples`.
+    func summary() -> PresentCadence? {
+        guard samples >= PresentIntervals.minSamples else { return nil }
+        // Ties resolve to the SMALLEST spacing — see the Rust original: `max_by_key` takes the
+        // last maximum and Swift's `max(by:)` the first, so this is written out on both sides.
+        var modeUnits = 0
+        var modeCount = 0
+        for (i, c) in hist.enumerated() where c > modeCount {
+            modeCount = c
+            modeUnits = i
+        }
+        return PresentCadence(
+            modeUnits: modeUnits,
+            judderPermille: (samples - modeCount) * 1000 / samples,
+            samples: samples, stalls: stalls, disordered: disordered)
+    }
+
+    /// Drain the window. The previous instant SURVIVES — the cadence continues across a window
+    /// boundary, and dropping it would manufacture one unscored interval per window.
+    mutating func take() -> PresentCadence? {
+        let out = summary()
+        hist = [Int](repeating: 0, count: PresentIntervals.maxUnits + 1)
+        samples = 0
+        stalls = 0
+        disordered = 0
+        return out
+    }
+}
+
 /// PUNKTFUNK_PRESENT_DEBUG=1 aggregation: one printed line per second from the render thread with
 /// the decode rate, render outcomes, the slowest render call (≈ nextDrawable wait) and the deltas
 /// between system-reported on-glass times (vsync-aligned presents show clean refresh-period
@@ -588,6 +686,50 @@ private final class PresentDebugStats: @unchecked Sendable {
     /// 120 Hz panel saturates this at ~maximumDrawableCount; stage-3 pegs it at the gate depth).
     private var inFlight = 0
     private var maxInFlight = 0
+    /// The cadence (judder) statistic — the only number here that is not a latency, and the only
+    /// one that can see a pacing defect. `glassDeltasMs` above is the same raw material reported
+    /// as a percentile, which cannot distinguish a steady 2-refresh cadence from an alternating
+    /// 1-and-3 one: same mean, same median, one of them visibly broken.
+    private var intervals = PresentIntervals()
+    /// The panel period cadence quantises against: seeded from the display mode and refined from
+    /// the link's own reported period, mirroring `punktfunk_core::phase::PanelGrid`'s seed-then-
+    /// correct design. 0 until known, which simply means cadence is not scored yet.
+    private var panelPeriodNs: Int64 = 0
+    /// Deadline-pacing period learner state (see `notePanelTarget`). Re-armed each window so a
+    /// mode or VRR rate change is tracked both ways rather than latching the first value seen.
+    private var lastTargetS: CFTimeInterval = 0
+    private var minTargetSpacingS: CFTimeInterval = 0
+    /// Whether the verbose per-second line prints. The cadence line always does: a smoothness
+    /// defect must not be invisible until someone thinks to set an env var.
+    private let verbose: Bool
+
+    init(verbose: Bool) { self.verbose = verbose }
+
+    /// Seed or refine the panel period (render/link thread).
+    func setPanelPeriod(ns: Int64) {
+        guard ns > 0 else { return }
+        lock.lock()
+        panelPeriodNs = ns
+        lock.unlock()
+    }
+
+    /// Deadline pacing has no reported period, so learn it from the link's own target instants.
+    /// Those tick at the panel rate whether or not WE present, which is what makes the window
+    /// minimum the true period — the same reasoning (and the same guard band) `PhaseReporter`
+    /// uses above. Learning it from on-glass spacings instead would read a 60-on-120 stream as a
+    /// 60 Hz panel and mislabel the cadence mode.
+    func notePanelTarget(mediaTime t: CFTimeInterval) {
+        lock.lock()
+        defer { lock.unlock() }
+        defer { lastTargetS = t }
+        guard lastTargetS > 0 else { return }
+        let d = t - lastTargetS
+        guard d > 0.0005, d < 0.1 else { return }
+        if minTargetSpacingS == 0 || d < minTargetSpacingS {
+            minTargetSpacingS = d
+            panelPeriodNs = Int64(d * 1_000_000_000)
+        }
+    }
 
     func emptyWake() { lock.lock(); empty += 1; lock.unlock() }
 
@@ -624,8 +766,13 @@ private final class PresentDebugStats: @unchecked Sendable {
             if lastGlassNs > 0 { glassDeltasMs.append(Double(atNs - lastGlassNs) / 1e6) }
             lastGlassNs = atNs
             latchMs.append(Double(atNs - issuedNs) / 1e6)
+            intervals.record(presentNs: atNs, periodNs: panelPeriodNs)
         } else {
+            // A dropped drawable never reached glass, so it is not a cadence event — but the
+            // NEXT one does not continue the previous interval either. Split rather than let
+            // the gap read as judder.
             dropped += 1
+            intervals.split()
         }
         lock.unlock()
     }
@@ -656,6 +803,9 @@ private final class PresentDebugStats: @unchecked Sendable {
             smoothing.overflowDrops, smoothing.underflows, maxRenderMs, inflightMax,
             gate?.drainForced() ?? 0, p50, dMax, deltas.count, latchP50, latchMax,
             vendP50, vendMax)
+        let cadence = intervals.take()
+        let verbose = self.verbose
+        minTargetSpacingS = 0 // re-arm the period learner for the next window
         ok = 0; failed = 0; empty = 0; dropped = 0; gated = 0; noDrawable = 0
         maxRenderMs = 0
         maxInFlight = inFlight // the window peak restarts from the live depth
@@ -663,6 +813,21 @@ private final class PresentDebugStats: @unchecked Sendable {
         latchMs.removeAll(keepingCapacity: true)
         vendLeadMs.removeAll(keepingCapacity: true)
         lock.unlock()
+        // The cadence line is ALWAYS emitted (when the window had evidence): it is the ruler the
+        // smoothness A/B reads, and it must not depend on an env var the field never sets. The
+        // verbose counters line stays behind its existing lever.
+        if let cadence {
+            let cadenceLine = String(
+                format: "pf-present judderPermille=%d modeVsync=%d n=%d stalls=%d disorder=%d",
+                cadence.judderPermille, cadence.modeUnits, cadence.samples,
+                cadence.stalls, cadence.disordered)
+            presentLog.info("\(cadenceLine, privacy: .public)")
+            if presentDebug {
+                print(cadenceLine)
+                fflush(stdout)
+            }
+        }
+        guard verbose else { return }
         // Console.app first (the on-device readout — see presentLog); stdout only under the env
         // lever (the CLI client's capture channel).
         presentLog.info("\(line, privacy: .public)")
@@ -746,6 +911,10 @@ public final class Stage2Pipeline {
     /// mirror the pump's bounded join.
     private let renderSignal = DispatchSemaphore(value: 0)
     private let vsyncClock = VsyncClock()
+    /// The per-session present statistics, retained so the clock-bearing threads can republish
+    /// the panel period the cadence statistic quantises against. Assigned once in `start`, read
+    /// from the render/link threads; the object is itself lock-guarded.
+    private var presentStats: PresentDebugStats?
     private let renderStopped = DispatchSemaphore(value: 0)
     private var renderJoinable = false
     /// Deadline pacing's staged CAMetalDisplayLink frame-rate hint (see `FrameRateHint`).
@@ -967,7 +1136,14 @@ public final class Stage2Pipeline {
         // startDeadlinePresenter. The V-Sync policy below doesn't apply there (the link deadline-
         // times every present). Deadline sessions ALWAYS carry the stats (their pf-present line
         // streams to Console.app via presentLog — the on-device pacing decomposition).
-        let debugStats = (presentDebug || pacing == .deadline) ? PresentDebugStats() : nil
+        //
+        // The stats object is now built for EVERY session, because the cadence statistic inside
+        // it has to be: a smoothness defect produces no drops and healthy percentiles, so gating
+        // it behind an env var means the one number that could see it is off exactly when it
+        // matters. `verbose` preserves the old behaviour for the wordy counters line.
+        let debugStats: PresentDebugStats? = PresentDebugStats(
+            verbose: presentDebug || pacing == .deadline)
+        presentStats = debugStats
         if pacing == .deadline {
             startDeadlinePresenter(debugStats: debugStats)
             return
@@ -1241,6 +1417,9 @@ public final class Stage2Pipeline {
     /// (their CAMetalDisplayLink's updates are both clock and retry).
     public func renderTick(targetMediaTime: CFTimeInterval, period: CFTimeInterval) {
         vsyncClock.set(target: targetMediaTime, period: period)
+        // The link's own reported period is the authoritative grid for the cadence statistic —
+        // it tracks VRR rate changes, which a mode-derived seed cannot.
+        presentStats?.setPanelPeriod(ns: Int64(period * 1_000_000_000))
         renderSignal.signal()
     }
 

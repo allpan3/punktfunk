@@ -234,12 +234,18 @@ impl PresentIntervals {
         if self.samples < CADENCE_MIN_SAMPLES {
             return None;
         }
-        let (mode_units, mode_count) = self
-            .hist
-            .iter()
-            .enumerate()
-            .max_by_key(|&(_, c)| *c)
-            .map(|(i, &c)| (i as u8, c))?;
+        // Ties resolve to the SMALLEST spacing, spelled out rather than left to a library:
+        // `max_by_key` would take the last maximum and Swift's `max(by:)` the first, so a
+        // 50/50 window (the classic 1-and-3 sawtooth) would label its mode differently on
+        // Android and Apple while reporting the same judder. The clients have to agree.
+        let mut mode_units = 0u8;
+        let mut mode_count = 0u32;
+        for (i, &c) in self.hist.iter().enumerate() {
+            if c > mode_count {
+                mode_count = c;
+                mode_units = i as u8;
+            }
+        }
         Some(PresentCadence {
             mode_units,
             judder_permille: (u64::from(self.samples - mode_count) * 1000 / u64::from(self.samples))
@@ -474,7 +480,10 @@ mod cadence_tests {
     fn the_sawtooth_that_latency_stats_cannot_see() {
         let s = cadence(&[P, P * 3], 40).summary().unwrap();
         assert_eq!(s.judder_permille, 500);
-        assert!(matches!(s.mode_units, 1 | 3));
+        assert_eq!(
+            s.mode_units, 1,
+            "a tied mode resolves to the smallest spacing — pinned so the Swift port agrees"
+        );
     }
 
     /// Sub-refresh jitter is not judder: the display quantises it away, so the metric must too.
