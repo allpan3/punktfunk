@@ -10,6 +10,18 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Opus must be built FROM SOURCE, never picked up from the machine. `audiopus_sys` probes
+# pkg-config first, and a Homebrew libopus is compiled for the HOST macOS — its objects land
+# inside our staticlib carrying that minos (the deployment-target check at the end of this
+# script then fails with 143 SILK objects at the host's version). Whether the bundle is
+# usable would otherwise depend on whether the developer happens to have `brew install opus`,
+# which is exactly the kind of thing an artifact consumed by every Apple build must not
+# depend on. `OPUS_NO_PKG_CONFIG` forces the vendored build; the CMake policy floor is for
+# that vendored copy, whose CMakeLists still declares a pre-3.5 minimum that CMake 4 removed
+# support for.
+export OPUS_NO_PKG_CONFIG=1
+export CMAKE_POLICY_VERSION_MINIMUM="${CMAKE_POLICY_VERSION_MINIMUM:-3.5}"
+
 TARGETS_MAC=(aarch64-apple-darwin x86_64-apple-darwin)
 BUILD_IOS="${BUILD_IOS:-0}" # BUILD_IOS=1 adds iOS device + simulator slices (rustup targets aarch64-apple-ios{,-sim})
 BUILD_TVOS="${BUILD_TVOS:-0}" # BUILD_TVOS=1 adds tvOS slices — TIER-3 Rust targets: needs `rustup toolchain install nightly` + `rustup component add rust-src --toolchain nightly`
@@ -125,7 +137,14 @@ for obj in "$STAGE"/macos/libpunktfunk_core.a; do
     bad=$(otool -l "$obj" 2>/dev/null | awk '/minos/ {print $2}' | sort -uV | awk -F. '$1 > 14' | head -1)
     if [[ -n "$bad" ]]; then
         echo "ERROR: $obj contains objects built for macOS $bad (> 14.0)." >&2
-        echo "Stale cache — rm -rf target/{aarch64,x86_64}-apple-darwin and rebuild." >&2
+        echo "Two known causes:" >&2
+        echo "  1. A system libopus linked instead of the vendored one (check the build" >&2
+        echo "     script output for a /opt/homebrew or /usr/local link-search path). This" >&2
+        echo "     script exports OPUS_NO_PKG_CONFIG=1 to prevent it — if you see it anyway," >&2
+        echo "     something overrode that." >&2
+        echo "  2. A stale cache: cargo does not fingerprint MACOSX_DEPLOYMENT_TARGET." >&2
+        echo "     rm -rf target/{aarch64,x86_64}-apple-darwin and rebuild." >&2
+        echo "Identify the offenders with: ar x $obj && otool -l *.o | grep -B1 minos" >&2
         exit 1
     fi
 done
