@@ -29,7 +29,7 @@ Source code
 The bundled binaries are unmodified builds produced by the BtbN/FFmpeg-Builds
 project. The exact source for the FFmpeg release used is available from:
 
-  * FFmpeg project source:   https://ffmpeg.org/download.html  (release n7.1)
+  * FFmpeg project source:   https://ffmpeg.org/download.html  (release n8.1)
   * Exact build recipe:      https://github.com/BtbN/FFmpeg-Builds
 
 A copy of the corresponding FFmpeg source for the version shipped here is
