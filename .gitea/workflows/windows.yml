@@ -15,8 +15,10 @@
 # target with host tools, so no ARM64 runner is needed — the cc/cmake crates pick the ARM64
 # compiler from the target triple (SDL3 + libopus build-from-source cross-compile fine). The one
 # arch-specific external dep is FFmpeg's import libs: the runner keeps an x64 tree at
-# C:\Users\Public\ffmpeg and an ARM64 tree at C:\Users\Public\ffmpeg-arm64 (both FFmpeg 7.x /
-# avcodec-61); the matrix points FFMPEG_DIR at the right one. aarch64 can't *run* on the x64 host,
+# C:\Users\Public\ffmpeg and an ARM64 tree at C:\Users\Public\ffmpeg-arm64 (both FFmpeg 8.1 /
+# avcodec-62 — version pinned in scripts/ci/provision-windows-punktfunk-extras.ps1, which
+# re-provisions a runner automatically when that pin moves); the matrix points FFMPEG_DIR at the
+# right one. aarch64 can't *run* on the x64 host,
 # so fmt + test run only for x64.
 #
 # The MSVC/WinUI/FFmpeg toolchain (cargo/rustup on ASCII paths, NASM, CMake, LLVM, the x64 FFmpeg,

@@ -32,20 +32,39 @@ if (Test-Path $rustup) {
 # the separate BSD-2 openh264 crate; NVENC is the direct NVIDIA SDK). lgpl-shared keeps the
 # bundled DLLs LGPL-2.1+ (dynamic linking satisfies the relink duty) rather than GPL, so the
 # shipped installer/MSIX stay consistent with punktfunk's MIT OR Apache-2.0 posture.
-# MIGRATION: a runner previously provisioned with the old *gpl-shared* trees must be
-# re-provisioned - delete C:\Users\Public\ffmpeg and C:\Users\Public\ffmpeg-arm64, then re-run.
+# VERSION: n8.1 (libavcodec 62). Bumped from n7.1 on 2026-08-05 — FFmpeg's **Vulkan Video
+# hwaccel** is the youngest code in our decode chain (merged ~6.1/7.0), 7.1 is a stabilisation
+# branch that does not receive its ongoing fixes, and the two field reports of silent inter-frame
+# corruption on Windows (Intel B580 2026-07, AMD Xbox Ally X 2026-08) both sit on that hwaccel
+# while the mature d3d11va one is clean. Linux already ships avcodec 62 (Ubuntu 26.04 = 8.0.1) and
+# pf-client-core compiles clean against it, so 8.x is not new ground for our API usage.
+# MIGRATION is AUTOMATIC and must stay that way: the presence check below keys off $Version, so a
+# runner provisioned with an older tree re-provisions itself on the next CI job. It used to test
+# only for `lib\avcodec.lib`, which meant a version bump here silently did NOTHING on every
+# already-provisioned runner — CI would keep building against the old tree while this file claimed
+# otherwise. If you change the layout, keep the check version-derived.
 # These DLLs are bundled verbatim into the code-signed host installer/MSIX, so the download is
 # SHA-256-pinned (like VB-CABLE below): BtbN's `latest` tag is a ROLLING release whose assets are
 # re-uploaded over time, so an unverified fetch would let a hijacked/MITM'd upstream asset land
-# signed DLLs in users' installs. The pins below were captured 2026-07-10 from the then-current
-# n7.1 lgpl-shared build. When BtbN re-rolls `latest`, this fetch FAILS CLOSED (hash mismatch) —
+# signed DLLs in users' installs. The pins below were captured 2026-08-05 from the then-current
+# n8.1 lgpl-shared build. When BtbN re-rolls `latest`, this fetch FAILS CLOSED (hash mismatch) —
 # that is intentional: re-download, re-verify the new archive, and update the two pins here.
 #   Refresh a pin:  (Get-FileHash .\ffmpeg-<tag>.zip -Algorithm SHA256).Hash
+$ffmpegVersion = 'n8.1'
 function Get-BtbnFfmpeg {
   param([string]$Dir, [string]$ZipTag, [string]$Sha)   # ZipTag: 'win64' (x64) or 'winarm64' (ARM64 cross tree)
-  if (Test-Path (Join-Path $Dir 'lib\avcodec.lib')) { info "FFmpeg ($ZipTag) already present at $Dir"; return }
-  info "fetching FFmpeg ($ZipTag, BtbN lgpl-shared, SHA-256 pinned)"
-  $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-$ZipTag-lgpl-shared-7.1.zip"
+  # Version-stamped marker, NOT a bare file-existence test — see the MIGRATION note above. Written
+  # only after a successful extract, so a half-finished provision re-runs rather than being
+  # mistaken for a good tree.
+  $stamp = Join-Path $Dir '.punktfunk-ffmpeg-version'
+  $short = $ffmpegVersion.TrimStart('n')
+  if ((Test-Path (Join-Path $Dir 'lib\avcodec.lib')) -and
+      (Test-Path $stamp) -and
+      ((Get-Content $stamp -Raw).Trim() -eq $ffmpegVersion)) {
+    info "FFmpeg $ffmpegVersion ($ZipTag) already present at $Dir"; return
+  }
+  info "fetching FFmpeg $ffmpegVersion ($ZipTag, BtbN lgpl-shared, SHA-256 pinned)"
+  $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-$ffmpegVersion-latest-$ZipTag-lgpl-shared-$short.zip"
   $zip = "$Dir.zip"; $tmp = "$Dir-extract"
   Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
   $got = (Get-FileHash $zip -Algorithm SHA256).Hash
@@ -58,10 +77,11 @@ function Get-BtbnFfmpeg {
   $inner = Get-ChildItem $tmp -Directory | Select-Object -First 1
   if (Test-Path $Dir) { Remove-Item -Recurse -Force $Dir }
   Move-Item -Path $inner.FullName -Destination $Dir
+  Set-Content -Path $stamp -Value $ffmpegVersion -Encoding ascii
   Remove-Item -Force $zip; Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }
-Get-BtbnFfmpeg -Dir "C:\Users\Public\ffmpeg"       -ZipTag 'win64'    -Sha '89F3469706E5D53AEA5CF34AEE63E62CE746E6159D7AEE473D330B02A47558E6'
-Get-BtbnFfmpeg -Dir "C:\Users\Public\ffmpeg-arm64" -ZipTag 'winarm64' -Sha 'D96B4CE08CEBDCC6AD0E3934A3F962915E440EEFB9D73831AFEA4D80E35129A5'
+Get-BtbnFfmpeg -Dir "C:\Users\Public\ffmpeg"       -ZipTag 'win64'    -Sha '0D0F7449A5600AB5DF9AF19DA861B24CA1534279EDE099D6541F1FEFB17BFBA9'
+Get-BtbnFfmpeg -Dir "C:\Users\Public\ffmpeg-arm64" -ZipTag 'winarm64' -Sha 'CDC81352B7781DBAD87D8069AF7835FEC86C039F1ADC2B41BB27B3A295695A70'
 
 # --- Vulkan-Headers (pf-ffvk's bindgen: libavutil/hwcontext_vulkan.h includes <vulkan/vulkan.h>,
 # and Windows has no system copy). Headers only - the loader (vulkan-1.dll) is a GPU-driver
