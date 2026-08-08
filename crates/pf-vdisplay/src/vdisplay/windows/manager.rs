@@ -421,6 +421,26 @@ pub fn hw_cursor_capable() -> bool {
     m.driver_proto.load(Ordering::Relaxed) >= 5
 }
 
+/// Does this host currently hold NO virtual display at all (no live session, no keep-alive slot)?
+///
+/// The safety question for anything that tears the adapter down — notably
+/// [`crate::driver::clean_cursor_for_next_session`], whose `pnputil /restart-device` would take
+/// every monitor on the adapter with it. Deliberately counts KEPT slots as well as streaming ones:
+/// a keep-alive monitor belongs to a client that is expected back, and destroying it under them is
+/// exactly the kind of cross-session damage the cursor clean-up exists to avoid causing.
+pub fn no_live_displays() -> bool {
+    match VDM.get() {
+        // Before the first backend open there is nothing to protect.
+        None => true,
+        Some(m) => m
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .slots
+            .is_empty(),
+    }
+}
+
 pub fn control_device_handle() -> Option<HANDLE> {
     VDM.get().and_then(VirtualDisplayManager::device_handle)
 }

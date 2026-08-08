@@ -181,6 +181,57 @@ enum AdapterCycle {
 ///
 /// Returns `true` only when pnputil reported success. Best-effort: a failure just leaves the
 /// adapter as it was (sessions then self-composite exactly as before).
+/// Has this host process DECLARED an IddCx hardware cursor since the adapter was last restarted?
+/// Set by [`note_cursor_declared`] when a session delivers a cursor channel; cleared when
+/// [`clean_cursor_for_next_session`] restarts the device. This is the host's own mirror of the
+/// driver's `DECLARED_TARGETS` — cheaper than probing, and it only ever needs to be right about
+/// "did WE dirty it", because a declare from an earlier BOOT is handled by the start-up clean.
+static CURSOR_DECLARED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record that a session declared the hardware cursor (it delivered a cursor channel), so the next
+/// session that does NOT want one knows the adapter needs cleaning.
+pub fn note_cursor_declared() {
+    CURSOR_DECLARED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Give the NEXT session back the lossless cursor: if an earlier session on this host declared the
+/// hardware cursor and this one does not want it, restart the device to clear the sticky declare.
+///
+/// This is the case the start-up clean cannot reach — **run a desktop-mode session, disconnect,
+/// reconnect in capture mode**. Same host process, so the adapter is still dirty from the first
+/// session and the capture session would self-composite the pointer for its whole life. Declaring
+/// is one-way and adapter-wide (`pf-driver-proto` v6), so the only way back is a device restart —
+/// 0.07 s, measured.
+///
+/// Must be called BEFORE this session creates its display, and only when nothing else holds one:
+/// the restart takes every monitor on the adapter with it.
+///
+/// Returns `true` only when it actually restarted.
+pub fn clean_cursor_for_next_session(session_wants_declare: bool) -> bool {
+    use std::sync::atomic::Ordering;
+    if session_wants_declare || !CURSOR_DECLARED.load(Ordering::Relaxed) {
+        return false;
+    }
+    // Conservative: a KEPT keep-alive slot counts as held, so a client that is expected back does
+    // not lose its monitor to another client's cursor preference. The cost of being wrong here is
+    // someone else's session dying; the cost of skipping is one session compositing its own
+    // pointer, which is merely the old behaviour.
+    if !super::manager::no_live_displays() {
+        tracing::info!(
+            "cursor: this session wants no hardware cursor and an earlier one declared, but a              display is still held (live or keep-alive) — skipping the adapter restart, so the              pointer stays host-composited for this session"
+        );
+        return false;
+    }
+    if restart_device_for_clean_cursor() {
+        CURSOR_DECLARED.store(false, Ordering::Relaxed);
+        tracing::info!(
+            "cursor: cleared the previous session's hardware-cursor declare — this capture-mode              session gets the OS's own pointer compositing back"
+        );
+        return true;
+    }
+    false
+}
+
 pub fn restart_device_for_clean_cursor() -> bool {
     if std::env::var("PUNKTFUNK_CURSOR_CLEAN_START").is_ok_and(|v| v == "0") {
         tracing::info!(
