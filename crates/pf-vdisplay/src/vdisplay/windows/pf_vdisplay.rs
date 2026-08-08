@@ -176,7 +176,16 @@ enum AdapterCycle {
 /// it does not hit the refusal that doc calls "the expected case here". It also repaired an adapter
 /// found in `CM_PROB_FAILED_POST_START` (Code 43) in the same call.
 ///
-/// ⚠ This tears the adapter down, so it must run only when NO session holds a display — the host
+/// ⚠⚠ **This is a ONCE-PER-BOOT lever, not a cheap one.** Measured on `.173` 2026-08-08: the first
+/// `/restart-device` after a cold boot succeeds in 0.07 s; every later one in the same boot fails
+/// with *"Das System muss neu gestartet werden, damit Konfigurationsvorgänge abgeschlossen
+/// werden"*, and repeated attempts additionally push the devnode into `restart pending`. So this
+/// can clean the adapter at host start-up and nowhere else — anything wanting to un-declare
+/// mid-boot (e.g. giving a capture session back the lossless pointer after a desktop session) needs
+/// a different mechanism to recycle the driver's WUDFHost process, which is where the declare
+/// actually lives.
+///
+/// ⚠ It tears the adapter down, so it must run only when NO session holds a display — the host
 /// start-up path. `PUNKTFUNK_CURSOR_CLEAN_START=0` disables it.
 ///
 /// Returns `true` only when pnputil reported success. Best-effort: a failure just leaves the
@@ -296,8 +305,15 @@ pub fn restart_device_for_clean_cursor() -> bool {
         other => {
             tracing::warn!(
                 outcome = other,
-                restart_pending = other.contains("Systemneustart")
-                    || other.to_ascii_lowercase().contains("restart is pending"),
+                // Two distinct wordings, both meaning "not until you reboot":
+                //   "Für das Gerät steht ein Systemneustart aus"        (device restart pending)
+                //   "Das System muss neu gestartet werden, damit …"     (config ops need a reboot)
+                // The second is what you actually hit, and it appears after the FIRST successful
+                // restart of a boot — see the doc on `restart_device_for_clean_cursor`.
+                needs_reboot = other.contains("Systemneustart")
+                    || other.contains("muss neu gestartet werden")
+                    || other.to_ascii_lowercase().contains("restart is pending")
+                    || other.to_ascii_lowercase().contains("must be restarted"),
                 "pf-vdisplay: cursor clean-start did not restart the adapter — sessions without a \
                  cursor channel will self-composite the pointer if an earlier declare is sticky"
             );
