@@ -224,6 +224,23 @@ const BLEND_RETRY_MAX: Duration = Duration::from_secs(4);
 /// hiccup, and still fast enough to name the fault while a user is still looking at it.
 const POLLER_STALL: Duration = Duration::from_secs(1);
 
+/// The next retry delay after a composite-blend failure: [`BLEND_RETRY_MIN`] for the first, then
+/// doubling per consecutive failure up to [`BLEND_RETRY_MAX`]. Free function so the escalation is
+/// testable without a live D3D11 device (the `mono_planes_to_rgba` precedent — the arithmetic a
+/// bug would hide in does not need the plumbing around it).
+fn next_blend_backoff(prev: Option<Duration>) -> Duration {
+    prev.map_or(BLEND_RETRY_MIN, |b| (b * 2).min(BLEND_RETRY_MAX))
+}
+
+/// The composite-regen change key for an overlay: what a blend would DRAW — `(serial, x, y)` for a
+/// visible pointer, `None` when nothing would be drawn. ONE definition, used by both the regen test
+/// and the blend itself, because the two drifting apart is precisely the bug shape here: a key that
+/// says "changed" while the drawn frame is identical re-encodes for nothing, and a key that says
+/// "unchanged" while the pointer moved freezes it on screen.
+fn blend_key_of(ov: Option<&pf_frame::CursorOverlay>) -> Option<(u64, i32, i32)> {
+    ov.filter(|o| o.visible).map(|o| (o.serial, o.x, o.y))
+}
+
 /// A composite-blend failure and its pending retry ([`IddPushCapturer::blend_fail`]).
 struct BlendFail {
     /// No blend is attempted before this instant.
@@ -1341,10 +1358,7 @@ impl IddPushCapturer {
     /// user-visible fault, and the old warn-once left a permanently broken one indistinguishable
     /// in the log from a single transient hiccup at startup.
     fn note_blend_failure(&mut self, why: &str) {
-        let backoff = self
-            .blend_fail
-            .as_ref()
-            .map_or(BLEND_RETRY_MIN, |f| (f.backoff * 2).min(BLEND_RETRY_MAX));
+        let backoff = next_blend_backoff(self.blend_fail.as_ref().map(|f| f.backoff));
         let consecutive = self.blend_fail.as_ref().map_or(1, |f| f.consecutive + 1);
         self.blend_fail = Some(BlendFail {
             retry_at: Instant::now() + backoff,
@@ -1375,9 +1389,7 @@ impl IddPushCapturer {
     /// visible⇄hidden transitions still change the key (`Some`⇄`None`), so the frame that must
     /// gain or lose the pointer is still regenerated.
     fn cursor_blend_key(&mut self) -> Option<(u64, i32, i32)> {
-        self.live_cursor()
-            .filter(|o| o.visible)
-            .map(|o| (o.serial, o.x, o.y))
+        blend_key_of(self.live_cursor().as_ref())
     }
 
     /// Composite the pointer for this convert: ensure the frame-sized blend scratch, copy the
@@ -1403,9 +1415,9 @@ impl IddPushCapturer {
         // "nothing" — `try_consume`'s regen test compares against this, so an early-out must still
         // leave the key describing the frame we are about to emit. Through `live_cursor`, so a
         // dead poller degrades to the shm section here too.
-        let overlay = self.live_cursor().filter(|o| o.visible);
-        self.last_blend_key = overlay.as_ref().map(|o| (o.serial, o.x, o.y));
-        let ov = overlay?;
+        let overlay = self.live_cursor();
+        self.last_blend_key = blend_key_of(overlay.as_ref());
+        let ov = overlay.filter(|o| o.visible)?;
         // Blending is suppressed while a recent failure's backoff runs — skip the scratch and the
         // copy too, not just the draw: with nothing to draw onto it, the copy is pure waste.
         if self.blend_suppressed() {
@@ -2200,6 +2212,84 @@ impl Drop for IddPushCapturer {
 mod tests {
     use super::stall::Stall;
     use super::*;
+
+    /// A `CursorOverlay` at `(x, y)` with `serial`, visible or not. `rgba` is never read by the
+    /// key/backoff logic under test, so a 1×1 pixel keeps the fixtures honest about that.
+    fn overlay(serial: u64, x: i32, y: i32, visible: bool) -> pf_frame::CursorOverlay {
+        pf_frame::CursorOverlay {
+            x,
+            y,
+            w: 1,
+            h: 1,
+            rgba: std::sync::Arc::new(vec![0, 0, 0, 0]),
+            serial,
+            hot_x: 0,
+            hot_y: 0,
+            visible,
+        }
+    }
+
+    /// The regen key is what would be DRAWN, so a hidden pointer keys to `None` no matter where it
+    /// is. This is the whole point: a game that grabbed the pointer moves it constantly, and each
+    /// of those moves used to re-encode the last slot for a frame that is pixel-identical.
+    #[test]
+    fn a_hidden_pointer_has_no_blend_key_wherever_it_moves() {
+        assert_eq!(blend_key_of(None), None, "no overlay ⇒ nothing drawn");
+        assert_eq!(
+            blend_key_of(Some(&overlay(7, 10, 10, false))),
+            None,
+            "hidden ⇒ nothing drawn"
+        );
+        assert_eq!(
+            blend_key_of(Some(&overlay(7, 999, 999, false))),
+            blend_key_of(Some(&overlay(7, 10, 10, false))),
+            "a hidden pointer moving must NOT look like a change"
+        );
+    }
+
+    /// …but every transition that alters the drawn frame still changes the key, or the pointer
+    /// would freeze on screen (the failure mode opposite to the one above).
+    #[test]
+    fn every_visible_change_moves_the_blend_key() {
+        let shown = blend_key_of(Some(&overlay(7, 10, 10, true)));
+        assert_eq!(shown, Some((7, 10, 10)));
+        assert_ne!(
+            shown,
+            blend_key_of(Some(&overlay(7, 11, 10, true))),
+            "a visible pointer moving is a change"
+        );
+        assert_ne!(
+            shown,
+            blend_key_of(Some(&overlay(8, 10, 10, true))),
+            "a new shape at the same spot is a change"
+        );
+        assert_ne!(
+            shown,
+            blend_key_of(Some(&overlay(7, 10, 10, false))),
+            "visible → hidden must regenerate the frame that loses the pointer"
+        );
+    }
+
+    /// The retry escalates and then holds at the ceiling — it must never grow without bound (the
+    /// point of a ceiling is that a device which comes back is picked up within it).
+    #[test]
+    fn the_blend_retry_backoff_doubles_then_caps() {
+        let first = next_blend_backoff(None);
+        assert_eq!(first, BLEND_RETRY_MIN, "the first failure retries quickly");
+        assert_eq!(next_blend_backoff(Some(first)), first * 2, "then doubles");
+
+        // Walk it well past the cap and assert it PARKS there rather than overshooting.
+        let mut b = first;
+        for _ in 0..32 {
+            b = next_blend_backoff(Some(b));
+        }
+        assert_eq!(b, BLEND_RETRY_MAX, "escalation parks at the ceiling");
+        assert_eq!(
+            next_blend_backoff(Some(BLEND_RETRY_MAX)),
+            BLEND_RETRY_MAX,
+            "and stays there"
+        );
+    }
 
     /// W14: the mint must stay inside the publish token's 24-bit generation field, and must skip 0.
     ///
