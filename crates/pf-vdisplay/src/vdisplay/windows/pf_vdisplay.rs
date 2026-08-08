@@ -910,7 +910,19 @@ impl VdisplayDriver for PfVdisplayDriver {
         // this monitor is added. The ADD path is the only place guaranteed to see every session
         // (the handshake call site this replaced sat in a `match (source, compositor)` arm that is
         // not taken on this host, so it never ran).
-        if !hw_cursor {
+        // ⚠ DISABLED BY DEFAULT — opt in with PUNKTFUNK_CURSOR_RECYCLE=1.
+        //
+        // The MECHANISM is proven (recycling the driver host clears the declare: measured pid
+        // 3872→19932, adapter_luid 0x8ed607→0x1a8f6ca, cursor_excluded true→false, next session
+        // streamed fine). What is NOT solved is calling it from HERE: `invalidate_cached_device`
+        // takes the manager `device` mutex, which this ADD path already holds, so the session
+        // DEADLOCKS — observed on .173, the ADD stops after SET_RENDER_ADAPTER and the client gets
+        // "no frames received". Its own doc warns about exactly this.
+        //
+        // The fix is a call site that runs OUTSIDE the mutex and still on every session's path;
+        // the handshake site tried before is not reached on this host. Until then this stays off:
+        // a session that self-composites is the old behaviour, a deadlocked one is a regression.
+        if !hw_cursor && std::env::var("PUNKTFUNK_CURSOR_RECYCLE").is_ok_and(|v| v == "1") {
             clean_cursor_for_next_session(false);
         }
         let session_id = next_session_id();
