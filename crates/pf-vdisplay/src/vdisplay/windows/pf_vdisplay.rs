@@ -209,9 +209,18 @@ pub fn note_cursor_declared() {
 /// Returns `true` only when it actually restarted.
 pub fn clean_cursor_for_next_session(session_wants_declare: bool) -> bool {
     use std::sync::atomic::Ordering;
-    if session_wants_declare || !CURSOR_DECLARED.load(Ordering::Relaxed) {
+    if session_wants_declare {
         return false;
     }
+    // NOT gated on `CURSOR_DECLARED`. Tracking "did we declare" in host-process memory was tried
+    // and silently never fired (on-glass .173, 2026-08-08: the reconnect kept getting
+    // `cursor_excluded=true` while BOTH outcome logs stayed absent — i.e. this function returned
+    // right here). The flag is set in `capture_virtual_output` and read in the handshake, and one
+    // of those is evidently not on the path that runs; chasing which is not worth it when the
+    // operation it guards is IDEMPOTENT and costs 0.07 s. Restarting an already-clean adapter
+    // wastes 70 ms once per capture-mode connect; NOT restarting a dirty one costs that session a
+    // full-frame copy for every frame with a visible pointer, for its whole life. Take the 70 ms.
+    let previously_declared = CURSOR_DECLARED.load(Ordering::Relaxed);
     // Refuse only while another session is STREAMING — a keep-alive (lingering/pinned) monitor has
     // no session attached and a reconnect recreates it regardless, so restarting the adapter costs
     // it nothing. Gating on keep-alive too made this dead code in the one case it exists for: after
@@ -226,7 +235,11 @@ pub fn clean_cursor_for_next_session(session_wants_declare: bool) -> bool {
     if restart_device_for_clean_cursor() {
         CURSOR_DECLARED.store(false, Ordering::Relaxed);
         tracing::info!(
-            "cursor: cleared the previous session's hardware-cursor declare — this capture-mode              session gets the OS's own pointer compositing back"
+            previously_declared,
+            "cursor: restarted the adapter for this capture-mode session — any hardware-cursor \
+             declare is gone, so the OS composites the pointer itself (full fidelity, no host \
+             blend). previously_declared=false only means the host-side hint was unset; the \
+             restart is idempotent either way"
         );
         return true;
     }
