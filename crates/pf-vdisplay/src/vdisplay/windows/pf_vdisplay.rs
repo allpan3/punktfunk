@@ -158,6 +158,86 @@ enum AdapterCycle {
     Refused(String),
 }
 
+/// Restart the pf-vdisplay device to CLEAR a sticky IddCx hardware-cursor declare, so sessions that
+/// do not want the host to own the pointer get the OS's own cursor compositing back (full fidelity,
+/// zero host cost — no GDI poller, no per-frame blend, true XOR instead of our outline
+/// approximation).
+///
+/// **Why this exists.** A hardware-cursor declare is irrevocable and ADAPTER-WIDE
+/// (`pf-driver-proto` v6 note): once any desktop-mode session declares, DWM stops compositing the
+/// pointer into EVERY later frame on that adapter, and every subsequent session — including
+/// capture-latched ones that never asked for a cursor channel — has to self-composite. The state
+/// lives in the driver's `DECLARED_TARGETS`, whose scope is the WUDFHost process, so recycling that
+/// process clears it.
+///
+/// **Why `/restart-device` and not the [`reload_vdisplay_adapter`] cycle.** Measured on-glass
+/// 2026-08-08 (`.173`): `pnputil /restart-device` returned in **0.07 s** with a NEW WUDFHost pid,
+/// against ~6 s of sleeps for `Disable`+`Enable` — and, being designed for a device that is in use,
+/// it does not hit the refusal that doc calls "the expected case here". It also repaired an adapter
+/// found in `CM_PROB_FAILED_POST_START` (Code 43) in the same call.
+///
+/// ⚠ This tears the adapter down, so it must run only when NO session holds a display — the host
+/// start-up path. `PUNKTFUNK_CURSOR_CLEAN_START=0` disables it.
+///
+/// Returns `true` only when pnputil reported success. Best-effort: a failure just leaves the
+/// adapter as it was (sessions then self-composite exactly as before).
+pub fn restart_device_for_clean_cursor() -> bool {
+    if std::env::var("PUNKTFUNK_CURSOR_CLEAN_START").is_ok_and(|v| v == "0") {
+        tracing::info!(
+            "pf-vdisplay: cursor clean-start disabled (PUNKTFUNK_CURSOR_CLEAN_START=0) — a sticky \
+             hardware-cursor declare from an earlier boot will keep sessions self-compositing"
+        );
+        return false;
+    }
+    // `$LASTEXITCODE` is pre-seeded to 1 for the same reason `reload_vdisplay_adapter` does it: if
+    // pnputil never launches, a stale value must not read as success.
+    const PS: &str = "$ErrorActionPreference='SilentlyContinue'; \
+        $ad = Get-PnpDevice -Class Display | Where-Object { $_.FriendlyName -match 'punktfunk Virtual Display' } | Select-Object -First 1; \
+        if (-not $ad) { Write-Output 'ABSENT'; exit }; \
+        $pnp = ($env:SystemRoot + '\\System32\\pnputil.exe'); $LASTEXITCODE = 1; \
+        if (Test-Path $pnp) { & $pnp /restart-device $ad.InstanceId *> $null }; \
+        if ($LASTEXITCODE -eq 0) { Write-Output 'RESTARTED' } else { Write-Output 'FAILED' }";
+    let ps = std::env::var("SystemRoot")
+        .map(|r| format!(r"{r}\System32\WindowsPowerShell\v1.0\powershell.exe"))
+        .unwrap_or_else(|_| "powershell.exe".to_string());
+    let out = match std::process::Command::new(&ps)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            PS,
+        ])
+        .output()
+    {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        Err(e) => {
+            tracing::warn!(error = %e, "pf-vdisplay: cursor clean-start could not spawn powershell");
+            return false;
+        }
+    };
+    match out.as_str() {
+        "RESTARTED" => {
+            tracing::info!(
+                "pf-vdisplay: restarted the adapter at start-up — any sticky hardware-cursor \
+                 declare is cleared, so sessions without a cursor channel get the OS's own \
+                 (full-fidelity, zero-cost) pointer compositing until one declares again"
+            );
+            true
+        }
+        "ABSENT" => false, // driver not installed — nothing to clean, and `open` reports that later
+        other => {
+            tracing::warn!(
+                outcome = other,
+                "pf-vdisplay: cursor clean-start did not restart the adapter — sessions without a \
+                 cursor channel will self-composite the pointer if an earlier declare is sticky"
+            );
+            false
+        }
+    }
+}
+
 /// Reload the pf-vdisplay ADAPTER device — the in-process equivalent of `reset-pf-vdisplay.ps1`
 /// step 3. A crashed/killed WUDFHost can leave the devnode "started" yet HOSTLESS (PnP Status OK, no
 /// WUDFHost process, zero device-interface instances) — a zombie no session can open until the stack

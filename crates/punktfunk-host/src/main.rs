@@ -382,6 +382,23 @@ fn real_main() -> Result<()> {
             // driver to a stray second host started while the service sat idle.
             #[cfg(target_os = "windows")]
             vdisplay::manager::claim_instance_eagerly();
+            // Clean-cursor start (design/windows-cursor-model-determinism.md §4.3): clear any
+            // sticky IddCx hardware-cursor declare left on the adapter by an EARLIER boot's
+            // desktop-mode session. That declare is irrevocable and adapter-wide, so without this
+            // every capture-latched session on the box self-composites the pointer for the rest of
+            // the adapter's life — paying a full-frame copy per visible-pointer frame and drawing
+            // our straight-alpha approximation of an XOR cursor — when the OS would otherwise
+            // composite it natively, for free, at full fidelity.
+            //
+            // It is NOT enough to wait for a reboot: with Fast Startup on (the Windows default) a
+            // shutdown+power-on is a hiberboot that RESTORES session 0 and its drivers, so the
+            // declare survives what the operator calls a reboot (measured: Kernel-Boot event id 27
+            // `0x1`, and `lsass`/`services` keeping their pre-"reboot" start times). Only a cold
+            // boot or a device restart actually clears it — and the device restart costs 0.07 s.
+            //
+            // Runs HERE, before any session holds a display: the restart tears the adapter down.
+            #[cfg(target_os = "windows")]
+            vdisplay::driver::restart_device_for_clean_cursor();
             // Crash recovery for the experimental `pnp_disable_monitors` axis: re-enable any
             // monitor devnodes a previous host disabled for an Exclusive session and never
             // restored (crash/kill/power loss) — before any new session touches the topology.
