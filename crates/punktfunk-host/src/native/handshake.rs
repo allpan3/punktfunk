@@ -686,13 +686,6 @@ pub(super) async fn negotiate(
             // The bit the Welcome just advertised — read back rather than recomputed, so the
             // prepared display and the session wiring cannot disagree with it.
             let cursor_fw = welcome.host_caps & punktfunk_core::quic::HOST_CAP_CURSOR != 0;
-            // Give a capture-mode session back the LOSSLESS pointer: if an earlier session on this
-            // host declared the hardware cursor (desktop mouse model) and this one did not ask for
-            // it, clear the sticky declare now — BEFORE this session's display is created, which is
-            // the only safe moment, and exactly the "desktop session, disconnect, reconnect in
-            // capture mode" case the start-up clean cannot reach. No-op when nothing declared, when
-            // this session wants the channel, or when any display is still held.
-            pf_vdisplay::driver::clean_cursor_for_next_session(cursor_fw);
             // Same bit the data plane's SessionContext reads — the prepared plan and the
             // session wiring must agree on the slicing ceiling (an encoder rebuilt from the
             // prepared plan with a DIFFERENT max_slices would change the wire shape mid-flow).

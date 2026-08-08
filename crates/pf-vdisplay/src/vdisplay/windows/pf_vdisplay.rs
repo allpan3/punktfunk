@@ -894,6 +894,14 @@ impl VdisplayDriver for PfVdisplayDriver {
         client_hdr: Option<punktfunk_core::quic::HdrMeta>,
         hw_cursor: bool,
     ) -> Result<AddedMonitor> {
+        // Give a capture-mode session the LOSSLESS pointer back: if an earlier session declared a
+        // hardware cursor and this one does not want it, recycle the driver's host process BEFORE
+        // this monitor is added. The ADD path is the only place guaranteed to see every session
+        // (the handshake call site this replaced sat in a `match (source, compositor)` arm that is
+        // not taken on this host, so it never ran).
+        if !hw_cursor {
+            clean_cursor_for_next_session(false);
+        }
         let session_id = next_session_id();
         // The client display's volume rides into the monitor's EDID CTA HDR block; all-zero =
         // unknown → the driver keeps its built-in defaults (also what an un-upgraded driver, which
