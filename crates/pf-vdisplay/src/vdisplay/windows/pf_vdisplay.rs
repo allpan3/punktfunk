@@ -209,18 +209,16 @@ pub fn note_cursor_declared() {
 /// Returns `true` only when it actually restarted.
 pub fn clean_cursor_for_next_session(session_wants_declare: bool) -> bool {
     use std::sync::atomic::Ordering;
-    if session_wants_declare {
+    if session_wants_declare || !CURSOR_DECLARED.load(Ordering::Relaxed) {
         return false;
     }
-    // NOT gated on `CURSOR_DECLARED`. Tracking "did we declare" in host-process memory was tried
-    // and silently never fired (on-glass .173, 2026-08-08: the reconnect kept getting
-    // `cursor_excluded=true` while BOTH outcome logs stayed absent — i.e. this function returned
-    // right here). The flag is set in `capture_virtual_output` and read in the handshake, and one
-    // of those is evidently not on the path that runs; chasing which is not worth it when the
-    // operation it guards is IDEMPOTENT and costs 0.07 s. Restarting an already-clean adapter
-    // wastes 70 ms once per capture-mode connect; NOT restarting a dirty one costs that session a
-    // full-frame copy for every frame with a visible pointer, for its whole life. Take the 70 ms.
-    let previously_declared = CURSOR_DECLARED.load(Ordering::Relaxed);
+    // Gated deliberately — a device restart is NOT free. Windows puts the devnode into
+    // "restart pending" after repeated cycles, and `/restart-device` then refuses with "a system
+    // restart is pending for this device" until an actual reboot (hit on .173 2026-08-08 after ~6
+    // restarts in one afternoon, which is also what made the earlier runs look like a wiring bug:
+    // the call ran, the restart failed, and nothing logged the failure). So restart only when a
+    // declare is actually outstanding, never speculatively.
+    let previously_declared = true;
     // Refuse only while another session is STREAMING — a keep-alive (lingering/pinned) monitor has
     // no session attached and a reconnect recreates it regardless, so restarting the adapter costs
     // it nothing. Gating on keep-alive too made this dead code in the one case it exists for: after
@@ -260,8 +258,9 @@ pub fn restart_device_for_clean_cursor() -> bool {
         $ad = Get-PnpDevice -Class Display | Where-Object { $_.FriendlyName -match 'punktfunk Virtual Display' } | Select-Object -First 1; \
         if (-not $ad) { Write-Output 'ABSENT'; exit }; \
         $pnp = ($env:SystemRoot + '\\System32\\pnputil.exe'); $LASTEXITCODE = 1; \
-        if (Test-Path $pnp) { & $pnp /restart-device $ad.InstanceId *> $null }; \
-        if ($LASTEXITCODE -eq 0) { Write-Output 'RESTARTED' } else { Write-Output 'FAILED' }";
+        if (Test-Path $pnp) { $out = (& $pnp /restart-device $ad.InstanceId 2>&1 | Out-String) }; \
+        if ($LASTEXITCODE -eq 0) { Write-Output 'RESTARTED' } \
+        else { Write-Output ('FAILED ' + ($out -replace '\\s+', ' ')) }";
     let ps = std::env::var("SystemRoot")
         .map(|r| format!(r"{r}\System32\WindowsPowerShell\v1.0\powershell.exe"))
         .unwrap_or_else(|_| "powershell.exe".to_string());
@@ -292,9 +291,13 @@ pub fn restart_device_for_clean_cursor() -> bool {
             true
         }
         "ABSENT" => false, // driver not installed — nothing to clean, and `open` reports that later
+        // Keep pnputil's own text. The failure that actually occurs is "a system restart is
+        // pending for this device" — no retry fixes it, and a bare exit code hid it for three runs.
         other => {
             tracing::warn!(
                 outcome = other,
+                restart_pending = other.contains("Systemneustart")
+                    || other.to_ascii_lowercase().contains("restart is pending"),
                 "pf-vdisplay: cursor clean-start did not restart the adapter — sessions without a \
                  cursor channel will self-composite the pointer if an earlier declare is sticky"
             );
