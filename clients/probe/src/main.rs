@@ -129,6 +129,16 @@ struct Args {
     /// host must composite the metadata cursor on its own; decode the dump and look for the
     /// pointer.
     cursor_nochannel: bool,
+    /// `--cursor-hold` — with `--cursor-capture`/`--cursor-nochannel`, stop the relative wiggle
+    /// after a short priming burst instead of circling forever. The wiggle exists to keep a
+    /// damage-driven desktop publishing frames, but it also DRAGS the host pointer several hundred
+    /// pixels a second, which makes it impossible to hold the pointer over a chosen target — and
+    /// the shape under the pointer is the whole point when the question is "does the MONOCHROME
+    /// I-beam survive compositing?" (the arrow is a colour cursor and proves nothing about the
+    /// mono path). With this flag: prime for ~3 s so the pointer is un-suppressed and metadata is
+    /// flowing, then hold still so a `SetCursorPos` on the host can park it on a text field for
+    /// the rest of the dump.
+    cursor_hold: bool,
     /// `--discover [SECS]` — browse the LAN for native (`_punktfunk._udp`) hosts for `SECS`
     /// seconds (default 4), print what's found, and exit. No connection is made.
     discover: Option<u64>,
@@ -309,6 +319,7 @@ fn parse_args() -> Args {
         clock_resync: argv.iter().any(|a| a == "--clock-resync"),
         cursor_capture: argv.iter().any(|a| a == "--cursor-capture"),
         cursor_nochannel: argv.iter().any(|a| a == "--cursor-nochannel"),
+        cursor_hold: argv.iter().any(|a| a == "--cursor-hold"),
     }
 }
 
@@ -900,13 +911,23 @@ async fn session(args: Args) -> Result<()> {
             }
         });
         let wiggle_conn = conn.clone();
+        let hold = args.cursor_hold;
         tokio::spawn(async move {
-            // Relative circles, forever: keeps the host pointer moving (and, on metadata-cursor
-            // compositors, keeps cursor updates flowing) for the whole dump.
+            // Relative circles: keeps the host pointer moving (and, on metadata-cursor
+            // compositors, keeps cursor updates flowing) for the whole dump — unless
+            // `--cursor-hold`, which primes and then stops so the pointer can be parked.
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            tracing::info!("cursor-capture: relative pointer wiggle running");
+            tracing::info!(hold, "cursor-capture: relative pointer wiggle running");
+            let prime_until = std::time::Instant::now() + std::time::Duration::from_secs(3);
             let mut t = 0.0f64;
             loop {
+                if hold && std::time::Instant::now() >= prime_until {
+                    tracing::info!(
+                        "cursor-capture: wiggle primed and STOPPED (--cursor-hold) — the pointer \
+                         now stays where the host puts it"
+                    );
+                    return;
+                }
                 let e = InputEvent {
                     kind: InputKind::MouseMove,
                     _pad: [0; 3],
