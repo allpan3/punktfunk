@@ -421,23 +421,31 @@ pub fn hw_cursor_capable() -> bool {
     m.driver_proto.load(Ordering::Relaxed) >= 5
 }
 
-/// Does this host currently hold NO virtual display at all (no live session, no keep-alive slot)?
+/// Is NO session currently streaming to a virtual display?
 ///
 /// The safety question for anything that tears the adapter down — notably
-/// [`crate::driver::clean_cursor_for_next_session`], whose `pnputil /restart-device` would take
-/// every monitor on the adapter with it. Deliberately counts KEPT slots as well as streaming ones:
-/// a keep-alive monitor belongs to a client that is expected back, and destroying it under them is
-/// exactly the kind of cross-session damage the cursor clean-up exists to avoid causing.
-pub fn no_live_displays() -> bool {
+/// [`crate::driver::clean_cursor_for_next_session`], whose `pnputil /restart-device` takes every
+/// monitor on the adapter with it. Only [`SlotState::Active`] counts: that is a session with live
+/// references, and destroying its monitor mid-stream is the cross-session damage worth refusing.
+///
+/// `Lingering`/`Pinned` slots deliberately do NOT count. They are keep-alive monitors with no
+/// session attached, and a reconnect **already** preempts and recreates them — "a reused IddCx
+/// swap-chain is dead" (see [`SlotState::Pinned`]) — so a device restart destroys nothing the
+/// reconnect was not going to destroy anyway. Counting them was too conservative to be useful: the
+/// case this gate exists for is exactly *disconnect from a desktop session, reconnect in capture
+/// mode*, and the disconnected session's monitor is lingering at precisely that moment, so the
+/// clean-up could never fire when it was most wanted (observed on `.173`, 2026-08-08).
+pub fn no_active_sessions() -> bool {
     match VDM.get() {
         // Before the first backend open there is nothing to protect.
         None => true,
-        Some(m) => m
+        Some(m) => !m
             .state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .slots
-            .is_empty(),
+            .values()
+            .any(|s| matches!(s, SlotState::Active { .. })),
     }
 }
 

@@ -212,11 +212,12 @@ pub fn clean_cursor_for_next_session(session_wants_declare: bool) -> bool {
     if session_wants_declare || !CURSOR_DECLARED.load(Ordering::Relaxed) {
         return false;
     }
-    // Conservative: a KEPT keep-alive slot counts as held, so a client that is expected back does
-    // not lose its monitor to another client's cursor preference. The cost of being wrong here is
-    // someone else's session dying; the cost of skipping is one session compositing its own
-    // pointer, which is merely the old behaviour.
-    if !super::manager::no_live_displays() {
+    // Refuse only while another session is STREAMING — a keep-alive (lingering/pinned) monitor has
+    // no session attached and a reconnect recreates it regardless, so restarting the adapter costs
+    // it nothing. Gating on keep-alive too made this dead code in the one case it exists for: after
+    // a desktop session disconnects its monitor LINGERS, which is exactly when the next
+    // capture-mode connect needs the declare gone (observed on .173).
+    if !super::manager::no_active_sessions() {
         tracing::info!(
             "cursor: this session wants no hardware cursor and an earlier one declared, but a              display is still held (live or keep-alive) — skipping the adapter restart, so the              pointer stays host-composited for this session"
         );
