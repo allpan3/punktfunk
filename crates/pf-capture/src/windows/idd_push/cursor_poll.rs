@@ -68,6 +68,11 @@ pub(super) struct CursorPoller {
     /// while the secure desktop needs the software-cursor path to render (see
     /// `IddPushCapturer::poll_secure_desktop`).
     secure: Arc<AtomicBool>,
+    /// Monotonic count of published snapshots — the poller's HEARTBEAT. It advances once per
+    /// successful poll (a failed `GetCursorInfo` `continue`s before the publish), so a thread that
+    /// is wedged on an input desktop it can no longer read stops advancing this while never
+    /// exiting. [`Self::alive`] cannot see that state: it only asks whether the thread finished.
+    ticks: Arc<AtomicU64>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -106,10 +111,12 @@ impl CursorPoller {
         let slot: Arc<Mutex<Option<pf_frame::CursorOverlay>>> = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
         let secure = Arc::new(AtomicBool::new(false));
-        let (slot_t, stop_t, secure_t) = (slot.clone(), stop.clone(), secure.clone());
+        let ticks = Arc::new(AtomicU64::new(0));
+        let (slot_t, stop_t, secure_t, ticks_t) =
+            (slot.clone(), stop.clone(), secure.clone(), ticks.clone());
         let thread = std::thread::Builder::new()
             .name("pf-cursor-poll".into())
-            .spawn(move || run(target_id, rect, &slot_t, &stop_t, &secure_t))
+            .spawn(move || run(target_id, rect, &slot_t, &stop_t, &secure_t, &ticks_t))
             .ok();
         if thread.is_none() {
             tracing::warn!("cursor poller thread spawn failed — cursor falls back to driver shm");
@@ -118,6 +125,7 @@ impl CursorPoller {
             slot,
             stop,
             secure,
+            ticks,
             thread,
         }
     }
@@ -133,7 +141,14 @@ impl CursorPoller {
         self.secure.load(Ordering::Relaxed)
     }
 
+    /// The heartbeat count (see [`Self::ticks`]). Compared against its own previous value by the
+    /// capturer — the ABSOLUTE value means nothing, only whether it is still moving.
+    pub(super) fn publishes(&self) -> u64 {
+        self.ticks.load(Ordering::Relaxed)
+    }
+
     /// Whether the worker thread is (still) alive — `false` degrades the capturer to the shm read.
+    /// Note this is liveness, NOT health: see [`Self::publishes`].
     pub(super) fn alive(&self) -> bool {
         self.thread.as_ref().is_some_and(|t| !t.is_finished())
     }
@@ -155,6 +170,7 @@ fn run(
     slot: &Mutex<Option<pf_frame::CursorOverlay>>,
     stop: &AtomicBool,
     secure: &AtomicBool,
+    ticks: &AtomicU64,
 ) {
     // Physical-pixel coordinates on this thread regardless of the process's DPI awareness:
     // `rect` comes from CCD (always physical), and a DPI-virtualized `GetCursorInfo` position
@@ -306,6 +322,8 @@ fn run(
             }
         });
         *slot.lock().unwrap_or_else(|p| p.into_inner()) = overlay;
+        // Heartbeat AFTER the publish, so it counts snapshots the capturer can actually read.
+        ticks.fetch_add(1, Ordering::Relaxed);
     }
 }
 

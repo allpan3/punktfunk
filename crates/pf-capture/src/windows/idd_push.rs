@@ -212,6 +212,30 @@ struct KeyedMutexGuard<'a> {
 /// (`frame_transport.rs`).
 const WAIT_ABANDONED_HRESULT: i32 = 0x0000_0080;
 
+/// First retry delay after a composite-blend failure — short enough that a transient device-loss
+/// costs a few pointer-less frames rather than the rest of the session.
+const BLEND_RETRY_MIN: Duration = Duration::from_millis(250);
+/// Ceiling for the doubling retry: a genuinely broken device stops burning a frame-sized texture
+/// allocation every quarter second, while still recovering within ~4 s if it ever comes back.
+const BLEND_RETRY_MAX: Duration = Duration::from_secs(4);
+
+/// How long the poller may publish NOTHING before the capturer calls it wedged. It polls at
+/// `CursorPoller::INTERVAL` (4 ms), so this is ~250 missed publishes — far outside any scheduling
+/// hiccup, and still fast enough to name the fault while a user is still looking at it.
+const POLLER_STALL: Duration = Duration::from_secs(1);
+
+/// A composite-blend failure and its pending retry ([`IddPushCapturer::blend_fail`]).
+struct BlendFail {
+    /// No blend is attempted before this instant.
+    retry_at: Instant,
+    /// The delay that produced `retry_at`; doubles per consecutive failure up to
+    /// [`BLEND_RETRY_MAX`].
+    backoff: Duration,
+    /// Consecutive failures without an intervening success — logged, so a session that is
+    /// permanently pointer-less is distinguishable from one that hiccupped once.
+    consecutive: u32,
+}
+
 impl<'a> KeyedMutexGuard<'a> {
     /// Acquire `mutex` at `key`, waiting up to `timeout_ms`. `None` if the acquire times out / errors
     /// (the caller skips the frame), so the guard is only ever held when the lock is genuinely held.
@@ -385,13 +409,26 @@ pub struct IddPushCapturer {
     /// to a visible pointer is compositing here. Pins `composite_cursor` on — nothing may turn
     /// it off (there is no channel to hand the pointer to).
     composite_forced: bool,
-    /// The cursor-quad blend pass (lazy; per capture device). `None` after a build failure —
-    /// composite mode then degrades to pointer-less frames (warned once).
+    /// The cursor-quad blend pass (lazy; per capture device). `None` before the first blend and
+    /// after a failure dropped it; rebuilt on the next attempt that is not suppressed.
     cursor_blend: Option<cursor_blend::CursorBlendPass>,
-    cursor_blend_failed: bool,
+    /// Composite-blend failure state. `None` = healthy. A failure used to be TERMINAL — one warn,
+    /// a sticky flag, and the session then streamed a pointer-less desktop for its whole life —
+    /// but the causes that actually occur (device loss, a transient allocation failure on the
+    /// frame-sized scratch) heal, and the pointer is the one thing a capture-model session cannot
+    /// do without. So a failure now only suppresses the blend until `retry_at`, doubling from
+    /// [`BLEND_RETRY_MIN`] to [`BLEND_RETRY_MAX`] while failures continue, and the first success
+    /// clears it.
+    blend_fail: Option<BlendFail>,
     /// Sticky: [`Self::live_cursor`] has fallen back to the driver's shm section. The two sources
     /// keep independent serial namespaces, so once crossed we never go back (see there).
     cursor_shm_latched: bool,
+    /// Poller heartbeat watch: the last sampled publish count and when it last ADVANCED. A poller
+    /// that is `alive()` but wedged stops advancing it while never exiting — invisible before.
+    cursor_poll_watch: (u64, Instant),
+    /// Whether the wedged-poller warning has already been emitted for the CURRENT stall (cleared
+    /// when it resumes), so a permanently wedged poller warns once rather than every tick.
+    cursor_poll_stalled: bool,
     /// The frame-sized blend scratch (slot copy + cursor quad): texture + SRV + (w, h, fmt)
     /// it was built for — rebuilt when the ring geometry changes.
     blend_scratch: Option<(
@@ -401,10 +438,12 @@ pub struct IddPushCapturer {
         u32,
         DXGI_FORMAT,
     )>,
-    /// The (serial, x, y, visible) of the LAST blended pointer — the composite-regen change
-    /// key: pointer-only motion produces no driver publish (the declared hardware cursor
-    /// doesn't dirty frames), so `try_consume` regenerates from the last slot when this moves.
-    last_blend_key: Option<(u64, i32, i32, bool)>,
+    /// What the LAST blend actually DREW — the composite-regen change key: pointer-only motion
+    /// produces no driver publish (the declared hardware cursor doesn't dirty frames), so
+    /// `try_consume` regenerates from the last slot when this changes. `None` = the frame carries
+    /// no pointer (hidden or no shape yet), which is why a HIDDEN pointer's position is not part
+    /// of the key — see [`Self::cursor_blend_key`].
+    last_blend_key: Option<(u64, i32, i32)>,
     /// The ring slot of the last FRESH publish — the regen source.
     last_slot: Option<usize>,
     /// The target's SDR-white scale (vs 80 nits) for HDR cursor compositing — refreshed on
@@ -1211,10 +1250,17 @@ impl IddPushCapturer {
     /// poller meant pointer-less frames, not a degraded pointer.
     fn live_cursor(&mut self) -> Option<pf_frame::CursorOverlay> {
         if !self.cursor_shm_latched {
-            if let Some(p) = &self.cursor_poll {
-                if p.alive() {
-                    return p.read();
-                }
+            // Sample the heartbeat and the snapshot together, then drop the borrow so the watch
+            // can take `&mut self`. `alive()` is liveness only — `watch_cursor_publishes` is what
+            // tells a working poller apart from a wedged one.
+            let sampled = self
+                .cursor_poll
+                .as_ref()
+                .filter(|p| p.alive())
+                .map(|p| (p.publishes(), p.read()));
+            if let Some((n, overlay)) = sampled {
+                self.watch_cursor_publishes(n);
+                return overlay;
             }
             // The poller is gone (or never started) and we are about to read the shm — latch, so a
             // poller that somehow reports alive again cannot re-cross the serial namespaces.
@@ -1255,17 +1301,96 @@ impl IddPushCapturer {
         );
     }
 
-    /// The (serial, x, y, visible) of the CURRENT live cursor — the composite-regen change key.
-    /// `None` while no source has a shape yet.
-    fn cursor_blend_key(&mut self) -> Option<(u64, i32, i32, bool)> {
-        self.live_cursor().map(|o| (o.serial, o.x, o.y, o.visible))
+    /// Watch the GDI poller's heartbeat and log the transitions. The poller is the ONLY
+    /// full-fidelity shape source (the driver's query is alpha-only — `cursor_poll.rs`), so a
+    /// poller that is alive but no longer publishing freezes the pointer in every frame at its
+    /// last sampled shape and position. That state used to be completely silent: `alive()` stays
+    /// true, the slot keeps returning its last snapshot, and nothing in the log distinguishes it
+    /// from a genuinely motionless pointer.
+    fn watch_cursor_publishes(&mut self, n: u64) {
+        let (last, since) = self.cursor_poll_watch;
+        if n != last {
+            self.cursor_poll_watch = (n, Instant::now());
+            if self.cursor_poll_stalled {
+                self.cursor_poll_stalled = false;
+                tracing::info!(
+                    target_id = self.target_id,
+                    "cursor poller resumed publishing — the pointer tracks again"
+                );
+            }
+        } else if !self.cursor_poll_stalled && since.elapsed() >= POLLER_STALL {
+            self.cursor_poll_stalled = true;
+            tracing::warn!(
+                target_id = self.target_id,
+                stalled_ms = since.elapsed().as_millis() as u64,
+                "cursor poller is ALIVE but has stopped publishing — the pointer is frozen at its \
+                 last sampled shape/position (input-desktop reads failing every tick?)"
+            );
+        }
+    }
+
+    /// Is the composite blend currently suppressed by a failure's backoff?
+    fn blend_suppressed(&self) -> bool {
+        self.blend_fail
+            .as_ref()
+            .is_some_and(|f| Instant::now() < f.retry_at)
+    }
+
+    /// Record a composite-blend failure and arm the next retry (see [`BlendFail`]). Logs EVERY
+    /// escalation rather than only the first — a pointer-less capture-model session is a
+    /// user-visible fault, and the old warn-once left a permanently broken one indistinguishable
+    /// in the log from a single transient hiccup at startup.
+    fn note_blend_failure(&mut self, why: &str) {
+        let backoff = self
+            .blend_fail
+            .as_ref()
+            .map_or(BLEND_RETRY_MIN, |f| (f.backoff * 2).min(BLEND_RETRY_MAX));
+        let consecutive = self.blend_fail.as_ref().map_or(1, |f| f.consecutive + 1);
+        self.blend_fail = Some(BlendFail {
+            retry_at: Instant::now() + backoff,
+            backoff,
+            consecutive,
+        });
+        tracing::warn!(
+            consecutive,
+            retry_in_ms = backoff.as_millis() as u64,
+            "cursor composite: {why} — frames stay pointer-less until the retry succeeds"
+        );
+    }
+
+    /// A blend succeeded: retire any failure record so the next one starts at the short backoff.
+    fn note_blend_success(&mut self) {
+        if let Some(f) = self.blend_fail.take() {
+            tracing::info!(
+                after_consecutive_failures = f.consecutive,
+                "cursor composite: blend recovered — the pointer is back in frames"
+            );
+        }
+    }
+
+    /// What a blend would DRAW this tick — `(serial, x, y)` for a visible pointer, `None` for a
+    /// hidden or not-yet-known one. Keyed on the drawn RESULT rather than on raw cursor state so
+    /// that a HIDDEN pointer moving — routine, because that is exactly what a game that grabbed
+    /// the pointer does — cannot force a frame regeneration on an otherwise idle desktop. The
+    /// visible⇄hidden transitions still change the key (`Some`⇄`None`), so the frame that must
+    /// gain or lose the pointer is still regenerated.
+    fn cursor_blend_key(&mut self) -> Option<(u64, i32, i32)> {
+        self.live_cursor()
+            .filter(|o| o.visible)
+            .map(|o| (o.serial, o.x, o.y))
     }
 
     /// Composite the pointer for this convert: ensure the frame-sized blend scratch, copy the
     /// slot into it, and alpha-blend the GDI poller's shape at its polled position. Returns the
     /// scratch (texture + SRV) the conversion should read INSTEAD of the slot; `None` degrades
-    /// to the pointer-less slot (scratch/pass creation failed — warned once). A hidden pointer
-    /// blends nothing (the plain copy is the correct frame).
+    /// to the pointer-less slot, which is the correct frame whenever nothing would be drawn.
+    ///
+    /// **There is NO scratch and NO copy when the pointer is hidden or unknown.** The full-frame
+    /// `CopyResource` below is the single largest cost of the composite model — a 4K FP16 ring
+    /// slot is 66 MB, so at 120 fps an unconditional copy is ~8 GB/s of write bandwidth — and it
+    /// buys nothing when the blend that follows draws nothing. A game that grabbed the pointer
+    /// hides it, so this early-out is what makes the capture model free in the state it spends
+    /// most of its life in.
     ///
     /// # Safety
     /// D3D11 calls on the owning capture/encode thread's device + immediate context, called
@@ -1274,6 +1399,18 @@ impl IddPushCapturer {
         &mut self,
         slot_tex: &ID3D11Texture2D,
     ) -> Option<(ID3D11Texture2D, ID3D11ShaderResourceView)> {
+        // Resolve WHAT WOULD BE DRAWN first, and record it as the applied key even when that is
+        // "nothing" — `try_consume`'s regen test compares against this, so an early-out must still
+        // leave the key describing the frame we are about to emit. Through `live_cursor`, so a
+        // dead poller degrades to the shm section here too.
+        let overlay = self.live_cursor().filter(|o| o.visible);
+        self.last_blend_key = overlay.as_ref().map(|o| (o.serial, o.x, o.y));
+        let ov = overlay?;
+        // Blending is suppressed while a recent failure's backoff runs — skip the scratch and the
+        // copy too, not just the draw: with nothing to draw onto it, the copy is pure waste.
+        if self.blend_suppressed() {
+            return None;
+        }
         // SAFETY: per the contract above, D3D11 calls on the owning thread's device + immediate
         // context while the slot's keyed mutex is held. `CreateTexture2D`/`CreateShaderResourceView`
         // take a fully-initialized stack descriptor plus live out-params and are `.ok()`-checked before
@@ -1325,13 +1462,7 @@ impl IddPushCapturer {
                         self.blend_scratch = Some((t, v, self.width, self.height, fmt));
                     }
                     None => {
-                        if !self.cursor_blend_failed {
-                            self.cursor_blend_failed = true;
-                            tracing::warn!(
-                                "cursor blend scratch creation failed — capture-model frames stay \
-                             pointer-less this session"
-                            );
-                        }
+                        self.note_blend_failure("scratch creation failed");
                         return None;
                     }
                 }
@@ -1339,38 +1470,33 @@ impl IddPushCapturer {
             let (tex, srv, ..) = self.blend_scratch.as_ref().expect("just ensured");
             let (tex, srv) = (tex.clone(), srv.clone());
             self.context.CopyResource(&tex, slot_tex);
-            // Blend the pointer (visible shapes only; hidden = the copy alone is the frame).
-            // Through `live_cursor`, so a dead poller degrades to the shm section HERE too — this
-            // is the path that actually draws the pointer in the composite model, and the one that
-            // used to read the poller unconditionally.
-            let overlay = self.live_cursor();
-            self.last_blend_key = overlay.as_ref().map(|o| (o.serial, o.x, o.y, o.visible));
-            if let Some(ov) = overlay.filter(|o| o.visible) {
-                if self.cursor_blend.is_none() && !self.cursor_blend_failed {
-                    match cursor_blend::CursorBlendPass::new(&self.device) {
-                        Ok(p) => self.cursor_blend = Some(p),
-                        Err(e) => {
-                            self.cursor_blend_failed = true;
-                            tracing::warn!(
-                                "cursor blend pass build failed — capture-model frames stay \
-                             pointer-less this session: {e:#}"
-                            );
-                        }
+            // Draw `ov` — resolved and keyed at the top, where a hidden pointer already took the
+            // early-out, so reaching here means there IS something to blend.
+            if self.cursor_blend.is_none() {
+                match cursor_blend::CursorBlendPass::new(&self.device) {
+                    Ok(p) => self.cursor_blend = Some(p),
+                    Err(e) => {
+                        self.note_blend_failure(&format!("blend pass build failed: {e:#}"));
                     }
                 }
-                if let Some(pass) = self.cursor_blend.as_mut() {
-                    // FP16 ring = scRGB linear composition (HDR): linearize the sRGB shape and
-                    // scale it to the target's SDR white so it matches the desktop around it.
-                    let scale = if self.display_hdr {
-                        self.sdr_white_scale
-                    } else {
-                        0.0
-                    };
-                    if let Err(e) = pass.blend(&self.device, &self.context, &tex, &ov, scale) {
-                        if !self.cursor_blend_failed {
-                            self.cursor_blend_failed = true;
-                            tracing::warn!("cursor blend draw failed — pointer-less frames: {e:#}");
-                        }
+            }
+            if let Some(pass) = self.cursor_blend.as_mut() {
+                // FP16 ring = scRGB linear composition (HDR): linearize the sRGB shape and
+                // scale it to the target's SDR white so it matches the desktop around it.
+                let scale = if self.display_hdr {
+                    self.sdr_white_scale
+                } else {
+                    0.0
+                };
+                match pass.blend(&self.device, &self.context, &tex, &ov, scale) {
+                    // One good draw retires the whole failure record: whatever broke has healed,
+                    // and the next failure should get the SHORT retry, not the escalated one.
+                    Ok(()) => self.note_blend_success(),
+                    Err(e) => {
+                        // Drop the pass so the block above rebuilds it: a device-loss failure is
+                        // transient, but a pass built against the lost device never succeeds again.
+                        self.cursor_blend = None;
+                        self.note_blend_failure(&format!("blend draw failed: {e:#}"));
                     }
                 }
             }
