@@ -231,12 +231,6 @@ pub fn capture_virtual_output(
     // Cursor-forward sessions (M2c): hand the capturer the v5 cursor-channel delivery closure —
     // its presence opts the session in (the capturer creates + delivers the CursorShm section,
     // the driver declares the IddCx hardware cursor). Built exactly like `sender` above.
-    // Remember that this host declared, so the NEXT session that wants no hardware cursor knows to
-    // clear it (`clean_cursor_for_next_session`) instead of self-compositing for its whole life.
-    #[cfg(target_os = "windows")]
-    if want.hw_cursor {
-        crate::vdisplay::driver::note_cursor_declared();
-    }
     let cursor_sender: Option<pf_capture::CursorChannelSender> = want.hw_cursor.then(|| {
         std::sync::Arc::new(
             move |req: &pf_driver_proto::control::SetCursorChannelRequest| {
