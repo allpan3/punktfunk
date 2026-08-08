@@ -190,6 +190,63 @@ enum AdapterCycle {
 ///
 /// Returns `true` only when pnputil reported success. Best-effort: a failure just leaves the
 /// adapter as it was (sessions then self-composite exactly as before).
+/// The driver's WUDFHost pid, from the most recent ADD reply. `0` before any monitor was created.
+static LAST_WUDF_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Clear a sticky hardware-cursor declare by recycling the driver's WUDFHost process.
+///
+/// The declare is irrevocable and adapter-wide, but its scope is the WUDFHost process
+/// (`monitor.rs` `DECLARED_TARGETS`) — so killing that process drops it. WUDF respawns the host on
+/// the next open, with a fresh adapter object.
+///
+/// **This is what makes un-declaring possible mid-boot.** `pnputil /restart-device` also works but
+/// is a ONCE-PER-BOOT operation (see [`restart_device_for_clean_cursor`]); the start-up clean
+/// spends it, leaving nothing for the desktop-session→reconnect case. Measured on `.173`
+/// 2026-08-08: pid 3872 → 19932, `adapter_luid` 0x8ed607 → 0x1a8f6ca, `cursor_excluded` true →
+/// **false**, next session streamed normally.
+///
+/// Same precondition as the device restart: no session may hold a display, because every monitor
+/// on the adapter dies with the host.
+fn recycle_wudfhost() -> bool {
+    let pid = LAST_WUDF_PID.load(std::sync::atomic::Ordering::Relaxed);
+    if pid == 0 {
+        tracing::info!("cursor: no driver host pid known yet — nothing to recycle");
+        return false;
+    }
+    // taskkill rather than OpenProcess/TerminateProcess: the host runs as SYSTEM, so it already has
+    // the rights, and shelling out keeps this off the unsafe-proof budget for a once-per-session
+    // maintenance action.
+    match std::process::Command::new(
+        std::env::var("SystemRoot")
+            .map(|r| format!(r"{r}\System32	askkill.exe"))
+            .unwrap_or_else(|_| "taskkill.exe".to_string()),
+    )
+    .args(["/PID", &pid.to_string(), "/F"])
+    .output()
+    {
+        Ok(o) if o.status.success() => {
+            tracing::info!(
+                pid,
+                "cursor: recycled the driver's WUDFHost — the hardware-cursor declare is gone"
+            );
+            LAST_WUDF_PID.store(0, std::sync::atomic::Ordering::Relaxed);
+            true
+        }
+        Ok(o) => {
+            tracing::warn!(
+                pid,
+                stderr = %String::from_utf8_lossy(&o.stderr).trim().replace('\n', " "),
+                "cursor: could not recycle the driver's WUDFHost — this session self-composites"
+            );
+            false
+        }
+        Err(e) => {
+            tracing::warn!(pid, error = %e, "cursor: taskkill spawn failed");
+            false
+        }
+    }
+}
+
 /// Has this host process DECLARED an IddCx hardware cursor since the adapter was last restarted?
 /// Set by [`note_cursor_declared`] when a session delivers a cursor channel; cleared when
 /// [`clean_cursor_for_next_session`] restarts the device. This is the host's own mirror of the
@@ -239,7 +296,7 @@ pub fn clean_cursor_for_next_session(session_wants_declare: bool) -> bool {
         );
         return false;
     }
-    if restart_device_for_clean_cursor() {
+    if recycle_wudfhost() {
         CURSOR_DECLARED.store(false, Ordering::Relaxed);
         tracing::info!(
             previously_declared,
@@ -988,7 +1045,14 @@ impl VdisplayDriver for PfVdisplayDriver {
         tracing::info!(
             target_id = reply.target_id,
             adapter_luid = %format_args!("{:#x}", luid.LowPart),
-            wudf_pid = reply.wudf_pid,
+            wudf_pid = {
+                // The declare lives in THIS process (monitor.rs `DECLARED_TARGETS`), so remember it:
+                // recycling it is the only way to un-declare that does not cost the once-per-boot
+                // device restart. Proven on .173 2026-08-08 — killing it gave a new host pid, a NEW
+                // adapter luid, and `cursor_excluded=false`, with the next session streaming fine.
+                LAST_WUDF_PID.store(reply.wudf_pid, std::sync::atomic::Ordering::Relaxed);
+                reply.wudf_pid
+            },
             cursor_excluded = reply.cursor_excluded != 0,
             "pf-vdisplay monitor created {}x{}@{}",
             mode.width,
