@@ -291,6 +291,11 @@ pub fn clean_cursor_for_next_session(session_wants_declare: bool) -> bool {
         return false;
     }
     if recycle_wudfhost() {
+        // The cached control handle died with the host process. Retire it so the next
+        // `ensure_device` reopens against the respawned WUDFHost — without this the ADD that
+        // follows runs on a stale handle and the session comes up with no frames at all.
+        super::manager::invalidate_cached_device("cursor clean: recycled the driver host");
+        std::thread::sleep(std::time::Duration::from_millis(1500));
         CURSOR_DECLARED.store(false, Ordering::Relaxed);
         tracing::info!(
             previously_declared,
@@ -568,6 +573,12 @@ pub unsafe fn send_cursor_channel(
     dev: HANDLE,
     req: &control::SetCursorChannelRequest,
 ) -> Result<()> {
+    // THE declare point. The driver declares its IddCx hardware cursor when this channel arrives —
+    // not from the ADD request's `hw_cursor` flag, which is why recording the declare there (and,
+    // before that, in `capture_virtual_output`) left the flag false and the between-session clean
+    // silently inert. The log line that names this moment is "cursor channel delivered - driver
+    // declares the hardware cursor".
+    CURSOR_DECLARED.store(true, std::sync::atomic::Ordering::Relaxed);
     let mut none: [u8; 0] = [];
     // SAFETY: per this fn's contract `dev` is the live control handle; `bytes_of(req)` borrows the
     // caller's request across this synchronous call; no output buffer.
@@ -930,16 +941,7 @@ impl VdisplayDriver for PfVdisplayDriver {
             // (DWM stops compositing the pointer into the frame); the capture layer delivers the
             // CursorShm section right after its ring. Zero toward older drivers is harmless —
             // the host only sets this when the handshake-reported proto is >= 5.
-            hw_cursor: {
-                // The ONE place guaranteed to see every declare: the ADD request that asks for it.
-                // (An earlier attempt recorded this from `capture_virtual_output`, which is not on
-                // the Windows prep path — the flag stayed false and the between-session clean
-                // silently never ran.)
-                if hw_cursor {
-                    CURSOR_DECLARED.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-                hw_cursor as u32
-            },
+            hw_cursor: hw_cursor as u32,
         };
         // SET_RENDER_ADAPTER (opt-in; pf-vdisplay IMPLEMENTS it). Non-fatal on failure: the driver reports
         // its real render LUID in the shared header, so the host binds correctly even if this is ignored.
