@@ -218,6 +218,12 @@ fn clear_takeover() {
 /// box back to gaming mode). No-op when no takeover file exists (a clean start). Call once from
 /// `serve` alongside [`start_restore_worker`].
 pub fn restore_takeover_on_startup() {
+    // A stale gamescope bind drop-in means a previous host died mid-stream (a clean exit removes
+    // it via [`restore_takeover_now`]). Unlike the takeover statics it is a FILE on the operator's
+    // box, so it outlives the process that wrote it and would otherwise keep reshaping the box's
+    // own game mode with no host to own it. Drop-ins apply at unit start, so removing it here
+    // cannot disturb a session that is already running.
+    remove_session_bind_dropin();
     let Ok(bytes) = std::fs::read(takeover_state_path()) else {
         return; // no takeover file — clean start
     };
@@ -1084,6 +1090,17 @@ fn ensure_box_gamescope_mode(mode: Mode) -> Result<u32> {
         &format!("SCREEN_HEIGHT={}", mode.height),
         &format!("CUSTOM_REFRESH_RATES={}", mode.refresh_hz.max(1)),
     ]);
+    // On a box whose session script hardcodes an absolute gamescope path, this restart is also the
+    // one chance to make that path mean the patched binary — the drop-in only takes effect at unit
+    // start. It is a no-op everywhere the `GAMESCOPE_BIN` wrapper already works, and on a box that
+    // cannot take the bind at all ([`session_bind_setting`] returns `None`), so the restart below
+    // is unchanged from today's behaviour in both of those cases.
+    //
+    // HDR is deliberately not requested here. This is the DEGRADED attach path — the host does not
+    // own this session's lifecycle, never claimed its capabilities, and does not run
+    // `verify_managed_spawn_flags` against it — so the bind is used for the one thing that is
+    // unambiguously right either way: the client's refresh rate reaching the compositor.
+    let mut bound = arm_session_bind_dropin(game_hz(mode.refresh_hz));
     systemctl_user(&["restart", &unit]);
     // Wait for the relaunched session to come up at the new size and publish its capture node. The
     // node appears when gamescope is up (well before Steam finishes booting); the caller's
@@ -1100,6 +1117,27 @@ fn ensure_box_gamescope_mode(mode: Mode) -> Result<u32> {
                 );
                 return Ok(node);
             }
+        }
+        // The bind's one catastrophic failure mode, on the unit where it would hurt most: this is
+        // the box's OWN game mode, so a unit that cannot build its mount namespace leaves the
+        // operator with no Game Mode until someone deletes a file by hand. Take the drop-in back
+        // out (which reloads systemd) and restart plain — the box lands exactly where it would
+        // have without this mechanism.
+        //
+        // Only once the unit has actually SETTLED: `ExecMainStatus` reports the last main process
+        // to exit, so consulting it mid-`activating` can read the previous run's number and disarm
+        // a bind that is working.
+        if bound && !unit_starting_or_active(&unit) && unit_failed_namespace(&unit) {
+            tracing::warn!(
+                %unit,
+                "gamescope: the box's game-mode unit could not be given a mount namespace \
+                 (exit {EXIT_NAMESPACE}) — removing the gamescope bind drop-in and restarting \
+                 without it"
+            );
+            note_session_bind_unusable();
+            remove_session_bind_dropin();
+            bound = false;
+            systemctl_user(&["restart", &unit]);
         }
         if Instant::now() >= deadline {
             bail!(
@@ -1303,19 +1341,31 @@ fn verify_managed_spawn_flags(hdr: bool) -> Result<()> {
         return Ok(());
     }
     note_spawn_flags_lost();
+    // This check is also the post-hoc oracle for the mount-namespace bind ([`session_bind_setting`]):
+    // a unit that FAILED to start is a different fault with its own detector ([`unit_failed_namespace`]),
+    // but a unit that started and still has no flags means the bind was armed and did not deliver
+    // — and an operator told to "install punktfunk-gamescope" on a box where it is already
+    // installed and bound would be sent the wrong way, which is the mistake this file has made
+    // before. So say which of the two mechanisms was actually in play.
+    let route = if session_bind_setting().is_some() {
+        "the session's hardcoded gamescope path was bind-mounted onto our wrapper and the flags \
+         still did not arrive"
+    } else {
+        "it ignored GAMESCOPE_BIN / the PATH shim and ran a stock gamescope"
+    };
     // Warn as well as erroring: the latch is a process-wide capability change, and whichever
     // caller consumes this error decides on its own how loudly to report it.
     tracing::warn!(
         missing = %missing.join(" "),
-        "gamescope: the session ignored GAMESCOPE_BIN / the PATH shim and ran a stock gamescope — \
-         HDR and the in-node cursor are now off for this host process"
+        %route,
+        "gamescope: the session did not receive our flags — HDR and the in-node cursor are now off \
+         for this host process"
     );
     Err(anyhow!(
-        "the gamescope session started without {} — it ignored GAMESCOPE_BIN / the PATH shim and \
-         ran a stock gamescope. Refusing it rather than streaming a session whose shape was \
-         planned around flags that never arrived (a missing cursor flag has no symptom but an \
-         absent pointer). Those capabilities are off for this host now; reconnect for a plain SDR \
-         session, or install punktfunk-gamescope as the box's `gamescope`",
+        "the gamescope session started without {} — {route}. Refusing it rather than streaming a \
+         session whose shape was planned around flags that never arrived (a missing cursor flag \
+         has no symptom but an absent pointer). Those capabilities are off for this host now; \
+         reconnect for a plain SDR session, or install punktfunk-gamescope as the box's `gamescope`",
         missing.join(" ")
     ))
 }
@@ -2384,6 +2434,10 @@ fn takeover_live() -> bool {
 /// `keep_alive=forever` pins a session for the NEXT client, which is meaningless once the host
 /// that would serve them is exiting. No-op when nothing was taken over.
 pub fn restore_takeover_now() {
+    // Unconditionally, and BEFORE the takeover gate: the bind drop-in is armed on the degraded
+    // attach path too, which takes nothing over and so would leave the file behind on every clean
+    // host shutdown. It is ours by name and a no-op when absent.
+    remove_session_bind_dropin();
     if !takeover_live() {
         return;
     }
@@ -2417,6 +2471,12 @@ fn connected_connector_under(base: &std::path::Path) -> bool {
 /// [`start_restore_worker`] once the debounce deadline passes; takes the stopped-unit list so a
 /// cancelled+reconnected window keeps the list for a later real restore.
 fn do_restore_tv_session() {
+    // FIRST, and outside every branch below: the gamescope bind drop-in is armed on the box's OWN
+    // game-mode unit, so it must come back out however this restore ends — including the early
+    // returns for "nothing was taken over" and "a desktop session is active", which are exactly
+    // the shapes the degraded attach path produces. It removes only our own file (the operator's
+    // drop-ins in that directory are untouched) and is a no-op when we never armed it.
+    remove_session_bind_dropin();
     // SteamOS: we reconfigured `gamescope-session.target` headless via a drop-in. Restore = remove
     // the drop-in + restart the target (back to the physical panel) — unless the user switched to a
     // desktop session meanwhile, in which case drop the override and leave the desktop alone.
@@ -2693,6 +2753,330 @@ fn write_gamescope_bin_wrapper() -> Result<std::path::PathBuf> {
     Ok(path)
 }
 
+/// systemd's exit status for "I could not set up this unit's mount namespace" (`EXIT_NAMESPACE`).
+/// A unit carrying [`session_bind_setting`] exits with it — before its `ExecStart` ever runs — when
+/// the box cannot give a **user** unit a mount namespace: no unprivileged user namespaces
+/// (`user.max_user_namespaces=0`, a hardened `kernel.unprivileged_userns_clone=0`, a container
+/// without the capability), or a source/target that cannot be bound.
+///
+/// It is the one outcome that is strictly WORSE than the bug the bind fixes. Without the bind the
+/// box streams a working session that merely lacks HDR and a cursor; with a bind that cannot be
+/// established the unit does not start at all, and Game Mode is simply gone. So every site that
+/// arms the bind also watches for this status and retries without it.
+const EXIT_NAMESPACE: i32 = 226;
+
+/// Set once a unit carrying the bind has actually failed to start with [`EXIT_NAMESPACE`] — the
+/// runtime counterpart to the [`bind_mount_usable`] preflight, for the box that passes the probe
+/// and then fails the real thing anyway (a probe runs `/bin/true`; the session unit carries the
+/// distro's own drop-ins, and one of them may add sandboxing that interacts badly).
+///
+/// One-way and process-wide, exactly like [`note_spawn_flags_lost`]: nothing we can observe proves
+/// the next launch would fare better, and the cost of trying again is a session that will not
+/// start. Once set, [`session_bind_setting`] answers `None` forever and every path is back to
+/// today's behaviour.
+static BIND_UNUSABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record that a unit carrying the bind failed with [`EXIT_NAMESPACE`] — see [`BIND_UNUSABLE`].
+fn note_session_bind_unusable() {
+    BIND_UNUSABLE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The gamescope binary `gamescope-session-plus` HARDCODES, on a box where the `GAMESCOPE_BIN`
+/// escape hatch does not exist **at all**. `None` when the script honours `GAMESCOPE_BIN` (Bazzite
+/// and the SteamOS-like images — the wrapper works there, and a box that does not need a mount
+/// namespace must not be given one), when there is no session-plus, or when the script's shape is
+/// not one we recognise.
+///
+/// Field evidence, Nobara 44 (`home-nobara-1`, 2026-08-09):
+/// `grep GAMESCOPE_BIN /usr/share/gamescope-session-plus/gamescope-session-plus` returns **no
+/// matches at all** — the variable is never read — and line 244 reads
+/// `GAMESCOPECMD="/usr/bin/gamescope \`. Against that, no environment variable and no `PATH` entry
+/// can win: the host writes its wrapper, exports it, and the session execs the distro's stock
+/// gamescope with none of our flags. That is not a misconfiguration to warn about, it is a
+/// structural property of the script on disk — and it is *readable*, which is what makes it safe
+/// to act on rather than guess at.
+fn session_plus_hardcoded_gamescope() -> Option<std::path::PathBuf> {
+    let script = std::fs::read_to_string(SESSION_PLUS_BIN).ok()?;
+    hardcoded_gamescope_in(&script).map(std::path::PathBuf::from)
+}
+
+/// [`session_plus_hardcoded_gamescope`]'s parser. Split out pure and unit-tested because both of
+/// its answers are load-bearing and one of them arms a bind mount over a distro-owned path.
+///
+/// A script that mentions `GAMESCOPE_BIN` *anywhere* is left alone: that is the sanctioned hook,
+/// the host already drives it, and the bind exists only for scripts that offer no hook at all.
+///
+/// Only the `GAMESCOPECMD=` assignment that OPENS the command line is read, and only when its
+/// first word is an absolute path. The same script contains `if [ -z "$GAMESCOPECMD" ]` (a test)
+/// and several `GAMESCOPECMD+=" -R $socket"` (appends); neither is an assignment of the binary,
+/// and mistaking one for it would bind a mount over `$socket`.
+fn hardcoded_gamescope_in(script: &str) -> Option<&str> {
+    if script.contains("GAMESCOPE_BIN") {
+        return None;
+    }
+    script.lines().find_map(|line| {
+        let rest = line.trim_start().strip_prefix("GAMESCOPECMD=")?;
+        let path = rest
+            .trim_start_matches(['"', '\''])
+            .split_whitespace()
+            .next()?;
+        path.starts_with('/').then_some(path)
+    })
+}
+
+/// The `BindReadOnlyPaths=` value that makes a hardcoded gamescope path resolve to the host's
+/// `GAMESCOPE_BIN` wrapper **inside the session unit's own mount namespace** — or `None` when the
+/// bind is either unnecessary or unproven, in which case every caller behaves exactly as it did
+/// before this mechanism existed.
+///
+/// ## Why a mount namespace, when two indirections already exist
+///
+/// The wrapper ([`write_gamescope_bin_wrapper`]) and the SteamOS PATH shim
+/// ([`write_headless_shim`]) both work by *asking* the session script to run something else. A
+/// script that hardcodes `/usr/bin/gamescope` never asks. The only remaining lever that does not
+/// require overwriting a distro-owned binary is to change what that path MEANS, for this unit and
+/// nothing else — which is what a bind mount in a private mount namespace is. Outside the unit the
+/// box is bit-for-bit unchanged; `dnf` still owns `/usr/bin/gamescope`, and a package upgrade,
+/// another user's session, and the operator's own desktop all see the stock binary.
+///
+/// ## Why the WRAPPER is the source, not the patched binary
+///
+/// Binding `punktfunk-gamescope` straight over `/usr/bin/gamescope` would fix the binary and lose
+/// the point: the flags this whole path exists to deliver — `--pipewire-composite-cursor`,
+/// `--pipewire-composite-external-overlay`, `--hdr-enabled`, `--nested-refresh` — are injected by
+/// the wrapper, not baked into the binary. A session bound to the bare binary still runs without
+/// them, [`verify_managed_spawn_flags`] still refuses it, and the box still streams SDR with no
+/// pointer. Binding the *wrapper* reproduces exactly what `GAMESCOPE_BIN` would have done had the
+/// script consulted it, which is the whole objective.
+///
+/// ## Where it applies
+///
+/// Only where the wrapper is *structurally* lost, decided by reading the script on this box
+/// ([`session_plus_hardcoded_gamescope`]) rather than by distro name. Bazzite and SteamOS keep the
+/// mechanism that already works there and never take a mount namespace they do not need; a box
+/// with no session-plus at all (the bare-spawn path builds its own argv) never reaches here.
+fn session_bind_setting() -> Option<&'static str> {
+    if BIND_UNUSABLE.load(std::sync::atomic::Ordering::Relaxed) {
+        return None;
+    }
+    static SETTING: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    SETTING.get_or_init(resolve_session_bind_setting).as_deref()
+}
+
+/// [`session_bind_setting`]'s one-time resolution. Every `None` here is a deliberate refusal to
+/// arm a bind, and each is logged at the level its cause deserves.
+fn resolve_session_bind_setting() -> Option<String> {
+    let dst = session_plus_hardcoded_gamescope()?;
+    // A bind mount cannot CREATE the target, and a unit whose bind fails does not start — so a
+    // hardcoded path that is not a file on this box is a refusal, not an attempt.
+    if !dst.is_file() {
+        tracing::warn!(
+            path = %dst.display(),
+            "gamescope: gamescope-session-plus hardcodes a gamescope that does not exist here — \
+             not binding over it"
+        );
+        return None;
+    }
+    // FORK-BOMB GUARD, and the reason this is a hard gate rather than an optimization: the source
+    // is a wrapper whose last act is `exec`ing [`gamescope_bin`]. If that resolved to the very
+    // path we are about to shadow, the wrapper would exec *itself*, forever, inside the session.
+    // It does exactly that on a box with no `punktfunk-gamescope` installed — which is also the
+    // box with nothing to gain here, since the flags the wrapper injects need the patched binary.
+    let bin = std::path::Path::new(gamescope_bin());
+    if !bin.is_absolute() || bin == dst {
+        tracing::debug!(
+            bin = %bin.display(),
+            hardcoded = %dst.display(),
+            "gamescope: the session script hardcodes the same gamescope we would run — nothing to \
+             bind (install punktfunk-gamescope for HDR and the in-node cursor)"
+        );
+        return None;
+    }
+    // Written here rather than assumed present: this resolution is cached for the process, so a
+    // first call that happened to precede the wrapper's own write would latch `None` forever.
+    // The write is idempotent and its body is constant for the process.
+    let src = write_gamescope_bin_wrapper()
+        .map_err(|e| tracing::warn!(error = %format!("{e:#}"), "gamescope: no wrapper to bind"))
+        .ok()?;
+    let paths = format!("{}:{}", src.display(), dst.display());
+    if !bind_mount_usable(&paths) {
+        tracing::warn!(
+            %paths,
+            "gamescope: this box's gamescope-session-plus hardcodes an absolute gamescope path and \
+             reads GAMESCOPE_BIN nowhere, but a systemd --user unit here cannot take a mount \
+             namespace — so the patched gamescope cannot be reached without overwriting a \
+             distro-owned binary. Sessions stay 8-bit SDR with a host-composited cursor. (Check \
+             `sysctl user.max_user_namespaces` / `kernel.unprivileged_userns_clone`.)"
+        );
+        return None;
+    }
+    tracing::info!(
+        %paths,
+        "gamescope: this box's gamescope-session-plus hardcodes an absolute gamescope path and \
+         reads GAMESCOPE_BIN nowhere — binding the punktfunk wrapper over it inside the session \
+         unit's own mount namespace (nothing outside the unit changes)"
+    );
+    Some(paths)
+}
+
+/// Can a `systemd --user` unit on this box actually take this bind? Proven — once per host
+/// process, before anything depends on it — by starting a throwaway transient unit carrying the
+/// exact `BindReadOnlyPaths=` value and running `/bin/true` inside it.
+///
+/// This is proven rather than assumed because the failure is worse than the bug (see
+/// [`EXIT_NAMESPACE`]). Everything the real bind needs is exercised: the user manager's ability to
+/// unshare a mount namespace at all, the source, and the target. Nothing else is: the payload is
+/// `/bin/true`, so no gamescope is spawned, no session is touched, and the unit is `--collect`ed
+/// the moment it exits.
+///
+/// It deliberately does NOT try to prove that the *substitution* took — that the gamescope the
+/// session ends up running is ours. That answer already exists downstream and is a better one:
+/// [`verify_managed_spawn_flags`] reads the running compositor's `/proc/<pid>/cmdline` and refuses
+/// a session missing our flags, whatever the reason. Proving it here would mean executing the
+/// bound path, and a preflight that can accidentally start a compositor on someone's box is not a
+/// preflight.
+fn bind_mount_usable(paths: &str) -> bool {
+    let out = Command::new("systemd-run")
+        .args(["--user", "--wait", "--collect", "--quiet"])
+        .arg(format!("--property=BindReadOnlyPaths={paths}"))
+        // A probe that can hang is a connect that can hang: `/bin/true` returns instantly, so any
+        // wait at all means something is wrong and the answer we want is "no".
+        .arg("--property=RuntimeMaxSec=15")
+        .args(["--", "/bin/true"])
+        .output();
+    match out {
+        // `--wait` propagates the payload's own exit status, so success here means systemd built
+        // the namespace, took the bind, and ran the command in it.
+        Ok(o) if o.status.success() => true,
+        Ok(o) => {
+            tracing::debug!(
+                status = %o.status,
+                stderr = %String::from_utf8_lossy(&o.stderr).trim(),
+                "gamescope: the bind-mount preflight unit failed"
+            );
+            false
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "gamescope: could not run the bind-mount preflight");
+            false
+        }
+    }
+}
+
+/// Did `unit` fail because systemd could not set up its mount namespace ([`EXIT_NAMESPACE`])?
+///
+/// The distinction this draws is the whole of the graceful degradation: a unit that started
+/// without our flags is the OLD bug (loud, recoverable, and [`verify_managed_spawn_flags`] already
+/// owns it), while a unit that never started at all is the NEW one, and only the second may retry
+/// without the bind. `false` whenever the answer cannot be read — an unreadable status must not
+/// disarm a bind that is working.
+fn unit_failed_namespace(unit: &str) -> bool {
+    let Ok(out) = Command::new("systemctl")
+        .args(["--user", "show", "-p", "ExecMainStatus", "--value", unit])
+        .output()
+    else {
+        return false;
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<i32>()
+        .ok()
+        == Some(EXIT_NAMESPACE)
+}
+
+/// Path of the drop-in that arms [`session_bind_setting`] on the BOX's own game-mode unit.
+///
+/// On the **template** (`gamescope-session-plus@.service.d`), not on an instance: the box chooses
+/// its own instance name (`@steam`, `@ogui-steam`, …), the host restarts whichever one is live,
+/// and a per-instance file would miss the next one.
+///
+/// `zz-` so it sorts LAST. systemd merges drop-ins in filename order and the last assignment of a
+/// setting wins, so no distro or operator file can silently take the bind back out from under us.
+/// The reference box's own operator drop-in is named `10-headless.conf` for the other half of that
+/// contract — a distinct name and an earlier sort position — and [`remove_session_bind_dropin`]
+/// removes only the single file named here, so a restore leaves it standing.
+fn session_bind_dropin_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok().filter(|h| !h.is_empty())?;
+    Some(
+        std::path::Path::new(&home)
+            .join(".config/systemd/user/gamescope-session-plus@.service.d/zz-punktfunk-bind.conf"),
+    )
+}
+
+/// Write the bind drop-in for the box's own game-mode unit and make systemd re-read it. Returns
+/// whether the bind is now armed; `false` means the caller proceeds exactly as it did before.
+///
+/// The `daemon-reload` is not optional and not deferrable: a drop-in systemd has not re-read is
+/// **inert**, so the restart that follows would start the unit from the old configuration and the
+/// entire mechanism would silently do nothing while looking like it worked.
+fn arm_session_bind_dropin(hz: u32) -> bool {
+    let Some(setting) = session_bind_setting() else {
+        return false;
+    };
+    let Some(path) = session_bind_dropin_path() else {
+        return false;
+    };
+    let write = || -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("mkdir {}", parent.display()))?;
+        }
+        // `PF_HZ` rides along because the wrapper reads it for `--nested-refresh` — the flag
+        // gamescope-session-plus does not expose and the one a headless session reports as its
+        // ONE refresh rate (60 Hz when it never arrives). Binding the wrapper without it would
+        // hand every game a 60 Hz display on a 120 Hz stream.
+        let body = format!(
+            "# Written by punktfunk for the duration of a stream; removed on restore.\n\
+             #\n\
+             # This box's gamescope-session-plus HARDCODES an absolute gamescope path and reads\n\
+             # GAMESCOPE_BIN nowhere, so neither the wrapper nor a PATH shim can reach it. Bind\n\
+             # the wrapper over that path inside THIS UNIT's own mount namespace instead: the\n\
+             # session gets the patched gamescope and our flags, and nothing outside the unit\n\
+             # changes — the distro still owns the binary on disk.\n\
+             [Service]\n\
+             BindReadOnlyPaths={setting}\n\
+             Environment=PF_HZ={hz}\n"
+        );
+        std::fs::write(&path, body).with_context(|| format!("write drop-in {}", path.display()))
+    };
+    if let Err(e) = write() {
+        tracing::warn!(
+            error = %format!("{e:#}"),
+            "gamescope: could not write the gamescope bind drop-in — the box's session will run \
+             the distro's stock gamescope (no HDR, no in-node cursor)"
+        );
+        return false;
+    }
+    systemctl_user(&["daemon-reload"]);
+    tracing::info!(
+        path = %path.display(),
+        "gamescope: armed the punktfunk gamescope bind on the box's own game-mode unit"
+    );
+    true
+}
+
+/// Remove the bind drop-in (restore, host shutdown, and a stale one found at startup). Best-effort.
+///
+/// It takes **only our own file** — `remove_file` on the one name we wrote, never the directory.
+/// The drop-in directory is shared with the operator: the reference box keeps a `10-headless.conf`
+/// in there without which its game-mode unit cannot start at all (no connected DRM connector), and
+/// an `rm -r` of the directory would take that with it and leave the box unable to reach Game Mode
+/// by any route. The `daemon-reload` runs only when a file was actually removed, so a restore on a
+/// box that never armed the bind touches nothing.
+fn remove_session_bind_dropin() {
+    let Some(path) = session_bind_dropin_path() else {
+        return;
+    };
+    if std::fs::remove_file(&path).is_ok() {
+        systemctl_user(&["daemon-reload"]);
+        tracing::info!(
+            path = %path.display(),
+            "gamescope: removed the punktfunk gamescope bind drop-in (the box's game-mode unit is \
+             back to the distro's own gamescope)"
+        );
+    }
+}
+
 /// Launch `gamescope-session-plus <client>` headless at `mode` as a transient `systemd --user`
 /// unit (clean cgroup teardown of the whole Steam tree on stop). Injects `--nested-refresh` (via
 /// the wrapper) + `--generate-drm-mode cvt` so games see exactly `mode` (resolution + refresh) and
@@ -2731,9 +3115,20 @@ fn launch_session(client: &str, unit_name: &str, mode: Mode, hdr: bool) -> Resul
         r.dedup();
         r.iter().map(u32::to_string).collect::<Vec<_>>().join(",")
     };
-    let start_unit = || -> Result<()> {
-        let status = Command::new("systemd-run")
-            .args(["--user", "--collect", &format!("--unit={unit_name}")])
+    // The bind is passed as a transient PROPERTY rather than through a drop-in file, because this
+    // unit is one we create: `systemd-run` applies it atomically with the start, there is no
+    // `daemon-reload` window in which it could be inert, and — the part that matters after a host
+    // crash — there is no file left behind on a box we no longer own. The box's OWN game-mode unit
+    // (which we only restart) has no such option and takes the drop-in instead; both carry the
+    // identical `BindReadOnlyPaths=` value from [`session_bind_setting`].
+    let mut bind = session_bind_setting();
+    let start_unit = |bind: Option<&str>| -> Result<()> {
+        let mut cmd = Command::new("systemd-run");
+        cmd.args(["--user", "--collect", &format!("--unit={unit_name}")]);
+        if let Some(paths) = bind {
+            cmd.arg(format!("--property=BindReadOnlyPaths={paths}"));
+        }
+        let status = cmd
             // Same headless-must-not-attach rule as [`spawn`]: the transient unit inherits the
             // user manager env, which can carry a (possibly stale) desktop DISPLAY/WAYLAND_DISPLAY
             // that would abort gamescope at startup.
@@ -2770,7 +3165,7 @@ fn launch_session(client: &str, unit_name: &str, mode: Mode, hdr: bool) -> Resul
         }
         Ok(())
     };
-    start_unit()?;
+    start_unit(bind)?;
     // Steam Big Picture cold-start is far slower than a bare app — poll the node for up to 45s.
     let deadline = Instant::now() + Duration::from_secs(45);
     loop {
@@ -2799,11 +3194,29 @@ fn launch_session(client: &str, unit_name: &str, mode: Mode, hdr: bool) -> Resul
         // and the transient unit has no Restart= — without supervision the rest of this poll would
         // wait on a corpse. Re-run the unit so every readiness attempt inside the deadline is used.
         if !unit_starting_or_active(unit_name) {
-            tracing::warn!(
-                unit = unit_name,
-                "gamescope session: transient unit died (missed the wrapper's 5 s gamescope \
-                 readiness window?) — relaunching"
-            );
+            // Before blaming the readiness window: did the unit fail because systemd could not
+            // build its mount namespace? That is a unit which never reached its ExecStart, so
+            // relaunching it identically would loop until the deadline and leave the box with no
+            // Game Mode at all — strictly worse than the missing-flags bug the bind is here to
+            // fix. Disarm and relaunch plain; the session then comes up exactly as it did before
+            // this mechanism existed, and `verify_managed_spawn_flags` refuses HDR + the in-node
+            // cursor as it always has.
+            if bind.is_some() && unit_failed_namespace(unit_name) {
+                tracing::warn!(
+                    unit = unit_name,
+                    "gamescope session: the unit could not be given a mount namespace \
+                     (exit {EXIT_NAMESPACE}) — dropping the gamescope bind and relaunching \
+                     without it. This session streams SDR with a host-composited cursor"
+                );
+                note_session_bind_unusable();
+                bind = None;
+            } else {
+                tracing::warn!(
+                    unit = unit_name,
+                    "gamescope session: transient unit died (missed the wrapper's 5 s gamescope \
+                     readiness window?) — relaunching"
+                );
+            }
             // Brief cooldown before the relaunch: the wrapper SIGKILLed a gamescope mid-Vulkan-init,
             // and the NVIDIA driver reclaims that context asynchronously — an instant relaunch pays
             // the reclaim serialization on top of device init and misses the 5 s window again.
@@ -2811,7 +3224,7 @@ fn launch_session(client: &str, unit_name: &str, mode: Mode, hdr: bool) -> Resul
             let _ = Command::new("systemctl")
                 .args(["--user", "reset-failed", unit_name])
                 .status();
-            start_unit()?;
+            start_unit(bind)?;
         }
         std::thread::sleep(Duration::from_millis(500));
     }
@@ -3152,9 +3565,9 @@ impl Drop for GamescopeProc {
 mod tests {
     use super::{
         cgroup_is_punktfunk_owned, cgroup_under_user_manager, connected_connector_under,
-        display_manager_unit_under, dm_plan, dm_survives_masked_unit, game_hz, hdr_args,
-        is_steam_launch, missing_flags, mode_mismatch, nested_wrapper_script, sentinel_advanced,
-        shape_dedicated_command, DmHelperError,
+        display_manager_unit_under, dm_plan, dm_survives_masked_unit, game_hz,
+        hardcoded_gamescope_in, hdr_args, is_steam_launch, missing_flags, mode_mismatch,
+        nested_wrapper_script, sentinel_advanced, shape_dedicated_command, DmHelperError,
     };
 
     /// The HDR spawn flags are what make a nested game render HDR at all — and their absence is
@@ -3429,6 +3842,58 @@ mod tests {
             "0::/user.slice/user-1000.slice/user@1000.service/app.slice/punktfunk-gamescope.service"
         ));
         assert!(!cgroup_is_punktfunk_owned(""));
+    }
+
+    /// The gate that decides whether a mount namespace is armed over a distro-owned path at all.
+    /// Both answers matter: a false `Some` binds a mount on a box that never needed one, and a
+    /// false `None` is the Nobara bug (a session that silently runs a stock gamescope).
+    #[test]
+    fn hardcoded_gamescope_is_read_only_where_there_is_no_escape_hatch() {
+        // THE field case, Nobara 44 / `home-nobara-1` 2026-08-09: `GAMESCOPE_BIN` appears nowhere
+        // in the script, and line 244 opens the command line with an absolute path. Verbatim
+        // shape, tabs and trailing backslash included.
+        let nobara = "\
+#!/bin/bash\n\
+if [ -z \"$GAMESCOPECMD\" ]; then\n\
+\tGAMESCOPECMD=\"/usr/bin/gamescope \\\n\
+\t\t$CURSOR \\\n\
+\t\t$RESOLUTION\"\n\
+fi\n\
+GAMESCOPECMD+=\" -R $socket -T $stats\"\n\
+$GAMESCOPECMD >\"${HOME}\"/.gamescope-stdout.log 2>&1 &\n";
+        assert_eq!(hardcoded_gamescope_in(nobara), Some("/usr/bin/gamescope"));
+
+        // A script that reads GAMESCOPE_BIN anywhere is LEFT ALONE — that is the sanctioned hook,
+        // the wrapper already drives it (Bazzite / SteamOS-like), and a box where it works must
+        // not be given a mount namespace it does not need.
+        let bazzite = "\
+GAMESCOPE_BIN=${GAMESCOPE_BIN:-gamescope}\n\
+GAMESCOPECMD=\"/usr/bin/gamescope $RESOLUTION\"\n";
+        assert_eq!(hardcoded_gamescope_in(bazzite), None);
+
+        // An APPEND (`+=`) is not the assignment of the binary. Reading one would bind a mount
+        // over `$socket`, which is the worst available outcome here.
+        assert_eq!(
+            hardcoded_gamescope_in("GAMESCOPECMD+=\" -R /tmp/sock\"\n"),
+            None
+        );
+        // Nor is the emptiness TEST that guards the assignment.
+        assert_eq!(
+            hardcoded_gamescope_in("if [ -z \"$GAMESCOPECMD\" ]; then\nfi\n"),
+            None
+        );
+        // A relative or variable command is not something we can bind over.
+        assert_eq!(
+            hardcoded_gamescope_in("GAMESCOPECMD=\"gamescope -W 1920\"\n"),
+            None
+        );
+        assert_eq!(
+            hardcoded_gamescope_in("GAMESCOPECMD=\"$GS -W 1920\"\n"),
+            None
+        );
+        // Nothing recognisable at all (a script we do not understand) stays hands-off.
+        assert_eq!(hardcoded_gamescope_in("exec gamescope \"$@\"\n"), None);
+        assert_eq!(hardcoded_gamescope_in(""), None);
     }
 
     /// The silent-60Hz guard. A headless gamescope reports `--nested-refresh` as its ONE refresh

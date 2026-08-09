@@ -240,6 +240,18 @@ These apply to the **Gaming Mode (gamescope)** path only; the desktop path is un
   mode and rate, and `PUNKTFUNK_GAMESCOPE_REFRESH_RATES=60,90,120` puts more than one entry in that
   menu. If the host log says *"the session did not start at the mode we asked for"*, a file in
   `/etc/gamescope-session-plus/sessions.d/` is overriding `GAMESCOPE_BIN` or setting `GAMESCOPECMD`.
+- **Some distros' session script ignores `GAMESCOPE_BIN` entirely — the host works around it with a
+  bind mount.** Nobara's `gamescope-session-plus` never reads that variable and hardcodes
+  `/usr/bin/gamescope` outright, so neither the variable nor a `PATH` entry can point the session at
+  `punktfunk-gamescope`; every session ran the stock binary, which cost HDR *and* the in-stream
+  cursor. The host now detects that shape by reading the script, and binds its own wrapper over the
+  hardcoded path **inside the session unit's own mount namespace** — the session gets the patched
+  gamescope and the flags, and nothing outside that unit changes (the distro still owns
+  `/usr/bin/gamescope`; you do not need to overwrite it). You will see *"binding the punktfunk
+  wrapper over it"* in the log when this engages. It needs unprivileged user namespaces; on a box
+  without them the host logs that it cannot take a mount namespace and streams SDR with a
+  host-composited cursor, exactly as before. Boxes whose script does honour `GAMESCOPE_BIN`
+  (Bazzite, SteamOS) are untouched by any of this.
 - **The performance overlay (fps / frametime / stats) needs the patched build.** It is mangoapp,
   which gamescope draws as an *external overlay* — a layer upstream's capture composite has never
   included on any version, so on a stock gamescope you can turn the overlay on and it simply will
