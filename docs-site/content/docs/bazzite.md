@@ -195,6 +195,16 @@ bash /usr/share/punktfunk/bazzite/kde-desktop-setup.sh
 
 Gaming Mode needs none of this — it auto-attaches.
 
+> **Version 0.26.0-1 cannot stream the Desktop, and nothing on this page fixes it.** Every session
+> ends with `KWin does not expose zkde_screencast_unstable_v1 to this client`. That image gave the
+> host binary the `CAP_SYS_NICE` capability, and Linux will not let KWin read the `/proc/<pid>/exe`
+> it uses to work out which program is asking — so the grant above can never match, however
+> correctly it is installed. Reinstalling does not help: it looks like a missing `.desktop` file and
+> is not one. The image's `/usr` is read-only, so it cannot be repaired on the box — take the next
+> image with `sudo punktfunk-sysext update`, then
+> `systemctl --user restart punktfunk-host`. Gaming Mode is unaffected; gamescope has no such
+> identity check.
+
 ## Run as an always-on host
 
 Bazzite hosts are typically headless. Enable the host service and linger so it starts at boot — see
