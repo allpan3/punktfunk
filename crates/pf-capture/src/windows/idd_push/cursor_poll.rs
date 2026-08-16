@@ -606,20 +606,6 @@ fn alpha_is_empty(rgba: &[u8]) -> bool {
     rgba.chunks_exact(4).all(|p| p[3] == 0)
 }
 
-/// Take alpha from an expanded AND mask: mask WHITE (AND bit 1) means transparent, black opaque.
-/// `mask_bgra` is the 32bpp expansion `GetDIBits` produces from the 1bpp mask, so any non-zero
-/// channel byte is "set".
-///
-/// Test-only: the simple AND-as-alpha helper (no invert). [`convert`] uses
-/// [`masked_color_to_rgba`] instead — AND=1 plus a non-zero colour pixel is invert, not
-/// transparent, and that is the I-beam.
-#[cfg(test)]
-fn apply_and_mask_alpha(rgba: &mut [u8], mask_bgra: &[u8]) {
-    for (px, m) in rgba.chunks_exact_mut(4).zip(mask_bgra.chunks_exact(4)) {
-        px[3] = if m[0] != 0 { 0 } else { 0xFF };
-    }
-}
-
 /// Alpha-less colour cursor: the AND mask plus the colour bitmap as XOR, same four states as
 /// [`mono_planes_to_rgba`]. A non-zero RGB with AND=1 is invert — which treating AND=1 as
 /// "always transparent" would have dropped, vanishing the I-beam.
@@ -630,8 +616,14 @@ fn masked_color_to_rgba(color_rgba: &[u8], mask_bgra: &[u8], w: usize, h: usize)
     let mut rgba = vec![0u8; w * h * 4];
     let mut invert = vec![false; w * h];
     for i in 0..w * h {
-        let and = mask_bgra.get(i * 4).is_some_and(|&b| b != 0);
-        let c = color_rgba.get(i * 4..i * 4 + 3).unwrap_or(&[0, 0, 0]);
+        // Either source running short leaves the pixel TRANSPARENT — the quiet failure. Reading a
+        // missing mask byte as AND=0 instead would land in the opaque arms and paint a black box
+        // over the pointer, which is the loudest way to be wrong. `convert` already requires the
+        // mask to cover the colour bitmap, so this is only the belt.
+        let (Some(&m), Some(c)) = (mask_bgra.get(i * 4), color_rgba.get(i * 4..i * 4 + 3)) else {
+            continue;
+        };
+        let and = m != 0;
         let xor = c[0] != 0 || c[1] != 0 || c[2] != 0;
         let px = &mut rgba[i * 4..i * 4 + 4];
         match (and, xor) {
@@ -815,35 +807,12 @@ mod tests {
         assert!(alpha_is_empty(&[]), "no pixels ⇒ vacuously empty");
     }
 
-    /// Mask WHITE (AND bit 1) = transparent, black = opaque — and the colour bytes are untouched.
-    #[test]
-    fn the_and_mask_supplies_alpha_for_an_alpha_less_cursor() {
-        let mut rgba = vec![
-            10, 20, 30, 0, // pixel 0
-            40, 50, 60, 0, // pixel 1
-        ];
-        let mask = plane(&[1, 0]); // pixel 0 masked out, pixel 1 kept
-        apply_and_mask_alpha(&mut rgba, &mask);
-        assert_eq!(px(&rgba, 0), [10, 20, 30, 0], "masked ⇒ transparent");
-        assert_eq!(px(&rgba, 1), [40, 50, 60, 0xFF], "unmasked ⇒ opaque");
-    }
-
-    /// A mask with FEWER pixels than the colour bitmap must not panic — `zip` stops at the shorter
-    /// side, leaving the tail at whatever alpha it had (the caller has already required
-    /// `mask.h >= color.h`, so this is the belt).
-    #[test]
-    fn a_short_mask_does_not_panic() {
-        let mut rgba = vec![1, 2, 3, 0, 4, 5, 6, 0, 7, 8, 9, 0];
-        apply_and_mask_alpha(&mut rgba, &plane(&[0]));
-        assert_eq!(px(&rgba, 0), [1, 2, 3, 0xFF]);
-        assert_eq!(px(&rgba, 1), [4, 5, 6, 0]);
-    }
-
     // ---- masked-color (colour bitmap as XOR) ------------------------------------------------
 
-    /// The four-state table, with colour standing in for XOR. Pixel 3 is the I-beam case:
-    /// AND=1 and a non-zero colour pixel is invert, not transparent — `apply_and_mask_alpha`
-    /// would have dropped it, which is how the text cursor vanished on a Windows host.
+    /// The four-state table, with colour standing in for XOR. Pixel 3 is the I-beam case: AND=1
+    /// and a non-zero colour pixel is invert, not transparent — the old AND-as-alpha helper read
+    /// AND=1 as "always transparent" and dropped it, which is how the text cursor vanished on a
+    /// Windows host.
     #[test]
     fn a_masked_color_invert_pixel_is_not_transparent() {
         //          (0,0) black  (0,1) red    (1,0) transparent  (1,1) invert
@@ -856,7 +825,11 @@ mod tests {
         let mask = plane(&[0, 0, 1, 1]);
         let out = masked_color_to_rgba(&color, &mask, 4, 1);
         assert_eq!(px(&out, 0), OPAQUE_BLACK, "AND=0 colour=0 ⇒ black");
-        assert_eq!(px(&out, 1), [0xCC, 0, 0, 0xFF], "AND=0 colour ⇒ opaque colour");
+        assert_eq!(
+            px(&out, 1),
+            [0xCC, 0, 0, 0xFF],
+            "AND=0 colour ⇒ opaque colour"
+        );
         // Pixel 2 is transparent by the table, but it is an 8-neighbour of the invert pixel at 3,
         // so the outline claims it — same as the monochrome table.
         assert_eq!(
@@ -864,7 +837,11 @@ mod tests {
             OPAQUE_WHITE,
             "outline grows into adjacent transparency"
         );
-        assert_eq!(px(&out, 3), OPAQUE_BLACK, "AND=1 colour≠0 ⇒ invert, not drop");
+        assert_eq!(
+            px(&out, 3),
+            OPAQUE_BLACK,
+            "AND=1 colour≠0 ⇒ invert, not drop"
+        );
     }
 
     /// AND=1 and a zero colour pixel stays transparent when nothing invert-neighbours it.
@@ -875,6 +852,25 @@ mod tests {
         let out = masked_color_to_rgba(&color, &mask, 4, 1);
         for i in 0..4 {
             assert_eq!(px(&out, i), TRANSPARENT, "pixel {i}");
+        }
+    }
+
+    /// Either source running short must not panic AND must leave the uncovered tail transparent —
+    /// reading a missing byte as a zero would land in the opaque arms and paint a black box over
+    /// the pointer. `convert` already requires `mask.h >= color.h`, so this is only the belt.
+    #[test]
+    fn a_masked_color_short_source_leaves_the_tail_transparent() {
+        let color = vec![0xFF; 16]; // four white pixels...
+        let out = masked_color_to_rgba(&color, &plane(&[0]), 4, 1); // ...but one mask pixel
+        assert_eq!(px(&out, 0), OPAQUE_WHITE, "the covered pixel converts");
+        for i in 1..4 {
+            assert_eq!(px(&out, i), TRANSPARENT, "mask ran short at pixel {i}");
+        }
+
+        let out = masked_color_to_rgba(&color[..4], &plane(&[0, 0, 0, 0]), 4, 1);
+        assert_eq!(px(&out, 0), OPAQUE_WHITE, "the covered pixel converts");
+        for i in 1..4 {
+            assert_eq!(px(&out, i), TRANSPARENT, "colour ran short at pixel {i}");
         }
     }
 }
