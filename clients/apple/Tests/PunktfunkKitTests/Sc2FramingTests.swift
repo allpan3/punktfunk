@@ -134,5 +134,15 @@ final class Sc2FramingTests: XCTestCase {
         // The pad kind the capture declares in its arrival (GamepadPref::SteamController2).
         XCTAssertEqual(Int(PUNKTFUNK_GAMEPAD_STEAMCONTROLLER2), 9)
         XCTAssertEqual(PunktfunkConnection.GamepadType.steamController2.rawValue, 9)
+        // The Puck dongle is its own host backend (native seven-interface topology, four
+        // controller slots), declared by the macOS USB capture when it owns the physical dongle.
+        XCTAssertEqual(Int(PUNKTFUNK_GAMEPAD_STEAMCONTROLLER2_PUCK), 10)
+        XCTAssertEqual(PunktfunkConnection.GamepadType.steamController2Puck.rawValue, 10)
+        // Both SC2 kinds carry motion (the IMU rides inside the opaque raw report), and both
+        // parse from their names — the env/dev hook the host's `GamepadPref::from_name` mirrors.
+        XCTAssertTrue(PunktfunkConnection.GamepadType.steamController2Puck.hasMotion)
+        XCTAssertEqual(PunktfunkConnection.GamepadType(name: "puck"), .steamController2Puck)
+        XCTAssertEqual(PunktfunkConnection.GamepadType(name: "sc2puck"), .steamController2Puck)
+        XCTAssertEqual(PunktfunkConnection.GamepadType(name: "sc2"), .steamController2)
     }
 }

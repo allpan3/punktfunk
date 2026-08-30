@@ -1,5 +1,10 @@
-// One captured Steam Controller 2 — the glue between the BLE transport (`Sc2BleLink`) and the
-// punktfunk wire, modeled on Android's `Sc2Capture.kt` with Apple idioms per `GamepadCapture`:
+// One captured Steam Controller 2 — the glue between a transport link and the punktfunk wire,
+// modeled on Android's `Sc2Capture.kt` with Apple idioms per `GamepadCapture`.
+//
+// Two transports, exactly one live at a time (`startTransport`): `Sc2UsbLink` for a wired pad or
+// a Puck dongle (macOS only — IOKit HID is not available to apps on iOS), and `Sc2BleLink` for a
+// directly-paired controller (iOS and macOS). USB wins when a pad is attached, because running
+// both would double-feed a controller that is simultaneously charging and paired.
 //
 // - **Raw plane (the point):** every input report is forwarded byte-for-byte
 //   (`PunktfunkConnection.sendHidReport` → the host's as-is virtual 28DE:1302 pad, which Steam
@@ -15,8 +20,9 @@
 //   real controller's motors/firmware.
 //
 // The wire slot is claimed LAZILY on the first parsed state report (`GamepadArrival` pref 9 —
-// `GamepadPref::SteamController2` — before any input; an idle radio stays invisible to the
-// host) and released on link drop / suspend / stop, so pad indices never leak. The index comes
+// `GamepadPref::SteamController2` — or pref 10 for a Puck, before any input; an idle radio and a
+// dongle with no pad powered on both stay invisible to the host) and released on link drop /
+// suspend / stop / Puck disconnect, so pad indices never leak. The index comes
 // from `GamepadManager.reserveExternalPadIndex()` — the SAME lowest-free allocator the
 // GameController slots use, so an SC2 and a GC pad can never collide.
 //
@@ -54,6 +60,16 @@ public final class Sc2Capture {
         label: "io.unom.punktfunk.sc2-ble",
         qos: .userInteractive)
     private var link: Sc2BleLink!
+    #if os(macOS)
+    /// The USB transport — wired pad or Puck dongle. macOS only: IOKit HID device access is not
+    /// available to apps on iOS, which is why BLE remains the only iOS transport.
+    private var usbLink: Sc2UsbLink!
+    #endif
+    /// Which transport `start` engaged. Exactly one runs at a time, deliberately: a single pad
+    /// can be BLE-paired AND plugged in (charging), and running both links would stream the same
+    /// controller onto two wire slots, doubling every input.
+    private enum Transport { case none, ble, usb }
+    private var transport: Transport = .none
     private var observers: [NSObjectProtocol] = []
 
     /// Guards every field below (see the threading note in the header).
@@ -74,6 +90,9 @@ public final class Sc2Capture {
     private var rawBuf = [UInt8](repeating: 0, count: 64)
     /// Armed while the escape chord is held (fires `onDisconnectRequest` on main).
     private var chordWork: DispatchWorkItem?
+    /// A Puck's wireless-CONNECT report, held until a wire slot exists to replay it on — see
+    /// `handleWireless`. Nil on every other transport.
+    private var pendingWireless: [UInt8]?
 
     /// The cross-client controller escape chord, read off this capture's own typed mirror —
     /// MUST stay equal to `GamepadCapture.escapeChord` (pinned by `Sc2EscapeChordMirrorTests`;
@@ -116,6 +135,23 @@ public final class Sc2Capture {
                 // poll, and the next connection re-claims + re-proves its IMU live.
                 self?.releaseSlot(reason: "link closed")
             })
+        #if os(macOS)
+        usbLink = Sc2UsbLink(
+            queue: queue,
+            onReport: { [weak self] report in self?.handleReport(report) },
+            onClosed: { [weak self] in self?.releaseSlot(reason: "usb link closed") })
+        #endif
+    }
+
+    /// Whether the live transport is a Puck dongle. Decides the declared wire kind AND whether
+    /// wireless-status reports may be acted on — see `handleWireless`. Read on the link queue,
+    /// where `Sc2UsbLink.isDongle` is also written.
+    private var isDongleLink: Bool {
+        #if os(macOS)
+        return transport == .usb && usbLink.isDongle
+        #else
+        return false
+        #endif
     }
 
     /// Begin acquisition (main actor: it registers the app-lifecycle observers). The wire slot
@@ -143,7 +179,7 @@ public final class Sc2Capture {
             // Release BLE while backgrounded (and the slot with it — a host pad frozen on the
             // last raw state would otherwise hold its buttons for the whole background stay).
             self.releaseSlot(reason: "app inactive")
-            self.link.stop()
+            self.stopTransport()
         })
         observers.append(NotificationCenter.default.addObserver(
             forName: activate, object: nil, queue: .main
@@ -153,9 +189,40 @@ public final class Sc2Capture {
             self.suspended = false
             let dead = self.stopped
             self.lock.unlock()
-            if !dead { self.link.start() } // reacquire; the first report re-claims a slot
+            if !dead { self.startTransport() } // reacquire; the first report re-claims a slot
         })
+        startTransport()
+    }
+
+    /// Engage exactly one transport: USB when an SC2 controller collection is attached right now,
+    /// otherwise BLE.
+    ///
+    /// USB wins because a plugged-in pad is the lower-latency path and is unambiguous — the
+    /// alternative, running both, double-feeds a pad that is simultaneously charging and paired.
+    /// The check opens nothing, so it cannot prompt or disturb a device another app holds.
+    ///
+    /// ponytail: the choice is made once per stream, so plugging a pad in mid-session keeps the
+    /// BLE link it started with. Re-evaluate on an IOKit matching callback if that proves
+    /// annoying on glass; a stream restart already picks the cable up today.
+    private func startTransport() {
+        #if os(macOS)
+        if Sc2UsbLink.attached() {
+            transport = .usb
+            usbLink.start()
+            return
+        }
+        #endif
+        transport = .ble
         link.start()
+    }
+
+    /// Stop whichever transport is live, and forget which it was.
+    private func stopTransport() {
+        #if os(macOS)
+        usbLink.stop()
+        #endif
+        link.stop()
+        transport = .none
     }
 
     /// Tear everything down: link stopped (unsubscribe, cancel, stop scanning), slot released,
@@ -170,7 +237,7 @@ public final class Sc2Capture {
         observers.forEach { NotificationCenter.default.removeObserver($0) }
         observers.removeAll()
         releaseSlot(reason: "stop")
-        link.stop()
+        stopTransport()
     }
 
     /// Replay one host raw write on the physical pad — wire this to `GamepadFeedback`'s hidRaw
@@ -183,6 +250,12 @@ public final class Sc2Capture {
         let claimed = padIndex
         lock.unlock()
         guard claimed == pad else { return } // addressed to some other controller
+        #if os(macOS)
+        if transport == .usb {
+            usbLink.writeRaw(kind: kind, frame: data)
+            return
+        }
+        #endif
         link.writeRaw(kind: kind, frame: data)
     }
 
@@ -190,10 +263,10 @@ public final class Sc2Capture {
 
     private func handleReport(_ framed: [UInt8]) {
         guard let id = framed.first else { return }
-        // Wireless status is authoritative only through a Puck dongle (USB — out of scope on
-        // Apple); a BLE pad emits it too, truthfully saying "no radio link", and acting on it
-        // tore the slot down 255 ms after creation on Android's first on-glass run. Swallow.
-        if id == Sc2Device.idWireless || id == Sc2Device.idWirelessX { return }
+        if id == Sc2Device.idWireless || id == Sc2Device.idWirelessX {
+            handleWireless(framed)
+            return
+        }
         var state = Sc2Device.State()
         var report = framed
         let isState = Sc2Device.parseState(report, into: &state)
@@ -222,6 +295,35 @@ public final class Sc2Capture {
         forwardRawLocked(&report, pad: pad)
         mirrorTypedLocked(state, pad: pad)
         lock.unlock()
+    }
+
+    /// One wireless connect/disconnect report (`0x79`/`0x46`).
+    ///
+    /// Authoritative ONLY through a Puck dongle, which is why this does nothing on any other
+    /// transport. A wired or BLE pad emits these too — truthfully, since it genuinely has no
+    /// radio link — and acting on that tore the wire slot down 255 ms after it was created on
+    /// Android's first on-glass run. SDL's wired path likewise marks the controller connected
+    /// unconditionally and reconnects on any state report.
+    ///
+    /// A connect arrives BEFORE the pad's first state report, and therefore before a wire slot
+    /// exists, so it is held and replayed by `claimSlot` — the host's virtual Puck must see the
+    /// same connect edge ahead of state, exactly as the physical dongle emits it.
+    private func handleWireless(_ framed: [UInt8]) {
+        guard isDongleLink, framed.count >= 2 else { return }
+        switch framed[1] {
+        case Sc2Device.wirelessConnect:
+            lock.lock()
+            pendingWireless = Array(framed.prefix(2))
+            lock.unlock()
+        case Sc2Device.wirelessDisconnect:
+            lock.lock()
+            pendingWireless = nil
+            lock.unlock()
+            log.info("SC2: Puck reports controller powered off — releasing wire slot")
+            releaseSlot(reason: "puck wireless disconnect")
+        default:
+            break
+        }
     }
 
     /// Forward one id-first report on the raw plane: IMU-gate in place, copy into the reusable
@@ -315,10 +417,25 @@ public final class Sc2Capture {
                 }
                 self.padIndex = index
                 self.lock.unlock()
-                self.connection.send(.gamepadArrival(
-                    pref: PunktfunkConnection.GamepadType.steamController2.rawValue,
-                    pad: UInt32(index)))
-                log.info("SC2 captured → wire pad \(index) (BLE passthrough, pref 9)")
+                // A Puck is its own host-side backend (native seven-interface topology, four
+                // controller slots), so it declares its own kind — a wired or BLE pad stays
+                // `.steamController2`.
+                let dongle = self.isDongleLink
+                let kind: PunktfunkConnection.GamepadType =
+                    dongle ? .steamController2Puck : .steamController2
+                self.connection.send(.gamepadArrival(pref: kind.rawValue, pad: UInt32(index)))
+                // Replay the connect edge the Puck emitted before this slot existed, ahead of any
+                // state — see `handleWireless`.
+                self.lock.lock()
+                if var pending = self.pendingWireless {
+                    self.pendingWireless = nil
+                    self.forwardRawLocked(&pending, pad: index)
+                }
+                self.lock.unlock()
+                let via = dongle ? "Puck" : (self.transport == .usb ? "USB" : "BLE")
+                log.info(
+                    "SC2 captured → wire pad \(index) (\(via, privacy: .public) passthrough, pref \(kind.rawValue))"
+                )
                 self.onPhaseChange?(.captured(pad: index))
             }
         }
@@ -336,6 +453,7 @@ public final class Sc2Capture {
         wireButtons = 0
         for i in lastAxis.indices { lastAxis[i] = Int32.min }
         imuGate.reset()
+        pendingWireless = nil
         let chord = chordWork
         chordWork = nil
         lock.unlock()

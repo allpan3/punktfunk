@@ -326,10 +326,21 @@ public final class PunktfunkConnection {
         /// glyphs + positional layout on the host side.
         case switchPro = 8
         /// New Steam Controller (2026, `28DE:1302`), passed through as-is on Linux hosts (raw
-        /// report mirroring; Steam Input is the consumer). Parity only on Apple — GameController
-        /// never surfaces the raw Valve device, so the client can't capture one; exists so the
-        /// resolved type round-trips and name parsing matches the host.
+        /// report mirroring; Steam Input is the consumer). CAPTURABLE on iOS/macOS over BLE
+        /// (`Sc2BleLink`) and on macOS over USB (`Sc2UsbLink`) — GameController never surfaces
+        /// the raw Valve device, so `Sc2Capture` opens it directly and declares this kind.
         case steamController2 = 9
+        /// The Steam Controller Puck dongle (`28DE:1304`/`1305`), passed through with its native
+        /// seven-interface topology and four controller slots — the host builds a different
+        /// virtual device for it than for a directly-attached pad, which is why it is its own
+        /// kind rather than a flag on `.steamController2`.
+        ///
+        /// Declared ONLY by a capture that owns the physical Puck (macOS `Sc2UsbLink`); a wired
+        /// or BLE SC2 stays `.steamController2`. The practical difference on the client side is
+        /// that a Puck's wireless connect/disconnect reports are AUTHORITATIVE — see
+        /// `Sc2Capture`, where acting on a wired pad's (truthful, but irrelevant) "no radio link"
+        /// once tore the wire slot down 255 ms after it was created.
+        case steamController2Puck = 10
 
         /// Loose name parsing for env/dev hooks, mirroring the host's
         /// `GamepadPref::from_name`.
@@ -344,6 +355,8 @@ public final class PunktfunkConnection {
             case "steamcontroller", "steam-controller", "steamcon": self = .steamController
             case "steamcontroller2", "steam-controller-2", "steamcon2", "sc2", "ibex":
                 self = .steamController2
+            case "steamcontroller2puck", "steam-controller-2-puck", "sc2puck", "sc2-puck", "puck":
+                self = .steamController2Puck
             case "dualsenseedge", "dualsense-edge", "edge", "dsedge": self = .dualSenseEdge
             case "switchpro", "switch-pro", "switch", "procontroller", "pro-controller":
                 self = .switchPro
@@ -369,7 +382,7 @@ public final class PunktfunkConnection {
             case .auto: return true // unknown; assume it can, see above
             case .xbox360, .xboxOne: return false
             case .dualSense, .dualShock4, .dualSenseEdge, .switchPro,
-                 .steamController, .steamDeck, .steamController2:
+                 .steamController, .steamDeck, .steamController2, .steamController2Puck:
                 return true
             }
         }

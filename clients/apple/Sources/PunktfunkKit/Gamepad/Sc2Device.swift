@@ -21,6 +21,49 @@
 import Foundation
 
 enum Sc2Device {
+    // MARK: - USB identity (macOS `Sc2UsbLink`; cf. Android's `Sc2Device.kt`)
+
+    static let vidValve = 0x28DE
+    /// Wired controller.
+    static let pidWired = 0x1302
+    /// Direct BLE identity — that transport is `Sc2BleLink`'s, never USB's.
+    static let pidBLE = 0x1303
+    /// The wireless Puck dongles (Proteus / Nereid).
+    static let pidDongleProteus = 0x1304
+    static let pidDongleNereid = 0x1305
+    /// Everything `Sc2UsbLink` matches. `pidBLE` is deliberately absent.
+    static let usbPIDs = [pidWired, pidDongleProteus, pidDongleNereid]
+
+    /// Whether a matched USB product id is a Puck dongle rather than a directly-attached pad.
+    /// Decides the declared wire kind (`.steamController2Puck` vs `.steamController2`) AND
+    /// whether wireless-status reports are authoritative — see `Sc2Capture`.
+    static func isDongle(pid: Int) -> Bool {
+        pid == pidDongleProteus || pid == pidDongleNereid
+    }
+
+    /// The HID usage pair of the SC2's CONTROLLER collection (vendor-defined page 0xFF00,
+    /// usage 0x01) — the third top-level collection in `pf_driver_proto::triton::RDESC`, behind
+    /// the lizard-mode mouse (Generic Desktop 01:02, report 0x40) and keyboard (01:06, report
+    /// 0x41).
+    ///
+    /// ⚠ Load-bearing, and the reason the USB link matches on a usage pair rather than on
+    /// VID/PID alone: macOS splits ONE multi-collection HID interface into one `IOHIDDevice` per
+    /// top-level collection (verified by census on this bench — a Keychron keyboard surfaces as
+    /// five devices sharing a single VID/PID, one per collection). Matching VID/PID alone would
+    /// therefore also open the SC2's KEYBOARD collection, which puts the app behind the Input
+    /// Monitoring TCC gate for no benefit. Pinning the vendor pair opens exactly the collection
+    /// that carries reports 0x42/0x43/0x45/0x79 and outputs 0x80…0x89, and nothing else.
+    static let usagePageVendor = 0xFF00
+    static let usageController = 0x01
+
+    /// The Puck hosts up to four pads on USB interfaces 2…5, one HID interface each, and there
+    /// is no way to know in advance which slot a controller bonded to. The link therefore opens
+    /// EVERY matched collection and lets whichever one streams state become the write target —
+    /// Android learned this on glass (claiming only interface 2 read silence). Kept as
+    /// documentation of the dongle's layout; the usage-pair match already excludes its CDC pair
+    /// on interfaces 0/1, which is not HID at all.
+    static let dongleIfaces = 2...5
+
     // MARK: - GATT topology (Valve vendor service; cf. Android's `Sc2BleLink.kt`)
 
     /// The custom Valve service every SC2 exposes over BLE.
@@ -99,6 +142,32 @@ enum Sc2Device {
         // [4..6] = LIZARD_MODE_OFF (0) — already zero
         return b
     }()
+
+    /// Force firmware-calibrated signed i16 stick coordinates (`SETTING_ENABLE_RAW_JOYSTICK`
+    /// 0x2e, value 0) — Steam sends this during physical-controller initialization. Without it a
+    /// controller previously opened in raw mode reports ADC coordinates around 0…3200, which a
+    /// Triton consumer reads as a few percent of full travel: the sticks barely move.
+    ///
+    /// USB only, deliberately. The BLE link never sent it and is hardware-proven without it; the
+    /// raw-mode state it corrects is left behind by a USB host that opened the pad, so it
+    /// belongs with the transport that can inherit that state. Same 64-byte zero-padded framing
+    /// as `disableLizard`, and re-sent on the same keep-alive tick.
+    static let normalizeJoysticks: [UInt8] = {
+        var b = [UInt8](repeating: 0, count: 64)
+        b[0] = 0x01 // feature report id
+        b[1] = 0x87 // ID_SET_SETTINGS_VALUES
+        b[2] = 3 // one ControllerSetting {u8 num, u16 value}
+        b[3] = 0x2E // SETTING_ENABLE_RAW_JOYSTICK
+        // [4..6] = disabled (0) — firmware emits calibrated signed i16 values
+        return b
+    }()
+
+    // MARK: - Wireless status payload (`idWireless` / `idWirelessX` byte 1)
+
+    /// The Puck reports the controller powered off / out of range.
+    static let wirelessDisconnect: UInt8 = 1
+    /// The Puck reports a controller bonded to one of its slots.
+    static let wirelessConnect: UInt8 = 2
 
     /// The gyro-enable Steam itself sends — WRITE_REGISTER, reg 0x30 (GYRO_MODE), value 0x0018
     /// (raw accel | raw gyro); confirmed both ways on real hardware 2026-06-08. Kept ONLY for
