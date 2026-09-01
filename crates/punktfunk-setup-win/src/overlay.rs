@@ -47,15 +47,17 @@ pub fn assemble(exe: &[u8], payload: &[u8]) -> Vec<u8> {
 }
 
 /// Locate and verify the payload inside an (optionally signed) assembled exe.
+///
+/// Signing pads the file to 8-byte alignment before appending the certificate table (S2,
+/// measured: `Set-AuthenticodeSignature` did), so the footer may sit up to 7 bytes before
+/// the table rather than flush against it.
 pub fn extract(data: &[u8]) -> Result<&[u8], String> {
-    let end = overlay_end(data);
-    if end < FOOTER_LEN {
-        return Err("file too short for a footer".into());
-    }
+    let table = overlay_end(data);
+    let end = (0..8)
+        .filter_map(|pad| table.checked_sub(pad))
+        .find(|&e| e >= FOOTER_LEN && &data[e - 8..e] == MAGIC)
+        .ok_or("no payload footer before the certificate table")?;
     let footer = &data[end - FOOTER_LEN..end];
-    if &footer[40..48] != MAGIC {
-        return Err("no payload footer before the certificate table".into());
-    }
     let len = u64::from_le_bytes(footer[0..8].try_into().unwrap()) as usize;
     let start = (end - FOOTER_LEN)
         .checked_sub(len)
@@ -93,8 +95,12 @@ mod tests {
         let mut assembled = assemble(&exe, &payload);
         assert_eq!(extract(&assembled).unwrap(), payload.as_slice());
 
-        // "Sign" it: stamp the security directory with the current EOF and append a fake
-        // certificate table — the footer is no longer at EOF and must still be found.
+        // "Sign" it the way real tools do: pad to 8-byte alignment, stamp the security
+        // directory with the padded offset, append a fake certificate table. The footer is
+        // neither at EOF nor flush against the table and must still be found.
+        while assembled.len() % 8 != 0 {
+            assembled.push(0);
+        }
         let cert_at = assembled.len() as u32;
         let entry = 0x80 + 24 + 112 + 4 * 8;
         assembled[entry..entry + 4].copy_from_slice(&cert_at.to_le_bytes());
