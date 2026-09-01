@@ -137,7 +137,7 @@ object VideoDecoders {
     fun envelopeReport(name: String, mime: String, w: Int, h: Int, hz: Int): String = runCatching {
         val infos = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
         val caps = infos.first { it.name == name }.getCapabilitiesForType(mime)
-        val video = caps.videoCapabilities
+        val video = caps.videoCapabilities ?: error("no video capabilities")
         "$name ${w}x$h@$hz: sizeAndRate=${video.areSizeAndRateSupported(w, h, hz.toDouble())}" +
             " widths=${video.supportedWidths} heights=${video.supportedHeights}" +
             " align=${video.widthAlignment}x${video.heightAlignment}" +
