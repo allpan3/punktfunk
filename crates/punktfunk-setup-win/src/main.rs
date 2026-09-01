@@ -10,14 +10,13 @@
 // print: a GUI-subsystem process inherits redirected stdout pipes (ssh, CI) just fine.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-mod cli;
-mod overlay;
+use punktfunk_setup_win as libwin;
 
 #[cfg(windows)]
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if !args.is_empty() {
-        if let Err(e) = cli::run(&args) {
+        if let Err(e) = libwin::cli::run(&args) {
             let _ = std::fs::write("s2-error.txt", &e);
             eprintln!("{e}");
             std::process::exit(2);
@@ -92,7 +91,7 @@ fn main() {
         eprintln!("punktfunk-setup-win: the wizard is Windows-only; CLI modes: measure | pack | inspect");
         std::process::exit(2);
     }
-    if let Err(e) = cli::run(&args) {
+    if let Err(e) = libwin::cli::run(&args) {
         eprintln!("{e}");
         std::process::exit(2);
     }
