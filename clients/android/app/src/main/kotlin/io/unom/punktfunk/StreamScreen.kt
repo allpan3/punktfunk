@@ -988,6 +988,17 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
                             // MIME, exactly as before the overhaul.
                             val mime = NativeBridge.nativeVideoMime(handle)
                             val choice = if (lowLatencyMode) VideoDecoders.pickDecoder(mime) else null
+                            // The pick's declared envelope for the negotiated mode, next to the
+                            // decode thread's `start failed` line it explains.
+                            val size = NativeBridge.nativeVideoSize(handle)
+                            if (choice != null && size != null && size.size >= 3) {
+                                Log.i(
+                                    "pf.caps",
+                                    VideoDecoders.envelopeReport(
+                                        choice.name, mime, size[0], size[1], size[2],
+                                    ),
+                                )
+                            }
                             NativeBridge.nativeStartVideo(
                                 handle,
                                 holder.surface,

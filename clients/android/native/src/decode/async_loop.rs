@@ -74,24 +74,53 @@ pub(super) enum DecodeEvent {
     Error { fatal: bool },
 }
 
-/// The decoder bring-up rungs, in order, as `(present backend, aggressive low-latency keys)`.
-/// The backend is `Some(overlay)` for ASC with that reader-usage profile (see
-/// [`AscBackend::create`]'s `overlay` doc), `None` for the SurfaceView presenter. See the ladder's
-/// comment in [`run_async`] for why these axes, and why in this order.
+/// How much of the low-latency ask a bring-up rung still carries. Ordered so a ladder only ever
+/// descends (see the monotonic test).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum Keys {
+    /// `low-latency = 1` alone, on the platform's default decoder for the MIME — Moonlight's first
+    /// try on a `FEATURE_LowLatency` decoder. Sheds Kotlin's `.low_latency` pick, the
+    /// `operating-rate = MAX` sentinel and the vendor keys together: a Qualcomm `start` that
+    /// refuses every rung above with `InsufficientResource` is refusing one of those three.
+    Bare,
+    /// `configure_low_latency(.., aggressive = false)`: the pre-overhaul set.
+    Plain,
+    /// `configure_low_latency(.., aggressive = true)`: the vendor set.
+    Aggressive,
+}
+
+/// The decoder bring-up rungs, in order, as `(present backend, keys)`. The backend is
+/// `Some(overlay)` for ASC with that reader-usage profile (see [`AscBackend::create`]'s `overlay`
+/// doc), `None` for the SurfaceView presenter.
 ///
 /// Consecutive duplicates are collapsed: the `present_backend` sysprop and the low-latency toggle
 /// may each already have shed what a rung was going to shed, and re-running a configuration the
 /// codec just refused buys nothing but another failed `start`. The first rung is always exactly
 /// what the session asked for, so a device that works is never charged for this ladder.
-fn bring_up_rungs(asc_wanted: bool, low_latency: bool) -> Vec<(Option<bool>, bool)> {
+fn bring_up_rungs(asc_wanted: bool, low_latency: bool) -> Vec<(Option<bool>, Keys)> {
+    let asked = if low_latency {
+        Keys::Aggressive
+    } else {
+        Keys::Plain
+    };
     let mut rungs = vec![
-        (asc_wanted.then_some(true), low_latency),
-        (asc_wanted.then_some(false), low_latency),
-        (None, low_latency),
-        (None, false),
+        (asc_wanted.then_some(true), asked),
+        (asc_wanted.then_some(false), asked),
+        (None, asked),
+        (None, Keys::Plain),
+        (None, Keys::Bare),
     ];
     rungs.dedup();
     rungs
+}
+
+/// Human label for a rung's keys, for the retry / decoder-started log lines.
+fn keys_label(keys: Keys) -> &'static str {
+    match keys {
+        Keys::Aggressive => "the aggressive low-latency keys",
+        Keys::Plain => "the plain low-latency keys",
+        Keys::Bare => "`low-latency` alone on the platform-default decoder",
+    }
 }
 
 /// Human label for a rung's present backend, for the retry / decoder-started log lines — the
@@ -210,43 +239,11 @@ pub(super) fn run_async(
     // callback closures (each capturing a clone) satisfy the async-notify `Send` bound.
     let (ev_tx, ev_rx) = mpsc::channel::<DecodeEvent>();
 
-    // ── Decoder bring-up ladder ──────────────────────────────────────────────────────────────
-    // `configure()` can succeed and `start()` still fail: start is where the codec negotiates
-    // buffers with its output consumer and allocates them, so a decoder that accepted the format
-    // can still refuse the surface it has to render into. Observed on a Xiaomi Mi TV Stick
-    // (2026-08-27; Android 11, armeabi-v7a, `OMX.amlogic.hevc.decoder.awesome2`): EVERY session
-    // logged `start failed: ErrorUnknown` and returned, so this thread died before feeding a single
-    // AU while the pump kept receiving video — the frame queue filled, the pump jumped to live once
-    // per `FLUSH_COOLDOWN`, and the host read that perfect 2 s keyframe cadence as a client too
-    // slow to keep up. Audio, input and the library all kept working, so it presented to the user
-    // as a permanent black screen with sound, and to us as a decoder that was never even running.
-    //
-    // A codec that failed `start` is in an error state and cannot be reconfigured, so each rung
-    // builds a fresh one. The rungs shed what a start can choke on, most-suspect first:
-    //
-    //   1. The ASC reader's `COMPOSER_OVERLAY` usage. Start dequeues every codec output buffer
-    //      from the reader's window with OUR consumer usage OR'd into the decoder's own producer
-    //      bits, and overlay + GPU-sampled + vendor-vdec in one allocation is exactly what an old
-    //      OMX-era gralloc can refuse (see [`AscBackend::create`]'s `overlay` doc). The retry
-    //      keeps the whole ASC backend — real latches, real fences — and asks only for the
-    //      SurfaceTexture-shaped `GPU_SAMPLED_IMAGE` allocation every video path exercises;
-    //      SurfaceFlinger GPU-composites the layer instead of scanning it out. Usage is the ONLY
-    //      reader axis worth a rung: `READER_MAX_IMAGES` is not a start-time factor (consumer-side
-    //      images allocate lazily during streaming).
-    //   2. The `AImageReader` entirely — an app-side BufferQueue consumer at all is the residual
-    //      suspect (a vendor OMX component keying on queues-to-composer).
-    //   3. The aggressive low-latency key set.
-    //
-    // Every downstream branch here already keys off `asc.is_some()`, so a fallen-back session just
-    // runs the SurfaceView presenter that has always been the API < 29 / ASC-init-failure
-    // fallback — nothing below this block needs to know.
-    //
-    // The rung that wins is logged: on a device that needs one, that line names the real culprit,
-    // which no amount of host-side log reading could.
-    //
-    // ponytail: no ASC + plain-keys rung. If a field case ever shows the low-latency keys alone
-    // were at fault, that rung belongs between 2 and 3 — the ASC presenter is the better one and
-    // is worth keeping whenever it can start.
+    // `configure()` can pass and `start()` still refuse: start is where the codec allocates its
+    // output buffers and opens its hardware session. A failed codec cannot be reconfigured, so each
+    // rung builds a fresh one and sheds one more suspect — the reader's overlay usage, the reader,
+    // the aggressive keys, then Kotlin's pick with every rate and vendor key (`Keys::Bare`). The
+    // winning rung is logged so a field bundle names the culprit.
     let asc_wanted = asc_backend_selected();
     if !asc_wanted {
         log::info!("decode: present backend = SurfaceView (present_backend sysprop)");
@@ -254,16 +251,17 @@ pub(super) fn run_async(
     let rungs = bring_up_rungs(asc_wanted, low_latency_mode);
 
     let mut brought_up: Option<(MediaCodec, Option<AscBackend>)> = None;
-    for (rung, &(backend, aggressive)) in rungs.iter().enumerate() {
+    for (rung, &(backend, keys)) in rungs.iter().enumerate() {
         if rung > 0 {
             log::warn!(
-                "decode: decoder refused that configuration — retrying through {} with aggressive \
-                 low-latency keys {}",
+                "decode: decoder refused that configuration — retrying through {} with {}",
                 backend_label(backend),
-                if aggressive { "ON" } else { "OFF" }
+                keys_label(keys)
             );
         }
-        let mut codec = match create_codec(mime, decoder_name.as_deref()) {
+        // `Bare` sheds Kotlin's pick with the keys: `None` resolves the platform default decoder.
+        let picked = decoder_name.as_deref().filter(|_| keys != Keys::Bare);
+        let mut codec = match create_codec(mime, picked) {
             Some(c) => c,
             None => {
                 log::error!("decode: no {mime} decoder on this device");
@@ -274,7 +272,6 @@ pub(super) fn run_async(
         // fell back) drives both the HUD label and which vendor low-latency keys apply.
         let codec_name = codec.name().unwrap_or_default();
         if rung == 0 {
-            stats.set_decoder(&codec_name, ll_feature);
             log::info!(
                 "decode: codec mime = {mime}, decoder = {codec_name} (async, low-latency feature: {ll_feature})"
             );
@@ -291,7 +288,10 @@ pub(super) fn run_async(
             "max-input-size",
             (mode.width * mode.height).max(2_000_000) as i32,
         );
-        configure_low_latency(&mut format, &codec_name, aggressive);
+        match keys {
+            Keys::Bare => format.set_i32("low-latency", 1),
+            _ => configure_low_latency(&mut format, &codec_name, keys == Keys::Aggressive),
+        }
         if let Some(info) = hdr_static.as_ref() {
             format.set_buffer("hdr-static-info", info);
         }
@@ -331,14 +331,17 @@ pub(super) fn run_async(
             log::error!("decode: start failed: {e}");
             continue;
         }
+        // `ll_feature` describes Kotlin's pick; the platform default was never inspected.
+        stats.set_decoder(&codec_name, ll_feature && picked.is_some());
         log::info!(
-            "decode: decoder started (async) at {}x{} through {}",
+            "decode: decoder started (async) at {}x{} through {} — {codec_name} with {}",
             mode.width,
             mode.height,
             // `asc.as_ref().and(backend)`, not `backend`: an ASC rung whose backend failed to
             // CREATE fell back to the SurfaceView within the rung, and this line must report what
             // actually runs.
-            backend_label(asc.as_ref().and(backend))
+            backend_label(asc.as_ref().and(backend)),
+            keys_label(keys)
         );
         brought_up = Some((codec, asc));
         break;
@@ -1391,45 +1394,57 @@ fn asc_present_ready(
 
 #[cfg(test)]
 mod tests {
-    use super::bring_up_rungs;
+    use super::{bring_up_rungs, Keys};
 
     /// The ladder that turns a decoder which refuses to start from a permanent black screen into
-    /// a retry or two away from a picture (the 2026-08-27 Mi TV Stick case). Order and
-    /// de-duplication are the whole of its logic — everything else in the loop is MediaCodec I/O.
+    /// a retry or two away from a picture. Order and de-duplication are the whole of its logic —
+    /// everything else in the loop is MediaCodec I/O.
     #[test]
-    fn rungs_shed_the_overlay_then_asc_then_the_aggressive_keys_and_never_repeat_one() {
+    fn rungs_shed_the_overlay_then_asc_then_the_keys_then_the_pick_and_never_repeat_one() {
+        use Keys::*;
         // The default: shed the reader's COMPOSER_OVERLAY usage first (keeping ASC — the whole
-        // point of the middle rung), then the `AImageReader` entirely, then the aggressive keys.
+        // point of the middle rung), then the `AImageReader` entirely, then the aggressive keys,
+        // then Kotlin's pick together with every rate and vendor key.
         assert_eq!(
             bring_up_rungs(true, true),
             [
-                (Some(true), true),
-                (Some(false), true),
-                (None, true),
-                (None, false)
+                (Some(true), Aggressive),
+                (Some(false), Aggressive),
+                (None, Aggressive),
+                (None, Plain),
+                (None, Bare)
             ]
         );
         // `present_backend=surfaceview` already shed ASC — both ASC rungs collapse away.
-        assert_eq!(bring_up_rungs(false, true), [(None, true), (None, false)]);
-        // Low-latency mode off ⇒ the keys are already the plain set; the backend is the only axis.
+        assert_eq!(
+            bring_up_rungs(false, true),
+            [(None, Aggressive), (None, Plain), (None, Bare)]
+        );
+        // Low-latency mode off ⇒ the keys start plain; the backend is shed, then the pick.
         assert_eq!(
             bring_up_rungs(true, false),
-            [(Some(true), false), (Some(false), false), (None, false)]
+            [
+                (Some(true), Plain),
+                (Some(false), Plain),
+                (None, Plain),
+                (None, Bare)
+            ]
         );
-        // Nothing left to shed: one attempt, and no pointless second `start` of the same thing.
-        assert_eq!(bring_up_rungs(false, false), [(None, false)]);
+        // Nothing left to shed but the pick: no pointless second `start` of the same thing.
+        assert_eq!(bring_up_rungs(false, false), [(None, Plain), (None, Bare)]);
 
         for asc in [true, false] {
             for ll in [true, false] {
                 let rungs = bring_up_rungs(asc, ll);
                 // A device that works must pay nothing for this ladder: rung 0 is always exactly
                 // what the session asked for.
-                assert_eq!(rungs[0], (asc.then_some(true), ll));
+                let asked = if ll { Aggressive } else { Plain };
+                assert_eq!(rungs[0], (asc.then_some(true), asked));
                 // Every ladder ends at the most conservative configuration there is.
-                assert_eq!(*rungs.last().unwrap(), (None, false));
+                assert_eq!(*rungs.last().unwrap(), (None, Bare));
                 // Monotonic: a rung only ever sheds, never re-enables what an earlier one dropped
-                // (`Option<bool>`'s Ord: `None < Some(false) < Some(true)`), so the ladder always
-                // descends towards the conservative end.
+                // (`None < Some(false) < Some(true)`, `Bare < Plain < Aggressive`), so the ladder
+                // always descends towards the conservative end.
                 assert!(rungs
                     .windows(2)
                     .all(|w| w[1].0 <= w[0].0 && w[1].1 <= w[0].1));

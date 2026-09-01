@@ -86,6 +86,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 - **`inhibit_shortcuts` applies under the desktop mouse model on the Apple client.** It gated the
   ⌘-chord passthrough and the system-shortcut tap on the capture model only, unlike the SDL
   clients; turn the setting off to keep the chords local.
+- **The Android decoder ladder ends on the platform-default decoder with `low-latency` alone.**
+  Every rung kept Kotlin's `.low_latency` pick, `operating-rate = MAX` and the Qualcomm vendor
+  keys, so a Snapdragon that refuses those with `InsufficientResource` had no picture at all; a
+  `pf.caps` line now prints the pick's declared size and frame-rate envelope for the negotiated mode.
 
 ---
 

@@ -128,6 +128,23 @@ object VideoDecoders {
         }
     }
 
+    /**
+     * One `pf.caps` line on decoder [name]'s declared envelope for [mime] at the negotiated
+     * [w]×[h]@[hz]: `MediaCodecList`'s size and frame-rate ranges, alignment, instance cap, and
+     * its verdict on that mode. Read against a `start failed: InsufficientResource`: a mode
+     * outside the envelope is the culprit, one inside it points at the keys. Never throws.
+     */
+    fun envelopeReport(name: String, mime: String, w: Int, h: Int, hz: Int): String = runCatching {
+        val infos = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
+        val caps = infos.first { it.name == name }.getCapabilitiesForType(mime)
+        val video = caps.videoCapabilities
+        "$name ${w}x$h@$hz: sizeAndRate=${video.areSizeAndRateSupported(w, h, hz.toDouble())}" +
+            " widths=${video.supportedWidths} heights=${video.supportedHeights}" +
+            " align=${video.widthAlignment}x${video.heightAlignment}" +
+            " fps@size=${runCatching { video.getSupportedFrameRatesFor(w, h) }.getOrNull()}" +
+            " maxInstances=${caps.maxSupportedInstances}"
+    }.getOrElse { "$name: envelope unavailable ($it)" }
+
     fun pickDecoder(mime: String): DecoderChoice? {
         if (mime.isEmpty()) return null
         val infos = runCatching { MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos }
