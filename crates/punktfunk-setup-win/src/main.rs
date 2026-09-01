@@ -62,7 +62,6 @@ fn run_ui(elevated: bool) -> windows_reactor::Result<()> {
                 button("Close").accent().on_click(|| std::process::exit(0)),
             ))
             .spacing(12.0)
-            .margin(uniform(24.0))
             .into()
         })
 }
