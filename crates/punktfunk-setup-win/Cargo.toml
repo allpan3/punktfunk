@@ -16,6 +16,14 @@ publish = false
 name = "punktfunk-setup"
 path = "src/main.rs"
 
+# S2 overlay spike: container + compression + hashing, cross-platform so the measurement
+# runs wherever the payload is. zstd-vs-xz is what `measure` decides.
+[dependencies]
+sha2 = "0.10"
+tar = "0.4"
+xz2 = "0.1"
+zstd = "0.13"
+
 # Same rev as clients/windows — the pin the real crate will inherit.
 [target.'cfg(windows)'.dependencies]
 windows-reactor = { git = "https://github.com/microsoft/windows-rs", rev = "acb5a1a7441033d9312b16842af02eb0c2b403dc" }

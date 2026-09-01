@@ -6,11 +6,29 @@
 //! verdict, one working button. Everything else is WP2.1's problem.
 
 // No console window on double-click; the run proof goes to s1-report.txt beside the exe,
-// because an SSH-driven launch may render in a session nobody can see.
+// because an SSH-driven launch may render in a session nobody can see. The CLI modes still
+// print: a GUI-subsystem process inherits redirected stdout pipes (ssh, CI) just fine.
 #![cfg_attr(windows, windows_subsystem = "windows")]
+
+mod cli;
+mod overlay;
 
 #[cfg(windows)]
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if !args.is_empty() {
+        if let Err(e) = cli::run(&args) {
+            let _ = std::fs::write("s2-error.txt", &e);
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+        return;
+    }
+    ui_main();
+}
+
+#[cfg(windows)]
+fn ui_main() {
     // Elevation probe without any `windows` crate features: `net session` succeeds only
     // elevated. Spike-grade; the real crate reads the token.
     let elevated = std::process::Command::new("net")
@@ -68,6 +86,14 @@ fn run_ui(elevated: bool) -> windows_reactor::Result<()> {
 
 #[cfg(not(windows))]
 fn main() {
-    // Windows-gated like clients/windows: a stub keeps `cargo build` green elsewhere.
-    eprintln!("punktfunk-setup-win is Windows-only (S1 spike)");
+    // The wizard is Windows-only, but the S2 overlay CLI runs anywhere the payload is.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.is_empty() {
+        eprintln!("punktfunk-setup-win: the wizard is Windows-only; CLI modes: measure | pack | inspect");
+        std::process::exit(2);
+    }
+    if let Err(e) = cli::run(&args) {
+        eprintln!("{e}");
+        std::process::exit(2);
+    }
 }
