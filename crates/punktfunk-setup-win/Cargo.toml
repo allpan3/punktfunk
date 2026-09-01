@@ -1,0 +1,24 @@
+[package]
+name = "punktfunk-setup-win"
+description = "S1 spike: the Windows installer wizard shell — WinUI 3 (windows-reactor), self-contained"
+version = "0.0.0"
+edition = "2024"
+# windows-reactor at the pinned rev declares rust-version 1.95+; rust-toolchain.toml pins 1.96.
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Standalone on purpose for the S1 spike: its windows-rs git pin must stay out of the workspace
+# lock until WP2.1 reconciles it with clients/windows' pin (both MUST share one rev then).
+[workspace]
+
+[[bin]]
+name = "punktfunk-setup"
+path = "src/main.rs"
+
+# Same rev as clients/windows — the pin the real crate will inherit.
+[target.'cfg(windows)'.dependencies]
+windows-reactor = { git = "https://github.com/microsoft/windows-rs", rev = "acb5a1a7441033d9312b16842af02eb0c2b403dc" }
+
+[target.'cfg(windows)'.build-dependencies]
+windows-reactor-setup = { git = "https://github.com/microsoft/windows-rs", rev = "acb5a1a7441033d9312b16842af02eb0c2b403dc" }
