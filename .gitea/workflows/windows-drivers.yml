@@ -179,3 +179,9 @@ jobs:
         # wdk-build sets /INTEGRITYCHECK unconditionally -> a self-signed driver won't load. Clear the PE
         # bit deterministically (the reusable packaging step; signing/.cat happen later for real drivers).
         run: ../clear-force-integrity.ps1 -Path target\x86_64-pc-windows-msvc\debug\pf_vdisplay.dll
+      - name: cargo build pf-vdisplay --features encode-probe (link-only encoder gate)
+        # Proves NVENC/AMF/QSV/PyroWave still link into the driver cdylib under the WDK toolchain
+        # and the static CRT — the thing that breaks silently while the host build stays green.
+        # LAST on purpose: same profile and target dir, so it overwrites pf_vdisplay.dll and would
+        # otherwise hand the PE-inspection steps above the probe DLL instead of the shipped one.
+        run: cargo build -p pf-vdisplay --features encode-probe -v

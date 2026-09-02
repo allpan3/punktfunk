@@ -19,7 +19,22 @@ crate-type = ["cdylib"]
 [build-dependencies]
 wdk-build.workspace = true
 
+[features]
+default = []
+# Link-only: the DLL references one entry point per encoder backend and calls none of them. Off by
+# default and never shippable — a probe build drags NVENC/AMF/QSV plus PyroWave's static C++ into a
+# driver DLL. It exists so CI proves the backends still link under the WDK toolchain.
+encode-probe = [
+    "dep:pf-encode-win",
+    "dep:pf-frame",
+    "pf-encode-win/nvenc",
+    "pf-encode-win/qsv",
+    "pf-encode-win/pyrowave",
+]
+
 [dependencies]
+pf-encode-win = { workspace = true, optional = true }
+pf-frame = { workspace = true, optional = true }
 wdk-sys = { workspace = true, features = ["iddcx"] }
 wdk-iddcx.workspace = true
 pf-driver-proto.workspace = true
