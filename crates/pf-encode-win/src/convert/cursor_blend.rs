@@ -9,7 +9,8 @@
 //! the frame itself (slot→scratch copy + one alpha-blended quad) on the capture device
 //! before conversion.
 
-use super::*;
+use super::{compile_shader, HDR_VS};
+use anyhow::{bail, Context, Result};
 use windows::core::s;
 use windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 use windows::Win32::Graphics::Direct3D11::{
@@ -20,7 +21,12 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_MAP_WRITE_DISCARD, D3D11_RENDER_TARGET_BLEND_DESC, D3D11_SAMPLER_DESC,
     D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
 };
+use windows::Win32::Graphics::Direct3D11::{
+    ID3D11Device, ID3D11DeviceContext, ID3D11RenderTargetView, ID3D11ShaderResourceView,
+    ID3D11Texture2D, D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM;
+use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
 
 /// Straight-alpha sample of the cursor bitmap. `linear_scale` = 0 is SDR passthrough;
 /// non-zero linearizes sRGB→scRGB and multiplies by the target's SDR-white scale.
@@ -40,7 +46,7 @@ float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD0) : SV_Target {
 ";
 
 /// Cursor-quad blend pass and shape-texture cache. One per capturer (device-scoped).
-pub(super) struct CursorBlendPass {
+pub struct CursorBlendPass {
     vs: ID3D11VertexShader,
     ps: ID3D11PixelShader,
     sampler: ID3D11SamplerState,
@@ -52,13 +58,13 @@ pub(super) struct CursorBlendPass {
 }
 
 impl CursorBlendPass {
-    pub(super) fn new(device: &ID3D11Device) -> Result<Self> {
+    pub fn new(device: &ID3D11Device) -> Result<Self> {
         // SAFETY: `?`-checked D3D11 creation on the live `device` borrow, over
         // fully-initialized stack descriptors. `compile_shader` receives `s!()` literals
         // (its contract).
         unsafe {
-            let vsb = crate::dxgi::compile_shader(crate::dxgi::HDR_VS, s!("main"), s!("vs_5_0"))?;
-            let psb = crate::dxgi::compile_shader(CURSOR_PS, s!("main"), s!("ps_5_0"))?;
+            let vsb = compile_shader(HDR_VS, s!("main"), s!("vs_5_0"))?;
+            let psb = compile_shader(CURSOR_PS, s!("main"), s!("ps_5_0"))?;
             let mut vs = None;
             device.CreateVertexShader(&vsb, None, Some(&mut vs))?;
             let mut ps = None;
@@ -160,7 +166,7 @@ impl CursorBlendPass {
     /// passthrough; non-zero = FP16 scRGB — linearize and scale to the target's SDR white.
     /// The quad is placed via the viewport (the fullscreen-triangle VS fills it); the OS
     /// clips to the target.
-    pub(super) fn blend(
+    pub fn blend(
         &mut self,
         device: &ID3D11Device,
         ctx: &ID3D11DeviceContext,

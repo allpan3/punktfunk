@@ -10,13 +10,13 @@
 //! `MAGIC`/`VERSION`/`RING_LEN`, status codes, and the publish token live in
 //! [`pf_driver_proto`] — both sides `use` it, so drift is a compile error.
 
-use super::dxgi::{
-    make_device, BgraToYuvPlanes, D3d11Frame, HdrP010Converter, HdrRgb10Converter, PyroFrameShare,
-    VideoConverter, WinCaptureTarget,
-};
+use super::dxgi::{make_device, D3d11Frame, PyroFrameShare, WinCaptureTarget};
 use super::{CapturedFrame, Capturer, FramePayload, PixelFormat};
 use anyhow::{bail, Context, Result};
 use pf_driver_proto::{control, frame};
+use pf_encode_win::convert::{
+    BgraToYuvPlanes, CursorBlendPass, HdrP010Converter, HdrRgb10Converter, VideoConverter,
+};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -401,8 +401,6 @@ mod compose_kick;
 use compose_kick::kick_dwm_compose;
 #[path = "idd_push/cursor.rs"]
 mod cursor;
-#[path = "idd_push/cursor_blend.rs"]
-mod cursor_blend;
 #[path = "idd_push/cursor_poll.rs"]
 mod cursor_poll;
 #[path = "idd_push/descriptor.rs"]
@@ -467,7 +465,7 @@ pub struct IddPushCapturer {
     /// declare (`WinCaptureTarget::cursor_excluded`). Pins `composite_cursor` on.
     composite_forced: bool,
     /// Lazy cursor-quad pass. `None` after a build failure (pointer-less, warned once).
-    cursor_blend: Option<cursor_blend::CursorBlendPass>,
+    cursor_blend: Option<CursorBlendPass>,
     cursor_blend_failed: bool,
     /// [`Self::live_cursor`] fell back to shm. Independent serial namespaces — never unlatch.
     cursor_shm_latched: bool,
@@ -1496,7 +1494,7 @@ impl IddPushCapturer {
             self.last_blend_key = overlay.as_ref().map(|o| (o.serial, o.x, o.y, o.visible));
             if let Some(ov) = overlay.filter(|o| o.visible) {
                 if self.cursor_blend.is_none() && !self.cursor_blend_failed {
-                    match cursor_blend::CursorBlendPass::new(&self.device) {
+                    match CursorBlendPass::new(&self.device) {
                         Ok(p) => self.cursor_blend = Some(p),
                         Err(e) => {
                             self.cursor_blend_failed = true;

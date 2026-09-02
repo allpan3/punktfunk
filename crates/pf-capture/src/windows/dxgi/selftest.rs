@@ -11,9 +11,24 @@
 //! Evidence: `f16_tests`, ignored `hdr_p010_selftest_intel_1080_live`,
 //! `docs-site/content/docs/hdr.md`.
 
-use super::*;
+use anyhow::{bail, Context, Result};
+use pf_encode_win::convert::HdrP010Converter;
+use std::ffi::c_void;
+use windows::core::Interface;
+use windows::Win32::Foundation::HMODULE;
+use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11ShaderResourceView,
+    ID3D11Texture2D, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION,
+    D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
+};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT_P010, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R16G16_UNORM,
+    DXGI_FORMAT_R16_UNORM, DXGI_SAMPLE_DESC,
+};
 
-/// f64 analogue of the HLSL in [`HDR_P010_COMMON`].
+/// f64 analogue of the HLSL in `HDR_P010_COMMON`.
 /// One scRGB pixel in (linear Rec.709, 1.0 = 80 nits, HDR may exceed 1.0);
 /// out is 10-bit studio-range (Y, Cb, Cr) for a flat block.
 #[cfg(target_os = "windows")]

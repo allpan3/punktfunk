@@ -11,6 +11,10 @@
 mod codec;
 pub use codec::*;
 
+// D3D11 colour converters + cursor blend, run on the capture device before encode.
+#[cfg(target_os = "windows")]
+pub mod convert;
+
 // `#[path]` keeps `crate::*` names flat. Native AMF is unconditional on
 // Windows — `amfrt64.dll` at runtime, like NVENC. See `design/native-amf-encoder.md`.
 #[cfg(target_os = "windows")]

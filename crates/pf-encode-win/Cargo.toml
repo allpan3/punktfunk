@@ -28,6 +28,8 @@ windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
+    # `D3DCompile` for the converters' HLSL (`convert::compile_shader`).
+    "Win32_Graphics_Direct3D_Fxc",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     # SECURITY_ATTRIBUTES — the PyroWave backend's IDXGIResource1::CreateSharedHandle signature.

@@ -41,6 +41,8 @@ x11rb = { version = "0.14", default-features = false, features = ["xfixes"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 # The host<->driver wire contract for the sealed frame channel (control IOCTL structs + frame header).
 pf-driver-proto = { path = "../pf-driver-proto" }
+# The D3D11 converters + cursor blend the IDD-push capturer runs before encode.
+pf-encode-win = { path = "../pf-encode-win" }
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Security",
