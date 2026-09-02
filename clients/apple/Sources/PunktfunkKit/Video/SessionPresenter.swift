@@ -89,7 +89,7 @@ enum PresenterChoice: Equatable {
     /// Passing VideoToolbox's decoded IOSurface directly to AVSampleBufferVideoRenderer removes
     /// that reservation and the Metal FIFO: the measured display stage falls from 28–32 ms to
     /// about 10–12 ms at 60 fps. tvOS before 17.4 retains deadline pacing because it cannot query
-    /// the displayed IOSurface for metrics; PyroWave, 4:4:4, and Smoothness retain Metal.
+    /// the displayed IOSurface for metrics; PyroWave and 4:4:4 retain Metal.
     static var platformDefault: PresenterChoice {
         #if os(iOS)
         return .stage4
@@ -111,7 +111,8 @@ enum PresenterChoice: Equatable {
 /// - `.smooth(buffer:)`: a small deliberate jitter buffer (`FrameStore.fifo`) evens the present
 ///   cadence at the cost of `buffer` refresh intervals of added display latency — which the HUD
 ///   SHOWS (only the OS floor is shaved, never the user's chosen buffer). `buffer` ∈ 1…3;
-///   the "Automatic" setting (stored 0) currently maps to 2.
+///   the "Automatic" setting (stored 0) currently maps to 2. Every engine drains it on its own
+///   cadence; tvOS's video plane takes one frame per display-link tick.
 ///
 /// Mechanism stays internal: intents map onto `PresentPacing`/`FrameStore.Policy` per platform
 /// in `SessionPresenter.start`; the stage ladder survives only as the PUNKTFUNK_PRESENTER debug
@@ -141,29 +142,22 @@ enum PresentPriority: Equatable {
 final class SessionPresenter {
     /// Map a presenter choice and codec to its execution path.
     ///
-    /// The decoded tvOS path requires a CVPixelBuffer, so PyroWave retains deadline-paced Metal.
-    /// Stage-3 and stage-4 map directly to glass and deadline pacing. On macOS, default PyroWave
-    /// uses glass gating to coalesce its bursty, near-instant decode output; an explicit stage-2
-    /// selection remains a faithful arrival-pacing comparison. Other stage-2 sessions use arrival.
+    /// The decoded tvOS plane takes 4:2:0 CVPixelBuffers only: PyroWave's planar textures and the
+    /// untested 4:4:4 formats keep deadline-paced Metal. Stage-3 and stage-4 map directly to glass
+    /// and deadline pacing. On macOS, default PyroWave uses glass gating to coalesce its bursty,
+    /// near-instant decode output; an explicit stage-2 selection remains a faithful arrival-pacing
+    /// comparison. Other stage-2 sessions use arrival.
     static func pacing(
-        for choice: PresenterChoice, explicit: PresenterChoice?, codec: VideoCodec
+        for choice: PresenterChoice, explicit: PresenterChoice?, codec: VideoCodec,
+        chroma444: Bool = false
     ) -> PresentPacing {
-        if choice == .decoded { return codec == .pyrowave ? .deadline : .decoded }
+        if choice == .decoded { return codec == .pyrowave || chroma444 ? .deadline : .decoded }
         if choice == .stage4 { return .deadline }
         if choice == .stage3 { return .glass }
         #if os(macOS)
         if explicit == nil, codec == .pyrowave { return .glass }
         #endif
         return .arrival
-    }
-
-    /// The decoded sink is zero-buffer and validated for biplanar 4:2:0. Preserve deadline Metal
-    /// for Smoothness and 4:4:4 rather than ignoring intent or risking an unsupported video plane.
-    static func effectivePacing(
-        _ selected: PresentPacing, priority: PresentPriority, videoLayerCompatible: Bool = true
-    ) -> PresentPacing {
-        if selected == .decoded, priority != .latency || !videoLayerCompatible { return .deadline }
-        return selected
     }
 
     /// The glass gate's in-flight present budget (`PresentGate` capacity): 1 everywhere.
@@ -285,15 +279,12 @@ final class SessionPresenter {
             env: ProcessInfo.processInfo.environment["PUNKTFUNK_PRESENTER"],
             allowStage1: allowStage1)
         let choice = explicit ?? PresenterChoice.platformDefault
-        let selectedPacing = Self.pacing(
-            for: choice, explicit: explicit, codec: connection.videoCodec)
+        let pacing = Self.pacing(
+            for: choice, explicit: explicit, codec: connection.videoCodec,
+            chroma444: connection.isChroma444)
         let priority = PresentPriority.resolve(
             setting: SessionSettings.current.presentPriority,
             bufferSetting: SessionSettings.current.smoothBuffer)
-        // Direct video presentation is the zero-buffer latency path. A user who asks for a
-        // smoothness buffer keeps the existing deadline engine, where FrameStore owns that buffer.
-        let pacing = Self.effectivePacing(
-            selectedPacing, priority: priority, videoLayerCompatible: !connection.isChroma444)
         #if os(macOS)
         let vsyncPaced = priority != .latency && pacing == .arrival
         #else

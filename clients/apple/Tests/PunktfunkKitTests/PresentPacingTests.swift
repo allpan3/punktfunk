@@ -357,17 +357,18 @@ final class PresentPacingTests: XCTestCase {
         XCTAssertNil(Stage2Pipeline(endToEndMeter: nil, pacing: .decoded))
     }
 
-    func testSmoothnessKeepsTheBufferedPresenter() {
+    /// Only the untested 4:4:4 formats send a decoded session back to deadline Metal; the intent
+    /// never does (smoothness drains its FIFO onto the plane from the display-link tick).
+    func testChroma444KeepsMetalOnTheDecodedDefault() {
         XCTAssertEqual(
-            SessionPresenter.effectivePacing(.decoded, priority: .latency), .decoded)
-        XCTAssertEqual(
-            SessionPresenter.effectivePacing(.decoded, priority: .smooth(buffer: 2)), .deadline)
-        XCTAssertEqual(
-            SessionPresenter.effectivePacing(
-                .decoded, priority: .latency, videoLayerCompatible: false),
+            SessionPresenter.pacing(for: .decoded, explicit: nil, codec: .hevc, chroma444: true),
             .deadline)
         XCTAssertEqual(
-            SessionPresenter.effectivePacing(.arrival, priority: .smooth(buffer: 2)), .arrival)
+            SessionPresenter.pacing(for: .decoded, explicit: nil, codec: .hevc, chroma444: false),
+            .decoded)
+        XCTAssertEqual(
+            SessionPresenter.pacing(for: .stage2, explicit: nil, codec: .hevc, chroma444: true),
+            .arrival)
     }
 
     // MARK: - Windowed present mechanism (the macOS DCP swapID-panic mitigation picker)

@@ -476,7 +476,8 @@ private func saturatingMul(_ a: Int64, _ b: Int64) -> Int64 {
 ///   the iOS default; tvOS retains it as an A/B path because its minimum render window spans two
 ///   fixed-rate refreshes.
 /// - `decoded`: send VideoToolbox's IOSurface-backed output directly to the system video renderer.
-///   This is tvOS's latency default and avoids compressed decode buffering plus the Metal FIFO.
+///   This is tvOS's default and avoids compressed decode buffering plus the Metal FIFO; under
+///   smoothness the display-link tick drains the FIFO store onto it, one frame per refresh.
 ///
 /// macOS PyroWave defaults to `glass` to prevent burst presents in its composited layer.
 public enum PresentPacing: Sendable, Equatable {
@@ -490,10 +491,11 @@ public enum PresentPacing: Sendable, Equatable {
 ///
 /// VideoToolbox already produced an IOSurface-backed YUV image, so wrapping it as an immediate
 /// uncompressed sample adds no copy or second decode. Backpressure drops the frame instead of
-/// building a queue; the next decoder callback supplies a fresher image. Display-link polling maps
-/// the renderer's current IOSurface ID back to its capture/decode stamp for on-glass metrics.
+/// building a queue; the next submit supplies a fresher image. Display-link polling maps the
+/// renderer's current IOSurface ID back to its capture/decode stamp for on-glass metrics.
 /// The renderer owns each sample after enqueue. Sendable because AVSampleBufferVideoRenderer
-/// explicitly permits background-thread enqueueing.
+/// explicitly permits background-thread enqueueing; one thread submits per session (the VT
+/// callback under latency, the display-link tick under smoothness) and the tick polls.
 final class DecodedVideoSink: @unchecked Sendable {
     private struct Stamp {
         let ptsNs: UInt64
@@ -503,11 +505,29 @@ final class DecodedVideoSink: @unchecked Sendable {
     private let renderer: AVSampleBufferVideoRenderer
     private let lock = NSLock()
     private var stamps: [IOSurfaceID: Stamp] = [:]
+    /// Reused while it still matches the buffer, so a steady stream allocates none per frame.
+    private var format: CMVideoFormatDescription?
+    /// The host's 0xCE mastering grade. VideoToolbox propagates only what the bitstream SEI
+    /// carried, so HDR buffers get it attached here before the plane sees them.
+    private var mastering: (display: Data, content: Data)?
+    private var wasFailed = false
+    private var submitted = 0, dropped = 0, displayed = 0
+    /// Stamped submits since the last one reached glass; 120 in a row is logged once.
+    private var undisplayedRun = 0
+    private var lastDebugFlush = CACurrentMediaTime()
 
     init(layer: AVSampleBufferDisplayLayer) {
         renderer = layer.sampleBufferRenderer
     }
 
+    func setHdrMeta(_ meta: PunktfunkConnection.HdrMeta) {
+        lock.lock()
+        mastering = (meta.masteringDisplayColorVolume(), meta.contentLightLevelInfo())
+        format = nil // the next sample's description must carry the new extensions
+        lock.unlock()
+    }
+
+    /// Drop queued samples and stale stamps; the displayed image stays until the next frame.
     func reset() {
         renderer.flush()
         lock.lock()
@@ -515,18 +535,46 @@ final class DecodedVideoSink: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Session end: clear the plane too, so the view goes black like a removed Metal layer.
+    func clear() {
+        renderer.flush(removingDisplayedImage: true, completionHandler: nil)
+        lock.lock()
+        stamps.removeAll()
+        lock.unlock()
+    }
+
     @discardableResult
     func submit(_ frame: ReadyFrame) -> Bool {
-        guard case .video(let pixelBuffer, _) = frame.image else { return false }
-        if renderer.requiresFlushToResumeDecoding || renderer.status == .failed { reset() }
-        guard renderer.isReadyForMoreMediaData,
-              let sample = Self.immediateSample(pixelBuffer)
-        else { return false }
-        guard let surfaceID = Self.surfaceID(pixelBuffer) else { return false }
+        guard case .video(let pixelBuffer, let isHDR) = frame.image else { return false }
+        noteRendererHealth()
+        guard renderer.isReadyForMoreMediaData else {
+            lock.lock()
+            dropped += 1
+            lock.unlock()
+            return false
+        }
         lock.lock()
-        // More than one second of unmatched 60 fps surfaces cannot yield a live latency sample.
-        if stamps.count >= 64 { stamps.removeAll(keepingCapacity: true) }
-        stamps[surfaceID] = Stamp(ptsNs: frame.ptsNs, decodedNs: frame.decodedNs)
+        if isHDR, let mastering { Self.attach(mastering, to: pixelBuffer) }
+        if let cached = format,
+           !CMVideoFormatDescriptionMatchesImageBuffer(cached, imageBuffer: pixelBuffer) {
+            format = nil
+        }
+        if format == nil { format = Self.formatDescription(for: pixelBuffer) }
+        let format = format
+        lock.unlock()
+        guard let format, let sample = Self.immediateSample(pixelBuffer, format: format) else {
+            return false
+        }
+        lock.lock()
+        // Metering only: a buffer without an IOSurface still displays, it just yields no sample.
+        if let surfaceID = Self.surfaceID(pixelBuffer) {
+            // Keys are pool surfaces, so live entries stay few; the cap only sheds IDs a rebuilt
+            // decode session left behind.
+            if stamps.count >= 64 { stamps.removeAll(keepingCapacity: true) }
+            stamps[surfaceID] = Stamp(ptsNs: frame.ptsNs, decodedNs: frame.decodedNs)
+            undisplayedRun += 1
+        }
+        submitted += 1
         lock.unlock()
         renderer.enqueue(sample)
         return true
@@ -540,7 +588,58 @@ final class DecodedVideoSink: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard let stamp = stamps.removeValue(forKey: surfaceID) else { return nil }
+        displayed += 1
+        undisplayedRun = 0
         return (stamp.ptsNs, stamp.decodedNs)
+    }
+
+    /// Once per tick: log a run of accepted frames that never reached glass (once per episode,
+    /// the evidence a watchdog would key on) and, under PUNKTFUNK_PRESENT_DEBUG, a per-second
+    /// counter line beside the FIFO's smoothness overflow drops.
+    func flushDebugIfDue(queueDrops: () -> Int) {
+        let now = CACurrentMediaTime()
+        lock.lock()
+        let stalled = undisplayedRun == 120
+        var counts: (submitted: Int, dropped: Int, displayed: Int, stamps: Int)?
+        if presentDebug, now - lastDebugFlush >= 1 {
+            lastDebugFlush = now
+            counts = (submitted, dropped, displayed, stamps.count)
+            submitted = 0
+            dropped = 0
+            displayed = 0
+        }
+        lock.unlock()
+        if stalled {
+            presentLog.error("decoded: 120 frames accepted and none reached glass — renderer wedged?")
+        }
+        if let c = counts {
+            presentLog.notice(
+                "pf-decoded submitted=\(c.submitted, privacy: .public) dropped=\(c.dropped, privacy: .public) displayed=\(c.displayed, privacy: .public) qDrop=\(queueDrops(), privacy: .public) stamps=\(c.stamps, privacy: .public)"
+            )
+        }
+    }
+
+    /// Log a failure once per episode with the renderer's reason; flush is the documented reset.
+    private func noteRendererHealth() {
+        let failed = renderer.status == .failed
+        lock.lock()
+        let entered = failed && !wasFailed
+        wasFailed = failed
+        lock.unlock()
+        if entered {
+            let why = renderer.error?.localizedDescription ?? "no error"
+            presentLog.error("decoded: video renderer failed (\(why, privacy: .public)) — flushing")
+        }
+        if failed || renderer.requiresFlushToResumeDecoding { reset() }
+    }
+
+    private static func attach(_ m: (display: Data, content: Data), to pixelBuffer: CVPixelBuffer) {
+        CVBufferSetAttachment(
+            pixelBuffer, kCVImageBufferMasteringDisplayColorVolumeKey, m.display as CFData,
+            .shouldPropagate)
+        CVBufferSetAttachment(
+            pixelBuffer, kCVImageBufferContentLightLevelInfoKey, m.content as CFData,
+            .shouldPropagate)
     }
 
     private static func surfaceID(_ pixelBuffer: CVPixelBuffer) -> IOSurfaceID? {
@@ -548,13 +647,21 @@ final class DecodedVideoSink: @unchecked Sendable {
         return IOSurfaceGetID(surface.takeUnretainedValue())
     }
 
-    static func immediateSample(_ pixelBuffer: CVPixelBuffer) -> CMSampleBuffer? {
+    private static func formatDescription(for pixelBuffer: CVPixelBuffer) -> CMVideoFormatDescription? {
         var format: CMVideoFormatDescription?
-        guard CMVideoFormatDescriptionCreateForImageBuffer(
-            allocator: kCFAllocatorDefault, imageBuffer: pixelBuffer,
-            formatDescriptionOut: &format) == noErr,
-            let format
-        else { return nil }
+        let rc = CMVideoFormatDescriptionCreateForImageBuffer(
+            allocator: kCFAllocatorDefault, imageBuffer: pixelBuffer, formatDescriptionOut: &format)
+        return rc == noErr ? format : nil
+    }
+
+    static func immediateSample(_ pixelBuffer: CVPixelBuffer) -> CMSampleBuffer? {
+        guard let format = formatDescription(for: pixelBuffer) else { return nil }
+        return immediateSample(pixelBuffer, format: format)
+    }
+
+    private static func immediateSample(
+        _ pixelBuffer: CVPixelBuffer, format: CMVideoFormatDescription
+    ) -> CMSampleBuffer? {
         var timing = CMSampleTimingInfo(
             duration: .invalid, presentationTimeStamp: .invalid, decodeTimeStamp: .invalid)
         var sample: CMSampleBuffer?
@@ -1319,7 +1426,13 @@ public final class Stage2Pipeline {
                 // bounded backstop. decoderKeyframe=false: VT doesn't flag IDRs, the wire FLAG_SOF does.
                 guard gate.onDecoded(flags: frame.flags) else { return }
                 if let decodedSink {
-                    decodedSink.submit(frame)
+                    // Latency goes straight to the plane. Smoothness parks the frame in the FIFO
+                    // until its cadence due time; the display-link tick drains one per refresh.
+                    if cadence == nil {
+                        decodedSink.submit(frame)
+                    } else {
+                        ring.submit(Stage2Pipeline.dated(frame, by: cadence, hint: rateHint))
+                    }
                     return
                 }
                 // Decoder OUTPUT is where the cadence loop is sampled — the instant the frame
@@ -1375,6 +1488,7 @@ public final class Stage2Pipeline {
         let decoder = decoder
         let recovery = recovery
         let presenter = presenter
+        let decodedSink = decodedSink
         let pumpStopped = pumpStopped
         let reanchorGate = gate
         // PyroWave rides a different decode half: no CMFormatDescription/VideoToolbox machinery
@@ -1434,13 +1548,12 @@ public final class Stage2Pipeline {
                     // Freeze backstop: a drop-count climb arms the gate (in case the frame-index gap
                     // below was itself lost), and an overdue freeze re-asks for the re-anchor.
                     if reanchorGate.poll(framesDropped: dropped) { recovery.request() }
-                    // Drain HDR mastering metadata (0xCE) and hand it to the PRESENTER (→ CAEDRMetadata).
-                    // Polled UNCONDITIONALLY (not gated on connection.isHDR, the fixed Welcome flag): the
-                    // host sends 0xCE only for HDR, INCLUDING a mid-session SDR→HDR transition (a game
-                    // entering HDR — the host re-inits its encoder) the Welcome flag would never reflect.
-                    // Non-blocking; nil for an SDR stream.
+                    // Drain HDR mastering metadata (0xCE) for the Metal presenter (CAEDRMetadata)
+                    // and the video plane (buffer attachments). Polled unconditionally, not gated on
+                    // the Welcome's fixed isHDR: a mid-session SDR→HDR flip sends 0xCE too.
                     if let meta = try? connection.nextHdrMeta(timeoutMs: 0) {
                         presenter.setHdrMeta(meta)
+                        decodedSink?.setHdrMeta(meta)
                     }
                     guard let au = try connection.nextAU(timeoutMs: 100) else { return true }
                     // Loss recovery (RFI): a forward frame-index gap fires a throttled reference-
@@ -1903,9 +2016,10 @@ public final class Stage2Pipeline {
 
     /// Consume an ordinary display-link tick on the main thread.
     ///
-    /// The target refresh updates scheduled-present timing. For decoded-video presentation, the
-    /// currently displayed IOSurface is correlated to its frame and stamped at this tick's
-    /// just-finished refresh. Other pacings signal the render thread only as a retry;
+    /// The target refresh updates scheduled-present timing. On the decoded video plane the tick
+    /// submits a smoothness frame due before the coming latch, correlates the currently displayed
+    /// IOSurface to its frame stamped at this tick's just-finished refresh, and flushes the
+    /// plane's diagnostics. Other pacings signal the render thread only as a retry;
     /// decoded-frame arrival remains their primary trigger. Deadline pacing has its own
     /// CAMetalDisplayLink and never calls this method.
     public func renderTick(
@@ -1913,14 +2027,20 @@ public final class Stage2Pipeline {
         period: CFTimeInterval
     ) {
         vsyncClock.set(target: targetMediaTime, period: period)
-        #if os(tvOS)
-        if let stamp = decodedSink?.takeDisplayedStamp() {
-            let atNs = Self.realtimeNs(forDisplayLinkTimestamp: displayedMediaTime)
-            endToEndMeter?.record(ptsNs: stamp.ptsNs, atNs: atNs, offsetNs: clockOffset())
-            displayMeter?.record(ptsNs: UInt64(stamp.decodedNs), atNs: atNs, offsetNs: 0)
+        if let decodedSink {
+            if cadence != nil,
+               let frame = ring.take(dueBy: targetMediaTime, due: { $0.dueMediaTime }) {
+                decodedSink.submit(frame)
+            }
+            if let stamp = decodedSink.takeDisplayedStamp() {
+                let atNs = Self.realtimeNs(forDisplayLinkTimestamp: displayedMediaTime)
+                endToEndMeter?.record(ptsNs: stamp.ptsNs, atNs: atNs, offsetNs: clockOffset())
+                displayMeter?.record(ptsNs: UInt64(stamp.decodedNs), atNs: atNs, offsetNs: 0)
+            }
+            decodedSink.flushDebugIfDue(queueDrops: { ring.drainSmoothing().overflowDrops })
+            return
         }
-        #endif
-        if pacing != .decoded { renderSignal.signal() }
+        renderSignal.signal()
     }
 
     /// MAIN thread (SessionPresenter — session start + every layout/Reconfigure): hint the
@@ -1987,6 +2107,7 @@ public final class Stage2Pipeline {
             _ = renderStopped.wait(timeout: .now() + 0.5)
         }
         decoder.reset()
+        decodedSink?.clear() // the plane goes black, like the Metal sublayer leaving the tree
         recovery.bind(nil) // stop requesting keyframes once the session is torn down
         phaseReporter.bind(nil) // and stop phase reports toward the dead connection
     }

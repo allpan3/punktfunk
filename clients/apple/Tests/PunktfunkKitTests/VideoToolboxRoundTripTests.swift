@@ -88,6 +88,71 @@ final class VideoToolboxRoundTripTests: XCTestCase {
     /// The uncompressed wrapper must preserve the color description that lets tvOS select and
     /// interpret the HDR10 video plane instead of treating P010 samples as untagged SDR.
     func testDecodedHDRImagePreservesPQColorDescription() throws {
+        let pixels = try pqPixelBuffer()
+        let sample = try XCTUnwrap(DecodedVideoSink.immediateSample(pixels))
+        let format = try XCTUnwrap(CMSampleBufferGetFormatDescription(sample))
+        XCTAssertEqual(
+            CMFormatDescriptionGetExtension(
+                format, extensionKey: kCMFormatDescriptionExtension_ColorPrimaries) as? String,
+            kCMFormatDescriptionColorPrimaries_ITU_R_2020 as String)
+        XCTAssertEqual(
+            CMFormatDescriptionGetExtension(
+                format, extensionKey: kCMFormatDescriptionExtension_TransferFunction) as? String,
+            kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ as String)
+        XCTAssertEqual(
+            CMFormatDescriptionGetExtension(
+                format, extensionKey: kCMFormatDescriptionExtension_YCbCrMatrix) as? String,
+            kCMFormatDescriptionYCbCrMatrix_ITU_R_2020 as String)
+    }
+
+    /// A buffer without an IOSurface still reaches the plane; it only yields no on-glass sample.
+    /// Before, `submit` dropped it ahead of enqueue and the picture stayed black.
+    func testDecodedSinkAcceptsABufferWithoutAnIOSurface() throws {
+        var buffer: CVPixelBuffer?
+        XCTAssertEqual(
+            CVPixelBufferCreate(
+                kCFAllocatorDefault, width, height,
+                kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, nil, &buffer),
+            kCVReturnSuccess)
+        let pixels = try XCTUnwrap(buffer)
+        XCTAssertNil(CVPixelBufferGetIOSurface(pixels))
+        let sink = DecodedVideoSink(layer: AVSampleBufferDisplayLayer())
+        XCTAssertTrue(sink.submit(readyFrame(pixels, isHDR: false)))
+    }
+
+    /// The host's 0xCE grade rides each HDR buffer into the plane's format description.
+    func testDecodedSinkAttachesMasteringMetadataToHDRFrames() throws {
+        let pixels = try pqPixelBuffer()
+        let sink = DecodedVideoSink(layer: AVSampleBufferDisplayLayer())
+        sink.setHdrMeta(
+            PunktfunkConnection.HdrMeta(
+                primariesX: [13250, 7500, 34000], primariesY: [34500, 3000, 16000],
+                whitePointX: 15635, whitePointY: 16450,
+                maxMasteringLuminance: 10_000_000, minMasteringLuminance: 50,
+                maxCLL: 1000, maxFALL: 400))
+        XCTAssertTrue(sink.submit(readyFrame(pixels, isHDR: true)))
+        let mastering =
+            CVBufferCopyAttachment(pixels, kCVImageBufferMasteringDisplayColorVolumeKey, nil)
+            as? Data
+        XCTAssertEqual(mastering?.count, 24)
+        let format = try XCTUnwrap(
+            CMSampleBufferGetFormatDescription(
+                try XCTUnwrap(DecodedVideoSink.immediateSample(pixels))))
+        XCTAssertNotNil(
+            CMFormatDescriptionGetExtension(
+                format, extensionKey: kCMFormatDescriptionExtension_MasteringDisplayColorVolume))
+        XCTAssertNotNil(
+            CMFormatDescriptionGetExtension(
+                format, extensionKey: kCMFormatDescriptionExtension_ContentLightLevelInfo))
+    }
+
+    private func readyFrame(_ pixels: CVPixelBuffer, isHDR: Bool) -> ReadyFrame {
+        ReadyFrame(
+            ptsNs: 1, receivedNs: 1, decodedNs: 2, image: .video(pixels, isHDR: isHDR), flags: 0)
+    }
+
+    /// A P010 IOSurface tagged BT.2020 / PQ, the shape VideoToolbox hands the plane for HDR10.
+    private func pqPixelBuffer() throws -> CVPixelBuffer {
         let attrs: [CFString: Any] = [
             kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
             kCVPixelBufferMetalCompatibilityKey: true,
@@ -109,21 +174,7 @@ final class VideoToolboxRoundTripTests: XCTestCase {
         CVBufferSetAttachment(
             pixels, kCVImageBufferYCbCrMatrixKey,
             kCVImageBufferYCbCrMatrix_ITU_R_2020, .shouldPropagate)
-
-        let sample = try XCTUnwrap(DecodedVideoSink.immediateSample(pixels))
-        let format = try XCTUnwrap(CMSampleBufferGetFormatDescription(sample))
-        XCTAssertEqual(
-            CMFormatDescriptionGetExtension(
-                format, extensionKey: kCMFormatDescriptionExtension_ColorPrimaries) as? String,
-            kCMFormatDescriptionColorPrimaries_ITU_R_2020 as String)
-        XCTAssertEqual(
-            CMFormatDescriptionGetExtension(
-                format, extensionKey: kCMFormatDescriptionExtension_TransferFunction) as? String,
-            kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ as String)
-        XCTAssertEqual(
-            CMFormatDescriptionGetExtension(
-                format, extensionKey: kCMFormatDescriptionExtension_YCbCrMatrix) as? String,
-            kCMFormatDescriptionYCbCrMatrix_ITU_R_2020 as String)
+        return pixels
     }
 
     /// Stage-2 decode half: the same known IDR through `VideoDecoder` — assert its async output

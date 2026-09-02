@@ -110,8 +110,8 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 ### Fixed
 
 - **`AVSampleBufferVideoRenderer` is the tvOS 17.4+ default for 4:2:0 streams, removing Metal's
-  two-refresh reservation.** Older tvOS,
-  4:4:4, PyroWave and Smoothness retain Metal; users need no setting changes.
+  two-refresh reservation.** Older tvOS, 4:4:4 and PyroWave retain Metal; Smoothness buffers on
+  the same plane, and users need no setting changes.
 
 ---
 
