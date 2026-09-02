@@ -30,6 +30,26 @@ pub(super) struct Recovery {
     pub(super) holes: u32,
     pub(super) hole_time: Duration,
     pub(super) worst: Duration,
+    /// Present→arrival for the stretch's frames (ms): local QPC at consume minus
+    /// the OS `PresentDisplayQPCTime` the driver stamped. `arrival_n` counts the
+    /// frames that carried a stamp; 0 means none did — not a zero delay.
+    pub(super) arrival_last_ms: u64,
+    pub(super) arrival_mean_ms: u64,
+    pub(super) arrival_max_ms: u64,
+    pub(super) arrival_n: u32,
+}
+
+impl Recovery {
+    /// `last/mean/max` present→arrival ms for the log line; `None` when no frame
+    /// in the stretch carried an OS present stamp.
+    pub(super) fn arrival_ms(&self) -> Option<String> {
+        (self.arrival_n > 0).then(|| {
+            format!(
+                "{}/{}/{}",
+                self.arrival_last_ms, self.arrival_mean_ms, self.arrival_max_ms
+            )
+        })
+    }
 }
 
 /// Open degraded stretch; closed into [`Recovery`].
@@ -39,6 +59,11 @@ struct Episode {
     holes: u32,
     hole_time: Duration,
     worst: Duration,
+    /// Present→arrival tally over the frames consumed inside the stretch.
+    arrival_last_ms: u64,
+    arrival_max_ms: u64,
+    arrival_sum_ms: u64,
+    arrival_n: u32,
 }
 
 /// Driver telemetry for one stall window (v2 header tail:
@@ -418,6 +443,8 @@ impl StallWatch {
     }
 
     /// Close the open episode into [`Self::pending_recovery`] if past the noise bar.
+    /// The present→arrival tally collapses to last/mean/max here; mean over an
+    /// empty tally would divide by zero, so it stays 0 with `arrival_n` at 0.
     fn close_episode(&mut self) {
         if let Some(ep) = self.episode.take() {
             if ep.holes >= Self::EPISODE_MIN_HOLES {
@@ -426,6 +453,13 @@ impl StallWatch {
                     holes: ep.holes,
                     hole_time: ep.hole_time,
                     worst: ep.worst,
+                    arrival_last_ms: ep.arrival_last_ms,
+                    arrival_mean_ms: ep
+                        .arrival_sum_ms
+                        .checked_div(u64::from(ep.arrival_n))
+                        .unwrap_or(0),
+                    arrival_max_ms: ep.arrival_max_ms,
+                    arrival_n: ep.arrival_n,
                 });
             }
         }
@@ -438,7 +472,10 @@ impl StallWatch {
     }
 
     /// Record a fresh driver frame at `now`. `Some` iff it ended a stall.
-    pub(super) fn note_fresh(&mut self, now: Instant) -> Option<Stall> {
+    ///
+    /// `arrival_ms` is this frame's present→arrival delay, `None` when the driver
+    /// stamped no OS present time. It folds into the open stretch only.
+    pub(super) fn note_fresh(&mut self, now: Instant, arrival_ms: Option<u64>) -> Option<Stall> {
         let was_active = self.recent.len() == Self::RECENT
             && self
                 .recent
@@ -473,6 +510,10 @@ impl StallWatch {
                         holes: 1,
                         hole_time: gap,
                         worst: gap,
+                        arrival_last_ms: 0,
+                        arrival_max_ms: 0,
+                        arrival_sum_ms: 0,
+                        arrival_n: 0,
                     });
                 }
                 None => {}
@@ -480,6 +521,14 @@ impl StallWatch {
         } else if was_active {
             // [`Self::RECENT`] tight frames: the stretch is over.
             self.close_episode();
+        }
+        // Folded after the bookkeeping above, so a hole-ending frame lands in the
+        // stretch it just opened or extended, and the closing frame in neither.
+        if let (Some(ep), Some(ms)) = (self.episode.as_mut(), arrival_ms) {
+            ep.arrival_last_ms = ms;
+            ep.arrival_max_ms = ep.arrival_max_ms.max(ms);
+            ep.arrival_sum_ms = ep.arrival_sum_ms.saturating_add(ms);
+            ep.arrival_n = ep.arrival_n.saturating_add(1);
         }
         if !was_active || gap < Self::STALL_MIN {
             return None;

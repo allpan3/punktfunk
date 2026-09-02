@@ -2050,12 +2050,17 @@ impl IddPushCapturer {
             self.last_present = Some((out.as_ref().expect("out ring").0.clone(), pf));
         }
         let now = Instant::now();
+        // The frame's OS present stamp, read once for both the stall summary and its
+        // provenance. `qpc_age_us` re-reads QPC, so the delay is measured at consume;
+        // a regen re-encodes an old image and carries no present of its own.
+        let present_qpc = if regen { 0 } else { self.source_present_qpc() };
+        let arrival_ms = (present_qpc != 0).then(|| Self::qpc_age_us(present_qpc) / 1_000);
         if regen {
             // Re-encodes old desktop at a new pointer; must not feed freshness/stall bookkeeping.
         } else if self.recovering_since.take().is_some() {
             // Self-inflicted gap (ring recreate). Reset so it is not a DWM stall.
             self.stall_watch.reset();
-        } else if let Some(stall) = self.stall_watch.note_fresh(now) {
+        } else if let Some(stall) = self.stall_watch.note_fresh(now, arrival_ms) {
             // ETW prose uses gap + 300 ms lead-in (the cause lands just before);
             // discriminator counts use the gap only — presents from healthy flow
             // would falsely acquit. Same ring snapshot, same clock.
@@ -2092,11 +2097,16 @@ impl IddPushCapturer {
         if !regen {
             // Sustained ~2 fps stretch: per-hole lines gate on prior ACTIVE flow.
             if let Some(r) = self.stall_watch.take_recovery() {
+                let arrival = r.arrival_ms();
                 tracing::info!(
                     degraded_ms = r.degraded.as_millis() as u64,
                     holes = r.holes,
                     hole_time_ms = r.hole_time.as_millis() as u64,
                     worst_hole_ms = r.worst.as_millis() as u64,
+                    // last/mean/max between the OS present and our consume: the one
+                    // ground-truth clock separating "DWM stopped" from "we were late".
+                    present_to_arrival_ms = arrival.as_deref().unwrap_or("absent"),
+                    present_to_arrival_n = r.arrival_n,
                     "IDD-push capture recovered from a degraded stretch — fresh frames arrived \
                      only between stall-sized holes for its whole span; the per-stall lines \
                      above cover at most its first hole"
@@ -2148,7 +2158,7 @@ impl IddPushCapturer {
             provenance: if regen {
                 pf_frame::Provenance::cursor_regen(self.source_seq)
             } else {
-                pf_frame::Provenance::source(self.source_seq, self.source_present_qpc())
+                pf_frame::Provenance::source(self.source_seq, present_qpc)
             },
             width: self.width,
             height: self.height,
@@ -2577,7 +2587,7 @@ mod tests {
             .iter()
             .map(|ms| {
                 let at = base + Duration::from_millis(*ms);
-                w.note_fresh(at).map(|s| {
+                w.note_fresh(at, None).map(|s| {
                     let period = w.cycle(at, false);
                     (s, period)
                 })
@@ -2619,12 +2629,14 @@ mod tests {
     }
 
     /// First degraded-stretch summary, checked after every frame like the capture loop.
+    /// Every frame reports the same 40 ms present→arrival, so the folded tally is
+    /// assertable without modelling which frames land inside the stretch.
     fn watch_recovery(offsets_ms: &[u64]) -> (StallWatch, Option<super::stall::Recovery>) {
         let base = Instant::now();
         let mut w = StallWatch::new();
         let mut recovery = None;
         for ms in offsets_ms {
-            w.note_fresh(base + Duration::from_millis(*ms));
+            w.note_fresh(base + Duration::from_millis(*ms), Some(40));
             if let Some(r) = w.take_recovery() {
                 recovery.get_or_insert(r);
             }
@@ -2645,6 +2657,9 @@ mod tests {
         assert_eq!(r.hole_time.as_millis(), 5000);
         assert_eq!(r.worst.as_millis(), 500);
         assert_eq!(r.degraded.as_millis(), 5000);
+        // Every stamped frame reported 40 ms, one of them per hole at least.
+        assert_eq!(r.arrival_ms().as_deref(), Some("40/40/40"));
+        assert!(r.arrival_n >= r.holes, "n={}", r.arrival_n);
     }
 
     #[test]
@@ -2723,7 +2738,7 @@ mod tests {
             flow(&mut t, cycle * 4_000, 232);
             for ms in t {
                 let at = base + Duration::from_millis(ms);
-                if let Some(_stall) = w.note_fresh(at) {
+                if let Some(_stall) = w.note_fresh(at, None) {
                     // 2nd stall is damage-idle (cursor still on a dwm-only desktop).
                     let damage_idle = periods.len() == 1;
                     periods.push(w.cycle(at, damage_idle));
@@ -2744,15 +2759,18 @@ mod tests {
         let at = |ms: u64| base + Duration::from_millis(ms);
         let mut w = StallWatch::new();
         for i in 0..20u64 {
-            assert!(w.note_fresh(at(i * 16)).is_none());
+            assert!(w.note_fresh(at(i * 16), None).is_none());
         }
         w.reset();
-        assert!(w.note_fresh(at(1_104)).is_none(), "recreate gap swallowed");
+        assert!(
+            w.note_fresh(at(1_104), None).is_none(),
+            "recreate gap swallowed"
+        );
         for i in 1..20u64 {
-            assert!(w.note_fresh(at(1_104 + i * 16)).is_none());
+            assert!(w.note_fresh(at(1_104 + i * 16), None).is_none());
         }
         assert!(
-            w.note_fresh(at(1_104 + 19 * 16 + 300)).is_some(),
+            w.note_fresh(at(1_104 + 19 * 16 + 300), None).is_some(),
             "detection re-armed after the reset"
         );
     }
