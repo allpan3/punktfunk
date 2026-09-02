@@ -27,10 +27,50 @@ pub mod topology_churn;
 #[cfg(target_os = "windows")]
 pub mod win_display;
 
-/// `Some((own_session, console_session))` when this process is not in the active console session —
-/// every `SetDisplayConfig`/CDS write then fails `ERROR_ACCESS_DENIED`, GDI reads describe the
-/// wrong session, and input compose kicks go nowhere. The IDD-push capturer uses it to phrase a
-/// diagnostic when the driver won't attach.
+/// Whether the machine-level seats add-on marker reserves connector slots.
+/// Key existence is the signal; HKLM keeps an unprivileged seat process from
+/// enabling cross-process driver management through its own environment.
+#[cfg(target_os = "windows")]
+pub fn seats_addon_reserves_display_slots() -> bool {
+    use std::sync::OnceLock;
+    use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND};
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY,
+    };
+
+    static RESERVED: OnceLock<bool> = OnceLock::new();
+    *RESERVED.get_or_init(|| {
+        let mut key = HKEY::default();
+        // SAFETY: the subkey is a NUL-terminated literal and `key` is a live out-param.
+        let rc = unsafe {
+            RegOpenKeyExW(
+                HKEY_LOCAL_MACHINE,
+                windows::core::w!(r"SOFTWARE\Punktfunk\Seats"),
+                None,
+                KEY_READ | KEY_WOW64_64KEY,
+                &mut key,
+            )
+        };
+        if rc.is_ok() {
+            // SAFETY: `key` was initialized by the successful open and is closed once here.
+            let _ = unsafe { RegCloseKey(key) };
+            true
+        } else {
+            if rc != ERROR_FILE_NOT_FOUND && rc != ERROR_PATH_NOT_FOUND {
+                tracing::warn!(
+                    error = rc.0,
+                    r"could not read HKLM\SOFTWARE\Punktfunk\Seats; seat display-slot reservation stays disabled"
+                );
+            }
+            false
+        }
+    })
+}
+
+/// Returns both session ids when this process is outside the active console.
+/// That usually predicts inaccessible console display state. A seats host can
+/// intentionally own an active RDP desktop instead, so callers decide how to
+/// phrase the mismatch without hiding later display-operation errors.
 #[cfg(target_os = "windows")]
 pub fn console_session_mismatch() -> Option<(u32, u32)> {
     use windows::Win32::System::RemoteDesktop::{

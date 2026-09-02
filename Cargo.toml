@@ -52,6 +52,8 @@ members = [
 # The vendored `ndk` is a [patch.crates-io] source, not a member: it only compiles for the
 # `*-linux-android` targets, so workspace membership would break host `cargo build --workspace`.
 exclude = [
+    # The opt-in Windows seat manager is a separate product and Rust workspace.
+    "crates/punktfunk-seats",
     "packaging/linux/steam-deck-gadget/usbip-poc",
     "clients/android/native/vendor/ndk",
     # Bring-your-own-hardware measurement tools. `hid-descriptor-dump` pulls `hidapi`, a C library

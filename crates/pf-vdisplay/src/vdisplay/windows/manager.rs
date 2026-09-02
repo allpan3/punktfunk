@@ -419,8 +419,8 @@ struct Pinger {
 #[derive(Default)]
 struct DeviceSlot {
     current: Option<Arc<OwnedHandle>>,
-    /// `CLEAR_ALL` (crashed-host orphan reap) runs only on the first open;
-    /// a reopen races sessions this process still considers live.
+    /// A global orphan reap is eligible only on the first unreserved open.
+    /// Reopens and seats mode can overlap monitors owned elsewhere.
     opened_once: bool,
 }
 
@@ -596,16 +596,23 @@ impl VirtualDisplayManager {
         self.driver.name()
     }
 
-    /// Open and cache the control device; reopen after a gone-classified
-    /// retire. Returns an `Arc` clone the caller holds across every IOCTL —
-    /// a concurrent retire then drops only the manager's reference.
+    /// Opens and caches the control device. A first legacy owner may clear
+    /// global orphans; seats mode and handle reopens cannot because sibling
+    /// processes or sessions may still own monitors. The returned `Arc` keeps
+    /// each IOCTL's handle alive across concurrent retirement.
     fn ensure_device(&self) -> Result<Arc<OwnedHandle>> {
         let mut slot = self.device.lock().unwrap();
         if let Some(d) = &slot.current {
             return Ok(d.clone());
         }
-        let reap = !slot.opened_once;
+        let plan = process_slot_plan().map_err(anyhow::Error::new)?;
+        let reap = !slot.opened_once && plan.allows_clear_all();
         claim_instance()?;
+        if !slot.opened_once && !reap {
+            tracing::info!(
+                "pf-vdisplay startup keeps existing monitors because seats slots are reserved"
+            );
+        }
         // `open` is safe: it discharges FFI inside its body. The `device`
         // mutex serializes racing opens — serialization, not soundness, so
         // this is not `unsafe`.
@@ -647,10 +654,9 @@ impl VirtualDisplayManager {
         self.ensure_device().map(|_| ())
     }
 
-    /// Acquire this client's slot: preempt-recreate under IDD-push, join a live
-    /// monitor (refcount++), or create one. `client_fp` keys the slot and gives
-    /// a freshly created monitor the client's stable id. The returned
-    /// [`MonitorLease`] releases the slot's refcount on drop.
+    /// Acquires the process-resolved connector slot, then joins or creates its
+    /// monitor. A seat override is resolved before any driver access. The
+    /// returned [`MonitorLease`] releases only its matching generation.
     pub(crate) fn acquire(
         &'static self,
         mode: Mode,
@@ -659,21 +665,30 @@ impl VirtualDisplayManager {
         hw_cursor: bool,
         quit: Option<Arc<AtomicBool>>,
     ) -> Result<VirtualOutput> {
-        // Host outside the active console session cannot drive the display it
-        // is about to create (SetDisplayConfig ACCESS_DENIED, GDI from the
-        // wrong session). Non-fatal: persistence-DB activation can still work.
         if let Some((own, console)) = pf_win_display::console_session_mismatch() {
-            tracing::error!(
-                own_session = own,
-                console_session = console,
-                "punktfunk-host is NOT in the active console session — display activation, \
-                 mode-set and capture will fail (disconnected RDP session?). Reconnect the \
-                 console (`tscon {own} /dest:console`) or run the host via the installed \
-                 service, which follows the console session"
-            );
+            let seat_session = std::env::var_os("PUNKTFUNK_SEAT_SESSION");
+            if super::identity::is_seat_session_marker(seat_session.as_deref()) {
+                tracing::warn!(
+                    own_session = own,
+                    console_session = console,
+                    "punktfunk seat host is intentionally outside the active console session — \
+                     the seats add-on active-RDP keeper must keep this RDP session active; display \
+                     activation errors that follow are real and mean the keeper or session is unavailable"
+                );
+            } else {
+                tracing::error!(
+                    own_session = own,
+                    console_session = console,
+                    "punktfunk-host is NOT in the active console session — display activation, \
+                     mode-set and capture will fail (disconnected RDP session?). Reconnect the \
+                     console (`tscon {own} /dest:console`) or run the host via the installed \
+                     service, which follows the console session"
+                );
+            }
         }
         self.ensure_linger_timer();
-        let slot = slot_id_for(client_fp, (mode.width, mode.height));
+        let slot =
+            resolve_slot_id(client_fp, (mode.width, mode.height)).map_err(anyhow::Error::new)?;
         let mut inner = self.state.lock().unwrap();
         let dev = self.ensure_device()?;
 
@@ -1278,12 +1293,11 @@ impl VirtualDisplayManager {
         None
     }
 
-    /// ADD via the driver, start the watchdog pinger, resolve the GDI name, force
-    /// the mode, apply group topology (first member isolates and captures restore;
-    /// a later member re-issues isolate with the grown set).
-    ///
-    /// Returned `Monitor.mode` is what the OS committed; `requested_mode` keeps
-    /// `mode` verbatim for `acquire`'s join/resize gate.
+    /// Adds the exact logical connector, resolves its GDI path, sets its mode,
+    /// and applies group topology. A driver's fallback connector is removed and
+    /// rejected because it could enter another process's reserved range.
+    /// `Monitor.mode` records the committed mode while `requested_mode` retains
+    /// the negotiated value for the join/resize gate.
     ///
     /// # Safety
     /// `dev` must be the live control handle.
@@ -1300,6 +1314,7 @@ impl VirtualDisplayManager {
         // ConnectorIndex) so Windows reapplies saved DPI on reconnect; `0`
         // (anonymous) = driver auto-allocates.
         let preferred_id = slot;
+        let slot_plan = process_slot_plan().map_err(anyhow::Error::new)?;
         // Negotiated mode, before the post-settle read-back overwrites `mode`.
         // The session re-asks for this on every rebuild (see `requested_mode`).
         let requested_mode = mode;
@@ -1334,6 +1349,34 @@ impl VirtualDisplayManager {
             self.driver
                 .add_monitor(dev, mode, render_pin, preferred_id, client_hdr, hw_cursor)?
         };
+        let wrong_exact_slot = preferred_id != 0 && added.resolved_monitor_id != preferred_id;
+        let outside_console_range = slot_plan
+            .ordinary_max()
+            .is_some_and(|max| added.resolved_monitor_id > max);
+        if wrong_exact_slot || outside_console_range {
+            let resolved_id = added.resolved_monitor_id;
+            // SAFETY: `dev` is the live handle by this function's contract. The successful ADD
+            // returned `added.key`, which identifies the fallback monitor removed here.
+            let cleanup = unsafe { self.driver.remove_monitor(dev, &added.key) };
+            let reason = if wrong_exact_slot {
+                format!("required connector slot {preferred_id}")
+            } else {
+                format!(
+                    "console connector range 1..={}",
+                    slot_plan.ordinary_max().expect("console plan has a bound")
+                )
+            };
+            if let Err(error) = cleanup {
+                anyhow::bail!(
+                    "pf-vdisplay assigned connector slot {resolved_id} outside {reason}; refusing \
+                     cross-slot fallback, and cleanup failed: {error:#}"
+                );
+            }
+            anyhow::bail!(
+                "pf-vdisplay assigned connector slot {resolved_id} outside {reason}; removed the \
+                 fallback monitor and refused cross-slot attachment"
+            );
+        }
         let added_key =
             CcdTargetKey::from_luid_parts(added.luid.LowPart, added.luid.HighPart, added.target_id);
 
@@ -2033,16 +2076,23 @@ impl VirtualDisplayManager {
         }
     }
 
-    /// Begin IDD-push session setup. Serializes via the manager-wide setup lock,
-    /// registers this session's stop flag on its slot, signals the prior holder
-    /// to stop, and waits for release so a reconnect (dead reused swap-chain)
-    /// preempts cleanly. A different identity is admission, never a preempt.
-    /// Caller holds the guard across pipeline build.
+    /// Begins IDD-push setup for the same process slot resolver as `acquire`.
+    /// `None` declines setup after an invalid seat assignment. The returned
+    /// guard serializes pipeline build and a same-slot reconnect preempts its
+    /// prior holder.
     pub fn begin_idd_setup(
         &'static self,
-        slot: u32,
+        slot: impl Into<Option<u32>>,
         stop: Arc<AtomicBool>,
-    ) -> std::sync::MutexGuard<'static, ()> {
+    ) -> Option<std::sync::MutexGuard<'static, ()>> {
+        let requested = slot.into()?;
+        let slot = match process_slot_plan().and_then(|plan| plan.resolve(requested)) {
+            Ok(slot) => slot,
+            Err(error) => {
+                tracing::error!(%error, "IDD-push setup rejected its pf-vdisplay connector slot");
+                return None;
+            }
+        };
         let guard = self.setup_lock.lock().unwrap();
         let prev = self.idd_session_stops.lock().unwrap().insert(slot, stop);
         if let Some(prev_stop) = prev {
@@ -2077,7 +2127,7 @@ impl VirtualDisplayManager {
                 }
             }
         }
-        guard
+        Some(guard)
     }
 
     /// Wait up to `timeout` for `slot` to leave Active. Used after signalling
@@ -2164,11 +2214,52 @@ impl Drop for MonitorLease {
     }
 }
 
-/// Slot id for a client's monitor: stable per-client identity (`1..=15`) or
-/// `0` for anonymous/GameStream (at most one; no identity to find another
-/// slot by). Shared by `acquire` and [`VirtualDisplayManager::begin_idd_setup`].
-pub fn slot_id_for(client_fp: Option<[u8; 32]>, mode: (u32, u32)) -> u32 {
-    super::identity::resolve_slot(client_fp, mode, crate::policy::Identity::PerClient).unwrap_or(0)
+fn process_slot_plan(
+) -> std::result::Result<super::identity::WindowsSlotPlan, super::identity::WindowsSlotError> {
+    static PLAN: OnceLock<
+        std::result::Result<super::identity::WindowsSlotPlan, super::identity::WindowsSlotError>,
+    > = OnceLock::new();
+    *PLAN.get_or_init(|| {
+        let seat_override = std::env::var_os("PUNKTFUNK_SEAT_DISPLAY_SLOT");
+        super::identity::windows_slot_plan(
+            seat_override.as_deref(),
+            pf_win_display::seats_addon_reserves_display_slots(),
+        )
+    })
+}
+
+/// Resolves one logical connector through the process-wide seat plan. Seat
+/// hosts bypass the identity map. Console hosts use its bounded candidate set,
+/// with slot 0 retained for anonymous/GameStream clients.
+fn resolve_slot_id(
+    client_fp: Option<[u8; 32]>,
+    mode: (u32, u32),
+) -> std::result::Result<u32, super::identity::WindowsSlotError> {
+    let plan = process_slot_plan()?;
+    let ordinary_slot = match plan.ordinary_max() {
+        Some(max_id) => super::identity::resolve_slot_bounded(
+            client_fp,
+            mode,
+            crate::policy::Identity::PerClient,
+            max_id,
+        )
+        .unwrap_or(0),
+        None => 0,
+    };
+    plan.resolve(ordinary_slot)
+}
+
+/// Returns the connector used by both IDD setup and monitor acquisition.
+/// `None` rejects malformed, unreserved, or out-of-range seat overrides before
+/// either path can touch the driver.
+pub fn slot_id_for(client_fp: Option<[u8; 32]>, mode: (u32, u32)) -> Option<u32> {
+    match resolve_slot_id(client_fp, mode) {
+        Ok(slot) => Some(slot),
+        Err(error) => {
+            tracing::error!(%error, "pf-vdisplay connector-slot configuration rejected");
+            None
+        }
+    }
 }
 
 /// Render-GPU pin: IDD-push NVENC runs on the render adapter, so it must be

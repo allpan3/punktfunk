@@ -736,6 +736,7 @@ fn parse_spike(args: &[String]) -> Result<Options> {
     let mut fps = 60u32;
     let mut seconds = 5u32;
     let mut codec = Codec::H265;
+    let mut hdr = false;
     let mut bitrate_mbps = 20u64;
     let mut out: Option<PathBuf> = None;
     let mut loopback = true;
@@ -756,11 +757,11 @@ fn parse_spike(args: &[String]) -> Result<Options> {
                     "synthetic" => Source::Synthetic,
                     "synthetic-nv12" => Source::SyntheticNv12,
                     "portal" => Source::Portal,
-                    "kwin-virtual" => Source::KwinVirtual,
+                    "virtual" | "kwin-virtual" => Source::Virtual,
                     other => {
                         bail!(
                             "unknown --source '{other}' \
-                             (synthetic|synthetic-nv12|portal|kwin-virtual)"
+                             (synthetic|synthetic-nv12|portal|virtual)"
                         )
                     }
                 }
@@ -791,6 +792,7 @@ fn parse_spike(args: &[String]) -> Result<Options> {
                     other => bail!("unknown --codec '{other}' (h264|h265|av1|pyrowave)"),
                 }
             }
+            "--hdr" => hdr = true,
             "--bitrate" => {
                 bitrate_mbps = next()?
                     .parse()
@@ -825,7 +827,7 @@ fn parse_spike(args: &[String]) -> Result<Options> {
             // Concatenated packets; not an FFmpeg-playable stream.
             Codec::PyroWave => "pyrowave",
         };
-        PathBuf::from(format!("/tmp/punktfunk-spike.{ext}"))
+        std::env::temp_dir().join(format!("punktfunk-spike.{ext}"))
     });
 
     Ok(Options {
@@ -835,6 +837,7 @@ fn parse_spike(args: &[String]) -> Result<Options> {
         fps,
         seconds,
         codec,
+        hdr,
         bitrate_bps: bitrate_mbps.saturating_mul(1_000_000),
         out,
         loopback,
@@ -844,7 +847,7 @@ fn parse_spike(args: &[String]) -> Result<Options> {
 
 fn print_usage() {
     eprintln!(
-        "punktfunk-host — Linux streaming host
+        "punktfunk-host — streaming host
 
 USAGE:
     punktfunk-host serve [OPTIONS]            native punktfunk/1 host + management REST API
@@ -861,7 +864,7 @@ USAGE:
     punktfunk-host probe-compositor           exit 0 iff the compositor is up + ready (bringup gate)
     punktfunk-host list-monitors              list the host's physical monitors (Linux) — the
                                               connector names PUNKTFUNK_CAPTURE_MONITOR takes
-    punktfunk-host spike [OPTIONS]            capture→encode→file pipeline spike (dev tool)
+    punktfunk-host spike [OPTIONS]            capture→encode probe; Windows seat quality gate
 
 SERVE OPTIONS:
     --mgmt-bind <IP:PORT>        management API address (or PUNKTFUNK_MGMT_BIND in host.env, which
@@ -917,17 +920,18 @@ PUNKTFUNK1-HOST OPTIONS:
                                  clients use --connect HOST:PORT). Also PUNKTFUNK_MDNS=0
 
 SPIKE OPTIONS:
-    --source <synthetic|portal|kwin-virtual>
-                                 frame source (default: portal). 'kwin-virtual' creates a
-                                 KWin virtual output at --width x --height and captures it
+    --source <synthetic|synthetic-nv12|portal|virtual>
+                                 frame source (default: portal). 'virtual' creates a platform
+                                 virtual display at --width x --height; 'kwin-virtual' is an alias
     --seconds <N>                capture duration in seconds (default: 5)
     --fps <N>                    target frame rate (default: 60)
     --codec <h264|h265|av1|pyrowave>
                                  encode codec (default: h265). 'pyrowave' also wants
                                  PUNKTFUNK_ENCODER=pyrowave so capture takes the passthrough
+    --hdr                        request HDR capture and 10-bit encode (HEVC Main10 by default)
     --bitrate <MBPS>             target bitrate in Mbps (default: 20)
-    --width <W> --height <H>     synthetic source size (default: 1920x1080)
-    --out <PATH>                 raw Annex-B output (default: /tmp/punktfunk-spike.<ext>)
+    --width <W> --height <H>     synthetic or virtual source size (default: 1920x1080)
+    --out <PATH>                 raw output (default: system temp/punktfunk-spike.<ext>)
     --no-loopback                skip the punktfunk_core round-trip verification
     --wire-chunk <BYTES>         PyroWave datagram-aligned packetization at this shard payload
                                  (a real session passes its negotiated shard_payload, e.g. 1408).
@@ -939,6 +943,9 @@ SPIKE OPTIONS:
 NOTES:
     'portal' needs headless Sway + xdg-desktop-portal-wlr running in this session
     (see design/linux-setup.md). 'synthetic' needs no capture session and always runs.
+    On Windows, `spike --source virtual --hdr` is a strict pf-vdisplay → IDD-push →
+    GPU Main10 encoder gate. A missing driver, capture frame, HDR/encoder capability,
+    encoded AU, write, or loopback verification exits nonzero; software encode is refused.
     Encoded AUs are written to a playable file AND (unless --no-loopback) fed through a
     punktfunk_core host→client loopback that reassembles and byte-verifies each one.
     Both 'serve' and 'punktfunk1-host' advertise the native service over mDNS
@@ -955,4 +962,34 @@ NOTES:
         \x20   punktfunk-host hdr-p010-selftest  GPU colour check for the PUNKTFUNK_HDR_SHADER_P010 path\n\
         \x20                                     (scRGB FP16 -> P010 BT.2020 PQ shader vs an f64 reference)"
     );
+}
+
+#[cfg(test)]
+mod spike_cli_tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn virtual_source_and_legacy_alias_match() {
+        for source in ["virtual", "kwin-virtual"] {
+            let opts = parse_spike(&args(&["--source", source, "--hdr"])).unwrap();
+            assert_eq!(opts.source, Source::Virtual);
+            assert!(opts.hdr);
+        }
+    }
+
+    #[test]
+    fn default_output_uses_the_platform_temp_directory() {
+        let opts = parse_spike(&args(&["--codec", "av1"])).unwrap();
+        assert_eq!(opts.out, std::env::temp_dir().join("punktfunk-spike.obu"));
+    }
+
+    #[test]
+    fn explicit_output_is_unchanged() {
+        let opts = parse_spike(&args(&["--out", "seat-gate.h265"])).unwrap();
+        assert_eq!(opts.out, PathBuf::from("seat-gate.h265"));
+    }
 }

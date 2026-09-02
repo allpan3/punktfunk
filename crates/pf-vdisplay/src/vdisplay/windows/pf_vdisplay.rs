@@ -41,11 +41,28 @@ use super::{Mode, VirtualDisplay, VirtualOutput};
 const PF_VDISPLAY_INTERFACE: GUID =
     GUID::from_u128(pf_driver_proto::PF_VDISPLAY_INTERFACE_GUID_U128);
 
-/// Per-session `u64` for `IOCTL_ADD`/`IOCTL_REMOVE`. Collision safety lives in the host refcount
-/// manager (a stale session cannot REMOVE a live one), so a monotonic counter is enough.
+/// `PFSLOT` namespace keeps stable slot keys disjoint from legacy counters.
+const SLOT_SESSION_PREFIX: u64 = 0x5046_534c_4f54_0000;
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
-fn next_session_id() -> u64 {
-    NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed)
+
+fn session_id_for(reservation_enabled: bool, preferred_monitor_id: u32, next: u64) -> u64 {
+    if reservation_enabled {
+        SLOT_SESSION_PREFIX | u64::from(preferred_monitor_id)
+    } else {
+        next
+    }
+}
+
+/// Returns a driver monitor key. Seats mode makes it stable per logical slot,
+/// so a restarted owner replaces its orphan while sibling processes keep the
+/// device watchdog alive. Legacy single-process mode retains monotonic keys.
+fn next_session_id(preferred_monitor_id: u32) -> u64 {
+    let next = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
+    session_id_for(
+        pf_win_display::seats_addon_reserves_display_slots(),
+        preferred_monitor_id,
+        next,
+    )
 }
 
 /// One METHOD_BUFFERED `DeviceIoControl`. Empty `input`/`output` are allowed; `bytemuck` at the
@@ -610,8 +627,8 @@ impl VdisplayDriver for PfVdisplayDriver {
                 info.protocol_version
             );
         }
-        // CLEAR_ALL only on the first open of the process. A reopen can race sessions that still
-        // believe they are live; an unconditional CLEAR_ALL would raze them.
+        // CLEAR_ALL requires exclusive legacy ownership. Reserved-seat processes and handle
+        // reopens can overlap monitors that must survive this open.
         if !reap_orphans {
             reap_ghost_monitors();
             return Ok((device, watchdog_s, info.protocol_version));
@@ -639,7 +656,7 @@ impl VdisplayDriver for PfVdisplayDriver {
         client_hdr: Option<punktfunk_core::quic::HdrMeta>,
         hw_cursor: bool,
     ) -> Result<AddedMonitor> {
-        let session_id = next_session_id();
+        let session_id = next_session_id(preferred_monitor_id);
         // EDID CTA HDR block; all-zero = unknown → driver defaults (also what a driver that
         // reads only the legacy 24-byte prefix does).
         let (max_luminance_nits, max_frame_avg_nits, min_luminance_millinits) = client_hdr
@@ -1075,6 +1092,16 @@ mod tests {
     use super::*;
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn reserved_session_ids_are_stable_and_slot_scoped() {
+        assert_eq!(session_id_for(true, 0, 99), SLOT_SESSION_PREFIX);
+        assert_eq!(session_id_for(true, 12, 1), SLOT_SESSION_PREFIX | 12);
+        assert_eq!(session_id_for(true, 12, 99), SLOT_SESSION_PREFIX | 12);
+        assert_eq!(session_id_for(true, 15, 1), SLOT_SESSION_PREFIX | 15);
+        assert_ne!(session_id_for(true, 12, 1), session_id_for(true, 13, 1));
+        assert_eq!(session_id_for(false, 12, 99), 99);
+    }
 
     /// A refusal must decode as a refusal, carrying its reason. PnP Status after a refused
     /// disable still reads `OK` and must never decode as `Reloaded`.

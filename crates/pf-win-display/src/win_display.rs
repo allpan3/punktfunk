@@ -446,10 +446,11 @@ pub fn wait_target_departed(key: CcdTargetKey, ceiling: std::time::Duration) -> 
     }
 }
 
-/// Toggle the virtual-display target's advanced-color (HDR) state via the CCD API. Disabling HDR while on the
-/// secure (Winlogon) desktop makes it render SDR/composed so DXGI Desktop Duplication can capture it
-/// (the HDR fullscreen independent-flip otherwise storms `ACCESS_LOST` → black); re-enable on return so
-/// WGC keeps HDR on the normal desktop. Returns true on a successful `DisplayConfigSetDeviceInfo`.
+/// Sets a virtual-display target's advanced-color state through CCD.
+///
+/// The IDD-push capturer uses the committed state to select an FP16 scRGB HDR
+/// ring or a BGRA SDR ring. Returns true only when the target is active and
+/// `DisplayConfigSetDeviceInfo` accepts the requested state.
 pub fn set_advanced_color(key: CcdTargetKey, enable: bool) -> bool {
     let Ok((paths, _modes)) = query_display_config(QDC_ONLY_ACTIVE_PATHS) else {
         return false;
@@ -481,14 +482,12 @@ pub fn set_advanced_color(key: CcdTargetKey, enable: bool) -> bool {
     false
 }
 
-/// Read the virtual-display target's CURRENT advanced-color (HDR) state via the CCD API — i.e. whether HDR is
-/// actually ON for the virtual display right now (e.g. because the user toggled it in Windows display
-/// settings). The capture/encode pipeline follows the monitor's real colorspace (WGC → FP16 → NVENC
-/// Main10 BT.2020 PQ), so this is the authoritative "is this an HDR session" signal — NOT the
-/// handshake-negotiated bit depth. `None` when the query fails or the target isn't in the active-path
-/// list (both happen transiently during a display-topology re-probe): the caller decides the fallback —
-/// the capture loop's poller keeps the last known value, since reading a blip as "HDR off" used to cost
-/// an HDR session TWO spurious ring recreates (false, then true again a poll later).
+/// Reads a virtual-display target's committed advanced-color state through CCD.
+///
+/// The IDD-push ring format and encoder HDR mode follow this state rather than
+/// the handshake's requested depth. `None` means the query failed or the target
+/// left the active-path list; callers retain their last sample across transient
+/// topology reprobes.
 pub fn advanced_color_enabled(key: CcdTargetKey) -> Option<bool> {
     let (paths, _modes) = query_display_config(QDC_ONLY_ACTIVE_PATHS).ok()?;
     for p in &paths {

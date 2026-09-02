@@ -11,6 +11,7 @@
 //! [`ScaleMap`] stores scale under the same [`identity_key`].
 
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
@@ -18,6 +19,123 @@ use serde::{Deserialize, Serialize};
 
 /// IddCx `ConnectorIndex` is `< MaxMonitorsSupported` (16). Shared map: `1..=15`.
 const MAX_ID: u32 = 15;
+const RESERVED_CONSOLE_MAX_ID: u32 = 11;
+const FIRST_SEAT_ID: u32 = 12;
+const SEAT_SLOT_ENV: &str = "PUNKTFUNK_SEAT_DISPLAY_SLOT";
+const SEATS_REGISTRY_KEY: &str = r"HKLM\SOFTWARE\Punktfunk\Seats";
+
+/// Process role derived from the trusted seats reservation and the optional
+/// fixed connector assignment. The console role retains slot 0 for clients
+/// without an identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WindowsSlotPlan {
+    Unreserved,
+    ReservedConsole,
+    Seat(u32),
+}
+
+impl WindowsSlotPlan {
+    pub(crate) const fn ordinary_max(self) -> Option<u32> {
+        match self {
+            Self::Unreserved => Some(MAX_ID),
+            Self::ReservedConsole => Some(RESERVED_CONSOLE_MAX_ID),
+            Self::Seat(_) => None,
+        }
+    }
+
+    pub(crate) const fn allows_clear_all(self) -> bool {
+        matches!(self, Self::Unreserved)
+    }
+
+    pub(crate) const fn seat_slot(self) -> Option<u32> {
+        match self {
+            Self::Seat(slot) => Some(slot),
+            Self::Unreserved | Self::ReservedConsole => None,
+        }
+    }
+
+    /// Applies the role to a normal host's resolved slot. Seat assignment
+    /// replaces that slot; console roles validate their allowed connector set.
+    pub(crate) fn resolve(self, ordinary_slot: u32) -> Result<u32, WindowsSlotError> {
+        let Some(max) = self.ordinary_max() else {
+            return Ok(self.seat_slot().expect("seat plan has a slot"));
+        };
+        if ordinary_slot <= max {
+            Ok(ordinary_slot)
+        } else {
+            Err(WindowsSlotError::OrdinaryOutOfRange {
+                slot: ordinary_slot,
+                max,
+            })
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WindowsSlotError {
+    MalformedOverride,
+    OverrideOutOfRange(u32),
+    ReservationMissing,
+    OrdinaryOutOfRange { slot: u32, max: u32 },
+}
+
+impl std::fmt::Display for WindowsSlotError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MalformedOverride => write!(
+                f,
+                "{SEAT_SLOT_ENV} must be a decimal connector slot in {FIRST_SEAT_ID}..={MAX_ID}"
+            ),
+            Self::OverrideOutOfRange(slot) => write!(
+                f,
+                "{SEAT_SLOT_ENV}={slot} is outside the reserved connector slots {FIRST_SEAT_ID}..={MAX_ID}"
+            ),
+            Self::ReservationMissing => write!(
+                f,
+                "{SEAT_SLOT_ENV} requires the seats add-on reservation marker at {SEATS_REGISTRY_KEY}"
+            ),
+            Self::OrdinaryOutOfRange { slot, max } => write!(
+                f,
+                "ordinary pf-vdisplay connector slot {slot} is outside the active 0..={max} range"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for WindowsSlotError {}
+
+/// Recognizes the seat-session diagnostic marker, not the slot reservation.
+pub(crate) fn is_seat_session_marker(value: Option<&OsStr>) -> bool {
+    value.and_then(OsStr::to_str) == Some("1")
+}
+
+/// Resolves the process role without reading environment or registry state.
+/// A seat override is valid only inside the reserved range and while the
+/// machine-level reservation is active.
+pub(crate) fn windows_slot_plan(
+    seat_override: Option<&OsStr>,
+    reservation_enabled: bool,
+) -> Result<WindowsSlotPlan, WindowsSlotError> {
+    let Some(raw) = seat_override else {
+        return Ok(if reservation_enabled {
+            WindowsSlotPlan::ReservedConsole
+        } else {
+            WindowsSlotPlan::Unreserved
+        });
+    };
+    let slot = raw
+        .to_str()
+        .ok_or(WindowsSlotError::MalformedOverride)?
+        .parse::<u32>()
+        .map_err(|_| WindowsSlotError::MalformedOverride)?;
+    if !(FIRST_SEAT_ID..=MAX_ID).contains(&slot) {
+        return Err(WindowsSlotError::OverrideOutOfRange(slot));
+    }
+    if !reservation_enabled {
+        return Err(WindowsSlotError::ReservationMissing);
+    }
+    Ok(WindowsSlotPlan::Seat(slot))
+}
 
 const FILE: &str = "display-identity.json";
 const LEGACY_FILE: &str = "pf-vdisplay-identity.json";
@@ -97,36 +215,45 @@ impl DisplayIdentityMap {
         Self { path, store }
     }
 
-    /// Remembered id for `key`, or the lowest free / LRU-idle id. Bumps MRU and persists.
-    ///
-    /// `live` ids currently drive a real display. Never evict those: the Windows
-    /// slot map JOIN-attaches a newcomer to whatever monitor that slot already holds.
-    /// If every candidate is live, return `None` (caller falls back to auto slot 0).
-    pub(crate) fn resolve(&mut self, key: &str, live: &BTreeSet<u32>) -> Option<u32> {
+    /// Returns the remembered id, or the lowest free / LRU-idle id in
+    /// `1..=max_id`. Live ids are never evicted because the Windows slot map
+    /// joins a newcomer to the monitor already there. A remembered id above
+    /// the active bound migrates on its next resolution.
+    pub(crate) fn resolve_bounded(
+        &mut self,
+        key: &str,
+        live: &BTreeSet<u32>,
+        max_id: u32,
+    ) -> Option<u32> {
+        debug_assert!((1..=MAX_ID).contains(&max_id));
         self.store.tick = self.store.tick.wrapping_add(1);
         let now = self.store.tick;
 
-        if let Some(e) = self.store.entries.iter_mut().find(|e| e.key == key) {
+        if let Some(e) = self
+            .store
+            .entries
+            .iter_mut()
+            .find(|e| e.key == key && e.id <= max_id)
+        {
             e.seen = now;
             let id = e.id;
             self.persist();
             return Some(id);
         }
 
-        let id = match (1..=MAX_ID).find(|i| !self.store.entries.iter().any(|e| e.id == *i)) {
+        let id = match (1..=max_id).find(|i| !self.store.entries.iter().any(|e| e.id == *i)) {
             Some(free) => free,
             None => {
                 let lru = self
                     .store
                     .entries
                     .iter()
-                    .enumerate()
-                    .filter(|(_, e)| !live.contains(&e.id))
-                    .min_by_key(|(_, e)| e.seen)
-                    .map(|(i, _)| i);
+                    .filter(|e| e.id <= max_id && !live.contains(&e.id))
+                    .min_by_key(|e| e.seen)
+                    .map(|e| e.id);
                 let Some(lru) = lru else {
                     tracing::warn!(
-                        cap = MAX_ID,
+                        cap = max_id,
                         live = live.len(),
                         "display identity map is full and every id is driving a live display — \
                          this client gets the shared/auto display identity (no persisted per-client \
@@ -134,9 +261,10 @@ impl DisplayIdentityMap {
                     );
                     return None;
                 };
-                self.store.entries.remove(lru).id
+                lru
             }
         };
+        self.store.entries.retain(|e| e.key != key && e.id != id);
         self.store.entries.push(Entry {
             key: key.to_string(),
             id,
@@ -144,6 +272,11 @@ impl DisplayIdentityMap {
         });
         self.persist();
         Some(id)
+    }
+
+    /// Resolves against the full identity range used outside a seats reservation.
+    pub(crate) fn resolve(&mut self, key: &str, live: &BTreeSet<u32>) -> Option<u32> {
+        self.resolve_bounded(key, live, MAX_ID)
     }
 
     /// Temp-file + rename. Best-effort. Parent is `config_dir()` (host key, allow-list,
@@ -162,20 +295,21 @@ impl DisplayIdentityMap {
     }
 }
 
-/// Process-wide map, loaded once. One host process per platform, so one
-/// instance cannot clobber `display-identity.json` from a second backend.
+/// Process-wide map, loaded once. Seat processes bypass it; the one console
+/// owner is the only process that writes `display-identity.json`.
 pub(crate) fn global() -> &'static Mutex<DisplayIdentityMap> {
     static MAP: OnceLock<Mutex<DisplayIdentityMap>> = OnceLock::new();
     MAP.get_or_init(|| Mutex::new(DisplayIdentityMap::load()))
 }
 
-/// Slot for this client under the identity policy, or `default` if none is set
-/// (PerClient on Windows, Shared on Linux). `None` is shared/anonymous, or the
-/// map refused because every id is live — backend uses its base name / auto slot.
-pub(crate) fn resolve_slot(
+/// Resolves a client under the configured identity policy. `None` means
+/// shared/anonymous, or that every candidate id is live. `max_id` bounds the
+/// identity map so a Windows console host cannot enter reserved seat slots.
+pub(crate) fn resolve_slot_bounded(
     fp: Option<[u8; 32]>,
     mode: (u32, u32),
     default: crate::policy::Identity,
+    max_id: u32,
 ) -> Option<u32> {
     use crate::policy::Identity;
     let id_policy = crate::policy::prefs()
@@ -191,10 +325,20 @@ pub(crate) fn resolve_slot(
     // Sample live ids before the map lock. Their sources take the manager/pool
     // lock, and this map is reached from backend `create`. Map lock stays a leaf.
     let live = live_slot_ids();
-    global()
-        .lock()
-        .unwrap()
-        .resolve(&identity_key(fp, mode, per_client_mode), &live)
+    global().lock().unwrap().resolve_bounded(
+        &identity_key(fp, mode, per_client_mode),
+        &live,
+        max_id,
+    )
+}
+
+/// Resolves against the full identity range used by non-Windows backends.
+pub(crate) fn resolve_slot(
+    fp: Option<[u8; 32]>,
+    mode: (u32, u32),
+    default: crate::policy::Identity,
+) -> Option<u32> {
+    resolve_slot_bounded(fp, mode, default, MAX_ID)
 }
 
 /// Ids driving a real display, including KEPT (lingering) ones: the reconnect
@@ -317,6 +461,124 @@ mod tests {
 
     fn nothing_live() -> BTreeSet<u32> {
         BTreeSet::new()
+    }
+
+    #[test]
+    fn seat_session_marker_is_diagnostic_and_exact() {
+        assert!(is_seat_session_marker(Some(OsStr::new("1"))));
+        for value in [None, Some(OsStr::new("0")), Some(OsStr::new("true"))] {
+            assert!(!is_seat_session_marker(value));
+        }
+    }
+
+    #[test]
+    fn windows_normal_roles_keep_anonymous_at_zero() {
+        let unreserved = windows_slot_plan(None, false).unwrap();
+        assert_eq!(unreserved, WindowsSlotPlan::Unreserved);
+        assert_eq!(unreserved.ordinary_max(), Some(15));
+        assert_eq!(unreserved.resolve(0), Ok(0));
+        assert_eq!(unreserved.resolve(15), Ok(15));
+
+        let reserved = windows_slot_plan(None, true).unwrap();
+        assert_eq!(reserved, WindowsSlotPlan::ReservedConsole);
+        assert_eq!(reserved.ordinary_max(), Some(11));
+        assert_eq!(reserved.resolve(0), Ok(0));
+        assert_eq!(reserved.resolve(11), Ok(11));
+        assert!(matches!(
+            reserved.resolve(12),
+            Err(WindowsSlotError::OrdinaryOutOfRange { slot: 12, max: 11 })
+        ));
+    }
+
+    #[test]
+    fn windows_seat_override_accepts_only_reserved_slots() {
+        for slot in 12..=15 {
+            let raw = slot.to_string();
+            let plan = windows_slot_plan(Some(OsStr::new(&raw)), true).unwrap();
+            assert_eq!(plan, WindowsSlotPlan::Seat(slot));
+            assert_eq!(plan.resolve(0), Ok(slot));
+            assert_eq!(plan.resolve(7), Ok(slot));
+        }
+        for slot in [0, 1, 11, 16, u32::MAX] {
+            let raw = slot.to_string();
+            assert_eq!(
+                windows_slot_plan(Some(OsStr::new(&raw)), true),
+                Err(WindowsSlotError::OverrideOutOfRange(slot))
+            );
+        }
+    }
+
+    #[test]
+    fn windows_seat_override_fails_closed_without_reservation() {
+        assert_eq!(
+            windows_slot_plan(Some(OsStr::new("12")), false),
+            Err(WindowsSlotError::ReservationMissing)
+        );
+        for raw in ["", "seat-12", " 12", "12 ", "-12", "4294967296"] {
+            assert_eq!(
+                windows_slot_plan(Some(OsStr::new(raw)), true),
+                Err(WindowsSlotError::MalformedOverride),
+                "{raw:?}"
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            assert_eq!(
+                windows_slot_plan(Some(OsStr::from_bytes(b"\xff")), true),
+                Err(WindowsSlotError::MalformedOverride)
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_identity_map_never_allocates_reserved_seat_slots() {
+        let mut m = temp_map("seat-bound");
+        for n in 1..=24u8 {
+            let id = m
+                .resolve_bounded(
+                    &identity_key(fp(n), (1920, 1080), false),
+                    &nothing_live(),
+                    RESERVED_CONSOLE_MAX_ID,
+                )
+                .unwrap();
+            assert!((1..=RESERVED_CONSOLE_MAX_ID).contains(&id), "fp {n}: {id}");
+        }
+        assert!(m
+            .store
+            .entries
+            .iter()
+            .all(|e| e.id <= RESERVED_CONSOLE_MAX_ID));
+        let all_console_slots_live: BTreeSet<u32> = (1..=RESERVED_CONSOLE_MAX_ID).collect();
+        assert_eq!(
+            m.resolve_bounded(
+                &identity_key(fp(25), (1920, 1080), false),
+                &all_console_slots_live,
+                RESERVED_CONSOLE_MAX_ID,
+            ),
+            None,
+            "a full console range must not spill into a reserved seat slot"
+        );
+        let _ = std::fs::remove_file(&m.path);
+    }
+
+    #[test]
+    fn bounded_identity_map_migrates_a_remembered_reserved_id() {
+        let mut m = temp_map("seat-migrate");
+        let mut key = String::new();
+        for n in 1..=12u8 {
+            key = identity_key(fp(n), (1920, 1080), false);
+            assert_eq!(m.resolve(&key, &nothing_live()), Some(u32::from(n)));
+        }
+        let migrated = m
+            .resolve_bounded(&key, &nothing_live(), RESERVED_CONSOLE_MAX_ID)
+            .unwrap();
+        assert!((1..=RESERVED_CONSOLE_MAX_ID).contains(&migrated));
+        assert_eq!(
+            m.store.entries.iter().find(|e| e.key == key).unwrap().id,
+            migrated
+        );
+        let _ = std::fs::remove_file(&m.path);
     }
 
     #[test]

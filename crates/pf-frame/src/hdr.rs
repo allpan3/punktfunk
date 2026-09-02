@@ -7,8 +7,8 @@
 //! - mastering luminance in 0.0001 cd/m²,
 //! - MaxCLL/MaxFALL in cd/m² (nits).
 //!
-//! SEI builders are consumed by the Windows NVENC path; display conversion by
-//! the Windows DXGI/WGC capturers.
+//! SEI builders feed the hardware encoders; display-unit conversion feeds the
+//! virtual display's HDR metadata.
 
 use punktfunk_core::quic::HdrMeta;
 
