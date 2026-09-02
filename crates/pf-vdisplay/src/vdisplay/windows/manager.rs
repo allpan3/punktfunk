@@ -519,12 +519,24 @@ pub(crate) fn invalidate_cached_device(why: &str) {
 /// (sole topology mutator). The OS reverts a path to software-cursor only on a
 /// mode commit; a same-config CCD apply is no commit, so after one the secure
 /// desktop still never presents. `false` before the first backend open.
+///
+/// The caller has only a target id; the adapter LUID that completes the CCD key
+/// comes from the live monitor, since a bare target id aliases across adapters.
 pub fn force_recommit(target_id: u32) -> bool {
     let Some(m) = VDM.get() else {
         return false;
     };
-    let _guard = m.state.lock().unwrap();
-    let Some(gdi) = pf_win_display::win_display::resolve_gdi_name(target_id) else {
+    let inner = m.state.lock().unwrap();
+    let Some(key) = inner
+        .slots
+        .values()
+        .map(SlotState::mon)
+        .find(|mon| mon.target_id == target_id)
+        .map(Monitor::ccd_key)
+    else {
+        return false;
+    };
+    let Some(gdi) = pf_win_display::win_display::resolve_gdi_name(key) else {
         return false;
     };
     pf_win_display::win_display::force_mode_reset(&gdi)
@@ -2312,10 +2324,10 @@ mod tests {
     fn an_alternating_fight_reaches_the_breaker_through_the_window() {
         let t0 = Instant::now();
         let mut recent = std::collections::VecDeque::new();
-        let mut consecutive = 0u32;
+        // A clean cycle between every round holds the consecutive count at 1 throughout.
+        let consecutive = 1u32;
         let mut rounds = 0;
         for i in 0..REASSERT_BREAKER_ROUNDS {
-            consecutive = 1; // a clean cycle in between reset it
             let now = t0 + Duration::from_secs(4 * u64::from(i));
             recent.push_back(now);
             rounds = consecutive.max(rounds_in_window(&mut recent, now, REASSERT_WINDOW));
