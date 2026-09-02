@@ -2343,7 +2343,7 @@ impl Capturer for IddPushCapturer {
         }
     }
 
-    fn hdr_meta(&self) -> Option<punktfunk_core::quic::HdrMeta> {
+    fn hdr_meta(&self) -> Option<pf_frame::HdrMeta> {
         // BT.2020 PQ while HDR. Driver does not forward IDDCX_HDR10_METADATA;
         // send the same generic HDR10 baseline as the native 0xCE path.
         self.display_hdr.then(pf_frame::hdr::generic_hdr10)

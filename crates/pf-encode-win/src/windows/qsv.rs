@@ -20,6 +20,7 @@ use pf_frame::{CapturedFrame, FramePayload, PixelFormat};
 use std::collections::VecDeque;
 use std::ptr;
 use windows::core::Interface;
+use windows::Win32::Foundation::LUID;
 use windows::Win32::Graphics::Direct3D11::ID3D11Device;
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11DeviceContext, ID3D11Multithread, ID3D11Resource, ID3D11Texture2D, D3D11_TEXTURE2D_DESC,
@@ -299,7 +300,7 @@ struct EncodeConfig {
     ten_bit: bool,
     /// CO2 intra-refresh wave instead of LTR (mutually exclusive).
     intra_refresh: bool,
-    hdr_meta: Option<punktfunk_core::quic::HdrMeta>,
+    hdr_meta: Option<pf_frame::HdrMeta>,
 }
 
 fn codec_id(codec: Codec) -> u32 {
@@ -601,9 +602,9 @@ pub struct QsvEncoder {
     bound_device: isize,
     frame_idx: i64,
     force_kf: bool,
-    hdr_meta: Option<punktfunk_core::quic::HdrMeta>,
+    hdr_meta: Option<pf_frame::HdrMeta>,
     /// HDR metadata baked at Init. A post-Init change re-Inits so in-band SEI/OBU refreshes.
-    hdr_applied: Option<punktfunk_core::quic::HdrMeta>,
+    hdr_applied: Option<pf_frame::HdrMeta>,
     /// Driver accepted intra-refresh — gates [`EncoderCaps::intra_refresh`].
     ir_active: bool,
     /// `mfxExtRefListCtrl` passed the per-codec Query gate — gates [`EncoderCaps::supports_rfi`].
@@ -640,12 +641,15 @@ impl QsvEncoder {
         bitrate_bps: u64,
         bit_depth: u8,
         chroma: ChromaFormat,
+        // Selected render adapter (`None` = first Intel VPL implementation); the AV1 probe
+        // queries it. The session itself binds to the capture device's adapter at bring-up.
+        adapter_luid: Option<LUID>,
     ) -> Result<Self> {
         if codec == Codec::PyroWave {
             bail!("PyroWave never opens the QSV backend");
         }
         // AV1 is DG2/Arc + MTL+ — probe here so an older box fails at open, not at lazy Init.
-        if codec == Codec::Av1 && !probe_can_encode(Codec::Av1) {
+        if codec == Codec::Av1 && !probe_can_encode(Codec::Av1, adapter_luid) {
             bail!("this GPU/driver declined AV1 encode (DG2/Arc or MTL+ required) — QSV probe");
         }
         // Depth follows delivered pixels, not negotiated depth ([`crate::ten_bit_input`]).
@@ -1208,7 +1212,7 @@ impl Encoder for QsvEncoder {
         self.force_kf = true;
     }
 
-    fn set_hdr_meta(&mut self, meta: Option<punktfunk_core::quic::HdrMeta>) {
+    fn set_hdr_meta(&mut self, meta: Option<pf_frame::HdrMeta>) {
         self.hdr_meta = meta;
     }
 
@@ -1514,23 +1518,23 @@ impl Encoder for QsvEncoder {
 }
 
 /// Can the selected Intel GPU encode `codec`? Query on a tiny block; no device handle.
-pub fn probe_can_encode(codec: Codec) -> bool {
-    probe_query(codec, false)
+pub fn probe_can_encode(codec: Codec, adapter_luid: Option<LUID>) -> bool {
+    probe_query(codec, false, adapter_luid)
 }
 
 /// 10-bit encode (HEVC Main10 / AV1, P010). H.264 is always false — High10 is never negotiated.
-pub fn probe_can_encode_10bit(codec: Codec) -> bool {
+pub fn probe_can_encode_10bit(codec: Codec, adapter_luid: Option<LUID>) -> bool {
     if !codec.supports_10bit() {
         return false;
     }
-    probe_query(codec, true)
+    probe_query(codec, true, adapter_luid)
 }
 
-fn probe_query(codec: Codec, ten_bit: bool) -> bool {
+fn probe_query(codec: Codec, ten_bit: bool, adapter_luid: Option<LUID>) -> bool {
     if codec == Codec::PyroWave {
         return false;
     }
-    let selected = pf_gpu::resolve_render_adapter_luid().map(|l| {
+    let selected = adapter_luid.map(|l| {
         let mut b = [0u8; 8];
         b[..4].copy_from_slice(&l.LowPart.to_le_bytes());
         b[4..].copy_from_slice(&l.HighPart.to_le_bytes());
@@ -1583,8 +1587,8 @@ mod tests {
     #[test]
     fn probe_smoke() {
         for codec in [Codec::H264, Codec::H265, Codec::Av1] {
-            let can = probe_can_encode(codec);
-            let can10 = probe_can_encode_10bit(codec);
+            let can = probe_can_encode(codec, None);
+            let can10 = probe_can_encode_10bit(codec, None);
             tracing::debug!(?codec, can, can10, "QSV probe");
             if can10 {
                 assert!(can, "10-bit implies base codec support");
@@ -1606,8 +1610,8 @@ mod tests {
         len: usize,
     }
 
-    fn test_hdr_meta() -> punktfunk_core::quic::HdrMeta {
-        punktfunk_core::quic::HdrMeta {
+    fn test_hdr_meta() -> pf_frame::HdrMeta {
+        pf_frame::HdrMeta {
             display_primaries: [[13250, 34500], [7500, 3000], [34000, 16000]], // G,B,R
             white_point: [15635, 16450],
             max_display_mastering_luminance: 10_000_000, // 1000 nits @ 0.0001 cd/m²
@@ -1643,11 +1647,11 @@ mod tests {
             eprintln!("skipping: no Intel VPL implementation on this box");
             return None;
         };
-        if !probe_can_encode(codec) {
+        if !probe_can_encode(codec, None) {
             eprintln!("skipping: this GPU declines {codec:?} encode");
             return None;
         }
-        if ten_bit && !probe_can_encode_10bit(codec) {
+        if ten_bit && !probe_can_encode_10bit(codec, None) {
             eprintln!("skipping: this GPU declines 10-bit {codec:?}");
             return None;
         }
@@ -1714,6 +1718,7 @@ mod tests {
             2_000_000,
             if ten_bit { 10 } else { 8 },
             ChromaFormat::Yuv420,
+            None,
         )
         .expect("open");
         if ten_bit {
@@ -1915,7 +1920,7 @@ mod tests {
             eprintln!("skipping: no Intel VPL implementation on this box");
             return;
         };
-        if !probe_can_encode_10bit(Codec::H265) {
+        if !probe_can_encode_10bit(Codec::H265, None) {
             eprintln!("skipping: this GPU declines 10-bit HEVC");
             return;
         }
@@ -1996,6 +2001,7 @@ mod tests {
             10_000_000,
             10,
             ChromaFormat::Yuv420,
+            None,
         )
         .expect("open");
         enc.set_hdr_meta(Some(test_hdr_meta()));
@@ -2036,78 +2042,6 @@ mod tests {
         println!(
             "wrote {} AUs ({} bytes, {keyframes} keyframes) to {}",
             aus,
-            stream.len(),
-            path.display()
-        );
-    }
-
-    /// Same 1080p ingest path through the real `HdrP010Converter` (RTV-written P010).
-    /// Dumps `%TEMP%\pf_qsv_conv_1080_bars.h265`.
-    #[test]
-    fn qsv_live_hdr_converter_e2e_1080_dump() {
-        const W: u32 = 1920;
-        const H: u32 = 1080;
-
-        init_tracing();
-        let Ok((_l, impls)) = intel_loader() else {
-            eprintln!("skipping: no VPL loader");
-            return;
-        };
-        let Some(imp) = impls.iter().find(|i| i.luid_valid) else {
-            eprintln!("skipping: no Intel VPL implementation on this box");
-            return;
-        };
-        if !probe_can_encode_10bit(Codec::H265) {
-            eprintln!("skipping: this GPU declines 10-bit HEVC");
-            return;
-        }
-        let (device, tex) = pf_capture::dxgi::hdr_p010_convert_bars_on_luid(imp.luid, W, H)
-            .expect("converter bars");
-
-        let mut enc = QsvEncoder::open(
-            Codec::H265,
-            PixelFormat::P010,
-            W,
-            H,
-            30,
-            10_000_000,
-            10,
-            ChromaFormat::Yuv420,
-        )
-        .expect("open");
-        enc.set_hdr_meta(Some(test_hdr_meta()));
-        let mut stream = Vec::new();
-        let mut aus = 0usize;
-        for i in 0..12u32 {
-            let frame = CapturedFrame {
-                provenance: Default::default(),
-                width: W,
-                height: H,
-                pts_ns: i as u64 * 33_333_333,
-                format: PixelFormat::P010,
-                payload: FramePayload::D3d11(pf_frame::dxgi::D3d11Frame {
-                    texture: tex.clone(),
-                    device: device.clone(),
-                    pyro: None,
-                }),
-                cursor: None,
-            };
-            enc.submit_indexed(&frame, i).expect("submit");
-            if let Some(au) = enc.poll().expect("poll") {
-                aus += 1;
-                stream.extend_from_slice(&au.data);
-            }
-        }
-        enc.flush().expect("flush");
-        while let Some(au) = enc.poll().expect("drain") {
-            aus += 1;
-            stream.extend_from_slice(&au.data);
-        }
-        assert!(aus >= 10, "expected ≥10 AUs, got {aus}");
-        let path = std::env::temp_dir().join("pf_qsv_conv_1080_bars.h265");
-        std::fs::write(&path, &stream).expect("write dump");
-        println!(
-            "wrote {aus} AUs ({} bytes) to {}",
             stream.len(),
             path.display()
         );

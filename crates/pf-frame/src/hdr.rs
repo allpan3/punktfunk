@@ -10,7 +10,28 @@
 //! SEI builders are consumed by the Windows NVENC path; display conversion by
 //! the Windows DXGI/WGC capturers.
 
-use punktfunk_core::quic::HdrMeta;
+/// SMPTE ST.2086 mastering volume + CEA-861.3 content light level, in HDR10
+/// SEI fixed-point units. Field-for-field the wire `punktfunk_core::quic::HdrMeta`;
+/// this copy keeps the encoders free of the QUIC crate. `pf_encode` converts.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HdrMeta {
+    /// Primaries G, B, R as (x, y) in 1/50000 units (ST.2086 order is G, B, R).
+    pub display_primaries: [[u16; 2]; 3],
+    /// White point (x, y) in 1/50000 units.
+    pub white_point: [u16; 2],
+    /// Max display mastering luminance, 0.0001 cd/m².
+    pub max_display_mastering_luminance: u32,
+    /// Min display mastering luminance, 0.0001 cd/m².
+    pub min_display_mastering_luminance: u32,
+    /// MaxCLL, nits. `0` = unknown.
+    pub max_cll: u16,
+    /// MaxFALL, nits. `0` = unknown.
+    pub max_fall: u16,
+}
+
+// 12 + 4 + 4 + 4 + 2 + 2: the same 28 bytes the 0xCE datagram body carries.
+const _: () = assert!(std::mem::size_of::<HdrMeta>() == 28);
 
 /// HEVC/H.264 SEI payload type `mastering_display_colour_volume` (ST.2086). Same
 /// code point in AVC and HEVC.

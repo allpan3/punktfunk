@@ -767,9 +767,9 @@ async fn host_info_reports_identity_and_ports() {
     assert_eq!(body["os_name"], "SteamOS");
     assert_eq!(body["ports"]["http"], HTTP_PORT);
     assert_eq!(body["ports"]["mgmt"], DEFAULT_PORT);
-    // Assert against `Codec::host_wire_caps`, not a fixed set. HEVC serializes as "hevc", never "h265".
+    // Assert against `host_wire_caps`, not a fixed set. HEVC serializes as "hevc", never "h265".
     use punktfunk_core::quic::{CODEC_AV1, CODEC_H264, CODEC_HEVC, CODEC_PYROWAVE};
-    let caps = Codec::host_wire_caps();
+    let caps = crate::encode::host_wire_caps();
     let expected: Vec<&str> = [
         (CODEC_H264, "h264"),
         (CODEC_HEVC, "hevc"),

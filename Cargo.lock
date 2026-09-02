@@ -3025,7 +3025,6 @@ dependencies = [
  "pf-win-display",
  "pf-zerocopy",
  "pipewire",
- "punktfunk-core",
  "tokio",
  "tracing",
  "windows 0.62.2 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3131,10 +3130,10 @@ dependencies = [
  "ffmpeg-next",
  "libc",
  "libloading 0.9.0",
- "libvpl-sys",
  "nvidia-video-codec-sdk",
  "openh264",
  "pf-capture",
+ "pf-encode-win",
  "pf-frame",
  "pf-gpu",
  "pf-host-config",
@@ -3149,13 +3148,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "pf-encode-win"
+version = "0.34.0"
+dependencies = [
+ "anyhow",
+ "libvpl-sys",
+ "nvidia-video-codec-sdk",
+ "pf-frame",
+ "pyrowave-sys",
+ "tracing",
+ "tracing-subscriber",
+ "windows 0.62.2 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
 name = "pf-frame"
 version = "0.34.0"
 dependencies = [
  "anyhow",
  "libc",
  "pf-zerocopy",
- "punktfunk-core",
  "tracing",
  "windows 0.62.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "zbus",

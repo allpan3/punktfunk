@@ -180,7 +180,7 @@ pub trait Capturer: Send {
     /// read it (Windows `IDXGIOutput6::GetDesc1`), or a generic HDR10 block once
     /// an HDR stream is negotiated (Linux exposes no real mastering volume).
     /// Forwarded to the encoder (SEI) and the client (`0xCE`). May change if regraded.
-    fn hdr_meta(&self) -> Option<punktfunk_core::quic::HdrMeta> {
+    fn hdr_meta(&self) -> Option<pf_frame::HdrMeta> {
         None
     }
 

@@ -22,7 +22,7 @@ use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::ptr;
 use windows::core::{w, Interface, PCWSTR};
-use windows::Win32::Foundation::HMODULE;
+use windows::Win32::Foundation::{HMODULE, LUID};
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D, D3D11_BIND_RENDER_TARGET,
     D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
@@ -581,7 +581,7 @@ struct Inner {
     /// AUs `submit` already drained for back-pressure, older than anything in `pending`.
     ready: VecDeque<EncodedFrame>,
     /// Last `*InHDRMetadata` pushed to this component — re-push on change or rebuild.
-    hdr_pushed: Option<punktfunk_core::quic::HdrMeta>,
+    hdr_pushed: Option<pf_frame::HdrMeta>,
     /// Gates the one-shot first-AU log. Absence after a context-created line is a VCN wedge.
     first_au_logged: bool,
 }
@@ -614,7 +614,7 @@ pub struct AmfEncoder {
     frame_idx: i64,
     force_kf: bool,
     /// Static HDR mastering metadata; pushed as `*InHDRMetadata` when it changes.
-    hdr_meta: Option<punktfunk_core::quic::HdrMeta>,
+    hdr_meta: Option<pf_frame::HdrMeta>,
     /// Driver accepted intra-refresh — gates [`EncoderCaps::intra_refresh`].
     ir_active: bool,
     /// Driver accepted LTR at open. Mutually exclusive with intra-refresh; LTR wins.
@@ -651,6 +651,8 @@ impl AmfEncoder {
         bitrate_bps: u64,
         bit_depth: u8,
         chroma: ChromaFormat,
+        // Selected render adapter (`None` = OS default); the AV1 probe opens on it.
+        adapter_luid: Option<LUID>,
     ) -> Result<Self> {
         let lib = try_factory().map_err(|e| anyhow!("native AMF unavailable: {e}"))?;
         tracing::debug!(
@@ -659,7 +661,7 @@ impl AmfEncoder {
         );
         let props = codec_props(codec);
         // AV1 is RDNA3+ — probe here so a pre-RDNA3 box fails at open, not at lazy Init.
-        if codec == Codec::Av1 && !probe_can_encode(Codec::Av1) {
+        if codec == Codec::Av1 && !probe_can_encode(Codec::Av1, adapter_luid) {
             bail!("this GPU/driver declined AV1 encode (RDNA3+ required) — native AMF probe");
         }
         // Depth follows delivered pixels, not negotiated depth ([`crate::ten_bit_input`]).
@@ -1073,7 +1075,7 @@ unsafe fn push_hdr_metadata(
     ctx: *mut sys::AmfContext,
     comp: *mut sys::AmfComponent,
     name: PCWSTR,
-    meta: &punktfunk_core::quic::HdrMeta,
+    meta: &pf_frame::HdrMeta,
 ) -> Result<()> {
     let mut buf: *mut sys::AmfBuffer = ptr::null_mut();
     amf_ok(
@@ -1115,8 +1117,8 @@ unsafe fn push_hdr_metadata(
 
 /// Can this GPU's AMF runtime `Init` a `codec` encoder on the selected render adapter?
 /// Tears down before return. `false` on any failure, including no runtime.
-pub fn probe_can_encode(codec: Codec) -> bool {
-    let Some(device) = selected_adapter_device() else {
+pub fn probe_can_encode(codec: Codec, adapter_luid: Option<LUID>) -> bool {
+    let Some(device) = selected_adapter_device(adapter_luid) else {
         return false;
     };
     probe_can_encode_on(&device, codec)
@@ -1129,11 +1131,11 @@ fn probe_can_encode_on(device: &ID3D11Device, codec: Codec) -> bool {
 
 /// Can this GPU `Init` `codec` at 10-bit (Main10 / `*ColorBitDepth` 10, P010)? H.264 is always
 /// false (High10 is not a VCN mode).
-pub fn probe_can_encode_10bit(codec: Codec) -> bool {
+pub fn probe_can_encode_10bit(codec: Codec, adapter_luid: Option<LUID>) -> bool {
     if !codec.supports_10bit() {
         return false;
     }
-    let Some(device) = selected_adapter_device() else {
+    let Some(device) = selected_adapter_device(adapter_luid) else {
         return false;
     };
     probe_open_on(&device, codec, true)
@@ -1208,7 +1210,7 @@ fn probe_open_on(device: &ID3D11Device, codec: Codec, ten_bit: bool) -> bool {
 }
 
 /// D3D11 device on the selected render adapter; OS default hardware adapter if unresolved.
-fn selected_adapter_device() -> Option<ID3D11Device> {
+fn selected_adapter_device(adapter_luid: Option<LUID>) -> Option<ID3D11Device> {
     use windows::Win32::Foundation::HMODULE;
     use windows::Win32::Graphics::Direct3D::{
         D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0,
@@ -1218,11 +1220,10 @@ fn selected_adapter_device() -> Option<ID3D11Device> {
     // SAFETY: probe owns every handle. Factory/adapter COM objects or err → default fallback.
     // `D3D11CreateDevice` fills `device` only on success. Everything drops with its COM wrapper.
     unsafe {
-        let adapter: Option<IDXGIAdapter1> =
-            pf_gpu::resolve_render_adapter_luid().and_then(|luid| {
-                let factory: IDXGIFactory4 = CreateDXGIFactory1().ok()?;
-                factory.EnumAdapterByLuid(luid).ok()
-            });
+        let adapter: Option<IDXGIAdapter1> = adapter_luid.and_then(|luid| {
+            let factory: IDXGIFactory4 = CreateDXGIFactory1().ok()?;
+            factory.EnumAdapterByLuid(luid).ok()
+        });
         let mut device: Option<ID3D11Device> = None;
         let created = match &adapter {
             Some(a) => D3D11CreateDevice(
@@ -1614,7 +1615,7 @@ impl Encoder for AmfEncoder {
         self.force_kf = true;
     }
 
-    fn set_hdr_meta(&mut self, meta: Option<punktfunk_core::quic::HdrMeta>) {
+    fn set_hdr_meta(&mut self, meta: Option<pf_frame::HdrMeta>) {
         self.hdr_meta = meta;
     }
 
@@ -1885,8 +1886,8 @@ mod tests {
     }
 
     /// HDR10 grade for live tests: BT.2020, 1000-nit, ST.2086 wire order (primaries G, B, R).
-    fn sample_hdr_meta() -> punktfunk_core::quic::HdrMeta {
-        punktfunk_core::quic::HdrMeta {
+    fn sample_hdr_meta() -> pf_frame::HdrMeta {
+        pf_frame::HdrMeta {
             display_primaries: [[8500, 39850], [6550, 2300], [35400, 14600]],
             white_point: [15635, 16450],
             max_display_mastering_luminance: 1000 * 10000,
@@ -1956,174 +1957,6 @@ mod tests {
         tex.expect("NV12 texture")
     }
 
-    /// `p`-quantile of `samples` (µs), sorting in place. `0` when empty. Gated like its only
-    /// caller so a `--features nvenc,qsv` build does not trip `dead_code`.
-    #[cfg(feature = "amf-qsv")]
-    fn percentile(samples: &mut [u128], p: f64) -> u128 {
-        if samples.is_empty() {
-            return 0;
-        }
-        samples.sort_unstable();
-        let idx = (((samples.len() - 1) as f64) * p).round() as usize;
-        samples[idx]
-    }
-
-    /// Pace at `1/fps` and return each frame's submit→AU wall-clock (µs), FIFO-paired. Unflushed
-    /// trailing frames are left unmeasured so every sample is a genuine paced submit→AU.
-    #[cfg(feature = "amf-qsv")]
-    #[allow(clippy::too_many_arguments)]
-    fn drive_and_measure(
-        enc: &mut dyn Encoder,
-        device: &ID3D11Device,
-        tex: &ID3D11Texture2D,
-        w: u32,
-        h: u32,
-        fps: u32,
-        fmt: PixelFormat,
-        frames: usize,
-    ) -> Vec<u128> {
-        use std::time::{Duration, Instant};
-        let interval = Duration::from_secs_f64(1.0 / fps as f64);
-        let mut pending: VecDeque<Instant> = VecDeque::new();
-        let mut samples: Vec<u128> = Vec::new();
-        let mut next = Instant::now();
-        for i in 0..frames {
-            if let Some(d) = next.checked_duration_since(Instant::now()) {
-                std::thread::sleep(d);
-            }
-            next += interval;
-            let frame = CapturedFrame {
-                provenance: Default::default(),
-                width: w,
-                height: h,
-                pts_ns: 1 + i as u64,
-                format: fmt,
-                payload: FramePayload::D3d11(pf_frame::dxgi::D3d11Frame {
-                    texture: tex.clone(),
-                    device: device.clone(),
-                    pyro: None,
-                }),
-                cursor: None,
-            };
-            let t = Instant::now();
-            enc.submit(&frame).expect("bench submit");
-            pending.push_back(t);
-            while let Some(_au) = enc.poll().expect("bench poll") {
-                let ts = pending.pop_front().expect("FIFO pairing");
-                samples.push(ts.elapsed().as_micros());
-            }
-        }
-        samples
-    }
-
-    /// Native vs libavcodec-AMF submit→AU A/B on the same paced NV12 input. Opt-in
-    /// (`PUNKTFUNK_AMF_BENCH=1`); gated on `amf-qsv`. Skips without the AMD runtime/GPU.
-    #[cfg(feature = "amf-qsv")]
-    #[test]
-    fn amf_latency_ab_bench() {
-        if std::env::var("PUNKTFUNK_AMF_BENCH").as_deref() != Ok("1") {
-            eprintln!(
-                "skipping: set PUNKTFUNK_AMF_BENCH=1 to run the native-vs-ffmpeg latency A/B"
-            );
-            return;
-        }
-        if let Err(e) = try_factory() {
-            eprintln!("skipping: AMF runtime unavailable ({e})");
-            return;
-        }
-        let Some(device) = amd_d3d11_device() else {
-            eprintln!("skipping: no AMD adapter on this box");
-            return;
-        };
-        let (w, h, fps) = (1920u32, 1080u32, 60u32);
-        let bitrate = 20_000_000u64;
-        let frames = 180usize;
-        let tex = nv12_texture(&device, w, h);
-
-        let mut native = AmfEncoder::open(
-            Codec::H265,
-            PixelFormat::Nv12,
-            w,
-            h,
-            fps,
-            bitrate,
-            8,
-            ChromaFormat::Yuv420,
-        )
-        .expect("native AMF open");
-        let mut native_us = drive_and_measure(
-            &mut native,
-            &device,
-            &tex,
-            w,
-            h,
-            fps,
-            PixelFormat::Nv12,
-            frames,
-        );
-        drop(native);
-
-        let mut ffmpeg = crate::ffmpeg_win::FfmpegWinEncoder::open(
-            crate::ffmpeg_win::WinVendor::Amf,
-            Codec::H265,
-            PixelFormat::Nv12,
-            w,
-            h,
-            fps,
-            bitrate,
-            8,
-            ChromaFormat::Yuv420,
-        )
-        .expect("libavcodec AMF open");
-        let mut ffmpeg_us = drive_and_measure(
-            &mut ffmpeg,
-            &device,
-            &tex,
-            w,
-            h,
-            fps,
-            PixelFormat::Nv12,
-            frames,
-        );
-        drop(ffmpeg);
-
-        let iv = 1_000_000u128 / fps as u128;
-        let (n50, n99, nc) = (
-            percentile(&mut native_us, 0.50),
-            percentile(&mut native_us, 0.99),
-            native_us.len(),
-        );
-        let (f50, f99, fc) = (
-            percentile(&mut ffmpeg_us, 0.50),
-            percentile(&mut ffmpeg_us, 0.99),
-            ffmpeg_us.len(),
-        );
-        eprintln!("=== native AMF vs libavcodec-AMF  encode_us A/B ===");
-        eprintln!("mode: {w}x{h}@{fps} HEVC, {frames} paced frames, frame period {iv} us");
-        eprintln!(
-            "native (direct SDK) : p50={n50} us  p99={n99} us  ({nc} AUs)  = {:.2} frame periods",
-            n50 as f64 / iv as f64
-        );
-        eprintln!(
-            "ffmpeg (libavcodec) : p50={f50} us  p99={f99} us  ({fc} AUs)  = {:.2} frame periods",
-            f50 as f64 / iv as f64
-        );
-        if n50 > 0 {
-            eprintln!(
-                "native p50 is {:.1}x lower than ffmpeg",
-                f50 as f64 / n50 as f64
-            );
-        }
-        assert!(
-            n50 < f50,
-            "native encode_us p50 ({n50}) must beat the libavcodec hold ({f50})"
-        );
-        assert!(
-            n50 < iv,
-            "native encode_us p50 ({n50} us) should collapse below one frame period ({iv} us)"
-        );
-    }
-
     /// Live [`Encoder`] smoke per codec: submit/poll, native `reset()`, second batch, flush-drain.
     /// Asserts Annex-B (or AV1 OBU), IDR at start and after reset, FIFO pts. Skips without AMD.
     #[test]
@@ -2154,6 +1987,7 @@ mod tests {
                 2_000_000,
                 8,
                 ChromaFormat::Yuv420,
+                None,
             ) {
                 Ok(e) => e,
                 Err(e) => {
@@ -2263,6 +2097,7 @@ mod tests {
             2_000_000,
             8,
             ChromaFormat::Yuv420,
+            None,
         )
         .expect("native AMF open");
         assert_eq!(
@@ -2363,6 +2198,7 @@ mod tests {
             4_000_000,
             10,
             ChromaFormat::Yuv420,
+            None,
         ) {
             Ok(e) => e,
             Err(e) => {
@@ -2504,6 +2340,7 @@ mod tests {
             2_000_000,
             8,
             ChromaFormat::Yuv420,
+            None,
         ) {
             Ok(e) => e,
             Err(e) => {

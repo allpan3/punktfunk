@@ -131,7 +131,7 @@ fn api() -> &'static EncodeApi {
 /// fields: codecs fail open, 4:4:4 and 10-bit fail closed.
 #[derive(Clone, Copy)]
 pub(crate) struct ProbedSupport {
-    /// Encode GUIDs this chip lists. All-`false` = unanswered; [`crate::CodecSupport::wire_mask`]
+    /// Encode GUIDs this chip lists. All-`false` = unanswered; [`crate::codec_support_wire_mask`]
     /// turns that into `None` so the caller keeps the static superset (fail open).
     pub codecs: crate::CodecSupport,
     /// HEVC 4:4:4 encode. `false` when unanswered (fail closed: a 4:2:0 session beats a dead
@@ -619,7 +619,7 @@ pub struct NvencCudaEncoder {
     yuv444_supported: bool,
     /// HDR (BT.2020 PQ). Follows packed 10-bit input, same as `bit_depth`.
     hdr: bool,
-    hdr_meta: Option<punktfunk_core::quic::HdrMeta>,
+    hdr_meta: Option<pf_frame::HdrMeta>,
     ring: Vec<RingSlot>,
     next: usize,
     /// Lifetime submit count (never reset, unlike `next`) — `PUNKTFUNK_PERF` sample cadence.
@@ -1998,7 +1998,7 @@ impl Encoder for NvencCudaEncoder {
         }
     }
 
-    fn set_hdr_meta(&mut self, meta: Option<punktfunk_core::quic::HdrMeta>) {
+    fn set_hdr_meta(&mut self, meta: Option<pf_frame::HdrMeta>) {
         self.hdr_meta = meta;
     }
 

@@ -557,11 +557,11 @@ impl Capturer for PortalCapturer {
     /// producer exposes mastering through the screencast (Mutter has none;
     /// gamescope's `VK_EXT_hdr_metadata` stops at the compositor). The native
     /// loop prefers the client's volume when sent (`Hello::display_hdr`).
-    fn hdr_meta(&self) -> Option<punktfunk_core::quic::HdrMeta> {
+    fn hdr_meta(&self) -> Option<pf_frame::HdrMeta> {
         if !self.signals.hdr_negotiated.load(Ordering::Relaxed) {
             return None;
         }
-        Some(punktfunk_core::quic::HdrMeta {
+        Some(pf_frame::HdrMeta {
             // ST.2086 order G, B, R; (x, y) chromaticity in 1/50000 units.
             display_primaries: [[8500, 39850], [6550, 2300], [35400, 14600]],
             white_point: [15635, 16450],                 // D65

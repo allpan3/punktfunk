@@ -1120,7 +1120,7 @@ pub(super) struct SessionContext {
     pub(super) launch: Option<String>,
     pub(super) launch_target: Option<crate::library::LaunchTarget>,
     /// Threaded into the EDID CTA HDR block before `create` so host apps tone-map to the client's panel.
-    pub(super) client_hdr: Option<punktfunk_core::quic::HdrMeta>,
+    pub(super) client_hdr: Option<pf_frame::HdrMeta>,
     pub(super) bringup: Arc<crate::bringup::Trace>,
     pub(super) resize_ms: Arc<AtomicU32>,
     #[cfg(target_os = "linux")]
@@ -1717,7 +1717,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
     const MAX_ENCODER_RESETS: u32 = 5;
     let mut encoder_resets: u32 = 0;
     let mut last_au_at = std::time::Instant::now();
-    let mut last_hdr_meta: Option<punktfunk_core::quic::HdrMeta> = None;
+    let mut last_hdr_meta: Option<pf_frame::HdrMeta> = None;
     let mut inflight: std::collections::VecDeque<(u64, u64, std::time::Instant)> =
         std::collections::VecDeque::new();
     // Diagnostic: distinguish NEW captured frames (the source produced a fresh frame) from REPEATS (the
@@ -2930,7 +2930,10 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                         if let Some(m) = last_hdr_meta {
                             if c.keyframe || resend_meta {
                                 let _ = conn.send_datagram(
-                                    punktfunk_core::quic::encode_hdr_meta_datagram(&m).into(),
+                                    punktfunk_core::quic::encode_hdr_meta_datagram(
+                                        &crate::encode::hdr_meta_to_wire(m),
+                                    )
+                                    .into(),
                                 );
                                 resend_meta = false;
                             }
@@ -3029,8 +3032,12 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
             }
             if let Some(m) = last_hdr_meta {
                 if au.keyframe || resend_meta {
-                    let _ = conn
-                        .send_datagram(punktfunk_core::quic::encode_hdr_meta_datagram(&m).into());
+                    let _ = conn.send_datagram(
+                        punktfunk_core::quic::encode_hdr_meta_datagram(
+                            &crate::encode::hdr_meta_to_wire(m),
+                        )
+                        .into(),
+                    );
                     resend_meta = false;
                 }
             }
@@ -3430,7 +3437,7 @@ pub(super) fn prepare_display(
     compositor: crate::vdisplay::Compositor,
     mode: punktfunk_core::Mode,
     client_identity: Option<[u8; 32]>,
-    client_hdr: Option<punktfunk_core::quic::HdrMeta>,
+    client_hdr: Option<pf_frame::HdrMeta>,
     cursor_forward: bool,
     multi_slice: bool,
     bitrate_kbps: u32,

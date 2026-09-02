@@ -14,7 +14,6 @@ description = "punktfunk host frame capture: Linux PipeWire portal + Windows IDD
 publish = false
 
 [dependencies]
-punktfunk-core = { path = "../punktfunk-core", features = ["quic"] }
 pf-frame = { path = "../pf-frame" }
 pf-zerocopy = { path = "../pf-zerocopy" }
 pf-win-display = { path = "../pf-win-display" }

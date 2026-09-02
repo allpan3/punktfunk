@@ -13,7 +13,6 @@ description = "punktfunk host shared frame/format vocabulary: CapturedFrame, Pix
 publish = false
 
 [dependencies]
-punktfunk-core = { path = "../punktfunk-core", features = ["quic"] }
 anyhow = "1"
 tracing = "0.1"
 

@@ -14,109 +14,166 @@
 use anyhow::Result;
 use pf_frame::{CapturedFrame, PixelFormat};
 
-#[path = "enc/codec.rs"]
-mod codec;
-pub use codec::*;
+// The Windows backends, the `Encoder` contract, and the pieces the Linux
+// backends share with them. One namespace: `pf_encode::*` is unchanged.
+pub use pf_encode_win::*;
 
-impl Codec {
-    /// `quic::CODEC_*` bits this host can emit on the native path, given the
-    /// resolved backend. Fed to [`punktfunk_core::quic::resolve_codec`].
-    ///
-    /// Software is H.264 only. Probed backends advertise what the GPU encodes
-    /// ([`vaapi_codec_support`] / [`windows_codec_support`]); NVENC falls back to
-    /// the GameStream superset when the probe cannot answer. An empty probe
-    /// means the GPU was unusable at probe time, not that it encodes nothing —
-    /// fall back to the superset so auto clients still land on HEVC.
-    pub fn host_wire_caps() -> u8 {
-        // PyroWave ORs onto the H.26x set; `resolve_codec` ignores the bit unless
-        // the client prefers it. Advertised whenever a Vulkan GPU could open;
-        // software/GPU-less keeps it off. Resolve the backend once — this path
-        // is polled, and the auto arm samples live GPU-preference state.
-        #[cfg(target_os = "linux")]
-        let backend = linux_resolved_backend();
-        #[cfg(all(target_os = "linux", feature = "pyrowave"))]
-        let pyro = if backend != LinuxBackend::Software {
-            punktfunk_core::quic::CODEC_PYROWAVE
-        } else {
-            0u8
-        };
-        // Own Vulkan device by render-GPU id; the H.26x backend is irrelevant.
-        // Software/GPU-less keeps the bit off. Interop is confirmed at encoder
-        // open (`pyrowave_device_confirm_interop_support`); a failed open
-        // renegotiates to HEVC.
-        #[cfg(all(target_os = "windows", feature = "pyrowave"))]
-        let pyro = if windows_resolved_backend() != WindowsBackend::Software {
-            punktfunk_core::quic::CODEC_PYROWAVE
-        } else {
-            0u8
-        };
-        #[cfg(not(all(any(target_os = "linux", target_os = "windows"), feature = "pyrowave")))]
-        let pyro = 0u8;
-        let base = (|| {
-            /// GameStream `SERVER_CODEC_MODE_SUPPORT` for an unprobed backend.
-            const GPU_SUPERSET: u8 = punktfunk_core::quic::CODEC_H264
-                | punktfunk_core::quic::CODEC_HEVC
-                | punktfunk_core::quic::CODEC_AV1;
-            #[cfg(target_os = "linux")]
-            {
-                if backend == LinuxBackend::Software {
-                    return punktfunk_core::quic::CODEC_H264;
-                }
-                // Forced-vulkan pref is a ceiling, never a replacement: the arm
-                // encodes HEVC/AV1 only (H.264 dies at open). A static HEVC|AV1
-                // would add AV1 on GPUs whose probe withholds it. No
-                // `vulkan-encode` feature → advertise nothing.
-                let pref_ceiling: u8 = match backend {
-                    // Resolver knows the pref is vulkan; only this cfg! knows
-                    // the build can open it. Else: advertise-then-die-at-open.
-                    LinuxBackend::Vulkan => {
-                        if cfg!(feature = "vulkan-encode") {
-                            punktfunk_core::quic::CODEC_HEVC | punktfunk_core::quic::CODEC_AV1
-                        } else {
-                            0
-                        }
-                    }
-                    _ => GPU_SUPERSET,
-                };
-                if linux_zero_copy_is_vaapi_for(backend) {
-                    if let Some(m) = vaapi_codec_support().wire_mask() {
-                        return m & pref_ceiling;
-                    }
-                }
-                // Driver GUID list, like the VAAPI arm. Fail-open: `None` leaves
-                // the historical superset, so this can only narrow.
-                #[cfg(feature = "nvenc")]
-                if backend == LinuxBackend::Nvenc {
-                    if let Some(m) = nvenc_codec_support().wire_mask() {
-                        return m & pref_ceiling;
-                    }
-                }
-                GPU_SUPERSET & pref_ceiling
-            }
-            #[cfg(target_os = "windows")]
-            {
-                if windows_resolved_backend() == WindowsBackend::Software {
-                    return punktfunk_core::quic::CODEC_H264;
-                }
-                if windows_backend_is_probed() {
-                    if let Some(m) = windows_codec_support().wire_mask() {
-                        return m;
-                    }
-                }
-                GPU_SUPERSET
-            }
-            // No GPU encode backend on this target — keep the unprobed advertisement.
-            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-            {
-                let _ = GPU_SUPERSET;
-                match pf_host_config::config().encoder_pref.as_str() {
-                    "software" | "sw" | "openh264" => punktfunk_core::quic::CODEC_H264,
-                    _ => punktfunk_core::quic::CODEC_HEVC,
-                }
-            }
-        })();
-        base | pyro
+/// `quic::CODEC_*` bit → [`Codec`]. Unknown / `0` maps to HEVC (pre-negotiation
+/// default). Inverse of [`codec_to_wire`].
+pub fn codec_from_wire(bit: u8) -> Codec {
+    match bit {
+        punktfunk_core::quic::CODEC_H264 => Codec::H264,
+        punktfunk_core::quic::CODEC_AV1 => Codec::Av1,
+        punktfunk_core::quic::CODEC_PYROWAVE => Codec::PyroWave,
+        _ => Codec::H265,
     }
+}
+
+pub fn codec_to_wire(codec: Codec) -> u8 {
+    match codec {
+        Codec::H264 => punktfunk_core::quic::CODEC_H264,
+        Codec::H265 => punktfunk_core::quic::CODEC_HEVC,
+        Codec::Av1 => punktfunk_core::quic::CODEC_AV1,
+        Codec::PyroWave => punktfunk_core::quic::CODEC_PYROWAVE,
+    }
+}
+
+/// HEVC `chroma_format_idc`: `1` (4:2:0) or `3` (4:4:4). Same numeric
+/// value as [`punktfunk_core::quic::Welcome::chroma_format`].
+pub fn chroma_idc(chroma: ChromaFormat) -> u8 {
+    match chroma {
+        ChromaFormat::Yuv420 => punktfunk_core::quic::CHROMA_IDC_420,
+        ChromaFormat::Yuv444 => punktfunk_core::quic::CHROMA_IDC_444,
+    }
+}
+
+/// Wire volume ([`punktfunk_core::quic::HdrMeta`]) → the encoders'
+/// [`pf_frame::HdrMeta`]. Same seven fields; both types are foreign here, so
+/// a field copy stands in for `From`.
+pub fn hdr_meta_from_wire(m: punktfunk_core::quic::HdrMeta) -> pf_frame::HdrMeta {
+    pf_frame::HdrMeta {
+        display_primaries: m.display_primaries,
+        white_point: m.white_point,
+        max_display_mastering_luminance: m.max_display_mastering_luminance,
+        min_display_mastering_luminance: m.min_display_mastering_luminance,
+        max_cll: m.max_cll,
+        max_fall: m.max_fall,
+    }
+}
+
+/// Inverse of [`hdr_meta_from_wire`], for the `0xCE` datagram.
+pub fn hdr_meta_to_wire(m: pf_frame::HdrMeta) -> punktfunk_core::quic::HdrMeta {
+    punktfunk_core::quic::HdrMeta {
+        display_primaries: m.display_primaries,
+        white_point: m.white_point,
+        max_display_mastering_luminance: m.max_display_mastering_luminance,
+        min_display_mastering_luminance: m.min_display_mastering_luminance,
+        max_cll: m.max_cll,
+        max_fall: m.max_fall,
+    }
+}
+
+/// `quic::CODEC_*` bits this host can emit on the native path, given the
+/// `quic::CODEC_*` bits this host can emit on the native path, given the
+/// resolved backend. Fed to [`punktfunk_core::quic::resolve_codec`].
+///
+/// Software is H.264 only. Probed backends advertise what the GPU encodes
+/// ([`vaapi_codec_support`] / [`windows_codec_support`]); NVENC falls back to
+/// the GameStream superset when the probe cannot answer. An empty probe
+/// means the GPU was unusable at probe time, not that it encodes nothing —
+/// fall back to the superset so auto clients still land on HEVC.
+pub fn host_wire_caps() -> u8 {
+    // PyroWave ORs onto the H.26x set; `resolve_codec` ignores the bit unless
+    // the client prefers it. Advertised whenever a Vulkan GPU could open;
+    // software/GPU-less keeps it off. Resolve the backend once — this path
+    // is polled, and the auto arm samples live GPU-preference state.
+    #[cfg(target_os = "linux")]
+    let backend = linux_resolved_backend();
+    #[cfg(all(target_os = "linux", feature = "pyrowave"))]
+    let pyro = if backend != LinuxBackend::Software {
+        punktfunk_core::quic::CODEC_PYROWAVE
+    } else {
+        0u8
+    };
+    // Own Vulkan device by render-GPU id; the H.26x backend is irrelevant.
+    // Software/GPU-less keeps the bit off. Interop is confirmed at encoder
+    // open (`pyrowave_device_confirm_interop_support`); a failed open
+    // renegotiates to HEVC.
+    #[cfg(all(target_os = "windows", feature = "pyrowave"))]
+    let pyro = if windows_resolved_backend() != WindowsBackend::Software {
+        punktfunk_core::quic::CODEC_PYROWAVE
+    } else {
+        0u8
+    };
+    #[cfg(not(all(any(target_os = "linux", target_os = "windows"), feature = "pyrowave")))]
+    let pyro = 0u8;
+    let base = 'base: {
+        /// GameStream `SERVER_CODEC_MODE_SUPPORT` for an unprobed backend.
+        const GPU_SUPERSET: u8 = punktfunk_core::quic::CODEC_H264
+            | punktfunk_core::quic::CODEC_HEVC
+            | punktfunk_core::quic::CODEC_AV1;
+        #[cfg(target_os = "linux")]
+        {
+            if backend == LinuxBackend::Software {
+                break 'base punktfunk_core::quic::CODEC_H264;
+            }
+            // Forced-vulkan pref is a ceiling, never a replacement: the arm
+            // encodes HEVC/AV1 only (H.264 dies at open). A static HEVC|AV1
+            // would add AV1 on GPUs whose probe withholds it. No
+            // `vulkan-encode` feature → advertise nothing.
+            let pref_ceiling: u8 = match backend {
+                // Resolver knows the pref is vulkan; only this cfg! knows
+                // the build can open it. Else: advertise-then-die-at-open.
+                LinuxBackend::Vulkan => {
+                    if cfg!(feature = "vulkan-encode") {
+                        punktfunk_core::quic::CODEC_HEVC | punktfunk_core::quic::CODEC_AV1
+                    } else {
+                        0
+                    }
+                }
+                _ => GPU_SUPERSET,
+            };
+            if linux_zero_copy_is_vaapi_for(backend) {
+                if let Some(m) = codec_support_wire_mask(vaapi_codec_support()) {
+                    break 'base m & pref_ceiling;
+                }
+            }
+            // Driver GUID list, like the VAAPI arm. Fail-open: `None` leaves
+            // the historical superset, so this can only narrow.
+            #[cfg(feature = "nvenc")]
+            if backend == LinuxBackend::Nvenc {
+                if let Some(m) = codec_support_wire_mask(nvenc_codec_support()) {
+                    break 'base m & pref_ceiling;
+                }
+            }
+            GPU_SUPERSET & pref_ceiling
+        }
+        #[cfg(target_os = "windows")]
+        {
+            if windows_resolved_backend() == WindowsBackend::Software {
+                break 'base punktfunk_core::quic::CODEC_H264;
+            }
+            if windows_backend_is_probed() {
+                if let Some(m) = codec_support_wire_mask(windows_codec_support()) {
+                    break 'base m;
+                }
+            }
+            GPU_SUPERSET
+        }
+        // No GPU encode backend on this target — keep the unprobed advertisement.
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        {
+            let _ = GPU_SUPERSET;
+            if matches!(
+                pf_host_config::config().encoder_pref.as_str(),
+                "software" | "sw" | "openh264"
+            ) {
+                break 'base punktfunk_core::quic::CODEC_H264;
+            }
+            punktfunk_core::quic::CODEC_HEVC
+        }
+    };
+    base | pyro
 }
 
 /// Open a hardware encoder for `format` and mode. NVENC on NVIDIA, VAAPI on
@@ -216,7 +273,7 @@ impl Encoder for TrackedEncoder {
     fn request_keyframe(&mut self) {
         self.inner.request_keyframe()
     }
-    fn set_hdr_meta(&mut self, meta: Option<punktfunk_core::quic::HdrMeta>) {
+    fn set_hdr_meta(&mut self, meta: Option<pf_frame::HdrMeta>) {
         self.inner.set_hdr_meta(meta)
     }
     fn invalidate_ref_frames(&mut self, first_frame: i64, last_frame: i64) -> bool {
@@ -536,6 +593,10 @@ fn open_video_backend(
             #[cfg(feature = "pyrowave")]
             {
                 let _ = (format, cuda);
+                // PCI ids, not the LUID — see `PyroWaveEncoder::open`.
+                let (vendor_id, device_id) = pf_gpu::selected_gpu()
+                    .map(|s| (s.info.vendor_id, s.info.device_id))
+                    .unwrap_or((0, 0));
                 return pyrowave::PyroWaveEncoder::open(
                     width,
                     height,
@@ -543,6 +604,8 @@ fn open_video_backend(
                     bitrate_bps,
                     chroma,
                     bit_depth,
+                    vendor_id,
+                    device_id,
                 )
                 .map(|e| (Box::new(e) as Box<dyn Encoder>, "pyrowave"));
             }
@@ -585,6 +648,7 @@ fn open_video_backend(
                         bit_depth,
                         chroma,
                         max_slices,
+                        pf_gpu::resolve_render_adapter_luid(),
                     )
                     .map(|e| (Box::new(e) as Box<dyn Encoder>, "nvenc"))
                 }
@@ -609,6 +673,7 @@ fn open_video_backend(
                     bitrate_bps,
                     bit_depth,
                     chroma,
+                    pf_gpu::resolve_render_adapter_luid(),
                 )
                 .map(|e| (Box::new(e) as Box<dyn Encoder>, "amf"))
                 .map_err(|e| {
@@ -641,6 +706,7 @@ fn open_video_backend(
                             bitrate_bps,
                             bit_depth,
                             chroma,
+                            pf_gpu::resolve_render_adapter_luid(),
                         ) {
                             Ok(e) => return Ok((Box::new(e) as Box<dyn Encoder>, "qsv")),
                             Err(e) => {
@@ -1147,33 +1213,22 @@ fn linux_zero_copy_is_vaapi_for(backend: LinuxBackend) -> bool {
     }
 }
 
-/// Codecs the active GPU can encode. AV1 encode is narrow — probe, don't assume.
+/// `quic::CODEC_*` bits of a [`CodecSupport`] probe, or `None` when it found
+/// nothing — GPU unusable at probe time, not "zero codecs". Caller falls back
+/// to the static superset.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-#[derive(Clone, Copy, Debug)]
-pub struct CodecSupport {
-    pub h264: bool,
-    pub h265: bool,
-    pub av1: bool,
-}
-
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-impl CodecSupport {
-    /// `quic::CODEC_*` bits, or `None` when the probe found nothing — GPU
-    /// unusable at probe time, not "zero codecs". Caller falls back to the
-    /// static superset.
-    pub fn wire_mask(self) -> Option<u8> {
-        let mut m = 0u8;
-        if self.h264 {
-            m |= punktfunk_core::quic::CODEC_H264;
-        }
-        if self.h265 {
-            m |= punktfunk_core::quic::CODEC_HEVC;
-        }
-        if self.av1 {
-            m |= punktfunk_core::quic::CODEC_AV1;
-        }
-        (m != 0).then_some(m)
+pub fn codec_support_wire_mask(caps: CodecSupport) -> Option<u8> {
+    let mut m = 0u8;
+    if caps.h264 {
+        m |= punktfunk_core::quic::CODEC_H264;
     }
+    if caps.h265 {
+        m |= punktfunk_core::quic::CODEC_HEVC;
+    }
+    if caps.av1 {
+        m |= punktfunk_core::quic::CODEC_AV1;
+    }
+    (m != 0).then_some(m)
 }
 
 /// NVIDIA encode-GUID list (cached once per process). Process-wide because
@@ -1270,7 +1325,7 @@ pub fn can_encode_444(codec: Codec) -> bool {
                 WindowsBackend::Nvenc => {
                     #[cfg(feature = "nvenc")]
                     {
-                        nvenc::probe_can_encode_444(codec)
+                        nvenc::probe_can_encode_444(codec, pf_gpu::resolve_render_adapter_luid())
                     }
                     #[cfg(not(feature = "nvenc"))]
                     {
@@ -1374,20 +1429,22 @@ pub fn can_encode_10bit(codec: Codec) -> bool {
                 WindowsBackend::Nvenc => {
                     #[cfg(feature = "nvenc")]
                     {
-                        nvenc::probe_can_encode_10bit(codec)
+                        nvenc::probe_can_encode_10bit(codec, pf_gpu::resolve_render_adapter_luid())
                     }
                     #[cfg(not(feature = "nvenc"))]
                     {
                         false
                     }
                 }
-                WindowsBackend::Amf => amf::probe_can_encode_10bit(codec),
+                WindowsBackend::Amf => {
+                    amf::probe_can_encode_10bit(codec, pf_gpu::resolve_render_adapter_luid())
+                }
                 // Native VPL Query. ffmpeg Main10 can silently encode 8-bit, so
                 // without the `qsv` feature this stays an honest `false`.
                 WindowsBackend::Qsv => {
                     #[cfg(feature = "qsv")]
                     {
-                        qsv::probe_can_encode_10bit(codec)
+                        qsv::probe_can_encode_10bit(codec, pf_gpu::resolve_render_adapter_luid())
                     }
                     #[cfg(not(feature = "qsv"))]
                     {
@@ -1408,21 +1465,6 @@ pub fn can_encode_10bit(codec: Codec) -> bool {
 pub fn can_encode_10bit(_codec: Codec) -> bool {
     false
 }
-
-/// Marker in an encoder error's `anyhow` chain: the failure is a deterministic
-/// config consequence, so an in-place rebuild can never succeed. The reset
-/// ladder downcasts this and ends the session instead of burning rebuilds.
-/// Attach with `Error::new(TerminalEncoderError).context("the actual cause")`.
-#[derive(Clone, Copy, Debug)]
-pub struct TerminalEncoderError;
-
-impl std::fmt::Display for TerminalEncoderError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("deterministic configuration error — an encoder rebuild cannot fix this")
-    }
-}
-
-impl std::error::Error for TerminalEncoderError {}
 
 // Windows backend selection. NVIDIA → NVENC, AMD → AMF, Intel → QSV.
 // `auto` uses the selected render adapter so encode matches capture.
@@ -1589,12 +1631,14 @@ pub fn windows_codec_support() -> CodecSupport {
     }
     let probe_one = |codec: Codec| -> bool {
         match backend {
-            WindowsBackend::Amf => amf::probe_can_encode(codec),
+            WindowsBackend::Amf => {
+                amf::probe_can_encode(codec, pf_gpu::resolve_render_adapter_luid())
+            }
             WindowsBackend::Qsv => {
                 // Libavcodec probe only on builds without native VPL.
                 #[cfg(feature = "qsv")]
                 {
-                    qsv::probe_can_encode(codec)
+                    qsv::probe_can_encode(codec, pf_gpu::resolve_render_adapter_luid())
                 }
                 #[cfg(all(not(feature = "qsv"), feature = "amf-qsv"))]
                 {
@@ -1614,7 +1658,7 @@ pub fn windows_codec_support() -> CodecSupport {
         // One throwaway session lists every GUID. Featureless builds fall
         // through to `probe_one`'s all-false (= static superset).
         #[cfg(feature = "nvenc")]
-        WindowsBackend::Nvenc => nvenc::probe_codec_support(),
+        WindowsBackend::Nvenc => nvenc::probe_codec_support(pf_gpu::resolve_render_adapter_luid()),
         _ => CodecSupport {
             h264: probe_one(Codec::H264),
             h265: probe_one(Codec::H265),
@@ -1648,53 +1692,19 @@ pub fn can_open_another_session() -> bool {
     }
 }
 
-// `#[path]` keeps `crate::*` names flat. Native AMF is unconditional on
-// Windows — `amfrt64.dll` at runtime, like NVENC. See `design/native-amf-encoder.md`.
-#[cfg(target_os = "windows")]
-#[path = "enc/windows/amf.rs"]
-mod amf;
+// `#[path]` keeps `crate::*` names flat. The Windows backends and the shared
+// NVENC/RFI/policy/PyroWave-wire modules arrive through the `pf_encode_win` glob.
 #[cfg(all(target_os = "windows", feature = "amf-qsv"))]
 #[path = "enc/windows/ffmpeg_win.rs"]
 mod ffmpeg_win;
-// Native QSV (VPL): `qsv` feature, vendored dispatcher, GPU runtime from the
-// driver store. See `design/native-qsv-encoder.md`.
 #[cfg(target_os = "linux")]
 #[path = "enc/linux/mod.rs"]
 mod linux;
-#[cfg(all(target_os = "windows", feature = "qsv"))]
-#[path = "enc/windows/qsv.rs"]
-mod qsv;
 // Direct-SDK NVENC (CUDA). `.so` at runtime, so `--features nvenc` is safe
 // on a driver-less/AMD box. See `design/linux-direct-nvenc.md`.
-#[cfg(all(target_os = "windows", feature = "nvenc"))]
-#[path = "enc/windows/nvenc.rs"]
-mod nvenc;
 #[cfg(all(target_os = "linux", feature = "nvenc"))]
 #[path = "enc/linux/nvenc_cuda.rs"]
 mod nvenc_cuda;
-// `NVENCSTATUS` → cause for both direct-NVENC backends. Splits the two
-// opposite failures the driver reports as the same `INVALID_VERSION`.
-#[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "nvenc"))]
-#[path = "enc/nvenc_status.rs"]
-mod nvenc_status;
-// Shared `nvEncodeAPI` glue (`NvStatusExt`/`nv_ok`, `codec_guid`). Sibling of `nvenc_status`.
-#[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "nvenc"))]
-#[path = "enc/nvenc_core.rs"]
-mod nvenc_core;
-// Slot-family RFI policy (taint sweep + pre-loss anchor) for AMF, QSV, and
-// Vulkan Video. Mechanisms stay in each backend. Cfg is the union of callers
-// (`amf` is featureless on Windows; `vulkan_video` needs `vulkan-encode`).
-// Items stay live under that whole cfg: `plan_slot_recovery` calls `pick_anchor`.
-#[cfg(any(
-    target_os = "windows",
-    all(target_os = "linux", feature = "vulkan-encode")
-))]
-#[path = "enc/rfi.rs"]
-mod rfi;
-// Shared loss-recovery env knobs. Defaults and API clamps stay per-backend.
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-#[path = "enc/policy.rs"]
-mod policy;
 // Shared libavcodec glue (`pixel_to_av`, swscale consts) for the three libav backends.
 #[cfg(any(target_os = "linux", all(target_os = "windows", feature = "amf-qsv")))]
 #[path = "enc/libav.rs"]
@@ -1742,26 +1752,11 @@ mod pyrowave_remote;
 #[cfg(all(target_os = "linux", feature = "pyrowave"))]
 #[path = "enc/linux/worker.rs"]
 pub mod worker;
-// Windows PyroWave: NV12 D3D11→Vulkan. Same module name as Linux (`#[path]`).
-// See `design/pyrowave-windows-host-zerocopy.md`.
-#[cfg(all(target_os = "windows", feature = "pyrowave"))]
-#[path = "enc/windows/pyrowave.rs"]
-mod pyrowave;
-// Shared PyroWave AU wire-framing — both platform backends emit this layout.
-#[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "pyrowave"))]
-#[path = "enc/pyrowave_wire.rs"]
-mod pyrowave_wire;
-
-/// Whether a PyroWave mode fits the rate controller's packed 16-bit block
-/// index: false ≈ 8K-class 4:4:4. Negotiator downgrades to 4:2:0; encoders refuse.
-#[cfg(all(any(target_os = "linux", target_os = "windows"), feature = "pyrowave"))]
-pub fn pyrowave_mode_fits_rdo(width: u32, height: u32, chroma444: bool) -> bool {
-    pyrowave_wire::block_count_32x32(width, height, chroma444) <= u16::MAX as u32
-}
-#[cfg(not(all(any(target_os = "linux", target_os = "windows"), feature = "pyrowave")))]
-pub fn pyrowave_mode_fits_rdo(_width: u32, _height: u32, _chroma444: bool) -> bool {
-    false
-}
+// Live tests pairing a `pf_encode_win` backend with what only this crate has
+// (libavcodec AMF, pf-capture's P010 converter).
+#[cfg(all(test, target_os = "windows"))]
+#[path = "enc/windows/live_tests.rs"]
+mod live_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1800,6 +1795,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn codec_wire_roundtrip_and_label() {
+        for c in [Codec::H264, Codec::H265, Codec::Av1, Codec::PyroWave] {
+            assert_eq!(codec_from_wire(codec_to_wire(c)), c);
+        }
+        assert_eq!(codec_from_wire(0), Codec::H265);
+        assert_eq!(Codec::H264.label(), "h264");
+        assert_eq!(Codec::H265.label(), "hevc");
+        assert_eq!(Codec::Av1.label(), "av1");
+        assert_eq!(chroma_idc(ChromaFormat::Yuv420), 1);
+        assert_eq!(chroma_idc(ChromaFormat::Yuv444), 3);
+    }
+
+    /// Every field must survive wire → frame → wire; a field the copy forgets
+    /// would silently zero the SEI the encoder emits.
+    #[test]
+    fn hdr_meta_wire_roundtrip_keeps_every_field() {
+        let wire = punktfunk_core::quic::HdrMeta {
+            display_primaries: [[1, 2], [3, 4], [5, 6]],
+            white_point: [7, 8],
+            max_display_mastering_luminance: 9,
+            min_display_mastering_luminance: 10,
+            max_cll: 11,
+            max_fall: 12,
+        };
+        let frame = hdr_meta_from_wire(wire);
+        assert_eq!(frame.display_primaries, [[1, 2], [3, 4], [5, 6]]);
+        assert_eq!(frame.white_point, [7, 8]);
+        assert_eq!(frame.max_display_mastering_luminance, 9);
+        assert_eq!(frame.min_display_mastering_luminance, 10);
+        assert_eq!(frame.max_cll, 11);
+        assert_eq!(frame.max_fall, 12);
+        assert_eq!(hdr_meta_to_wire(frame), wire);
+        assert_eq!(
+            hdr_meta_to_wire(pf_frame::HdrMeta::default()),
+            punktfunk_core::quic::HdrMeta::default()
+        );
+    }
+
     /// [`TerminalEncoderError`] must stay downcastable through `context` layers.
     /// A `format!`/stringify on any layer would break the reset ladder.
     #[test]
@@ -1817,27 +1851,30 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     #[test]
-    fn codec_support_wire_mask() {
+    fn codec_support_wire_mask_maps_the_probe_to_bits() {
         use punktfunk_core::quic::{CODEC_AV1, CODEC_H264, CODEC_HEVC};
         let all = CodecSupport {
             h264: true,
             h265: true,
             av1: true,
         };
-        assert_eq!(all.wire_mask(), Some(CODEC_H264 | CODEC_HEVC | CODEC_AV1));
+        assert_eq!(
+            codec_support_wire_mask(all),
+            Some(CODEC_H264 | CODEC_HEVC | CODEC_AV1)
+        );
         let hevc_only = CodecSupport {
             h264: false,
             h265: true,
             av1: false,
         };
-        assert_eq!(hevc_only.wire_mask(), Some(CODEC_HEVC));
+        assert_eq!(codec_support_wire_mask(hevc_only), Some(CODEC_HEVC));
         // All-false = GPU unusable, not "zero codecs" — `None` → static superset.
         let none = CodecSupport {
             h264: false,
             h265: false,
             av1: false,
         };
-        assert_eq!(none.wire_mask(), None);
+        assert_eq!(codec_support_wire_mask(none), None);
     }
 
     #[cfg(target_os = "linux")]
@@ -1901,7 +1938,7 @@ mod tests {
         }
         // `find` takes the first occurrence: the real impl precedes this test's copy.
         let trait_fns = fn_names(item_block(
-            include_str!("enc/codec.rs"),
+            include_str!("../../pf-encode-win/src/codec.rs"),
             "pub trait Encoder: Send {",
         ));
         let impl_fns = fn_names(item_block(

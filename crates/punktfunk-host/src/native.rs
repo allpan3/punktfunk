@@ -1313,7 +1313,7 @@ async fn serve_session(
         reconfig_allowed(compositor, per_client_mode_identity, mirrored)
     };
     // `Copy` so the control task's `async move` and SessionContext both keep it.
-    let codec = crate::encode::Codec::from_wire(welcome.codec);
+    let codec = crate::encode::codec_from_wire(welcome.codec);
     let client_udp = std::net::SocketAddr::new(peer.ip(), start.client_udp_port);
     tracing::info!(
         %client_udp,
@@ -1715,7 +1715,7 @@ async fn serve_session(
         // Client display volume (Hello::display_hdr) — EDID advertises it. Generic HDR10 for old clients.
         let meta = hello
             .display_hdr
-            .unwrap_or_else(pf_frame::hdr::generic_hdr10);
+            .unwrap_or_else(|| crate::encode::hdr_meta_to_wire(pf_frame::hdr::generic_hdr10()));
         let _ = conn.send_datagram(punktfunk_core::quic::encode_hdr_meta_datagram(&meta).into());
         tracing::info!(
             client_volume = hello.display_hdr.is_some(),
@@ -1851,7 +1851,7 @@ async fn serve_session(
     let stop_stream = stop.clone();
     let quit_stream = quit.clone();
     // Client HDR volume for EDID + 0xCE. `None` = older client / no HDR → built-in defaults.
-    let client_hdr = hello.display_hdr;
+    let client_hdr = hello.display_hdr.map(crate::encode::hdr_meta_from_wire);
     let fec_target_dp = fec_target.clone();
     let conn_stream = conn.clone();
     // 0xCF host-timing only if the client advertised the cap; older clients get no extra datagrams.

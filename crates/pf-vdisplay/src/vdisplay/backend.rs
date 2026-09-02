@@ -169,7 +169,7 @@ pub trait VirtualDisplay: Send {
     /// Client panel HDR volume (`Hello::display_hdr`) for the virtual output's EDID (CTA-861.3).
     /// Host apps then tone-map to the panel the stream lands on. `None` = unknown/SDR → default
     /// EDID. Default no-op: only Windows pf-vdisplay mints per-monitor EDIDs.
-    fn set_client_hdr(&mut self, _hdr: Option<punktfunk_core::quic::HdrMeta>) {}
+    fn set_client_hdr(&mut self, _hdr: Option<pf_frame::HdrMeta>) {}
     /// Stream negotiated HDR (10-bit BT.2020/PQ, `bit_depth >= 10` in Welcome). Distinct from
     /// [`set_client_hdr`](Self::set_client_hdr) (panel volume for EDID). Default no-op; gamescope
     /// adds `--hdr-enabled --hdr-debug-force-support` so nested WSI surfaces are HDR and capture

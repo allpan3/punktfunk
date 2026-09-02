@@ -1,0 +1,56 @@
+# The Windows encoder backends (NVENC, AMF, QSV, PyroWave) and the `Encoder` contract they
+# implement, split out of pf-encode so the IddCx display driver can host them
+# (design/windows-video-plane-overhaul.md §2.6). Speaks pf-frame only: no QUIC, no GPU
+# inventory, no libavcodec — the host-side selector in pf-encode supplies the adapter.
+[package]
+name = "pf-encode-win"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT OR Apache-2.0"
+description = "punktfunk Windows video encode backends: NVENC/AMF/QSV/PyroWave behind the Encoder trait."
+publish = false
+
+[dependencies]
+pf-frame = { path = "../pf-frame" }
+anyhow = "1"
+tracing = "0.1"
+# Shared `nvEncodeAPI` glue (`nvenc_core`/`nvenc_status`) also serves the Linux direct-SDK
+# backend in pf-encode, so the binding is declared for both targets.
+nvidia-video-codec-sdk = { version = "0.4", features = ["ci-check"], optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Native Intel QSV (VPL): vendored static MIT dispatcher + bindgen'd C API, only under `qsv`.
+libvpl-sys = { path = "../libvpl-sys", optional = true }
+# PyroWave NV12 zero-copy D3D11→Vulkan encoder, only under `pyrowave`.
+pyrowave-sys = { path = "../pyrowave-sys", optional = true }
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    # SECURITY_ATTRIBUTES — the PyroWave backend's IDXGIResource1::CreateSharedHandle signature.
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+# A test writer for the NVENC backend's unit tests (`with_test_writer().try_init()`).
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+default = []
+# NVENC hardware encode; entry points resolved at runtime.
+nvenc = ["dep:nvidia-video-codec-sdk"]
+# Native Intel QSV via the statically linked VPL dispatcher.
+qsv = ["dep:libvpl-sys"]
+# PyroWave — the opt-in wired-LAN intra-only wavelet codec.
+pyrowave = ["dep:pyrowave-sys"]
+# Linux Vulkan Video in pf-encode shares `rfi` and `vbv_window_ms`; the gate mirrors pf-encode's.
+vulkan-encode = []
+
+[lints]
+workspace = true

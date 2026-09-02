@@ -46,7 +46,7 @@ pub(crate) struct HostInfo {
     /// Human-readable OS name (os-release `PRETTY_NAME`; `"Windows"`/`"macOS"` elsewhere).
     #[schema(example = "Bazzite 42 (Kinoite)")]
     os_name: String,
-    /// Codecs this host can encode (`Codec::host_wire_caps`, not the compile-time list).
+    /// Codecs this host can encode (`host_wire_caps`, not the compile-time list).
     codecs: Vec<ApiCodec>,
     /// GameStream/Moonlight-compat planes are running (`--gamestream`). `false` is the default (native only).
     gamestream: bool,
@@ -422,9 +422,9 @@ pub(crate) async fn get_host_info(State(st): State<Arc<MgmtState>>) -> Json<Host
         gfe_version: GFE_VERSION.into(),
         os: h.os_chain.clone(),
         os_name: h.os_name.clone(),
-        // Same mask as GameStream/QUIC negotiation (`Codec::host_wire_caps`), not the compile-time list.
+        // Same mask as GameStream/QUIC negotiation (`host_wire_caps`), not the compile-time list.
         codecs: {
-            let caps = Codec::host_wire_caps();
+            let caps = crate::encode::host_wire_caps();
             use punktfunk_core::quic::{CODEC_AV1, CODEC_H264, CODEC_HEVC, CODEC_PYROWAVE};
             [
                 (CODEC_H264, ApiCodec::H264),

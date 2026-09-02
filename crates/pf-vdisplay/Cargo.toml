@@ -16,6 +16,9 @@ publish = false
 
 [dependencies]
 punktfunk-core = { path = "../punktfunk-core", features = ["quic"] }
+# `HdrMeta` in the `VirtualDisplay` trait (the client's mastering volume) + the DXGI capture
+# identity and the CTA-861.3 luminance fields on Windows. A leaf: no QUIC, no codec.
+pf-frame = { path = "../pf-frame" }
 pf-host-config = { path = "../pf-host-config" }
 pf-paths = { path = "../pf-paths" }
 pf-win-display = { path = "../pf-win-display" }
@@ -61,13 +64,11 @@ bitflags = "2"
 x11rb = { version = "0.14", default-features = false }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-# Windows-only, all three, and gated here rather than unconditionally so the LINUX build does not
-# drag their closures in for nothing: `pf-frame` for the DXGI capture identity + the CTA-861.3 HDR
-# luminance fields, `pf-gpu` for the render-adapter LUID, and `pf-encode` for the admission gate's
-# NVENC session budget (`can_open_another_session`, admission.rs, itself `#[cfg(windows)]`). Every
-# use site of all three is Windows-gated — verified by grep — and between them they pull FFmpeg,
-# ash and openh264, none of which a Linux host reaches through this crate.
-pf-frame = { path = "../pf-frame" }
+# Windows-only, both, and gated here rather than unconditionally so the LINUX build does not
+# drag their closures in for nothing: `pf-gpu` for the render-adapter LUID, and `pf-encode` for
+# the admission gate's NVENC session budget (`can_open_another_session`, admission.rs, itself
+# `#[cfg(windows)]`). Every use site of both is Windows-gated — verified by grep — and between
+# them they pull FFmpeg, ash and openh264, none of which a Linux host reaches through this crate.
 pf-gpu = { path = "../pf-gpu" }
 pf-encode = { path = "../pf-encode" }
 # The host<->driver wire contract for the pf-vdisplay IddCx backend (control IOCTLs + Pod structs).

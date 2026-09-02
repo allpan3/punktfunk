@@ -19,8 +19,9 @@
 use super::{AppState, LaunchSession, CONTROL_PORT};
 use crate::inject::gamepad::GamepadManager;
 use anyhow::{anyhow, Context, Result};
+use pf_frame::HdrMeta;
 use punktfunk_core::input::{GamepadEvent, InputEvent};
-use punktfunk_core::quic::{classify, GrantClass, HdrMeta, GRANT_ALL};
+use punktfunk_core::quic::{classify, GrantClass, GRANT_ALL};
 use rusty_enet::{Event, Host, HostSettings, Packet, PeerID};
 use std::net::{IpAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};

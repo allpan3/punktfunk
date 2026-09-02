@@ -102,6 +102,8 @@ pub struct PyroWaveEncoder {
 unsafe impl Send for PyroWaveEncoder {}
 
 impl PyroWaveEncoder {
+    // The adapter hint adds two ids to the mode tuple; a struct for one caller buys nothing.
+    #[allow(clippy::too_many_arguments)]
     pub fn open(
         width: u32,
         height: u32,
@@ -109,6 +111,9 @@ impl PyroWaveEncoder {
         bitrate_bps: u64,
         chroma: crate::ChromaFormat,
         bit_depth: u8,
+        // PCI ids of the selected render adapter; `(0, 0)` lets pyrowave pick.
+        vendor_id: u32,
+        device_id: u32,
     ) -> Result<Self> {
         let chroma444 = chroma.is_444();
         let hdr16 = bit_depth >= 10;
@@ -127,9 +132,7 @@ impl PyroWaveEncoder {
         let fps = fps.max(1);
         // Vendor/device-id of the selected render adapter, not LUID: Session 0
         // Vulkan ICDs report `deviceLUIDValid = false`, so a LUID match finds nothing.
-        let (vid, pid) = pf_gpu::selected_gpu()
-            .map(|s| (s.info.vendor_id, s.info.device_id))
-            .unwrap_or((0, 0));
+        let (vid, pid) = (vendor_id, device_id);
         // SAFETY: `create_device_by_compat` builds pyrowave's instance/device from
         // vendor/device-id (null uuids/luid = unconstrained); out-param is a live
         // local. Later calls take that non-null device; failure destroys it first.
@@ -941,6 +944,8 @@ mod tests {
                 crate::ChromaFormat::Yuv420
             },
             if hdr { 10 } else { 8 },
+            0,
+            0,
         )
         .expect("PyroWaveEncoder::open");
         let frame = CapturedFrame {

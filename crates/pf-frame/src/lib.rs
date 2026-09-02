@@ -10,6 +10,7 @@
 //! identity + D3D11 device).
 
 pub mod hdr;
+pub use hdr::HdrMeta;
 pub mod health;
 pub mod metronome;
 pub mod recovery;

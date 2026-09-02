@@ -4,7 +4,7 @@
 //! Sibling of `rfi.rs`, which owns the slot-recovery policy.
 
 /// Trimmed truthy env opt-in. A trailing space must not disagree per backend.
-pub(crate) fn env_flag(name: &str) -> bool {
+pub fn env_flag(name: &str) -> bool {
     std::env::var(name)
         .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false)
@@ -14,14 +14,14 @@ pub(crate) fn env_flag(name: &str) -> bool {
 /// intra band heals FEC-unrecoverable loss without a 20-40× IDR spike.
 /// Linux ANDs its `IR_UNSUPPORTED` latch on top. On Windows this also
 /// selects LTR vs IR (the wave sweeps the picture; LTR pins references).
-pub(crate) fn intra_refresh_requested() -> bool {
+pub fn intra_refresh_requested() -> bool {
     env_flag("PUNKTFUNK_INTRA_REFRESH")
 }
 
 /// `PUNKTFUNK_IR_PERIOD_FRAMES` — wave length in frames (`>= 2` or it is not
 /// a wave). Default is half a second of frames (~2-3 % intra cost per frame).
 /// Backends clamp to their API field at the call site.
-pub(crate) fn intra_refresh_period(fps: u32) -> u32 {
+pub fn intra_refresh_period(fps: u32) -> u32 {
     std::env::var("PUNKTFUNK_IR_PERIOD_FRAMES")
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
@@ -32,7 +32,7 @@ pub(crate) fn intra_refresh_period(fps: u32) -> u32 {
 /// `PUNKTFUNK_LTR_INTERVAL_FRAMES` — LTR mark cadence (`>= 1`). `None` leaves
 /// the backend's tuned default; it does not disable LTR.
 #[cfg(target_os = "windows")]
-pub(crate) fn ltr_interval_env() -> Option<i64> {
+pub fn ltr_interval_env() -> Option<i64> {
     std::env::var("PUNKTFUNK_LTR_INTERVAL_FRAMES")
         .ok()
         .and_then(|v| v.parse::<i64>().ok())
@@ -43,7 +43,7 @@ pub(crate) fn ltr_interval_env() -> Option<i64> {
 /// self-triggers `invalidate_ref_frames` so a headless run exercises LTR
 /// recovery. `None` normally. N must be `> 0`; frame 0 is the opening IDR.
 #[cfg(target_os = "windows")]
-pub(crate) fn ltr_test_force_at() -> Option<i64> {
+pub fn ltr_test_force_at() -> Option<i64> {
     std::env::var("PUNKTFUNK_LTR_FORCE_AT")
         .ok()
         .and_then(|s| s.parse::<i64>().ok())

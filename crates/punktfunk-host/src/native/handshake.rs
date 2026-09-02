@@ -303,7 +303,7 @@ pub(super) async fn negotiate(
 
     // GPU-probed host codecs ∩ client advertised, honoring preference. A software host is
     // H.264-only — refuse rather than send a stream an HEVC-only client cannot decode.
-    let host_codecs = crate::encode::Codec::host_wire_caps();
+    let host_codecs = crate::encode::host_wire_caps();
     let codec_bit =
             punktfunk_core::quic::resolve_codec(hello.video_codecs, host_codecs, hello.preferred_codec)
                 .ok_or_else(|| {
@@ -314,7 +314,7 @@ pub(super) async fn negotiate(
                     host_codecs
                 )
             })?;
-    let codec = crate::encode::Codec::from_wire(codec_bit);
+    let codec = crate::encode::codec_from_wire(codec_bit);
     tracing::info!(
         ?codec,
         client_codecs = format_args!("0x{:02x}", hello.video_codecs),
@@ -482,7 +482,7 @@ pub(super) async fn negotiate(
         } else {
             ColorInfo::SDR_BT709
         },
-        chroma_format: chroma.idc(),
+        chroma_format: crate::encode::chroma_idc(chroma),
         audio_channels,
         // Negotiated codec; the client must not assume HEVC.
         codec: codec_bit,
@@ -584,7 +584,7 @@ pub(super) async fn negotiate(
         (Punktfunk1Source::Virtual, Some(comp)) => {
             let (ctx_tx, ctx_rx) = std::sync::mpsc::sync_channel::<SessionContext>(1);
             let client_identity = endpoint::peer_fingerprint(conn);
-            let client_hdr = hello.display_hdr;
+            let client_hdr = hello.display_hdr.map(crate::encode::hdr_meta_from_wire);
             // Read back off Welcome so the prepared display and session wiring cannot disagree.
             let cursor_fw = welcome.host_caps & punktfunk_core::quic::HOST_CAP_CURSOR != 0;
             // Same bit SessionContext reads; a different max_slices would change the wire mid-flow.

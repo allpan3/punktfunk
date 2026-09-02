@@ -19,7 +19,7 @@ static SESSION_OPENED: AtomicBool = AtomicBool::new(false);
 
 /// Latch after every successful `open_encode_session_ex`. [`explain`] uses it
 /// to rule out a version skew for the rest of the process.
-pub(super) fn note_session_opened() {
+pub fn note_session_opened() {
     SESSION_OPENED.store(true, Ordering::Relaxed);
 }
 
@@ -48,7 +48,7 @@ fn invalid_version(session_opened: bool) -> String {
 
 /// Operator-actionable cause for an NVENC status. Does not repeat the raw
 /// code — callers print that alongside (see [`call_err`]).
-pub(super) fn explain(status: nv::NVENCSTATUS) -> String {
+pub fn explain(status: nv::NVENCSTATUS) -> String {
     match status {
         nv::NVENCSTATUS::NV_ENC_ERR_INVALID_VERSION => {
             invalid_version(SESSION_OPENED.load(Ordering::Relaxed))
@@ -101,7 +101,7 @@ pub(super) fn explain(status: nv::NVENCSTATUS) -> String {
 /// "above the ceiling"; a transient failure that shrinks the search would
 /// cache a bogus one. Downcast via [`is_param_rejection`].
 #[derive(Debug)]
-pub(super) struct NvCallError(pub(super) nv::NVENCSTATUS);
+pub struct NvCallError(pub nv::NVENCSTATUS);
 
 impl std::fmt::Display for NvCallError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -114,7 +114,7 @@ impl std::error::Error for NvCallError {}
 /// Parameter/capability rejection: this config is not encodable, so the
 /// clamp search may treat it as "above the ceiling". Busy, session limit,
 /// OOM, device loss, and version skew must propagate instead.
-pub(super) fn is_param_rejection(err: &anyhow::Error) -> bool {
+pub fn is_param_rejection(err: &anyhow::Error) -> bool {
     matches!(
         err.downcast_ref::<NvCallError>(),
         Some(NvCallError(
@@ -127,7 +127,7 @@ pub(super) fn is_param_rejection(err: &anyhow::Error) -> bool {
 
 /// `call` names the NVENC entry point. The chain carries the raw status and
 /// its cause; [`NvCallError`] stays downcastable for failure-class checks.
-pub(super) fn call_err(call: &str, status: nv::NVENCSTATUS) -> anyhow::Error {
+pub fn call_err(call: &str, status: nv::NVENCSTATUS) -> anyhow::Error {
     anyhow::Error::new(NvCallError(status)).context(format!("NVENC {call} failed"))
 }
 
@@ -138,7 +138,7 @@ pub(super) fn call_err(call: &str, status: nv::NVENCSTATUS) -> anyhow::Error {
 /// and retry destroy. A wrong `true` over-admits; a wrong `false` defers the
 /// refund. Windows D3D11 teardown; Linux has no session budget.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub(super) fn destroy_proves_no_session(status: nv::NVENCSTATUS) -> bool {
+pub fn destroy_proves_no_session(status: nv::NVENCSTATUS) -> bool {
     matches!(
         status,
         nv::NVENCSTATUS::NV_ENC_ERR_DEVICE_NOT_EXIST

@@ -20,7 +20,7 @@ use nvidia_video_codec_sdk::sys::nvEncodeAPI as nv;
 
 /// `NVENCSTATUS` → `Result` without the SDK `safe` module (these backends must
 /// not pull it in). Callers fold the raw status through [`super::nvenc_status`].
-pub(super) trait NvStatusExt {
+pub trait NvStatusExt {
     fn nv_ok(self) -> std::result::Result<(), nv::NVENCSTATUS>;
 }
 impl NvStatusExt for nv::NVENCSTATUS {
@@ -33,7 +33,7 @@ impl NvStatusExt for nv::NVENCSTATUS {
 }
 
 /// NVENC codec GUID. PyroWave never opens this backend.
-pub(super) fn codec_guid(codec: Codec) -> nv::GUID {
+pub fn codec_guid(codec: Codec) -> nv::GUID {
     match codec {
         Codec::H264 => nv::NV_ENC_CODEC_H264_GUID,
         Codec::H265 => nv::NV_ENC_CODEC_HEVC_GUID,
@@ -46,7 +46,7 @@ pub(super) fn codec_guid(codec: Codec) -> nv::GUID {
 /// escape) else `default_slices`. AV1 is always 1 (tiles, not slices). Shared by
 /// [`apply_low_latency_config`] and the Linux chunked-poll arm so they cannot
 /// disagree. A client that never advertised `VIDEO_CAP_MULTI_SLICE` stays at 1.
-pub(super) fn resolve_slices(codec: Codec, default_slices: u32) -> u32 {
+pub fn resolve_slices(codec: Codec, default_slices: u32) -> u32 {
     if !matches!(codec, Codec::H264 | Codec::H265) {
         return 1;
     }
@@ -61,7 +61,7 @@ pub(super) fn resolve_slices(codec: Codec, default_slices: u32) -> u32 {
 /// sync sessions only — see [`build_init_params`]): `PUNKTFUNK_NVENC_SUBFRAME`
 /// `0` never, `1` force, unset = `default_on` (the GPU's `SUBFRAME_READBACK`
 /// cap on both backends).
-pub(super) fn resolve_subframe(default_on: bool) -> bool {
+pub fn resolve_subframe(default_on: bool) -> bool {
     match std::env::var("PUNKTFUNK_NVENC_SUBFRAME").as_deref() {
         Ok("0") => false,
         Ok("1") => true,
@@ -72,7 +72,7 @@ pub(super) fn resolve_subframe(default_on: bool) -> bool {
 /// True when `PUNKTFUNK_NVENC_SUBFRAME=1`. Latch once next to the resolved
 /// subframe flag — a re-read at reconfigure would diverge from open.
 #[cfg(any(target_os = "linux", windows))]
-pub(super) fn subframe_env_forced() -> bool {
+pub fn subframe_env_forced() -> bool {
     matches!(
         std::env::var("PUNKTFUNK_NVENC_SUBFRAME").as_deref(),
         Ok("1")
@@ -94,7 +94,7 @@ pub(super) fn subframe_env_forced() -> bool {
 ///
 /// Returns `(split_mode, subframe)` actually configured. Store both: without
 /// `reportSliceOffsets`, `poll_chunk` busy-polls (`numSlices` stays 0).
-pub(super) fn resolve_split_subframe(
+pub fn resolve_split_subframe(
     codec: Codec,
     split_mode: u32,
     subframe: bool,
@@ -278,7 +278,7 @@ mod split_subframe_tests {
 // ungated item is the item-level `dead_code` trap (see `subframe_env_forced`).
 #[cfg(any(target_os = "linux", windows))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ArbAction {
+pub enum ArbAction {
     /// Reconfigure in place. `resetEncoder=0` emits no IDR.
     SwitchTo(u32),
     /// This mode won; the arbiter will not ask again.
@@ -308,7 +308,7 @@ enum ArbState {
 /// `SETTLE_FRAMES` is load-bearing. Split-encode does not reach steady state
 /// on the first frame; judging immediately after a switch reads the transient
 /// and would cache a wrong verdict intermittently.
-pub(super) struct SplitArbiter {
+pub struct SplitArbiter {
     state: ArbState,
     incumbent: u32,
     challenger: u32,
@@ -338,7 +338,7 @@ const WIN_MARGIN_PCT: u64 = 10;
 impl SplitArbiter {
     /// `handicap_us` is cost outside the measured encode — `0` when the challenger
     /// gives up nothing. See [`Self::challenger_handicap_us`].
-    pub(super) fn with_handicap(incumbent: u32, challenger: u32, handicap_us: u64) -> Self {
+    pub fn with_handicap(incumbent: u32, challenger: u32, handicap_us: u64) -> Self {
         Self {
             state: ArbState::MeasuringIncumbent,
             incumbent,
@@ -350,7 +350,7 @@ impl SplitArbiter {
         }
     }
 
-    pub(super) fn on_frame(&mut self, us: u64) -> Option<ArbAction> {
+    pub fn on_frame(&mut self, us: u64) -> Option<ArbAction> {
         match self.state {
             ArbState::Done => None,
             ArbState::Settling => {
@@ -407,7 +407,7 @@ impl SplitArbiter {
         }
     }
 
-    pub(super) fn is_done(&self) -> bool {
+    pub fn is_done(&self) -> bool {
         self.state == ArbState::Done
     }
 }
@@ -423,7 +423,7 @@ fn median(v: &mut [u64]) -> u64 {
 /// validation: GPU generation, luma rate (dims/fps), profile (depth/chroma),
 /// and the split mode the session actually opened with.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct CeilingKey {
+pub struct CeilingKey {
     /// GPU identity — Linux: process-global `CUcontext` pointer; Windows: render
     /// adapter LUID (`0` if unresolved). Advisory: a colliding identity costs one
     /// failed open + re-search, never a wrong session.
@@ -448,11 +448,11 @@ fn ceilings() -> &'static std::sync::Mutex<std::collections::HashMap<CeilingKey,
 /// Advisory: a failed open at the cached value is stale — fall back to the
 /// full search, which rewrites via [`store_ceiling`]. An ABR overshoot on a
 /// known config then opens at the ceiling instead of a ~6-open binary search.
-pub(super) fn cached_ceiling(key: &CeilingKey) -> Option<u64> {
+pub fn cached_ceiling(key: &CeilingKey) -> Option<u64> {
     ceilings().lock().unwrap().get(key).copied()
 }
 
-pub(super) fn store_ceiling(key: CeilingKey, bps: u64) {
+pub fn store_ceiling(key: CeilingKey, bps: u64) {
     ceilings().lock().unwrap().insert(key, bps);
 }
 
@@ -460,7 +460,7 @@ pub(super) fn store_ceiling(key: CeilingKey, bps: u64) {
 /// Split-arbitration verdict cache key: [`CeilingKey`] minus `split_mode`,
 /// because split mode is the thing being decided.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct SplitKey {
+pub struct SplitKey {
     pub gpu: u64,
     pub codec: Codec,
     pub width: u32,
@@ -481,12 +481,12 @@ fn split_verdicts() -> &'static std::sync::Mutex<std::collections::HashMap<Split
 /// Split mode a previous arbitration found fastest for `key` this process.
 /// Advisory like [`cached_ceiling`]: not persisted — a driver update can
 /// change the answer, and a disk verdict would outlive its evidence.
-pub(super) fn cached_split_verdict(key: &SplitKey) -> Option<u32> {
+pub fn cached_split_verdict(key: &SplitKey) -> Option<u32> {
     split_verdicts().lock().unwrap().get(key).copied()
 }
 
 #[cfg(any(target_os = "linux", windows))]
-pub(super) fn store_split_verdict(key: SplitKey, mode: u32) {
+pub fn store_split_verdict(key: SplitKey, mode: u32) {
     split_verdicts().lock().unwrap().insert(key, mode);
 }
 
@@ -497,7 +497,7 @@ pub(super) fn store_split_verdict(key: SplitKey, mode: u32) {
 // Linux-only: sole caller is `nvenc_cuda`'s on-hw test. Ungated it is dead
 // on Windows — the same item-level `dead_code` trap.
 #[cfg(all(test, target_os = "linux"))]
-pub(super) fn clear_split_verdicts() {
+pub fn clear_split_verdicts() {
     split_verdicts().lock().unwrap().clear();
 }
 
@@ -755,12 +755,12 @@ mod tests {
 
 /// RFI DPB depth (Apollo's 5). [`plan_range_recovery`] treats
 /// `next_ts - RFI_DPB` as the oldest frame still in the DPB.
-pub(super) const RFI_DPB: u32 = 5;
+pub const RFI_DPB: u32 = 5;
 
 /// One loss event's recovery for timestamp-range RFI. The per-timestamp
 /// `nvEncInvalidateRefFrames` loop and `last_rfi_range`/`pending_anchor`
 /// stores stay in each backend. Slot-RFI (AMF/QSV/Vulkan) is `crate::rfi`.
-pub(super) enum RangePlan {
+pub enum RangePlan {
     /// Last successful invalidation already covers this range. Re-arm the recovery
     /// anchor: the client re-asking means the previous anchor AU may itself have
     /// been lost.
@@ -785,7 +785,7 @@ pub(super) enum RangePlan {
 /// `next_ts` is `frame_idx`: the next timestamp to assign. `teardown()` clears
 /// `last_rfi_range` but not `frame_idx`, so a post-reset call can see a
 /// stale-high `next_ts` with `None` range.
-pub(super) fn plan_range_recovery(
+pub fn plan_range_recovery(
     first: i64,
     last: i64,
     next_ts: i64,
@@ -917,7 +917,7 @@ mod range_policy_tests {
 /// `full_chroma_input` / `av1_input_depth_minus8` are the CUDA vs D3D11
 /// input-format divergence; everything else is identical across platforms.
 #[derive(Clone, Copy)]
-pub(super) struct LowLatencyConfig {
+pub struct LowLatencyConfig {
     pub codec: Codec,
     pub bitrate: u64,
     pub fps: u32,
@@ -943,7 +943,7 @@ pub(super) struct LowLatencyConfig {
 /// the same init params. `enable_async` is the Windows two-thread retrieve;
 /// Linux is sync-only (`enableEncodeAsync = 0`).
 #[allow(clippy::too_many_arguments)]
-pub(super) fn build_init_params(
+pub fn build_init_params(
     codec_guid: nv::GUID,
     width: u32,
     height: u32,
@@ -989,7 +989,7 @@ pub(super) fn build_init_params(
 /// # Safety
 /// Writes codec-config union fields on `cfg`, which must be a valid,
 /// preset-seeded `NV_ENC_CONFIG` whose active arm matches [`LowLatencyConfig::codec`].
-pub(super) unsafe fn apply_low_latency_config(cfg: &mut nv::NV_ENC_CONFIG, c: LowLatencyConfig) {
+pub unsafe fn apply_low_latency_config(cfg: &mut nv::NV_ENC_CONFIG, c: LowLatencyConfig) {
     cfg.gopLength = nv::NVENC_INFINITE_GOPLENGTH;
     cfg.frameIntervalP = 1;
     cfg.rcParams.rateControlMode = nv::NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CBR;

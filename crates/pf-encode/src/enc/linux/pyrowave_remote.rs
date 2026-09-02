@@ -611,7 +611,7 @@ impl Encoder for RemotePyroWave {
         // Intra-only: every AU is already a keyframe.
     }
 
-    fn set_hdr_meta(&mut self, _meta: Option<punktfunk_core::quic::HdrMeta>) {
+    fn set_hdr_meta(&mut self, _meta: Option<pf_frame::HdrMeta>) {
         // PyroWave carries no VUI/SEI grade — the colour contract is the CSC shader's.
     }
 

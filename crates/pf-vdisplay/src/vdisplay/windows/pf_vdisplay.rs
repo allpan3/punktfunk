@@ -636,7 +636,7 @@ impl VdisplayDriver for PfVdisplayDriver {
         mode: Mode,
         render_luid: Option<LUID>,
         preferred_monitor_id: u32,
-        client_hdr: Option<punktfunk_core::quic::HdrMeta>,
+        client_hdr: Option<pf_frame::HdrMeta>,
         hw_cursor: bool,
     ) -> Result<AddedMonitor> {
         let session_id = next_session_id();
@@ -870,7 +870,7 @@ pub struct PfVdisplayDisplay {
     client_fp: Option<[u8; 32]>,
     /// Client HDR volume (`None` = unknown/SDR → driver EDID defaults). Advertised in the
     /// created monitor's EDID so host apps tone-map to the client's panel.
-    client_hdr: Option<punktfunk_core::quic::HdrMeta>,
+    client_hdr: Option<pf_frame::HdrMeta>,
     /// Declare an IddCx hardware cursor. Honored only when the handshake reported proto ≥ 5.
     hw_cursor: bool,
     /// Deliberate-quit flag (`None` = linger policy). A user "stop" tears the monitor down
@@ -899,7 +899,7 @@ impl VirtualDisplay for PfVdisplayDisplay {
         self.client_fp = fingerprint;
     }
 
-    fn set_client_hdr(&mut self, hdr: Option<punktfunk_core::quic::HdrMeta>) {
+    fn set_client_hdr(&mut self, hdr: Option<pf_frame::HdrMeta>) {
         self.client_hdr = hdr;
     }
 

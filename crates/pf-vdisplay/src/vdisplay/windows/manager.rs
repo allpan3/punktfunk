@@ -645,7 +645,7 @@ impl VirtualDisplayManager {
         &'static self,
         mode: Mode,
         client_fp: Option<[u8; 32]>,
-        client_hdr: Option<punktfunk_core::quic::HdrMeta>,
+        client_hdr: Option<pf_frame::HdrMeta>,
         hw_cursor: bool,
         quit: Option<Arc<AtomicBool>>,
     ) -> Result<VirtualOutput> {
@@ -1288,7 +1288,7 @@ impl VirtualDisplayManager {
         dev: HANDLE,
         mut mode: Mode,
         slot: u32,
-        client_hdr: Option<punktfunk_core::quic::HdrMeta>,
+        client_hdr: Option<pf_frame::HdrMeta>,
         hw_cursor: bool,
         inner: &mut MgrInner,
     ) -> Result<Monitor> {
@@ -1655,7 +1655,7 @@ impl VirtualDisplayManager {
         slot: u32,
         old: &Monitor,
         mode: Mode,
-        client_hdr: Option<punktfunk_core::quic::HdrMeta>,
+        client_hdr: Option<pf_frame::HdrMeta>,
     ) -> ReAdd {
         tracing::info!(
             slot,

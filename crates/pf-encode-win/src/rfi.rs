@@ -14,20 +14,20 @@
 //! Do not harmonize them here. NVENC's range policy is
 //! [`super::nvenc_core::plan_range_recovery`].
 
-pub(super) struct SlotPlan {
+pub struct SlotPlan {
     /// Slots with `wire >= loss_first`. Persist the distrust in the backend marker:
     /// without it, the next loss treats these as pre-loss anchors.
-    pub(super) tainted: u32,
+    pub tainted: u32,
     /// Newest trusted `(slot, wire)` strictly older than the loss. `None` → the
     /// caller declines and recovers via its keyframe path.
-    pub(super) anchor: Option<(usize, i64)>,
+    pub anchor: Option<(usize, i64)>,
 }
 
 /// Taint and pick from one snapshot of currently-trusted `(slot, wire)` pairs
 /// (caller already dropped previously-distrusted entries). `wire >= loss_first`
 /// taints; `wire < loss_first` is the only eligible anchor, so this call cannot
 /// pick a slot it just tainted.
-pub(super) fn plan_slot_recovery(refs: &[(usize, i64)], loss_first: i64) -> SlotPlan {
+pub fn plan_slot_recovery(refs: &[(usize, i64)], loss_first: i64) -> SlotPlan {
     // Callers gate `first < 0` before they get here; `-1`/`None` sentinels are
     // "untrusted". Plain `assert`: `--release` lint runs, and a compiled-out
     // check would drop taints instead of failing.
@@ -51,7 +51,7 @@ pub(super) fn plan_slot_recovery(refs: &[(usize, i64)], loss_first: i64) -> Slot
 /// Newest trusted `wire` strictly older than the loss. Ties keep the first
 /// `refs` entry (callers feed ascending slot order; the backends used `>`).
 /// Vulkan re-picks at frame-build against the table as it stands then.
-pub(super) fn pick_anchor(refs: &[(usize, i64)], loss_first: i64) -> Option<(usize, i64)> {
+pub fn pick_anchor(refs: &[(usize, i64)], loss_first: i64) -> Option<(usize, i64)> {
     let mut best: Option<(usize, i64)> = None;
     for &(slot, wire) in refs {
         if wire < loss_first && best.is_none_or(|(_, b)| wire > b) {

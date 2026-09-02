@@ -55,7 +55,7 @@ pub(crate) trait VdisplayDriver: Send + Sync {
         mode: Mode,
         render_luid: Option<LUID>,
         preferred_monitor_id: u32,
-        client_hdr: Option<punktfunk_core::quic::HdrMeta>,
+        client_hdr: Option<pf_frame::HdrMeta>,
         hw_cursor: bool,
     ) -> Result<AddedMonitor>;
     /// In-place resize (`IOCTL_UPDATE_MODES`, protocol v4). The monitor is not
@@ -100,7 +100,7 @@ mod tests {
             _mode: Mode,
             _render_luid: Option<LUID>,
             _preferred_monitor_id: u32,
-            _client_hdr: Option<punktfunk_core::quic::HdrMeta>,
+            _client_hdr: Option<pf_frame::HdrMeta>,
             _hw_cursor: bool,
         ) -> Result<AddedMonitor> {
             anyhow::bail!("fake driver adds no monitors")

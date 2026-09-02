@@ -10,7 +10,7 @@
 //! No GPU/FFI. Tests below pin the walk. Clients parse this exact layout, so
 //! both backends emit it from here. See `design/pyrowave-codec-plan.md`.
 
-pub(crate) const WINDOW_PREFIX: usize = 4;
+pub const WINDOW_PREFIX: usize = 4;
 const WIN_PACKED: u16 = 0;
 const WIN_FRAG_FIRST: u16 = 1;
 const WIN_FRAG_CONT: u16 = 2;
@@ -18,7 +18,7 @@ const WIN_FRAG_LAST: u16 = 3;
 
 /// Shard payload minus the window prefix, so a whole codec packet plus prefix
 /// fits one shard. Dense mode uses `dense_cap` (one packet per AU).
-pub(crate) fn packet_boundary(wire_chunk: Option<usize>, dense_cap: usize) -> usize {
+pub fn packet_boundary(wire_chunk: Option<usize>, dense_cap: usize) -> usize {
     wire_chunk.map(|c| c - WINDOW_PREFIX).unwrap_or(dense_cap)
 }
 
@@ -31,7 +31,7 @@ pub(crate) fn packet_boundary(wire_chunk: Option<usize>, dense_cap: usize) -> us
 /// primaries bit 27 (`0x08`), transfer bit 28 (`0x10`), transform bit 29
 /// (`0x20`), range bit 30 (`0x40`). `chroma_siting` bit 31 stays 0 (CENTER —
 /// the pyrowave CSCs use a centre-sited 2×2 box, unlike left-cosited P010).
-pub(crate) fn stamp_color_bits(bitstream: &mut [u8], seq_offset: usize, bt2020_pq: bool) {
+pub fn stamp_color_bits(bitstream: &mut [u8], seq_offset: usize, bt2020_pq: bool) {
     if let Some(b) = bitstream.get_mut(seq_offset + 7) {
         *b |= 0x40;
         if bt2020_pq {
@@ -51,7 +51,7 @@ pub(crate) fn stamp_color_bits(bitstream: &mut [u8], seq_offset: usize, bt2020_p
 /// the same frame. Linux-only caller (alternating encoder handles); Windows
 /// builds `-D warnings`, so `dead_code` is allowed off-Linux.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub(crate) fn wire_sequence(bitstream: &[u8], packet_offset: usize) -> Option<u8> {
+pub fn wire_sequence(bitstream: &[u8], packet_offset: usize) -> Option<u8> {
     let lo = *bitstream.get(packet_offset + 2)?;
     let hi = *bitstream.get(packet_offset + 3)?;
     Some(((u16::from_le_bytes([lo, hi]) >> 12) & 0x7) as u8)
@@ -61,7 +61,7 @@ pub(crate) fn wire_sequence(bitstream: &[u8], packet_offset: usize) -> Option<u8
 /// The vendored RDO packs the block index in 16 bits (`RDOperation.block_offset_saving`);
 /// a count above `u16::MAX` wraps inside the rate controller, so the host rejects
 /// those modes (~8K 4:4:4).
-pub(crate) fn block_count_32x32(width: u32, height: u32, chroma444: bool) -> u32 {
+pub fn block_count_32x32(width: u32, height: u32, chroma444: bool) -> u32 {
     const LEVELS: u32 = 5;
     let align = |v: u32| ((v + 31) & !31).max(128);
     let (aw, ah) = (align(width), align(height));
@@ -90,7 +90,7 @@ pub(crate) fn block_count_32x32(width: u32, height: u32, chroma444: bool) -> u32
 /// so this EMA-scales the target handed to pyrowave's rate control. Sealed-
 /// datagram framing and FEC parity are not compensated: H.26x sessions carry
 /// those on top of the configured bitrate too.
-pub(crate) struct WireBudget {
+pub struct WireBudget {
     /// EMA of AU/bitstream bytes, ×1024 fixed point.
     scale_x1024: u32,
 }
@@ -104,13 +104,21 @@ impl WireBudget {
     const MIN_X1024: u32 = 1024;
     const MAX_X1024: u32 = 2048;
 
-    pub(crate) fn new() -> WireBudget {
+    pub fn new() -> WireBudget {
         WireBudget {
             scale_x1024: Self::PRIOR_X1024,
         }
     }
+}
 
-    pub(crate) fn observe(&mut self, bitstream_len: usize, au_len: usize) {
+impl Default for WireBudget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WireBudget {
+    pub fn observe(&mut self, bitstream_len: usize, au_len: usize) {
         if bitstream_len == 0 {
             return;
         }
@@ -121,7 +129,7 @@ impl WireBudget {
     }
 
     /// Codec budget that makes the wire hit `budget` bytes/frame under the measured inflation.
-    pub(crate) fn deflate(&self, budget: usize) -> usize {
+    pub fn deflate(&self, budget: usize) -> usize {
         let scale = self.scale_x1024.clamp(Self::MIN_X1024, Self::MAX_X1024) as u64;
         ((budget as u64 * 1024) / scale) as usize
     }
@@ -129,7 +137,7 @@ impl WireBudget {
 
 /// Frame `packets` (offset, size into `bitstream`) into the wire AU.
 /// `None` copies the single dense packet; `Some(chunk)` emits whole `chunk`-sized windows.
-pub(crate) fn build_au(
+pub fn build_au(
     packets: &[(usize, usize)],
     bitstream: &[u8],
     wire_chunk: Option<usize>,
@@ -234,7 +242,7 @@ fn chunk_step(window: usize, target: usize) -> usize {
 /// `plan.wire_chunk = Some(session.shard_payload())`.
 /// `PUNKTFUNK_PYROWAVE_CHUNK_KIB` overrides the target (clamped to
 /// [`STREAM_CHUNK_MIN_KIB`]..=[`STREAM_CHUNK_MAX_KIB`]); garbage uses the default.
-pub(crate) fn stream_chunk_step(wire_chunk: Option<usize>) -> Option<usize> {
+pub fn stream_chunk_step(wire_chunk: Option<usize>) -> Option<usize> {
     let window = wire_chunk.filter(|&w| w > 0)?;
     if !stream_armed() {
         return None;
@@ -265,7 +273,7 @@ pub(crate) fn stream_chunk_step(wire_chunk: Option<usize>) -> Option<usize> {
 /// `kind` in its 4-byte prefix; a mid-window cut would split a unit clients
 /// parse atomically. Whole windows are `shard_payload` multiples, so sealer
 /// sentinel bases stay shard-aligned.
-pub(crate) struct AuChunker {
+pub struct AuChunker {
     au: Vec<u8>,
     cursor: usize,
     /// Whole-window byte count ([`chunk_step`]).
@@ -280,7 +288,7 @@ pub(crate) struct AuChunker {
 }
 
 impl AuChunker {
-    pub(crate) fn new(frame: crate::EncodedFrame, step: usize) -> AuChunker {
+    pub fn new(frame: crate::EncodedFrame, step: usize) -> AuChunker {
         AuChunker {
             au: frame.data,
             cursor: 0,
@@ -294,7 +302,9 @@ impl AuChunker {
     }
 
     /// Pieces concatenate to [`crate::Encoder::poll`]; `first` opens the wire frame and `last` closes it.
-    pub(crate) fn next(&mut self) -> Option<crate::AuChunk> {
+    // Not an `Iterator`: the chunker is driven by the encoder's poll cadence, not by a loop.
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> Option<crate::AuChunk> {
         if self.cursor >= self.au.len() {
             // `build_au` always emits at least one window, but a chunked poll that
             // returned nothing would leak the host's open `StreamedAu`.

@@ -78,7 +78,7 @@ pub const AMF_DX11_1: i32 = 111;
 pub const AMF_MEMORY_HOST: i32 = 1;
 
 /// Payload of `*InHDRMetadata`. Units match HEVC ST.2086 /
-/// [`punktfunk_core::quic::HdrMeta`]: chromaticities 1/50000, mastering luminance
+/// [`pf_frame::HdrMeta`]: chromaticities 1/50000, mastering luminance
 /// 0.0001 cd/m², CLL/FALL in nits.
 #[repr(C)]
 pub struct AmfHdrMetadata {

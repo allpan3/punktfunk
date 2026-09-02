@@ -6,8 +6,8 @@
 //! does not own the frame: keep the GPU payload alive until the matching AU
 //! returns from [`poll`](Encoder::poll). Loss recovery routes through
 //! [`EncoderCaps`] (RFI, intra-refresh, cursor blend), not no-op defaults.
-//! Backend selection and capability probes live in the crate root, which
-//! re-exports this module.
+//! Backend selection, capability probes, and the wire codec bits live in
+//! `pf-encode`, which re-exports this module.
 //!
 //! Pin split-mode values with `nvenc_split_constants_match_the_sdk`.
 //! Dimension and VBV contracts are in the tests below.
@@ -22,7 +22,7 @@ use pf_frame::CapturedFrame;
 /// on every `submit` (libavcodec). Negotiated depth is an upper bound; a
 /// session that still labels itself HDR is a negotiation mismatch.
 #[cfg(target_os = "windows")]
-pub(crate) fn ten_bit_input(format: pf_frame::PixelFormat, negotiated_depth: u8) -> bool {
+pub fn ten_bit_input(format: pf_frame::PixelFormat, negotiated_depth: u8) -> bool {
     use pf_frame::PixelFormat;
     let ten = matches!(
         format,
@@ -50,11 +50,11 @@ pub struct EncodedFrame {
     pub keyframe: bool,
     /// RFI recovery AU: a clean P against a known-good reference after
     /// [`invalidate_ref_frames`](Encoder::invalidate_ref_frames). The pump tags
-    /// [`punktfunk_core::packet::USER_FLAG_RECOVERY_ANCHOR`]. After RFI the host
+    /// `punktfunk_core::packet::USER_FLAG_RECOVERY_ANCHOR`. After RFI the host
     /// suppresses IDR, so without this flag the freeze only lifts on a later IDR.
     pub recovery_anchor: bool,
     /// Shard-aligned self-delimiting chunks ([`Encoder::set_wire_chunking`]).
-    /// The session stamps [`punktfunk_core::packet::USER_FLAG_CHUNK_ALIGNED`].
+    /// The session stamps `punktfunk_core::packet::USER_FLAG_CHUNK_ALIGNED`.
     /// Only PyroWave sets it.
     pub chunk_aligned: bool,
 }
@@ -108,7 +108,7 @@ pub enum Codec {
 
 /// Chroma the encoder emits (`PUNKTFUNK_444` + client `VIDEO_CAP_444` + GPU
 /// probe). `Yuv420` is the default. `Yuv444` is HEVC-only, native-protocol
-/// only (GameStream stays 4:2:0), and only after [`can_encode_444`].
+/// only (GameStream stays 4:2:0), and only after `pf_encode::can_encode_444`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ChromaFormat {
     #[default]
@@ -117,42 +117,13 @@ pub enum ChromaFormat {
 }
 
 impl ChromaFormat {
-    /// HEVC `chroma_format_idc`: `1` (4:2:0) or `3` (4:4:4). Same numeric
-    /// value as [`punktfunk_core::quic::Welcome::chroma_format`].
-    pub fn idc(self) -> u8 {
-        match self {
-            ChromaFormat::Yuv420 => punktfunk_core::quic::CHROMA_IDC_420,
-            ChromaFormat::Yuv444 => punktfunk_core::quic::CHROMA_IDC_444,
-        }
-    }
-
     pub fn is_444(self) -> bool {
         matches!(self, ChromaFormat::Yuv444)
     }
 }
 
 impl Codec {
-    /// Map a `quic` codec bit ([`punktfunk_core::quic::CODEC_H264`] etc.) to
-    /// [`Codec`]. Unknown / `0` maps to HEVC (pre-negotiation default). Inverse
-    /// of [`Codec::to_wire`].
-    pub fn from_wire(bit: u8) -> Codec {
-        match bit {
-            punktfunk_core::quic::CODEC_H264 => Codec::H264,
-            punktfunk_core::quic::CODEC_AV1 => Codec::Av1,
-            punktfunk_core::quic::CODEC_PYROWAVE => Codec::PyroWave,
-            _ => Codec::H265,
-        }
-    }
-
-    pub fn to_wire(self) -> u8 {
-        match self {
-            Codec::H264 => punktfunk_core::quic::CODEC_H264,
-            Codec::H265 => punktfunk_core::quic::CODEC_HEVC,
-            Codec::Av1 => punktfunk_core::quic::CODEC_AV1,
-            Codec::PyroWave => punktfunk_core::quic::CODEC_PYROWAVE,
-        }
-    }
-
+    /// Wire mapping (`quic::CODEC_*`) is `pf_encode::codec_from_wire` / `codec_to_wire`.
     pub fn label(self) -> &'static str {
         match self {
             Codec::H264 => "h264",
@@ -166,7 +137,7 @@ impl Codec {
     /// UNORM planes with P010-style studio codes — `design/pyrowave-444-hdr.md`).
     /// H.264 is always 8-bit (High10 is not an NVENC or VCN encode mode).
     /// Codec-level gate only: the GPU/backend must still pass
-    /// [`can_encode_10bit`](crate::can_encode_10bit).
+    /// `pf_encode::can_encode_10bit`.
     pub fn supports_10bit(self) -> bool {
         matches!(self, Codec::H265 | Codec::Av1 | Codec::PyroWave)
     }
@@ -185,7 +156,7 @@ impl Codec {
 
     /// FFmpeg VAAPI encoder name. One libavcodec encoder per codec covers AMD
     /// and Intel. Selected by name (codec id would pick SW). AV1 VAAPI is
-    /// narrow — probe, never assume (see [`open_video`]).
+    /// narrow — probe, never assume (see `pf_encode::open_video`).
     pub fn vaapi_name(self) -> &'static str {
         match self {
             Codec::H264 => "h264_vaapi",
@@ -244,7 +215,7 @@ pub struct EncoderCaps {
     pub intra_refresh: bool,
     /// Constrained GDR heals a lost picture within one wave. The host then tags
     /// wave-boundary AUs with
-    /// [`USER_FLAG_RECOVERY_POINT`](punktfunk_core::packet::USER_FLAG_RECOVERY_POINT)
+    /// `punktfunk_core::packet::USER_FLAG_RECOVERY_POINT`
     /// so the client can lift its freeze on the second mark. Default `false`
     /// (the IDR path stays until this is set). Meaningless unless
     /// [`intra_refresh`](Self::intra_refresh) is also set.
@@ -256,7 +227,7 @@ pub struct EncoderCaps {
     /// Encoder composites [`CapturedFrame::cursor`] into the picture.
     /// `open_video`'s `cursor_blend` is a request; most backends ignore
     /// `frame.cursor`. Query this instead of assuming. Negotiation gates the
-    /// cursor channel with [`cursor_blend_capable`](crate::cursor_blend_capable);
+    /// cursor channel with `pf_encode::cursor_blend_capable`;
     /// `open_video`'s post-open check is the backstop.
     pub blends_cursor: bool,
 }
@@ -288,7 +259,7 @@ pub trait Encoder: Send {
     /// emits it in-band (HEVC/H.264 SEI or AV1 metadata OBUs) on keyframes so a
     /// stock decoder can tone-map. First-party clients read the grade out-of-band
     /// (0xCE datagram); this is never the primary channel. Default: no-op.
-    fn set_hdr_meta(&mut self, _meta: Option<punktfunk_core::quic::HdrMeta>) {}
+    fn set_hdr_meta(&mut self, _meta: Option<pf_frame::HdrMeta>) {}
     /// Invalidate a contiguous range of previously-encoded references (wire
     /// frame indexes, the domain [`submit_indexed`](Self::submit_indexed) pins)
     /// so the encoder re-references an older still-valid frame instead of an
@@ -410,7 +381,7 @@ impl Codec {
 
     /// Spec top level/tier bitrate (bits/s) — the usual boundary at which NVENC
     /// rejects `avcodec_open2` with EINVAL. Not a hard cap:
-    /// [`open_video`](crate::open_video) probes the GPU ceiling by stepping
+    /// `pf_encode::open_video` probes the GPU ceiling by stepping
     /// down from the requested bitrate only on EINVAL, and uses this as the
     /// first step-down candidate so a card that accepts more is never clamped
     /// to it. HEVC Level 6.2 High = 800 Mbps; H.264 High 6.2 ≈ 480 Mbps.
@@ -447,15 +418,15 @@ pub const SPLIT_FORCE_PIXEL_RATE: u64 = 950_000_000;
 // only with `feature = "nvenc"`. Ungated this is `dead_code` on a
 // featureless Windows build — an item lint, not a module one.
 #[cfg(any(target_os = "linux", all(target_os = "windows", feature = "nvenc")))]
-pub(crate) const SPLIT_AUTO: u32 = 0;
+pub const SPLIT_AUTO: u32 = 0;
 #[cfg(any(target_os = "linux", all(target_os = "windows", feature = "nvenc")))]
-pub(crate) const SPLIT_AUTO_FORCED: u32 = 1;
+pub const SPLIT_AUTO_FORCED: u32 = 1;
 #[cfg(any(target_os = "linux", all(target_os = "windows", feature = "nvenc")))]
-pub(crate) const SPLIT_TWO_FORCED: u32 = 2;
+pub const SPLIT_TWO_FORCED: u32 = 2;
 #[cfg(any(target_os = "linux", all(target_os = "windows", feature = "nvenc")))]
-pub(crate) const SPLIT_THREE_FORCED: u32 = 3;
+pub const SPLIT_THREE_FORCED: u32 = 3;
 #[cfg(any(target_os = "linux", all(target_os = "windows", feature = "nvenc")))]
-pub(crate) const SPLIT_DISABLE: u32 = 15;
+pub const SPLIT_DISABLE: u32 = 15;
 
 /// NVENC split-frame mode for a session. Shared by the Windows and Linux
 /// direct-SDK backends. Precedence:
@@ -477,12 +448,7 @@ pub(crate) const SPLIT_DISABLE: u32 = 15;
 /// `NV_ENC_CAPS_NUM_ENCODER_ENGINES`; `0` = unknown (assume a second engine).
 // Split-policy cfg — see the constants above.
 #[cfg(any(target_os = "linux", all(target_os = "windows", feature = "nvenc")))]
-pub(crate) fn resolve_split_mode(
-    codec: Codec,
-    bit_depth: u8,
-    pixel_rate: u64,
-    engines: u32,
-) -> u32 {
+pub fn resolve_split_mode(codec: Codec, bit_depth: u8, pixel_rate: u64, engines: u32) -> u32 {
     let hw_max = max_forced_split_mode(engines);
     let mode = match std::env::var("PUNKTFUNK_SPLIT_ENCODE").ok().as_deref() {
         Some("0") | Some("disable") => SPLIT_DISABLE,
@@ -517,7 +483,7 @@ pub(crate) fn resolve_split_mode(
 /// Above that, `AUTO_FORCED` = "split, driver picks how many".
 // Split-policy cfg — see the constants above.
 #[cfg(any(target_os = "linux", all(target_os = "windows", feature = "nvenc")))]
-pub(crate) fn max_forced_split_mode(engines: u32) -> u32 {
+pub fn max_forced_split_mode(engines: u32) -> u32 {
     match engines {
         // Cap unreadable or not probed: assume a second engine; open-time
         // rejection fallback corrects it.
@@ -541,7 +507,7 @@ pub(crate) fn max_forced_split_mode(engines: u32) -> u32 {
 // `codec.rs` compiles everywhere; without this cfg it is `dead_code` on
 // Windows (item lint, not a module one).
 #[cfg(target_os = "linux")]
-pub(crate) fn forced_split_width(mode: u32) -> Option<u32> {
+pub fn forced_split_width(mode: u32) -> Option<u32> {
     match mode {
         m if m == SPLIT_TWO_FORCED => Some(2),
         m if m == SPLIT_THREE_FORCED => Some(3),
@@ -554,7 +520,7 @@ pub(crate) fn forced_split_width(mode: u32) -> Option<u32> {
 /// (see [`max_forced_split_mode`]).
 // Split-policy cfg — see the constants above.
 #[cfg(any(target_os = "linux", all(target_os = "windows", feature = "nvenc")))]
-pub(crate) fn clamp_to_engines(requested: u32, hw_max: u32, engines: u32) -> u32 {
+pub fn clamp_to_engines(requested: u32, hw_max: u32, engines: u32) -> u32 {
     // Only named N-way modes are ordered; `hw_max` may be AUTO_FORCED (1) on
     // a >3-engine part, which is not less than TWO_FORCED and must not clamp.
     let named = |m: u32| (2..=3).contains(&m);
@@ -576,7 +542,7 @@ pub(crate) fn clamp_to_engines(requested: u32, hw_max: u32, engines: u32) -> u32
 /// each frame must fit its rate share, keeping sizes uniform for the pacer).
 /// Direct-NVENC, AMF, VAAPI, and QSV parse the same variable. Larger
 /// values let complex frames borrow bits at the cost of size variance.
-pub(crate) fn vbv_frames_env() -> f64 {
+pub fn vbv_frames_env() -> f64 {
     std::env::var("PUNKTFUNK_VBV_FRAMES")
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
@@ -598,7 +564,7 @@ pub(crate) fn vbv_frames_env() -> f64 {
 /// `window / 2 <= window` (`VUID-...-08358`). Linux `vulkan-encode` only;
 /// ungated this is dead on Windows.
 #[cfg(all(target_os = "linux", feature = "vulkan-encode"))]
-pub(crate) fn vbv_window_ms(fps: u32) -> (u32, u32) {
+pub fn vbv_window_ms(fps: u32) -> (u32, u32) {
     let frames = vbv_frames_env();
     let ms = (frames * 1000.0 / fps.max(1) as f64).round();
     // `f64 as u32` saturates at the bounds, so an absurd `PUNKTFUNK_VBV_FRAMES` cannot wrap.
@@ -740,15 +706,5 @@ mod tests {
         assert_eq!(c.pts_ns, 42);
         assert!(c.keyframe && c.recovery_anchor && !c.chunk_aligned);
         assert!(c.first && c.last);
-    }
-
-    #[test]
-    fn codec_wire_roundtrip_and_label() {
-        for c in [Codec::H264, Codec::H265, Codec::Av1] {
-            assert_eq!(Codec::from_wire(c.to_wire()), c);
-        }
-        assert_eq!(Codec::H264.label(), "h264");
-        assert_eq!(Codec::H265.label(), "hevc");
-        assert_eq!(Codec::Av1.label(), "av1");
     }
 }
