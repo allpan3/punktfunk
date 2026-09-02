@@ -233,8 +233,12 @@ impl WinFacts {
 
     /// D11: a competitor is live — by service or by the port answering — and the operator has
     /// not already moved the management API themselves.
+    /// The bound-port signal counts only on a box without punktfunk: on an upgrade the
+    /// running host owns :47990 itself (WP3.5's VM smoke moved a lone host to :47991), and a
+    /// named competitor is caught by the service probe regardless.
     pub fn needs_coexistence(&self) -> bool {
-        (!self.competing_hosts.is_empty() || self.mgmt_port_in_use) && !self.mgmt_bind_set
+        let foreign_port = self.mgmt_port_in_use && self.installed.is_none();
+        (!self.competing_hosts.is_empty() || foreign_port) && !self.mgmt_bind_set
     }
 
     /// D12: the networks whose Public category makes the default firewall rules inert.
@@ -614,6 +618,24 @@ mod tests {
         let facts = probe(&run, &env, &net, tmp.path());
         assert!(facts.competing_hosts.is_empty());
         assert!(facts.needs_coexistence());
+    }
+
+    // WP3.5's VM smoke: on an upgrade the bound port is our own running host.
+    #[test]
+    fn an_upgrades_own_host_on_the_mgmt_port_is_no_conflict() {
+        let (mut run, env, _, tmp) = fresh_box();
+        let body = format!(
+            "\r\n{HOST_ARP_KEY}\r\n    DisplayVersion    REG_SZ    0.35.16661\r\n    InstallLocation    REG_SZ    C:\\Program Files\\punktfunk\\\r\n\r\n"
+        );
+        run = run.answer(&format!("reg query {HOST_ARP_KEY}"), 0, &body);
+        let net = FakeNet {
+            ports_in_use: vec![MGMT_PORT],
+            ..FakeNet::default()
+        };
+        let facts = probe(&run, &env, &net, tmp.path());
+        assert!(facts.installed.is_some());
+        assert!(facts.mgmt_port_in_use);
+        assert!(!facts.needs_coexistence());
     }
 
     // D11's guard: an operator who moved the port themselves already coexists — rewriting
