@@ -164,33 +164,45 @@ enum AdapterCycle {
 ///
 /// Disable+enable is the script's lever, but that script stops the host first: this process
 /// still holds [`DeviceSlot`](super::manager) handles, so disable is expected to refuse.
-/// `pnputil /restart-device` reloads a device in use. Failure paths re-enable so a half cycle
-/// cannot leave the adapter disabled. Best-effort, ~6 s inside the script.
+/// `pnputil /restart-device` reloads a device in use, and is also the escalation when the cycle
+/// leaves the node re-failing. A `CM_PROB_FAILED_POST_START` node reads `Status OK` for an
+/// instant after enable, so success demands three consecutive clean `ConfigManagerErrorCode`
+/// reads a second apart — a single status snapshot reports a dead adapter as reloaded, and the
+/// session then spends its whole build budget against an interface that never returns. Failure
+/// paths re-enable so a half cycle cannot leave the adapter disabled. Best-effort, ~21 s.
 fn reload_vdisplay_adapter() -> AdapterCycle {
     // Prefer live nodes (`Present` or `Status -ne 'Unknown'`): `-First 1` can pick a phantom whose
-    // disable and restart both fail. `-ErrorAction Stop` inside `try` — reporting PnP Status after
-    // a refused disable looks like `OK`. `$LASTEXITCODE=1` before pnputil so "never ran" ≠ 0.
-    // REFUSED carries counts, Status, problem code, restart exit (3010 = needs reboot).
+    // disable and restart both fail. `Settle` is the health verdict, not `Status`: a node that
+    // re-fails still reads `OK` for an instant after enable. `$LASTEXITCODE=1` before pnputil so
+    // "never ran" ≠ 0; REFUSED carries counts, live status, settled problem code, restart exit.
     const CYCLE_PS: &str = "$ErrorActionPreference='SilentlyContinue'; \
+        function Settle($i) { $global:code = 999; $ok = 0; \
+            for ($n = 0; $n -lt 8; $n++) { Start-Sleep -Milliseconds 1000; \
+                $d = Get-PnpDevice -InstanceId $i; \
+                if ($d) { $global:code = [int]$d.ConfigManagerErrorCode } else { $global:code = 999 }; \
+                if ($global:code -eq 0) { $ok++ } else { $ok = 0 }; \
+                if ($ok -ge 3) { break } } }; \
+        $global:code = 999; \
         $all = @(Get-PnpDevice -Class Display | Where-Object { $_.FriendlyName -match 'punktfunk Virtual Display' }); \
         if ($all.Count -eq 0) { Write-Output 'ABSENT'; exit }; \
         $live = @($all | Where-Object { $_.Present -or $_.Status -ne 'Unknown' } | Sort-Object { $_.Status -ne 'OK' }); \
         if ($live.Count -eq 0) { Write-Output ('REFUSED only phantom (not-present) adapter devnodes remain (' + $all.Count + ') - the device node itself is gone and no reload can revive it; reinstalling the host re-creates it'); exit }; \
-        $ad = $live[0]; $id = $ad.InstanceId; $err = ''; \
+        $ad = $live[0]; $id = $ad.InstanceId; $err = ''; $how = ''; $rx = -1; \
         try { \
             Disable-PnpDevice -InstanceId $id -Confirm:$false -ErrorAction Stop; Start-Sleep -Seconds 2; \
             try { Enable-PnpDevice -InstanceId $id -Confirm:$false -ErrorAction Stop } \
             catch { Start-Sleep -Seconds 2; Enable-PnpDevice -InstanceId $id -Confirm:$false -ErrorAction Stop }; \
-            Start-Sleep -Seconds 2; \
-            Write-Output ('RELOADED cycle ' + (Get-PnpDevice -InstanceId $id).Status); exit \
+            $how = 'cycle'; Settle $id \
         } catch { $err = ($_.Exception.Message -replace '\\s+', ' ') }; \
-        $pnp = ($env:SystemRoot + '\\System32\\pnputil.exe'); $LASTEXITCODE = 1; \
-        if (Test-Path $pnp) { & $pnp /restart-device $id *> $null }; \
-        $rx = $LASTEXITCODE; \
-        if ($rx -eq 0) { Start-Sleep -Seconds 2; \
-            Write-Output ('RELOADED restart ' + (Get-PnpDevice -InstanceId $id).Status) } \
+        if ($how -eq '' -or $global:code -ne 0) { \
+            $pnp = ($env:SystemRoot + '\\System32\\pnputil.exe'); $LASTEXITCODE = 1; \
+            if (Test-Path $pnp) { & $pnp /restart-device $id *> $null }; \
+            $rx = $LASTEXITCODE; \
+            if ($rx -eq 0) { $how = 'restart'; Settle $id } }; \
+        if ($how -ne '' -and $global:code -eq 0) { \
+            Write-Output ('RELOADED ' + $how + ' ' + (Get-PnpDevice -InstanceId $id).Status) } \
         else { Enable-PnpDevice -InstanceId $id -Confirm:$false; \
-            Write-Output ('REFUSED devnodes=' + $all.Count + ' live=' + $live.Count + ' status=' + $ad.Status + ' problem=' + $ad.ConfigManagerErrorCode + ' restart_exit=' + $rx + ' ' + $err) }";
+            Write-Output ('REFUSED devnodes=' + $all.Count + ' live=' + $live.Count + ' status=' + (Get-PnpDevice -InstanceId $id).Status + ' problem=' + $global:code + ' restart_exit=' + $rx + ' ' + $err) }";
     let ps = std::env::var("SystemRoot")
         .map(|r| format!(r"{r}\System32\WindowsPowerShell\v1.0\powershell.exe"))
         .unwrap_or_else(|_| "powershell.exe".to_string());
@@ -948,8 +960,9 @@ const ABSENT_SETTLE: Duration = Duration::from_secs(3);
 /// Arrival window after a reload. 15 s: PnP is contended right after wake; 4 s missed it.
 const ARRIVAL_AFTER_RELOAD: Duration = Duration::from_secs(15);
 
-/// Ceiling on the whole wait. Without it, not-ready + reload + arrival can approach a minute.
-const TOTAL_BUDGET: Duration = Duration::from_secs(30);
+/// Ceiling on the whole wait. Only the reload path can approach it: the escalating cycle
+/// (disable+enable, settle, `/restart-device`, settle) runs ~21 s before arrival gets its window.
+const TOTAL_BUDGET: Duration = Duration::from_secs(45);
 
 /// Budget when the caller must not stall: re-probe only, no reload. [`VdisplayDriver::open`]
 /// and `hw_cursor_capable` (a handshake bool) must not hold Welcome for tens of seconds.
@@ -1166,6 +1179,22 @@ mod tests {
                 "{dead:?} is not a reap report"
             );
         }
+    }
+
+    /// Only the reload path can reach [`TOTAL_BUDGET`], and it must fit the whole ladder:
+    /// absent-settle, the escalating cycle script, then a full arrival window. Cut the budget
+    /// below that and a verified reload is abandoned before the interface can register — the
+    /// session then fails against an adapter that was seconds from coming back.
+    #[test]
+    fn the_total_budget_covers_a_full_escalating_reload() {
+        // Worst case inside `CYCLE_PS`: 2 s disable settle, two 8 s `Settle` rounds, and
+        // `pnputil /restart-device` between them.
+        const SCRIPT_WORST: Duration = Duration::from_secs(21);
+        assert!(
+            ABSENT_SETTLE + SCRIPT_WORST + ARRIVAL_AFTER_RELOAD <= TOTAL_BUDGET,
+            "TOTAL_BUDGET {TOTAL_BUDGET:?} cannot hold {ABSENT_SETTLE:?} + {SCRIPT_WORST:?} + \
+             {ARRIVAL_AFTER_RELOAD:?}"
+        );
     }
 
     /// `is_absent` is what decides wait vs. surgery. Registered-but-inactive is mid-transition
