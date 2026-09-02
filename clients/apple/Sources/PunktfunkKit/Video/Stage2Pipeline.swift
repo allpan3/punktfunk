@@ -637,9 +637,11 @@ final class DecodedVideoSink: @unchecked Sendable {
             presentLog.error("decoded: 120 frames accepted and none reached glass — renderer wedged?")
         }
         if let c = counts {
-            presentLog.notice(
-                "pf-decoded submitted=\(c.submitted, privacy: .public) dropped=\(c.dropped, privacy: .public) displayed=\(c.displayed, privacy: .public) qDrop=\(queueDrops(), privacy: .public) stamps=\(c.stamps, privacy: .public)"
-            )
+            // stdout, like pf-present: the console bridge is the only readout an Apple TV has.
+            print(
+                "pf-decoded submitted=\(c.submitted) dropped=\(c.dropped) displayed=\(c.displayed) "
+                    + "qDrop=\(queueDrops()) stamps=\(c.stamps)")
+            fflush(stdout)
         }
     }
 
@@ -762,7 +764,8 @@ private enum DecodedPlaneProbe {
                     let line = "pf-plane-probe" + stat(" flipAfterSubmitMs", flipLag)
                         + stat(" flipPhaseMs", flipPhase) + stat(" localReleaseMs", localRelease)
                         + stat(" remoteReleaseMs", remoteRelease)
-                    presentLog.notice("\(line, privacy: .public)")
+                    print(line) // stdout: the console bridge is the only readout an Apple TV has
+                    fflush(stdout)
                     flipLag.removeAll()
                     flipPhase.removeAll()
                     localRelease.removeAll()
