@@ -201,6 +201,13 @@ private final class VsyncClock: @unchecked Sendable {
         if target >= now { return target }
         return target + ceil((now - target) / period) * period
     }
+
+    /// The last vsync at or before `now`, on the same grid and staleness rules as `nextVsync`.
+    func lastVsync(before now: CFTimeInterval) -> CFTimeInterval? {
+        guard let next = nextVsync(after: now) else { return nil }
+        lock.lock(); defer { lock.unlock() }
+        return next > now ? next - period : next
+    }
 }
 
 /// Tuning for one cadence loop. Gains are SHIFT COUNTS — the loop is fixed-point Int64
@@ -500,6 +507,7 @@ final class DecodedVideoSink: @unchecked Sendable {
     private struct Stamp {
         let ptsNs: UInt64
         let decodedNs: Int64
+        let submittedAt: CFTimeInterval
     }
 
     private let renderer: AVSampleBufferVideoRenderer
@@ -571,7 +579,8 @@ final class DecodedVideoSink: @unchecked Sendable {
             // Keys are pool surfaces, so live entries stay few; the cap only sheds IDs a rebuilt
             // decode session left behind.
             if stamps.count >= 64 { stamps.removeAll(keepingCapacity: true) }
-            stamps[surfaceID] = Stamp(ptsNs: frame.ptsNs, decodedNs: frame.decodedNs)
+            stamps[surfaceID] = Stamp(
+                ptsNs: frame.ptsNs, decodedNs: frame.decodedNs, submittedAt: CACurrentMediaTime())
             undisplayedRun += 1
         }
         submitted += 1
@@ -591,6 +600,21 @@ final class DecodedVideoSink: @unchecked Sendable {
         displayed += 1
         undisplayedRun = 0
         return (stamp.ptsNs, stamp.decodedNs)
+    }
+
+    /// The renderer's current surface without consuming its stamp (the debug probe's poll).
+    func displayedSurface() -> (buffer: CVPixelBuffer, id: IOSurfaceID)? {
+        guard #available(macOS 14.4, iOS 17.4, tvOS 17.4, *),
+              let pixelBuffer = renderer.displayedPixelBuffer(),
+              let surfaceID = Self.surfaceID(pixelBuffer)
+        else { return nil }
+        return (pixelBuffer, surfaceID)
+    }
+
+    func submitMediaTime(of surfaceID: IOSurfaceID) -> CFTimeInterval? {
+        lock.lock()
+        defer { lock.unlock() }
+        return stamps[surfaceID]?.submittedAt
     }
 
     /// Once per tick: log a run of accepted frames that never reached glass (once per episode,
@@ -681,6 +705,80 @@ final class DecodedVideoSink: @unchecked Sendable {
             Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
             Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
         return sample
+    }
+}
+
+/// PUNKTFUNK_PRESENT_DEBUG on the decoded plane: brackets in time what `displayedPixelBuffer`
+/// means, because Apple defines it as a paused-renderer state query with no playback timing
+/// contract. A 2 kHz sampler catches each identity flip and logs, per second, the flip's lag
+/// behind its submit, its phase after the last vsync, and how long the previous surface stayed
+/// held afterwards: locally (our process: renderer and decoder) and by any process
+/// (`IOSurfaceIsInUse`, where the display's hold shows once ours is gone). A flip right after
+/// submit means the display stat is a floor, not a measurement; a remote release one refresh
+/// after the flip means the stat is one refresh optimistic. Never runs in a normal session.
+private enum DecodedPlaneProbe {
+    static func start(sink: DecodedVideoSink, vsync: VsyncClock, token: StopFlag) {
+        let thread = Thread {
+            var lastID: IOSurfaceID?
+            var held: CVPixelBuffer?
+            var previous: (surface: IOSurfaceRef, flipAt: CFTimeInterval, localDone: Bool)?
+            var flipLag: [Double] = [], flipPhase: [Double] = []
+            var localRelease: [Double] = [], remoteRelease: [Double] = []
+            var lastLog = CACurrentMediaTime()
+            while !token.isStopped {
+                usleep(500)
+                let now = CACurrentMediaTime()
+                autoreleasepool {
+                    guard let shown = sink.displayedSurface(), shown.id != lastID else { return }
+                    if lastID != nil {
+                        if let at = sink.submitMediaTime(of: shown.id) {
+                            flipLag.append((now - at) * 1000)
+                        }
+                        if let v = vsync.lastVsync(before: now) {
+                            flipPhase.append((now - v) * 1000)
+                        }
+                        if let old = held,
+                           let surface = CVPixelBufferGetIOSurface(old)?.takeUnretainedValue() {
+                            previous = (surface, now, false)
+                        }
+                    }
+                    lastID = shown.id
+                    held = shown.buffer
+                }
+                if let p = previous {
+                    if !p.localDone, IOSurfaceGetUseCount(p.surface) == 0 {
+                        localRelease.append((now - p.flipAt) * 1000)
+                        previous?.localDone = true
+                    }
+                    if !IOSurfaceIsInUse(p.surface) {
+                        remoteRelease.append((now - p.flipAt) * 1000)
+                        previous = nil
+                    } else if now - p.flipAt > 0.1 {
+                        previous = nil // held past 100 ms: not a display hold, give up
+                    }
+                }
+                if now - lastLog >= 1 {
+                    lastLog = now
+                    let line = "pf-plane-probe" + stat(" flipAfterSubmitMs", flipLag)
+                        + stat(" flipPhaseMs", flipPhase) + stat(" localReleaseMs", localRelease)
+                        + stat(" remoteReleaseMs", remoteRelease)
+                    presentLog.notice("\(line, privacy: .public)")
+                    flipLag.removeAll()
+                    flipPhase.removeAll()
+                    localRelease.removeAll()
+                    remoteRelease.removeAll()
+                }
+            }
+        }
+        thread.name = "punktfunk-plane-probe"
+        thread.qualityOfService = .userInteractive
+        thread.start()
+    }
+
+    private static func stat(_ name: String, _ values: [Double]) -> String {
+        let sorted = values.sorted()
+        guard let max = sorted.last else { return "\(name) n=0" }
+        return name + String(format: " p50=%.2f max=%.2f n=%d", sorted[sorted.count / 2], max, sorted.count)
     }
 }
 
@@ -1622,7 +1720,12 @@ public final class Stage2Pipeline {
         pumpJoinable = true
         thread.start()
 
-        if decodedSink != nil { return }
+        if let decodedSink {
+            if presentDebug {
+                DecodedPlaneProbe.start(sink: decodedSink, vsync: vsyncClock, token: token)
+            }
+            return
+        }
 
         // The present half. Deadline pacing (stage-4) swaps it wholesale: a CAMetalDisplayLink
         // vends the drawables and its per-refresh updates co-drive the render thread — see
