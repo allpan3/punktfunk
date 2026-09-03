@@ -483,6 +483,8 @@ impl RingEndpoint {
 
 impl Drop for RingEndpoint {
     fn drop(&mut self) {
+        let before = handle_count();
+        dbglog!("[pf-vd] hcount: endpoint drop before={before}");
         // Every publisher (opened textures + keyed mutexes) is gone — they hold an `Arc` to us.
         // Unmap the header, then close the event, section and every retained texture handle:
         // nothing of the channel outlives the endpoint (`design/idd-push-security.md`).
@@ -504,6 +506,7 @@ impl Drop for RingEndpoint {
                 }
             }
         }
+        dbglog!("[pf-vd] hcount: endpoint drop after={}", handle_count());
     }
 }
 

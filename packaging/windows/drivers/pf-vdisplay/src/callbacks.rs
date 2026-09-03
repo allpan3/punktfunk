@@ -470,6 +470,10 @@ pub unsafe extern "C" fn assign_swap_chain(
 /// time is logged every time: the wake event should make it sub-millisecond, and a slow one
 /// here is a DDI or D3D call the worker was inside when the OS unassigned it.
 pub unsafe extern "C" fn unassign_swap_chain(monitor: iddcx::IDDCX_MONITOR) -> NTSTATUS {
+    dbglog!(
+        "[pf-vd] hcount: unassign entry n={}",
+        crate::frame_transport::handle_count()
+    );
     let had = crate::registry::find(|m| m.object() == Some(monitor)).and_then(|m| m.take_swap());
     let live = had.is_some();
     let started = std::time::Instant::now();

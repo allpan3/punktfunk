@@ -254,6 +254,10 @@ impl SwapChainProcessor {
     ) {
         let (wake, available_buffer_event) = events;
         let assignment_epoch = ASSIGNMENT_EPOCH.fetch_add(1, Ordering::AcqRel) + 1;
+        dbglog!(
+            "[pf-vd] hcount: run_core entry n={}",
+            crate::frame_transport::handle_count()
+        );
         // `as_raw()` BORROWS our single reference — IddCx AddRefs its own — and it is released right
         // after the realtime raise below. An `into_raw()` here would orphan that reference and pin the
         // D3D device (its worker threads and VRAM) past the processor's drop.
@@ -281,6 +285,10 @@ impl SwapChainProcessor {
         }
         dbglog!(
             "[pf-vd] swap-chain run_core: SetDevice OK (target={target_id}) — entering drain loop"
+        );
+        dbglog!(
+            "[pf-vd] hcount: after SetDevice n={}",
+            crate::frame_transport::handle_count()
         );
         // GPU-scheduling raise for the swap-chain processing device — default ON, so the leg
         // feeding every captured frame into the ring outranks a GPU-saturating game (history +
@@ -326,6 +334,10 @@ impl SwapChainProcessor {
         // on the monitor's endpoint, so a swap-chain flap (a SIBLING display churning the topology)
         // resumes the same host ring without any COM object crossing device epochs — a TDR
         // recreate or adapter move just makes the open fail, reported in the header.
+        dbglog!(
+            "[pf-vd] hcount: before re-open n={}",
+            crate::frame_transport::handle_count()
+        );
         let mut publisher: Option<FramePublisher> = monitor
             .upgrade()
             .and_then(|m| m.endpoint())
@@ -343,6 +355,10 @@ impl SwapChainProcessor {
                     None
                 }
             });
+        dbglog!(
+            "[pf-vd] hcount: after re-open n={}",
+            crate::frame_transport::handle_count()
+        );
         // The FIRST-FRAME stash (see `FrameStash`): the retained last composed frame, republished
         // into every fresh ring at attach so a session opening onto an idle desktop is never black.
         // Worker-local (D4): its texture lives on THIS device, so it never crosses an assignment —
@@ -438,6 +454,10 @@ impl SwapChainProcessor {
                                 );
                             }
                             publisher = Some(p);
+                            dbglog!(
+                                "[pf-vd] hcount: after fresh attach n={}",
+                                crate::frame_transport::handle_count()
+                            );
                         }
                         Err(e) => {
                             // Terminal for THIS delivery (pre-WP5 semantics): the host reads the

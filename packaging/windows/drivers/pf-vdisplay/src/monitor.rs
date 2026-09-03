@@ -281,6 +281,10 @@ impl Monitor {
     /// so a racing install hands its value back instead of landing here unjoined. Run by the
     /// caller that removed this monitor from the registry, with the registry lock released.
     pub fn teardown(&self) {
+        dbglog!(
+            "[pf-vd] hcount: teardown entry n={}",
+            crate::frame_transport::handle_count()
+        );
         self.gone.store(true, Ordering::Release);
         let started = Instant::now();
         let (worker, event) = {
@@ -293,6 +297,10 @@ impl Monitor {
         drop(take(&self.endpoint));
         drop(take(&self.chan));
         let took = started.elapsed();
+        dbglog!(
+            "[pf-vd] hcount: teardown exit n={}",
+            crate::frame_transport::handle_count()
+        );
         if took > Duration::from_millis(250) {
             dbglog!("[pf-vd] monitor teardown took {} ms", took.as_millis());
         }
