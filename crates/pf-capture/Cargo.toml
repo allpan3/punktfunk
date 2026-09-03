@@ -19,8 +19,17 @@ pf-zerocopy = { path = "../pf-zerocopy" }
 pf-win-display = { path = "../pf-win-display" }
 pf-gpu = { path = "../pf-gpu" }
 pf-host-config = { path = "../pf-host-config" }
+# The host<->driver wire contract: control IOCTL structs, the frame header, and (v7) the AU
+# section. Every target: the AU reader's pure half is unit-tested off Windows.
+pf-driver-proto = { path = "../pf-driver-proto" }
 anyhow = "1"
 tracing = "0.1"
+
+[features]
+# Video-plane overhaul Phase 3: the driver encodes and the host reads access units from the AU
+# section (`windows/au_reader.rs`, `idd_push/driver_encode.rs`). OFF until the cutover; the ring
+# path is untouched either way, so nothing ships with both transports.
+driver-encode = []
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # The xdg ScreenCast + RemoteDesktop portals, and the PipeWire consumer for the capture frames.
@@ -39,8 +48,6 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "sy
 x11rb = { version = "0.14", default-features = false, features = ["xfixes"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-# The host<->driver wire contract for the sealed frame channel (control IOCTL structs + frame header).
-pf-driver-proto = { path = "../pf-driver-proto" }
 # The D3D11 converters + cursor blend the IDD-push capturer runs before encode.
 pf-encode-win = { path = "../pf-encode-win" }
 windows = { version = "0.62", features = [

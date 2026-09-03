@@ -556,6 +556,10 @@ mod idd_push;
 // (`inject::windows::gamepad_raii`); re-export so that reach stays a leaf.
 #[cfg(target_os = "windows")]
 pub use idd_push::verify_is_wudfhost;
+// The AU section's reader half. Pure over a mapped view, so its tests run on every target.
+#[cfg(feature = "driver-encode")]
+#[path = "windows/au_reader.rs"]
+mod au_reader;
 #[cfg(target_os = "linux")]
 #[path = "linux/mod.rs"]
 mod linux;
