@@ -837,6 +837,25 @@ fn open_backend(
     h: u32,
     primed: &Primed,
 ) -> Result<Box<dyn Encoder>, Fail> {
+    // Implicit Vulkan layers (overlays, our pf-vkhdr-layer) hang in session 0, where there is no
+    // desktop to hook, and the encoder's private instance wants none of them. The loader-wide
+    // knob needs a 1.3.234+ loader; each manifest's own `disable_environment` works on any.
+
+    // SAFETY: WUDFHost is this driver's own process (`ProcessSharingDisabled`); Windows'
+    // SetEnvironmentVariable is thread-safe and nothing here parses the environment concurrently.
+    unsafe {
+        for (k, v) in [
+            ("VK_LOADER_LAYERS_DISABLE", "~implicit~"),
+            ("DISABLE_RTSS_LAYER", "1"),
+            ("DISABLE_PF_VKHDR", "1"),
+            ("DISABLE_VK_LAYER_VALVE_steam_overlay_1", "1"),
+            ("DISABLE_VK_LAYER_VALVE_steam_fossilize_1", "1"),
+            ("EOS_OVERLAY_DISABLE_VULKAN_WIN64", "1"),
+            ("DISABLE_GALAXY_OVERLAY", "1"),
+        ] {
+            std::env::set_var(k, v);
+        }
+    }
     let codec = match req.codec {
         1 => Codec::H264,
         2 => Codec::H265,
