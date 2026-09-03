@@ -16,6 +16,7 @@
 //! contracts are tested below; design in `design/remote-desktop-sweep.md`.
 
 use super::*;
+use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Foundation::POINT;
 use windows::Win32::Graphics::Gdi::{
     DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO, BITMAPINFOHEADER,
@@ -31,7 +32,8 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CopyIcon, DestroyIcon, GetCursorInfo, GetIconInfo, CURSORINFO, HICON, ICONINFO, SM_CXCURSOR,
+    CopyIcon, CopyImage, DestroyIcon, GetCursorInfo, GetIconInfo, CURSORINFO, HICON, ICONINFO,
+    IMAGE_CURSOR, LR_COPYFROMRESOURCE, SM_CXCURSOR,
 };
 
 const CURSOR_SHOWING: u32 = 0x1;
@@ -278,11 +280,12 @@ fn run(
         }
 
         if showing && handle != 0 && handle != cached_handle && handle != failed_handle {
-            match rasterize(ci.hCursor) {
+            let want = target_cursor_px(rect);
+            match rasterize(ci.hCursor, want.map(|(px, _)| px)) {
                 Some((rgba, w, h, hot_x, hot_y)) => {
                     // Normalise to what the OS would draw on THIS display, not on whichever
                     // panel the pointer happened to be over when Windows built the bitmap.
-                    let (rgba, w, h, hot_x, hot_y) = match target_cursor_px(rect) {
+                    let (rgba, w, h, hot_x, hot_y) = match want {
                         Some((want, dpi)) if w != want && w > 0 && h > 0 => {
                             let dh = (h * want).div_ceil(w.max(1));
                             tracing::info!(
@@ -393,15 +396,37 @@ impl Drop for DesktopBinding {
 
 /// Rasterise `hcursor` to straight-alpha RGBA. `None` on any failure (caller
 /// keeps the previous shape).
-fn rasterize(hcursor: windows::Win32::UI::WindowsAndMessaging::HCURSOR) -> RasterOut {
+fn rasterize(
+    hcursor: windows::Win32::UI::WindowsAndMessaging::HCURSOR,
+    want: Option<u32>,
+) -> RasterOut {
+    // Prefer artwork DRAWN at the size we need. `LR_COPYFROMRESOURCE` sends Windows back to the
+    // cursor's own resource, which carries several sizes, so the result is as crisp as the one a
+    // local user sees. Resampling the bitmap Windows happened to build for another monitor's
+    // scale can only blur it. A cursor with no resource behind it (an app that made one from a
+    // bitmap) fails here and falls back to the copy plus the caller's filter.
+    let recut = want.and_then(|px| {
+        // SAFETY: cursors are icons in user32; CopyImage returns an owned handle or an error,
+        // and IMAGE_CURSOR with a non-zero size is the documented re-cut call.
+        unsafe {
+            CopyImage(
+                HANDLE(hcursor.0),
+                IMAGE_CURSOR,
+                px as i32,
+                px as i32,
+                LR_COPYFROMRESOURCE,
+            )
+        }
+        .ok()
+        .filter(|h| !h.is_invalid())
+        .map(|h| HICON(h.0))
+    });
     // CopyIcon first: the owner can destroy its HCURSOR between GetCursorInfo
     // and the reads below; the copy is ours.
 
     // SAFETY: `HICON(hcursor.0)` reinterprets the cursor handle as an icon handle (cursors ARE
     // icons in user32); CopyIcon yields an owned HICON we destroy below.
-    let Ok(icon) = (unsafe { CopyIcon(HICON(hcursor.0)) }) else {
-        return None;
-    };
+    let icon = recut.or_else(|| unsafe { CopyIcon(HICON(hcursor.0)) }.ok())?;
     let mut ii = ICONINFO::default();
     // SAFETY: `ii` is a live out-param. On Ok it hands us COPIES of the mask/color bitmaps —
     // both deleted below (GDI-handle leak otherwise).
