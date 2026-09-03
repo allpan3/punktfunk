@@ -176,7 +176,8 @@ impl EncodeThread {
 
 /// The thread body: open, build or reuse the monitor's pool, report, then drive until stopped.
 /// The pool is reused — retained slot included — when it already fits this session's device,
-/// size and input kind; anything else is a fresh pool installed on the monitor.
+/// size and input kind; anything else is a fresh pool installed on the monitor. The open line
+/// names the frame path (`pool` or S6's `bypass`), so a comparison run can prove which it got.
 fn run(stop: HANDLE, ctx: ThreadCtx, live: Arc<AtomicBool>) {
     let _mmcss = Mmcss::distribution("encode");
     let section = &ctx.session.section;
@@ -218,11 +219,12 @@ fn run(stop: HANDLE, ctx: ThreadCtx, live: Arc<AtomicBool>) {
     };
     drop(monitor);
     dbglog!(
-        "[pf-vd] encode: backend {} open {}x{} {:?} (target {})",
+        "[pf-vd] encode: backend {} open {}x{} {:?} mode={} (target {})",
         reply.backend_opened,
         spec.width,
         spec.height,
         spec.kind,
+        if pool.bypass() { "bypass" } else { "pool" },
         ctx.session.request.target_id
     );
     section.store_u32(offset_of!(AuHeader, driver_status), DRV_STATUS_OPENED);

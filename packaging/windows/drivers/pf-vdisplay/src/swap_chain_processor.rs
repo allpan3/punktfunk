@@ -8,6 +8,9 @@
 //! one fused GPU pass into a free pool slot — or drops at the pool. Nothing else: telemetry is
 //! stamped after `FinishedProcessingFrame`, because the window is what DWM waits on for this head.
 //!
+//! Spike S6 (`pool-bypass`) widens that window on purpose: the encoder reads the acquired surface
+//! and the window stays open until the access unit is out. That is the cadence risk being measured.
+//!
 //! The `wdk_iddcx` DDI wrappers return a RAW `NTSTATUS` (`i32`) that is HRESULT-shaped for the
 //! swap-chain DDIs, so we classify it by hand (`hr >= 0` = success; `0x8000_000A` = E_PENDING;
 //! `hr < 0 && != E_PENDING` = error) rather than with `nt_success`.
@@ -364,10 +367,15 @@ impl SwapChainProcessor {
                         let res = unsafe { IDXGIResource::from_raw(raw) };
                         if let Ok(tex) = res.cast::<ID3D11Texture2D>() {
                             // The one fused pass into a free pool slot, or a drop at the pool.
-                            attached.offer(device, &tex, display_qpc);
+                            // Under S6 there is no pass and the surface is the encoder's, so
+                            // the window stays open until the pool hands it back (bounded).
+                            let held = attached.offer(device, &tex, display_qpc);
                             // Spike S5: one `CopyResource` into the probe's ring, or nothing.
                             #[cfg(feature = "encode-probe")]
                             crate::encode_probe::offer(device, &tex, display_qpc, target_id);
+                            if held {
+                                attached.wait_release();
+                            }
                         }
                         // `res` drops here: the acquire's surface reference is released,
                         // pre-Finished.
@@ -379,8 +387,9 @@ impl SwapChainProcessor {
                 if !hr_success(hr) {
                     break;
                 }
-                // Stamped only now: nothing may sit between acquire and Finished.
-                attached.note_drain();
+                // Stamped only now: nothing may sit between acquire and Finished. The present
+                // stamp feeds the compose-cadence histogram both modes are compared on.
+                attached.note_frame(display_qpc);
             } else {
                 // The swap-chain was likely abandoned (e.g. DXGI_ERROR_ACCESS_LOST) — exit the loop.
                 break;

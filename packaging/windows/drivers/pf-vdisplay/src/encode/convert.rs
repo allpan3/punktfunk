@@ -458,6 +458,25 @@ impl Targets {
         }
     }
 
+    /// Spike S6: wrap the acquired surface itself as the frame `submit` takes — no pass, no
+    /// slot, and no pointer, because there is no driver-owned image to draw one on. Only the
+    /// BGRA kind reaches this; every other kind's converter has to run first.
+    pub fn direct_frame(&self, src: &Tex, pts_ns: u64) -> CapturedFrame {
+        CapturedFrame {
+            width: self.width,
+            height: self.height,
+            pts_ns,
+            format: self.kind.pixel_format(),
+            payload: FramePayload::D3d11(D3d11Frame {
+                texture: src.clone(),
+                device: self.dev.clone(),
+                pyro: None,
+            }),
+            cursor: None,
+            provenance: Provenance::UNTRACKED,
+        }
+    }
+
     /// Wrap filled slot `i` as the frame `submit` takes, after the cursor blend and the
     /// converter a deferred pass left for this thread. The planar pair signals its fence here,
     /// so the Vulkan wait orders after the pass however far apart the two threads ran.
