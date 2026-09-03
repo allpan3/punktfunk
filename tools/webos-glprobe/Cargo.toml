@@ -1,0 +1,26 @@
+[package]
+name = "pf-webos-glprobe"
+description = "On-glass probe: draws the shared pf-console-ui shell with Skia's GLES backend on an SDL2 GL context, on an LG webOS TV — step 1 of design/webos-skia-console-port.md"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Its own workspace: this never builds on a normal `cargo build --workspace` leg. It needs the
+# webosbrew cross toolchain and a self-hosted armv7 Skia archive, neither of which CI has, so the
+# repo root also lists it under `exclude`. Run it through `scripts/build.sh`.
+[workspace]
+
+[dependencies]
+# The shell itself, lean: no `vulkan-overlay` (so no pf-presenter, no SDL3, and pf-client-core
+# stays on its portable half) and `gl` for Skia's GLES backend — the feature added for this
+# consumer. This is also the only in-tree build that exercises that combination.
+pf-console-ui = { path = "../../crates/pf-console-ui", default-features = false, features = ["gl"] }
+# The menu-event vocabulary the shell is driven with, same lean half.
+pf-client-core = { path = "../../crates/pf-client-core", default-features = false }
+skia-safe = { version = "0.99", features = ["gl", "textlayout"] }
+# Same major the webOS client links; its bundled webosbrew fork is 2.30.12.
+sdl2 = { version = "0.38", default-features = false }
+anyhow = "1"
+
+[profile.release]
+opt-level = 3

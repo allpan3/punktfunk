@@ -59,6 +59,10 @@ exclude = [
     # what they can see. Neither belongs in `cargo build --workspace` or on a CI leg with no pad.
     "tools/hid-descriptor-dump",
     "tools/win-input-matrix",
+    # The webOS on-glass probe: cross-builds for armv7 against the webosbrew SDK and links a
+    # self-hosted Skia archive, neither of which exists on a CI leg. Built by its own
+    # scripts/build.sh, in Docker.
+    "tools/webos-glprobe",
 ]
 
 # ndk 0.9.0 with a small maintained patch set: public `MediaCodec::as_ptr` for the missing
