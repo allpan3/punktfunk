@@ -840,7 +840,13 @@ impl FramePublisher {
             unsafe { dev5.OpenSharedFence(HANDLE(h as usize as *mut core::ffi::c_void), &mut f)? };
             f.ok_or_else(|| windows::core::HRESULT(0x8000_4005u32 as i32).into())
         };
-        match (open(ep.ready_fence), open(ep.retire_fence)) {
+        let before = handle_count();
+        let opened = (open(ep.ready_fence), open(ep.retire_fence));
+        dbglog!(
+            "[pf-vd] hcount: open_fences before={before} after={}",
+            handle_count()
+        );
+        match opened {
             (Ok(ready), Ok(retire)) => Some(Fences {
                 ctx4,
                 ready,
@@ -1304,4 +1310,13 @@ impl FramePublisher {
         self.last_published = Some((slot, Instant::now()));
         PublishOutcome::Published
     }
+}
+
+/// Scratch instrumentation: this process's handle count (leak hunt for the fence arm).
+pub(crate) fn handle_count() -> u32 {
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+    let mut n = 0u32;
+    // SAFETY: pseudo-handle of the current process; `n` is a valid out-param.
+    let _ = unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut n) };
+    n
 }

@@ -617,6 +617,12 @@ impl SwapChainProcessor {
         // the endpoint's last holder and dropping it closes the ring handles — no leak.
         if let Some(p) = publisher.take() {
             p.endpoint().mark_rebuilding();
+            let before = crate::frame_transport::handle_count();
+            drop(p);
+            dbglog!(
+                "[pf-vd] hcount: publisher dropped before={before} after={} (target={target_id})",
+                crate::frame_transport::handle_count()
+            );
         }
         drop(stash);
     }
