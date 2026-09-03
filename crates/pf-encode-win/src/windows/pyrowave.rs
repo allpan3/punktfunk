@@ -991,6 +991,35 @@ mod tests {
     /// End-to-end on a real GPU. `#[ignore]`d; build anywhere, run on the GPU host:
     /// `cargo test -p pf-encode --features pyrowave --no-run`
     /// then `<bin> --ignored --nocapture pyrowave_win_smoke`.
+    /// Decode the access units a driver encode probe wrote (`[u32 len][u64 pts][u8 kf][bytes]`
+    /// framing, `PF_PYRO_PROBE_FILE`) with the CPU decoder: the S5 "AUs decode" check for
+    /// PyroWave, where ffmpeg cannot stand in. Every frame must yield finite, non-black planes.
+    #[test]
+    #[ignore = "needs a Vulkan-1.3 GPU and a probe file (PF_PYRO_PROBE_FILE)"]
+    fn pyrowave_probe_file_decodes() {
+        let path = std::env::var("PF_PYRO_PROBE_FILE").expect("PF_PYRO_PROBE_FILE");
+        let w: u32 = std::env::var("PF_PYRO_W").map_or(1920, |v| v.parse().unwrap());
+        let h: u32 = std::env::var("PF_PYRO_H").map_or(1080, |v| v.parse().unwrap());
+        let max: usize = std::env::var("PF_PYRO_MAX").map_or(30, |v| v.parse().unwrap());
+        let bytes = std::fs::read(&path).expect("probe file");
+        let (mut i, mut n) = (0usize, 0usize);
+        while i + 13 <= bytes.len() && n < max {
+            let len = u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
+            let au = &bytes[i + 13..i + 13 + len];
+            // SAFETY: the test owns the device it creates; `au` is one whole access unit.
+            let (y, cb, cr) = unsafe { decode_plane_means(w, h, au, false) };
+            println!("au {n}: {len} bytes → y={y:.1} cb={cb:.1} cr={cr:.1}");
+            assert!(
+                y.is_finite() && cb.is_finite() && cr.is_finite(),
+                "au {n} decoded NaN"
+            );
+            assert!(y > 1.0, "au {n} decoded black");
+            i += 13 + len;
+            n += 1;
+        }
+        assert!(n > 0, "no access units in {path}");
+    }
+
     /// Square plus real streaming sizes: NVIDIA D3D11→Vulkan import is size-sensitive.
     #[test]
     #[ignore = "needs a real D3D11 + Vulkan-1.3 GPU (run on the Windows host, not the build box)"]
