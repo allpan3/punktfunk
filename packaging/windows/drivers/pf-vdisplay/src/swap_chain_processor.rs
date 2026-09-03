@@ -221,6 +221,14 @@ impl SwapChainProcessor {
             unsafe {
                 call_unsafe_wdf_function_binding!(WdfObjectDelete, swap_chain.0 as WDFOBJECT);
             }
+            // Experiment: drain the pooled context's deferred destruction queue now that the
+            // swap-chain's surfaces are released, so the runtime frees their sync objects.
+            // SAFETY: plain call on the pooled device's multithread-protected immediate context.
+            unsafe { device.device_context.Flush() };
+            dbglog!(
+                "[pf-vd] hcount: after swap-chain delete + flush n={}",
+                crate::frame_transport::handle_count()
+            );
 
             // Revert the thread to normal once it's done (only if MMCSS was actually engaged).
             if let Some(h) = av_handle {
