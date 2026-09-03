@@ -803,6 +803,80 @@ impl Session {
 }
 
 #[cfg(test)]
+mod offload_switch_tests {
+    use super::*;
+    use crate::config::{FecConfig, FecScheme, ProtocolPhase};
+    use crate::crypto::SessionKey;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct Calls {
+        gso: AtomicUsize,
+        batch: AtomicUsize,
+    }
+
+    /// Counts which send path a batch took. `send_gso` is overridden because the trait's
+    /// default body delegates to `send_batch` — without the override both routes look alike
+    /// and the veto could be ignored with the test still green.
+    struct CountingTransport(std::sync::Arc<Calls>);
+
+    impl Transport for CountingTransport {
+        fn send(&self, _packet: &[u8]) -> std::io::Result<bool> {
+            Ok(true)
+        }
+        fn send_batch(&self, packets: &[&[u8]]) -> std::io::Result<usize> {
+            self.0.batch.fetch_add(1, Ordering::Relaxed);
+            Ok(packets.len())
+        }
+        fn send_gso(&self, packets: &[&[u8]]) -> std::io::Result<usize> {
+            self.0.gso.fetch_add(1, Ordering::Relaxed);
+            Ok(packets.len())
+        }
+        fn recv(&self) -> std::io::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+    }
+
+    /// The veto reaches the socket, not just the guard's counter: clearing it must move the
+    /// next send off the offload path for real.
+    #[test]
+    fn clearing_the_switch_moves_sends_off_the_offload_path() {
+        let calls = std::sync::Arc::new(Calls::default());
+        let cfg = Config {
+            role: Role::Host,
+            phase: ProtocolPhase::P2Punktfunk,
+            fec: FecConfig {
+                scheme: FecScheme::Gf16,
+                fec_percent: 0,
+                max_data_per_block: 8,
+            },
+            shard_payload: 64,
+            max_frame_bytes: 1024 * 1024,
+            encrypt: false,
+            key: SessionKey::Aes128Gcm([7u8; 16]),
+            salt: [3, 1, 4, 1],
+            loopback_drop_period: 0,
+        };
+        let mut session = Session::new(cfg, Box::new(CountingTransport(calls.clone()))).unwrap();
+        let switch = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        session.set_offload_switch(switch.clone());
+
+        session.submit_frame(&[9u8; 256], 0, 0).unwrap();
+        assert_eq!(calls.gso.load(Ordering::Relaxed), 1, "offload on: send_gso");
+        assert_eq!(calls.batch.load(Ordering::Relaxed), 0);
+
+        switch.store(false, Ordering::Relaxed);
+        session.submit_frame(&[9u8; 256], 1, 0).unwrap();
+        assert_eq!(
+            calls.gso.load(Ordering::Relaxed),
+            1,
+            "vetoed: no new send_gso"
+        );
+        assert_eq!(calls.batch.load(Ordering::Relaxed), 1, "vetoed: send_batch");
+    }
+}
+
+#[cfg(test)]
 mod wire_equivalence_tests {
     use super::*;
     use crate::config::{FecConfig, FecScheme, ProtocolPhase};
