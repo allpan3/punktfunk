@@ -16,19 +16,22 @@
 //! contracts are tested below; design in `design/remote-desktop-sweep.md`.
 
 use super::*;
+use windows::Win32::Foundation::POINT;
 use windows::Win32::Graphics::Gdi::{
     DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO, BITMAPINFOHEADER,
     BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC,
 };
+use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONEAREST};
 use windows::Win32::System::StationsAndDesktops::{
     CloseDesktop, OpenInputDesktop, SetThreadDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS,
     HDESK,
 };
 use windows::Win32::UI::HiDpi::{
-    SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    GetDpiForMonitor, GetSystemMetricsForDpi, SetThreadDpiAwarenessContext,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CopyIcon, DestroyIcon, GetCursorInfo, GetIconInfo, CURSORINFO, HICON, ICONINFO,
+    CopyIcon, DestroyIcon, GetCursorInfo, GetIconInfo, CURSORINFO, HICON, ICONINFO, SM_CXCURSOR,
 };
 
 const CURSOR_SHOWING: u32 = 0x1;
@@ -112,6 +115,68 @@ impl Drop for CursorPoller {
             let _ = t.join(); // worker sleeps ≤ INTERVAL — a bounded join
         }
     }
+}
+
+/// The cursor size the OS would draw on the VIRTUAL display, and the DPI it comes from.
+///
+/// Windows rasterises a system cursor for the monitor the pointer is over, so a host with a
+/// scaled physical panel hands us that panel's bitmap — 48 px at 150%, 64 px at 200% — while
+/// the virtual display the client actually sees runs at its own scale. Drawn one-to-one, the
+/// pointer is then half again or twice the size a local user would see. `SM_CXCURSOR` answers
+/// per-DPI, so the display's own scale is the whole signal; nothing here is a preference.
+fn target_cursor_px(rect: (i32, i32, i32, i32)) -> Option<(u32, u32)> {
+    let pt = POINT {
+        x: rect.0 + rect.2 / 2,
+        y: rect.1 + rect.3 / 2,
+    };
+    // SAFETY: by-value POINT in, monitor handle out; MONITOR_DEFAULTTONEAREST never returns null.
+    let mon = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
+    let (mut dx, mut dy) = (0u32, 0u32);
+    // SAFETY: `mon` is a live monitor handle; both out-params are valid locals.
+    unsafe { GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut dx, &mut dy).ok()? };
+    // SAFETY: pure metric lookup for a DPI value.
+    let px = unsafe { GetSystemMetricsForDpi(SM_CXCURSOR, dx) };
+    (px > 0).then_some((px as u32, dy))
+}
+
+/// Box-filter an RGBA cursor to `dst` square, premultiplying so transparent pixels cannot
+/// bleed colour into the edge. Straight alpha in, straight alpha out.
+fn scale_rgba(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    let mut out = vec![0u8; (dw as usize) * (dh as usize) * 4];
+    for y in 0..dh {
+        let (y0, y1) = span(y, dh, sh);
+        for x in 0..dw {
+            let (x0, x1) = span(x, dw, sw);
+            let (mut r, mut g, mut b, mut a, mut n) = (0u32, 0u32, 0u32, 0u32, 0u32);
+            for sy in y0..y1 {
+                for sx in x0..x1 {
+                    let i = ((sy * sw + sx) * 4) as usize;
+                    let av = u32::from(src[i + 3]);
+                    r += u32::from(src[i]) * av;
+                    g += u32::from(src[i + 1]) * av;
+                    b += u32::from(src[i + 2]) * av;
+                    a += av;
+                    n += 1;
+                }
+            }
+            // Colour is alpha-weighted, so a fully transparent span sums to zero and the
+            // `max(1)` divisor yields zero rather than a bogus colour.
+            let o = ((y * dw + x) * 4) as usize;
+            let d = a.max(1);
+            out[o] = (r / d) as u8;
+            out[o + 1] = (g / d) as u8;
+            out[o + 2] = (b / d) as u8;
+            out[o + 3] = (a / n.max(1)) as u8;
+        }
+    }
+    out
+}
+
+/// The source span one destination pixel covers, at least one pixel wide.
+fn span(i: u32, dst: u32, src: u32) -> (u32, u32) {
+    let a = i * src / dst;
+    let b = ((i + 1) * src).div_ceil(dst).min(src);
+    (a, b.max(a + 1).min(src))
 }
 
 fn run(
@@ -215,6 +280,24 @@ fn run(
         if showing && handle != 0 && handle != cached_handle && handle != failed_handle {
             match rasterize(ci.hCursor) {
                 Some((rgba, w, h, hot_x, hot_y)) => {
+                    // Normalise to what the OS would draw on THIS display, not on whichever
+                    // panel the pointer happened to be over when Windows built the bitmap.
+                    let (rgba, w, h, hot_x, hot_y) = match target_cursor_px(rect) {
+                        Some((want, dpi)) if w != want && w > 0 && h > 0 => {
+                            let dh = (h * want).div_ceil(w.max(1));
+                            tracing::info!(
+                                target = %ccd,
+                                from = format!("{w}x{h}"),
+                                to = format!("{want}x{dh}"),
+                                display_dpi = dpi,
+                                "cursor: rescaling the pointer to this display's scale"
+                            );
+                            let px = scale_rgba(&rgba, w, h, want, dh);
+                            let (hx, hy) = (hot_x * want / w.max(1), hot_y * dh / h.max(1));
+                            (px, want, dh, hx, hy)
+                        }
+                        _ => (rgba, w, h, hot_x, hot_y),
+                    };
                     serial += 1;
                     shape = Some(Shape {
                         rgba: std::sync::Arc::new(rgba),
@@ -610,6 +693,43 @@ fn grow_invert_outline(rgba: &mut [u8], invert: &[bool], w: usize, h: usize) {
 
 #[cfg(test)]
 mod tests {
+
+    /// Downscaling must not drag colour out of transparent pixels: a cursor is mostly alpha 0,
+    /// and a straight-alpha average would ring its edge with whatever the padding happens to be.
+    #[test]
+    fn scaling_a_cursor_does_not_bleed_the_transparent_padding() {
+        // 4x4: an opaque red 2x2 at top-left, the rest transparent GREEN (the trap).
+        let mut src = vec![0u8; 4 * 4 * 4];
+        for y in 0..4 {
+            for x in 0..4 {
+                let i = (y * 4 + x) * 4;
+                if x < 2 && y < 2 {
+                    src[i] = 255;
+                    src[i + 3] = 255;
+                } else {
+                    src[i + 1] = 255; // green, alpha 0
+                }
+            }
+        }
+        let out = super::scale_rgba(&src, 4, 4, 2, 2);
+        // The top-left destination pixel covers only opaque red: it must stay pure red.
+        assert_eq!((out[0], out[1], out[2], out[3]), (255, 0, 0, 255));
+        // The bottom-right covers only alpha-0 green and must stay fully transparent.
+        let i = 3 * 4; // the (1,1) pixel of a 2x2
+        assert_eq!(out[i + 3], 0, "transparent stays transparent");
+    }
+
+    /// Every destination pixel maps to at least one source pixel, at any ratio.
+    #[test]
+    fn each_destination_pixel_covers_a_source_span() {
+        for (dst, src) in [(32u32, 48u32), (48, 32), (64, 32), (32, 32), (1, 7)] {
+            for i in 0..dst {
+                let (a, b) = super::span(i, dst, src);
+                assert!(b > a, "empty span at {i} for {dst}<-{src}");
+                assert!(b <= src, "span past the source at {i} for {dst}<-{src}");
+            }
+        }
+    }
     use super::*;
 
     /// 1bpp plane → 32bpp as `GetDIBits` does: any non-zero channel means "bit set".
