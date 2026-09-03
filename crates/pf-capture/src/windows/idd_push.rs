@@ -1759,11 +1759,9 @@ impl IddPushCapturer {
             Stage::EncoderReset | Stage::DriverCycle if cfg!(feature = "driver-encode") => {
                 return None
             }
-            Stage::EncoderReset
-            | Stage::SwapChainReset
-            | Stage::MonitorCycle
-            | Stage::DriverCycle
-            | Stage::CaptureFallback => StageOutcome::Unsupported,
+            Stage::EncoderReset | Stage::SwapChainReset | Stage::DriverCycle => {
+                StageOutcome::Unsupported
+            }
         })
     }
 

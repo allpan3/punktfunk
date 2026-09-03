@@ -191,7 +191,7 @@ pub(crate) struct CaptureEpisode {
 /// One recovery rung of an episode.
 #[derive(Serialize, ToSchema)]
 pub(crate) struct CaptureStage {
-    /// `encoder_reset` / `ring_reset` / `swap_chain_reset` / `presentation_reset` / `monitor_cycle` / `driver_cycle` / `capture_fallback`.
+    /// `encoder_reset` / `ring_reset` / `swap_chain_reset` / `presentation_reset` / `driver_cycle`.
     stage: String,
     /// `applied` / `failed` / `unsupported` / `timed_out`.
     outcome: String,

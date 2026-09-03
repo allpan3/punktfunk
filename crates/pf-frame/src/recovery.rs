@@ -5,8 +5,7 @@
 //! An EPISODE opens on a `Stalled` verdict and walks the ladder from the class's first actuator:
 //!
 //! ```text
-//! EncoderReset -> RingReset -> SwapChainReset -> PresentationReset -> MonitorCycle
-//!   -> DriverCycle -> CaptureFallback -> Failed
+//! EncoderReset -> RingReset -> SwapChainReset -> PresentationReset -> DriverCycle -> Failed
 //! ```
 //!
 //! Each stage runs ONCE per episode under a deadline and records its outcome; a stage that
@@ -34,23 +33,17 @@ pub enum Stage {
     SwapChainReset,
     /// One actor-mediated same-mode reset, only for presentation evidence.
     PresentationReset,
-    /// The manager removes/re-adds the same identity while the host keeps the session.
-    MonitorCycle,
-    /// Release control handles, cycle the dedicated device, reopen, rebuild monitors.
+    /// Reap the WUDFHost and reload the adapter, then rebuild — the last rung before `Failed`.
     DriverCycle,
-    /// Secondary capture (S3) — policy-selected; the last rung before `Failed`.
-    CaptureFallback,
 }
 
 impl Stage {
-    const LADDER: [Stage; 7] = [
+    const LADDER: [Stage; 5] = [
         Stage::EncoderReset,
         Stage::RingReset,
         Stage::SwapChainReset,
         Stage::PresentationReset,
-        Stage::MonitorCycle,
         Stage::DriverCycle,
-        Stage::CaptureFallback,
     ];
 
     /// The first actuator for a stall class (D7 table).
@@ -420,7 +413,7 @@ mod tests {
             s = next;
             n += 1;
         }
-        assert_eq!((s, n), (Stage::CaptureFallback, 7));
+        assert_eq!((s, n), (Stage::DriverCycle, 5));
     }
 
     #[test]
@@ -469,9 +462,7 @@ mod tests {
             Stage::RingReset,
             Stage::SwapChainReset,
             Stage::PresentationReset,
-            Stage::MonitorCycle,
             Stage::DriverCycle,
-            Stage::CaptureFallback,
         ];
         let mut running = Stage::EncoderReset;
         for next in expect {
@@ -491,7 +482,7 @@ mod tests {
         assert_eq!(c.step(t, Event::Tick), Action::Failed);
         let s = c.last_summary().unwrap();
         assert!(!s.recovered);
-        assert_eq!(s.stages.len(), 7, "each stage exactly once");
+        assert_eq!(s.stages.len(), 5, "each stage exactly once");
         assert_eq!(s.consecutive_failures, 1);
         assert_eq!(s.cooldown, b.cooldown_base);
         // In cooldown the next stall is suppressed, not re-fought.

@@ -35,9 +35,7 @@ fn stage_name(s: Stage) -> &'static str {
         Stage::RingReset => "ring_reset",
         Stage::SwapChainReset => "swap_chain_reset",
         Stage::PresentationReset => "presentation_reset",
-        Stage::MonitorCycle => "monitor_cycle",
         Stage::DriverCycle => "driver_cycle",
-        Stage::CaptureFallback => "capture_fallback",
     }
 }
 

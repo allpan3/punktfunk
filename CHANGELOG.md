@@ -73,11 +73,16 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   active display path.
 - **`pf_frame::recovery` sequences staged recovery.** A pure coordinator opens one episode per
   `Stalled` verdict and walks the ladder EncoderReset, RingReset, SwapChainReset,
-  PresentationReset, MonitorCycle, DriverCycle, CaptureFallback from the class's first actuator,
-  running each stage once under a deadline; a stage that applied still has to prove itself with
-  three new source sequences (republishes and cursor regens never count). Four episodes per ten
-  minutes, a doubling cooldown after failed ones (10 s to 5 min), one summary per episode, and
-  `owns_episode` so passive descriptor reactions stand down. Actuators wire in with WP6/WP7/WP14.
+  PresentationReset, DriverCycle from the class's first actuator, running each stage once under a
+  deadline; a stage that applied still has to prove itself with three new source sequences
+  (republishes and cursor regens never count). Four episodes per ten minutes, a doubling cooldown
+  after failed ones (10 s to 5 min), one summary per episode, and `owns_episode` so passive
+  descriptor reactions stand down. Actuators wire in with WP6/WP7/WP14.
+- **The `driver-encode` recovery rungs act.** With the in-driver encoder, an `encoder_reset`
+  restarts the wedged encode thread over `ENCODE_CTL`, and a `driver_cycle` reaps the WUDFHost
+  and reloads the adapter when two resets did not hold or the host is gone. The status `stage`
+  enum drops `monitor_cycle` and `capture_fallback`; a `driver` stall class joins the four. Off
+  the feature the pixel path is unchanged.
 - **IDD-push fence-ring protocol layer (`pf_driver_proto::frame::fence`).** A v4 header appends
   a 32-byte per-slot record (state, seq, producer-ready and consumer-retire fence values) after
   the v3 tail; `SetFrameChannelRequestV2` carries the two shared fence handles behind the v1
