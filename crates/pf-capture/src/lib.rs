@@ -231,6 +231,13 @@ pub trait Capturer: Send {
     fn health(&self) -> Option<CaptureHealth> {
         None
     }
+
+    /// The monitor and WUDFHost an in-driver encoder opens against
+    /// ([`open_driver_encoder`]). `None` = not an IDD-push source.
+    #[cfg(all(target_os = "windows", feature = "driver-encode"))]
+    fn driver_endpoint(&self) -> Option<DriverEndpoint> {
+        None
+    }
 }
 
 /// Deterministic moving BGRx test pattern: a sweeping bar plus an animated
@@ -537,6 +544,33 @@ pub type CursorChannelSender = std::sync::Arc<
 #[cfg(target_os = "windows")]
 pub type CursorForwardSender = std::sync::Arc<dyn Fn(bool) -> Result<()> + Send + Sync>;
 
+/// v7 in-driver encode open (`IOCTL_SET_ENCODE`) — same facade contract as
+/// [`FrameChannelSender`]: the driver adopts the request's handle values iff the
+/// IOCTL succeeds. Once per encoder generation.
+#[cfg(all(target_os = "windows", feature = "driver-encode"))]
+pub type SetEncodeSender = std::sync::Arc<
+    dyn Fn(
+            &pf_driver_proto::encode::SetEncodeRequest,
+        ) -> Result<pf_driver_proto::encode::SetEncodeReply>
+        + Send
+        + Sync,
+>;
+
+/// v7 one-shot encoder control (`IOCTL_ENCODE_CTL`): the `Encoder` calls the
+/// stream loop makes, forwarded by the driver proxy.
+#[cfg(all(target_os = "windows", feature = "driver-encode"))]
+pub type EncodeCtlSender =
+    std::sync::Arc<dyn Fn(&pf_driver_proto::encode::EncodeCtlRequest) -> Result<()> + Send + Sync>;
+
+/// Where an in-driver encoder is opened: the monitor's driver target and the WUDFHost the AU
+/// section is duplicated into ([`Capturer::driver_endpoint`]).
+#[cfg(all(target_os = "windows", feature = "driver-encode"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DriverEndpoint {
+    pub target_id: u32,
+    pub wudf_pid: u32,
+}
+
 // One-time PipeWire library init, shared by video (portal) and audio capture.
 #[cfg(target_os = "linux")]
 pub mod pwinit;
@@ -560,6 +594,8 @@ pub use idd_push::verify_is_wudfhost;
 #[cfg(feature = "driver-encode")]
 #[path = "windows/au_reader.rs"]
 mod au_reader;
+#[cfg(all(target_os = "windows", feature = "driver-encode"))]
+pub use idd_push::driver_encode::{open_driver_encoder, DriverEncodeOpenError, DriverEncodeParams};
 #[cfg(target_os = "linux")]
 #[path = "linux/mod.rs"]
 mod linux;

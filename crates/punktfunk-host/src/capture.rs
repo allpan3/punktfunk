@@ -281,6 +281,91 @@ pub fn capture_virtual_output(
     .map_err(|(e, _keep)| e.context("IDD-push capture open (no fallback)"))
 }
 
+/// Open the in-driver encoder for an IDD-push session (`driver-encode`): the plan as the
+/// driver numbers it, the resolved Windows backend as a one-entry preference list, the two
+/// IOCTL senders over the manager's control handle, and the `pf_gpu` session record the
+/// local encoders keep. The heap is sized from the opening rate; ABR climbs past twice it
+/// eat the burst margin.
+#[cfg(all(target_os = "windows", feature = "driver-encode"))]
+pub fn open_driver_encoder(
+    plan: &crate::session_plan::SessionPlan,
+    capturer: &dyn Capturer,
+    frame: &CapturedFrame,
+    fps: u32,
+    bitrate_bps: u64,
+    bit_depth: u8,
+    wire_seq_base: u32,
+) -> Result<Box<dyn crate::encode::Encoder>> {
+    use crate::encode::{Codec, WindowsBackend};
+    let endpoint = capturer
+        .driver_endpoint()
+        .ok_or_else(|| anyhow::anyhow!("driver encode: the capture source is not IDD-push"))?;
+    let control = crate::vdisplay::manager::control_device_handle().ok_or_else(|| {
+        anyhow::anyhow!(
+            "pf-vdisplay control device not open (monitor not created via the manager?)"
+        )
+    })?;
+    let control_open = control.clone();
+    let set_encode: pf_capture::SetEncodeSender =
+        std::sync::Arc::new(move |req: &pf_driver_proto::encode::SetEncodeRequest| {
+            // SAFETY: the captured Arc keeps the control handle open across this call
+            // (`send_set_encode`'s precondition).
+            unsafe {
+                crate::vdisplay::driver::send_set_encode(
+                    windows::Win32::Foundation::HANDLE(
+                        std::os::windows::io::AsRawHandle::as_raw_handle(&*control_open),
+                    ),
+                    req,
+                )
+            }
+        });
+    let encode_ctl: pf_capture::EncodeCtlSender =
+        std::sync::Arc::new(move |req: &pf_driver_proto::encode::EncodeCtlRequest| {
+            // SAFETY: the captured Arc keeps the control handle open across this call
+            // (`send_encode_ctl`'s precondition).
+            unsafe {
+                crate::vdisplay::driver::send_encode_ctl(
+                    windows::Win32::Foundation::HANDLE(
+                        std::os::windows::io::AsRawHandle::as_raw_handle(&*control),
+                    ),
+                    req,
+                )
+            }
+        });
+    let (backend, label) = match plan.codec {
+        Codec::PyroWave => (4, "driver-pyrowave"),
+        _ => match crate::encode::windows_resolved_backend() {
+            WindowsBackend::Nvenc => (1, "driver-nvenc"),
+            WindowsBackend::Amf => (2, "driver-amf"),
+            WindowsBackend::Qsv => (3, "driver-qsv"),
+            WindowsBackend::Software => anyhow::bail!(
+                "driver encode: the resolved backend is software, which the driver cannot run"
+            ),
+        },
+    };
+    let params = pf_capture::DriverEncodeParams {
+        codec: match plan.codec {
+            Codec::H264 => 1,
+            Codec::H265 => 2,
+            Codec::Av1 => 3,
+            Codec::PyroWave => 4,
+        },
+        chroma: u32::from(plan.chroma.is_444()),
+        bit_depth: u32::from(bit_depth),
+        width: frame.width,
+        height: frame.height,
+        fps,
+        bitrate_kbps: (bitrate_bps / 1000).min(u64::from(u32::MAX)) as u32,
+        hdr: plan.hdr,
+        hdr_meta: capturer.hdr_meta(),
+        wire_chunk_bytes: plan.wire_chunk.unwrap_or(0) as u32,
+        backends: [backend, 0, 0, 0],
+        wire_seq_base,
+    };
+    let enc = pf_capture::open_driver_encoder(endpoint, &params, set_encode, encode_ctl)?;
+    Ok(crate::encode::track_session(enc, label))
+}
+
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub fn capture_virtual_output(
     _vout: crate::vdisplay::VirtualOutput,

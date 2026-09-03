@@ -17,8 +17,9 @@ pub(super) struct ChannelBroker {
     /// `SYNCHRONIZE` doubles as the driver-death probe ([`Self::driver_alive`]).
     process: OwnedHandle,
     pub(super) wudf_pid: u32,
-    /// `IOCTL_SET_FRAME_CHANNEL`. Once per generation, never per-frame.
-    sender: crate::FrameChannelSender,
+    /// `IOCTL_SET_FRAME_CHANNEL`. Once per generation, never per-frame. `None` on a broker
+    /// that only duplicates (the AU section's) — [`Self::send`] is not for it.
+    sender: Option<crate::FrameChannelSender>,
 }
 
 impl ChannelBroker {
@@ -28,6 +29,15 @@ impl ChannelBroker {
     /// interface GUID, different process) would otherwise receive the frames
     /// (`design/idd-push-security.md`).
     pub(super) fn open(wudf_pid: u32, sender: crate::FrameChannelSender) -> Result<Self> {
+        let mut me = Self::open_dup_only(wudf_pid)?;
+        me.sender = Some(sender);
+        Ok(me)
+    }
+
+    /// [`Self::open`] for a channel with its own delivery IOCTL (the AU section): the same
+    /// WUDFHost verification and duplication target, no frame-channel sender.
+    #[cfg_attr(not(feature = "driver-encode"), allow(dead_code))]
+    pub(super) fn open_dup_only(wudf_pid: u32) -> Result<Self> {
         if wudf_pid == 0 {
             bail!("driver reported no WUDFHost pid for the frame channel");
         }
@@ -48,7 +58,7 @@ impl ChannelBroker {
         Ok(Self {
             process,
             wudf_pid,
-            sender,
+            sender: None,
         })
     }
 
@@ -67,7 +77,7 @@ impl ChannelBroker {
     ///
     /// # Safety
     /// `h` must be a live handle of the current process.
-    unsafe fn dup_into(&self, h: HANDLE, access: Option<u32>) -> Result<u64> {
+    pub(super) unsafe fn dup_into(&self, h: HANDLE, access: Option<u32>) -> Result<u64> {
         let mut out = HANDLE::default();
         let (desired, options) = match access {
             Some(rights) => (rights, DUPLICATE_HANDLE_OPTIONS(0)),
@@ -108,7 +118,7 @@ impl ChannelBroker {
 
     /// Close a handle VALUE in the WUDFHost table. `DUPLICATE_CLOSE_SOURCE` with no
     /// target closes the source; the result is ignored.
-    fn close_remote(&self, value: u64) {
+    pub(super) fn close_remote(&self, value: u64) {
         if value == 0 {
             return;
         }
@@ -215,7 +225,11 @@ impl ChannelBroker {
                 req.ready_fence_handle = self.dup_into(ready, None)?;
                 req.retire_fence_handle = self.dup_into(retire, None)?;
             }
-            (self.sender)(req)
+            let sender = self
+                .sender
+                .as_ref()
+                .context("frame channel: broker opened without a delivery sender")?;
+            sender(req)
         }
     }
 }

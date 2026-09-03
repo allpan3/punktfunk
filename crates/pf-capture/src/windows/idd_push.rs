@@ -415,6 +415,10 @@ mod stall;
 // Live health classification + the staged-recovery ladder (immunity plan WP12/WP13).
 #[path = "idd_push/recovery.rs"]
 mod recovery;
+// In-driver encode: the AU section, `SET_ENCODE`, and the `Encoder` proxy over `ENCODE_CTL`.
+#[cfg(feature = "driver-encode")]
+#[path = "idd_push/driver_encode.rs"]
+pub(crate) mod driver_encode;
 use channel::ChannelBroker;
 use descriptor::{DescriptorPoller, DisplayDescriptor};
 use stall::{StallEvidence, StallWatch};
@@ -2387,6 +2391,14 @@ impl Capturer for IddPushCapturer {
     fn health(&self) -> Option<crate::CaptureHealth> {
         let ring = self.ring_health();
         Some(self.recovery.report(Instant::now(), ring.as_ref()))
+    }
+
+    #[cfg(feature = "driver-encode")]
+    fn driver_endpoint(&self) -> Option<crate::DriverEndpoint> {
+        Some(crate::DriverEndpoint {
+            target_id: self.target_id,
+            wudf_pid: self.broker.wudf_pid,
+        })
     }
 
     fn recreate_ring_in_place(&mut self) -> bool {

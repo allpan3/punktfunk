@@ -211,9 +211,25 @@ pub fn open_video(
         cursor_blend,
         max_slices,
     )?;
-    // Backend label from the branch that opened, not re-derived — Vulkan Video
-    // falls back to VAAPI, and a dispatch mirror would report the wrong one.
-    // GPU identity is [`pf_gpu::selected_gpu`]. Drop ends the live-session record.
+    // Open-time fallback (Vulkan→VAAPI) and gamescope (no embedded cursor) still
+    // reach here. `open_video` cannot re-plan capture, so a warning is all it does.
+    if cursor_blend && !inner.caps().blends_cursor {
+        tracing::warn!(
+            backend,
+            "session negotiated a composited cursor but this encode backend does not blend \
+             CapturedFrame::cursor — the pointer will be MISSING from the stream unless the \
+             capturer composites it"
+        );
+    }
+    Ok(track_session(inner, backend))
+}
+
+/// Tie `inner` to a `pf_gpu` live-session record labelled `backend` — the label of the
+/// branch that opened, not re-derived (Vulkan Video falls back to VAAPI, and a dispatch mirror
+/// would report the wrong one). GPU identity is [`pf_gpu::selected_gpu`]; dropping the returned
+/// encoder ends the record. Public for encoders opened outside [`open_video`] (the Windows
+/// driver proxy).
+pub fn track_session(inner: Box<dyn Encoder>, backend: &'static str) -> Box<dyn Encoder> {
     let gpu = if backend == "software" {
         pf_gpu::ActiveGpu {
             id: String::new(),
@@ -237,20 +253,10 @@ pub fn open_video(
             },
         }
     };
-    // Open-time fallback (Vulkan→VAAPI) and gamescope (no embedded cursor) still
-    // reach here. `open_video` cannot re-plan capture, so a warning is all it does.
-    if cursor_blend && !inner.caps().blends_cursor {
-        tracing::warn!(
-            backend,
-            "session negotiated a composited cursor but this encode backend does not blend \
-             CapturedFrame::cursor — the pointer will be MISSING from the stream unless the \
-             capturer composites it"
-        );
-    }
-    Ok(Box::new(TrackedEncoder {
+    Box::new(TrackedEncoder {
         inner,
         _session: pf_gpu::session_begin(gpu),
-    }))
+    })
 }
 
 /// Ties the `pf_gpu` live-session record to the encoder's lifetime; pure delegation
@@ -302,6 +308,9 @@ impl Encoder for TrackedEncoder {
     }
     fn poll_chunk(&mut self) -> Result<Option<AuChunk>> {
         self.inner.poll_chunk()
+    }
+    fn ready_aus(&mut self, deadline: std::time::Instant) -> Option<usize> {
+        self.inner.ready_aus(deadline)
     }
     fn reset(&mut self) -> bool {
         self.inner.reset()

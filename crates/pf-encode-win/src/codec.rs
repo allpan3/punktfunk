@@ -307,6 +307,14 @@ pub trait Encoder: Send {
     fn poll_chunk(&mut self) -> Result<Option<AuChunk>> {
         Ok(self.poll()?.map(AuChunk::whole))
     }
+    /// Access units a backend that encodes without [`submit`](Self::submit)
+    /// already holds for [`poll_chunk`](Self::poll_chunk), waiting until
+    /// `deadline` for the first. The loop owes one wire index per AU counted
+    /// and drains them at once. `None` (default): the backend encodes what
+    /// `submit` hands it, so the loop submits this tick's frame instead.
+    fn ready_aus(&mut self, _deadline: std::time::Instant) -> Option<usize> {
+        None
+    }
     /// Rebuild the hardware encoder in place, keeping negotiated parameters
     /// (encode-stall watchdog: a wedged driver stops emitting AUs without
     /// returning an error). `true` = rebuilt: every submitted-but-unpolled

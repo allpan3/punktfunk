@@ -367,6 +367,9 @@ vulkan-encode = ["pf-encode/vulkan-encode"]
 # the vendored codec from source in pf-encode. ON by default (see `default`); sessions reach it only
 # through explicit client opt-in.
 pyrowave = ["pf-encode/pyrowave"]
+# Video-plane overhaul Phase 3 (Windows): the driver encodes; the stream loop reads access units
+# from the AU section and forwards encoder control over `ENCODE_CTL`. OFF until the cutover.
+driver-encode = ["pf-capture/driver-encode"]
 
 # Build-time icon/version-info embedding (build.rs; Windows dev/CI hosts only — Linux packaging
 # builds of this crate never execute the winresource block).

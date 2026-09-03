@@ -31,7 +31,8 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::IO::DeviceIoControl;
 
-use pf_driver_proto::control;
+use bytemuck::Zeroable;
+use pf_driver_proto::{control, encode};
 
 use super::manager::{AddedMonitor, MonitorKey, VdisplayDriver};
 use super::{Mode, VirtualDisplay, VirtualOutput};
@@ -367,6 +368,58 @@ pub unsafe fn send_cursor_forward(
     }
     .map(|_| ())
     .context("pf-vdisplay SET_CURSOR_FORWARD")
+}
+
+/// Open a monitor's in-driver encoder (`IOCTL_SET_ENCODE`, proto v7) and adopt its AU section.
+/// Same handle contract as [`send_frame_channel`]: the section and event VALUES in `req` are
+/// already duplicated into WUDFHost, the driver owns them iff the IOCTL succeeds, and the
+/// caller reaps them on `Err`. A short reply fails closed: every field feeds the session.
+///
+/// # Safety
+/// `dev` must be a live pf-vdisplay control handle (see [`super::manager::control_device_handle`]).
+pub unsafe fn send_set_encode(
+    dev: HANDLE,
+    req: &encode::SetEncodeRequest,
+) -> Result<encode::SetEncodeReply> {
+    let mut reply = encode::SetEncodeReply::zeroed();
+    // SAFETY: `dev` is the live control handle by this fn's contract; `bytes_of(req)` and
+    // `bytes_of_mut(&mut reply)` borrow the caller's request and this local for the call.
+    let n = unsafe {
+        ioctl(
+            dev,
+            encode::IOCTL_SET_ENCODE,
+            bytemuck::bytes_of(req),
+            bytemuck::bytes_of_mut(&mut reply),
+        )
+    }
+    .context("pf-vdisplay SET_ENCODE")?;
+    if (n as usize) < size_of::<encode::SetEncodeReply>() {
+        anyhow::bail!(
+            "pf-vdisplay SET_ENCODE: short reply ({n} of {} bytes) — driver predates proto v7",
+            size_of::<encode::SetEncodeReply>()
+        );
+    }
+    Ok(reply)
+}
+
+/// One-shot control on a monitor's live in-driver encoder (`IOCTL_ENCODE_CTL`, proto v7).
+///
+/// # Safety
+/// `dev` must be a live pf-vdisplay control handle (see [`super::manager::control_device_handle`]).
+pub unsafe fn send_encode_ctl(dev: HANDLE, req: &encode::EncodeCtlRequest) -> Result<()> {
+    let mut none: [u8; 0] = [];
+    // SAFETY: `dev` is the live control handle by this fn's contract; `bytes_of(req)` borrows the
+    // caller's request across this synchronous call; no output buffer.
+    unsafe {
+        ioctl(
+            dev,
+            encode::IOCTL_ENCODE_CTL,
+            bytemuck::bytes_of(req),
+            &mut none,
+        )
+    }
+    .map(|_| ())
+    .with_context(|| format!("pf-vdisplay ENCODE_CTL op {}", req.op))
 }
 
 /// RAII SetupAPI device-info list. Every [`open_device`] exit path must destroy it; a driverless
