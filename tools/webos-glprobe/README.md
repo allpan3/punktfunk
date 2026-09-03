@@ -36,7 +36,14 @@ build. Native on Apple Silicon, emulated elsewhere.
 
 **Skia comes from a prebuilt archive.** rust-skia publishes no armv7 archive for any OS, so
 `armv7-unknown-linux-gnueabi-gl-jpegd-jpege-pdf-textlayout` is one we cut ourselves. `build.sh`
-defaults to the self-hosted release; to use a local copy:
+defaults to the self-hosted release, which needs no credentials:
+
+```
+git.unom.io/unom/skia-binaries  tag 0.99.0
+sha256 177178bfae46206b5963713e718e397f11b51ec143857397b24e59f6e2f626ac   18,367,399 bytes
+```
+
+To build against a local copy instead (e.g. while cutting the next bump's archives):
 
 ```sh
 SKIA_BINARIES_URL='file:///abs/path/skia-binaries-{key}.tar.gz' ./scripts/build.sh
