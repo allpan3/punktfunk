@@ -39,10 +39,14 @@ fn main() {
     // Always Release: a debug build of the wavelet kernels' host code buys no
     // debuggability (the hot path is GPU shaders baked into the source) and the
     // MSVC debug CRT would clash with Rust's release CRT.
-    let dst = cmake::Config::new(&manifest_dir)
-        .profile("Release")
-        .build_target("pyrowave-capi")
-        .build();
+    let mut cfg = cmake::Config::new(&manifest_dir);
+    cfg.profile("Release").build_target("pyrowave-capi");
+    // A `+crt-static` target (the UMDF driver workspace) must get static-CRT objects:
+    // CMP0091 makes CMake ignore the `-MT` in the flags and default to the DLL runtime.
+    if env::var("CARGO_CFG_TARGET_FEATURE").is_ok_and(|f| f.split(',').any(|t| t == "crt-static")) {
+        cfg.define("CMAKE_MSVC_RUNTIME_LIBRARY", "MultiThreaded");
+    }
+    let dst = cfg.build();
     let build = dst.join("build");
 
     // Static link closure, dependents before dependencies (GNU ld is order-sensitive).

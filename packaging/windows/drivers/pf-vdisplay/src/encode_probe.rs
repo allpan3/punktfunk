@@ -22,3 +22,19 @@ pub fn backends_linked() -> &'static [&'static str] {
     let _: fn(pf_frame::PixelFormat, u8) -> bool = pf_encode_win::ten_bit_input;
     &["nvenc", "amf", "qsv", "pyrowave", "convert"]
 }
+
+// `nvidia-video-codec-sdk` (feature `ci-check`) links no import library, and the DLL still pulls
+// its `EncodeAPI` object, which names these two entry points. The NVENC backend resolves both
+// from `nvEncodeAPI64.dll` at runtime and never calls these; they only satisfy the linker.
+// Not `pub`: internal linkage only, nothing is exported from the DLL.
+#[unsafe(no_mangle)]
+extern "C" fn NvEncodeAPICreateInstance(_list: *mut core::ffi::c_void) -> u32 {
+    // NV_ENC_ERR_NO_ENCODE_DEVICE
+    1
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn NvEncodeAPIGetMaxSupportedVersion(_version: *mut u32) -> u32 {
+    // NV_ENC_ERR_NO_ENCODE_DEVICE
+    1
+}
