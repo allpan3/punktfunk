@@ -85,6 +85,12 @@ mod gso {
     }
 }
 
+/// Bytes one GSO super-buffer may carry: 65535 - 40 - 8 (IPv6 + UDP, tighter than IPv4's
+/// 65507), alongside the kernel's 64-segment cap. Oversize is EMSGSIZE, which
+/// `gso_unsupported` reads as "no GSO here" — an arithmetic slip forfeits the lever.
+#[cfg(target_os = "linux")]
+const GSO_MAX_PAYLOAD: usize = 65535 - 40 - 8;
+
 /// Errors that mean GSO is unusable on this kernel/NIC/path — latch off and
 /// fall back to `sendmmsg` instead of tearing the stream down.
 ///
@@ -201,10 +207,6 @@ pub(super) fn send_gso(t: &UdpTransport, packets: &[&[u8]]) -> std::io::Result<u
         return send_batch(t, packets);
     }
     let fd = t.socket.as_raw_fd();
-    // 64-segment kernel cap, and 65535 - 40 - 8 (IPv6+UDP; tighter than IPv4
-    // 65507). Oversize is EMSGSIZE, which `gso_unsupported` latches GSO off
-    // process-wide.
-    const GSO_MAX_PAYLOAD: usize = 65535 - 40 - 8;
     let max_seg = (GSO_MAX_PAYLOAD / seg).clamp(1, 64);
     let mut scratch: Vec<u8> = Vec::with_capacity(seg * max_seg);
     let mut sent = 0usize;
@@ -222,6 +224,57 @@ pub(super) fn send_gso(t: &UdpTransport, packets: &[&[u8]]) -> std::io::Result<u
                 return Ok(sent + send_batch(t, &packets[sent..])?);
             }
             Err(e) => return Err(e),
+        }
+    }
+    Ok(sent)
+}
+
+/// Reusable Linux GSO batch send for a caller that owns its OWN connected `UdpSocket` and is
+/// not the [`UdpTransport`] data plane — the GameStream video sender, whose paced bursts of
+/// equal-size RTP/FEC packets otherwise cost one `sendmmsg` per chunk. Coalesces the LEADING
+/// run of uniform-size packets into `sendmsg(UDP_SEGMENT)` super-buffers and returns how many
+/// it sent that way; the caller sends any remainder its own way.
+///
+/// `Ok(0)` when GSO is off or the burst is size-mixed. An unsupported-path error latches GSO
+/// off process-wide and returns the count so far, as does a transient full buffer. Mirror of
+/// the Windows `send_uso_all`, same contract.
+///
+/// This plane has NO delivery guard: the native plane's `OffloadGuard` watches a `LossReport`
+/// GameStream never sends. Flipping the Linux default on must extend a guard here or leave
+/// this caller on the explicit `PUNKTFUNK_GSO` pin.
+#[cfg(target_os = "linux")]
+pub fn send_gso_all(socket: &std::net::UdpSocket, packets: &[&[u8]]) -> std::io::Result<usize> {
+    use std::os::fd::AsRawFd;
+    if packets.is_empty() || !gso::active() {
+        return Ok(0);
+    }
+    // Every segment but the last must be exactly `seg` bytes; bail to the caller's own path
+    // for a size-mixed burst or a frame's short final packet.
+    let seg = packets[0].len();
+    let last = packets.len() - 1;
+    if seg == 0 || packets[..last].iter().any(|p| p.len() != seg) || packets[last].len() > seg {
+        return Ok(0);
+    }
+    let fd = socket.as_raw_fd();
+    let max_seg = (GSO_MAX_PAYLOAD / seg).clamp(1, 64);
+    let mut scratch: Vec<u8> = Vec::with_capacity(seg * max_seg);
+    let mut sent = 0usize;
+    for chunk in packets.chunks(max_seg) {
+        scratch.clear();
+        for p in chunk {
+            scratch.extend_from_slice(p);
+        }
+        match send_one_gso(fd, &scratch, seg as u16) {
+            Ok(()) => sent += chunk.len(),
+            // Send buffer full or stale ICMP: stop here, the caller sends the rest.
+            Err(e) if is_transient_io(&e) => break,
+            Err(e) => {
+                if gso_unsupported(&e) {
+                    gso::disable();
+                    break;
+                }
+                return Err(e);
+            }
         }
     }
     Ok(sent)

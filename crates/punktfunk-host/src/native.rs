@@ -949,6 +949,51 @@ fn adapt_fec(loss_ppm: u32) -> u8 {
     target.clamp(FEC_MIN as u32, FEC_MAX as u32) as u8
 }
 
+/// Reported loss at which send offload is suspected of costing delivered throughput. 0.4 % is
+/// what the 2026-07-14 Linux GSO A/B produced at a rate `sendmmsg` carried clean; under it the
+/// offload is not the discriminator.
+const OFFLOAD_LOSS_PPM: u32 = 4_000;
+/// Windows over [`OFFLOAD_LOSS_PPM`] before the downshift (~1.5 s), so one Wi-Fi scan or BT
+/// coexistence burst cannot strip the offload.
+const OFFLOAD_LOSS_WINDOWS: u8 = 2;
+
+/// One-way runtime guard on UDP send offload (Linux GSO / Windows USO).
+///
+/// The offload hands the kernel super-buffers that leave at NIC line rate. Where the path's
+/// bottleneck sits below that, the train overruns a queue the `sendmmsg` path did not — its
+/// per-chunk syscall cost was spacing the packets (2026-07-14: peak 2452 → 1909 Mbps and
+/// 0.4 % loss over a 2.5GbE hop, reproduced three times). Nothing on the host predicts that
+/// path, so watch what the client actually receives and give the offload up when it looks
+/// responsible. Sticky for the session: a link that costs it once is never re-probed, so the
+/// send mode cannot oscillate mid-stream.
+struct OffloadGuard {
+    /// Cleared to downshift; shared with the data plane's `Session`.
+    switch: Arc<AtomicBool>,
+    over: u8,
+}
+
+impl OffloadGuard {
+    /// One report window. Built only when [`offload_pinned`](punktfunk_core::transport::offload_pinned)
+    /// is false, so an A/B run is never downshifted under the measurement.
+    fn on_report(&mut self, loss_ppm: u32) {
+        if loss_ppm < OFFLOAD_LOSS_PPM {
+            self.over = 0;
+            return;
+        }
+        self.over = self.over.saturating_add(1);
+        // `swap` is the once-only latch: only the transition logs.
+        if self.over >= OFFLOAD_LOSS_WINDOWS && self.switch.swap(false, Ordering::Relaxed) {
+            tracing::warn!(
+                loss_ppm,
+                windows = self.over,
+                "UDP send offload (GSO/USO) looks to be costing delivered throughput on this \
+                 path — falling back to sendmmsg for the rest of the session (PUNKTFUNK_GSO=1 \
+                 pins it on)"
+            );
+        }
+    }
+}
+
 /// Decay floor after any real loss. 5 % so a static stretch cannot drop protection before motion.
 const FEC_BURNED_MIN: u8 = 5;
 /// Clean 750 ms windows (~2 min) before a burned session re-earns [`FEC_MIN`].
@@ -1384,6 +1429,10 @@ async fn serve_session(
     let adaptive_fec = fec_static_override().is_none();
     let fec_target = Arc::new(AtomicU8::new(welcome.fec.fec_percent));
     let fec_target_ctl = fec_target.clone();
+    // Send-offload veto (see `OffloadGuard`): control task clears it, the data plane's Session
+    // reads it per send. On until a report says the offload is costing this path throughput.
+    let offload_on = Arc::new(AtomicBool::new(true));
+    let offload_ctl = offload_on.clone();
     // PhaseReports from the control task; encode loop drains. Inert until a vsync-aware client.
     let phase_ctl = Arc::new(stream::PhaseCtl::new());
     let phase_ctl_control = phase_ctl.clone();
@@ -1422,6 +1471,7 @@ async fn serve_session(
         cadence_behind_score: cadence_behind_score.clone(),
         client_packets_received: client_packets_received_ctl,
         fec_target_ctl,
+        offload_ctl,
         phase_ctl: phase_ctl_control,
         reconfig_tx,
         keyframe_tx,
@@ -1853,6 +1903,7 @@ async fn serve_session(
     // Client HDR volume for EDID + 0xCE. `None` = older client / no HDR → built-in defaults.
     let client_hdr = hello.display_hdr.map(crate::encode::hdr_meta_from_wire);
     let fec_target_dp = fec_target.clone();
+    let offload_dp = offload_on.clone();
     let conn_stream = conn.clone();
     // 0xCF host-timing only if the client advertised the cap; older clients get no extra datagrams.
     let timing_conn =
@@ -1969,6 +2020,7 @@ async fn serve_session(
             }
             let mut session = Session::new(cfg, Box::new(transport))
                 .map_err(|e| anyhow!("host session: {e:?}"))?;
+            session.set_offload_switch(offload_dp);
             match source {
                 Punktfunk1Source::Synthetic => synthetic_stream(
                     &mut session,
@@ -2341,6 +2393,48 @@ mod tests {
         assert_eq!(adapt_fec(100_000), 15); // 10% → ceil(14)+1 = 15
         assert_eq!(adapt_fec(1_000_000), FEC_MAX); // 100% → clamped
         assert!(adapt_fec(u32::MAX) <= FEC_MAX);
+    }
+
+    #[test]
+    fn offload_guard_downshifts_only_on_sustained_loss() {
+        let mk = || {
+            let switch = Arc::new(AtomicBool::new(true));
+            (
+                OffloadGuard {
+                    switch: switch.clone(),
+                    over: 0,
+                },
+                switch,
+            )
+        };
+        // Loss under the threshold never downshifts, however long it runs.
+        let (mut g, sw) = mk();
+        for _ in 0..100 {
+            g.on_report(OFFLOAD_LOSS_PPM - 1);
+        }
+        assert!(sw.load(Ordering::Relaxed));
+
+        // One window over is not enough; the second takes the offload away.
+        let (mut g, sw) = mk();
+        g.on_report(OFFLOAD_LOSS_PPM);
+        assert!(sw.load(Ordering::Relaxed));
+        g.on_report(OFFLOAD_LOSS_PPM);
+        assert!(!sw.load(Ordering::Relaxed));
+
+        // A clean window between two bad ones resets the run — an isolated burst is not a verdict.
+        let (mut g, sw) = mk();
+        g.on_report(OFFLOAD_LOSS_PPM);
+        g.on_report(0);
+        g.on_report(OFFLOAD_LOSS_PPM);
+        assert!(sw.load(Ordering::Relaxed));
+
+        // Sticky: a clean link afterwards does not re-arm the offload mid-session.
+        let (mut g, sw) = mk();
+        g.on_report(u32::MAX);
+        g.on_report(u32::MAX);
+        assert!(!sw.load(Ordering::Relaxed));
+        g.on_report(0);
+        assert!(!sw.load(Ordering::Relaxed));
     }
 
     #[test]

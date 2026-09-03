@@ -746,12 +746,19 @@ fn gs_bit_depth(format: crate::capture::PixelFormat) -> u8 {
 
 type PacketBatch = Vec<Vec<u8>>;
 
-/// Send `pkts` with as few syscalls as possible (`sendmmsg`, up to 64 per call). The socket is
-/// connected, so no per-message address. Returns an error on the first send failure.
+/// Send `pkts` with as few syscalls as possible: GSO super-buffers where the burst is
+/// uniform-size and GSO is on, then `sendmmsg` (up to 64 per call) for the remainder. The
+/// socket is connected, so no per-message address. Errors on the first send failure.
 #[cfg(target_os = "linux")]
 fn sendmmsg_all(sock: &UdpSocket, pkts: &[Vec<u8>]) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
     const CHUNK: usize = 64;
+    // `Ok(0)` when GSO is off or the burst is size-mixed — then this is the old sendmmsg path
+    // unchanged. A frame's short final packet is the usual remainder.
+    let refs: Vec<&[u8]> = pkts.iter().map(|p| p.as_slice()).collect();
+    let offloaded = punktfunk_core::transport::send_gso_all(sock, &refs)?;
+    drop(refs);
+    let pkts = &pkts[offloaded..];
     let fd = sock.as_raw_fd();
     for chunk in pkts.chunks(CHUNK) {
         let mut iovs: Vec<libc::iovec> = chunk

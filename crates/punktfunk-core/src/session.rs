@@ -101,6 +101,10 @@ pub struct Session {
     /// Reused Vecs for the lane hand-off. The worker's half round-trips here, so
     /// steady-state two-lane frames move `n/2` headers with no allocation.
     lane_scratch: Vec<Vec<u8>>,
+    /// Send-offload veto, shared with whoever watches delivery (host: the control task's
+    /// loss guard). `false` sends the batch scalar even where the platform gate says GSO/USO
+    /// is available. Starts `true`; the platform gate still decides whether offload happens.
+    offload: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Stamp [`Frame::received_ns`] as the frame leaves [`Session::poll_frame`]. Completed
@@ -167,8 +171,17 @@ impl Session {
                 .map(|v| v != "1")
                 .unwrap_or(true),
             lane_scratch: Vec::new(),
+            offload: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             config,
         })
+    }
+
+    /// Share this session's send-offload veto with a delivery watcher (host: the control
+    /// task's loss guard, which clears it when the client reports the offload's packet
+    /// trains costing delivered throughput). Storing `false` downshifts the next send to the
+    /// scalar/`sendmmsg` path; the platform gate is unaffected and still has the last word.
+    pub fn set_offload_switch(&mut self, switch: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.offload = switch;
     }
 
     /// Drain receive-path stage timings since the last call (window semantics: the pump
@@ -501,9 +514,16 @@ impl Session {
 
     /// Host: send one chunk of already-sealed packets in one `sendmmsg`. Returns how many
     /// the kernel accepted; the rest are send-buffer drops. Whole frame, or per paced chunk.
+    ///
+    /// Offloaded (GSO/USO) unless [`set_offload_switch`](Self::set_offload_switch)'s veto is
+    /// clear. Both paths share the short-count drop contract, so the downshift is invisible
+    /// to callers.
     pub fn send_sealed(&self, packets: &[&[u8]]) -> Result<usize> {
-        // GSO when enabled (UdpTransport/Linux), else sendmmsg — same short-count drop contract.
-        let sent = self.transport.send_gso(packets)?;
+        let sent = if self.offload.load(std::sync::atomic::Ordering::Relaxed) {
+            self.transport.send_gso(packets)?
+        } else {
+            self.transport.send_batch(packets)?
+        };
         if sent < packets.len() {
             StatsCounters::add(
                 &self.stats.packets_send_dropped,

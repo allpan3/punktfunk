@@ -41,6 +41,8 @@ pub(super) struct Task {
     /// `u32::MAX` is the pre-seed: an old client never sent a `DeliveryReport`.
     pub(super) client_packets_received: Arc<AtomicU32>,
     pub(super) fec_target_ctl: Arc<AtomicU8>,
+    /// Send-offload veto shared with the data plane's `Session` (see `OffloadGuard`).
+    pub(super) offload_ctl: Arc<AtomicBool>,
     /// Encode loop drains at its own cadence (`design/phase-locked-capture.md`).
     pub(super) phase_ctl: Arc<super::stream::PhaseCtl>,
     pub(super) reconfig_tx: std::sync::mpsc::Sender<punktfunk_core::Mode>,
@@ -88,6 +90,7 @@ pub(super) async fn run(task: Task) {
         cadence_behind_score,
         client_packets_received,
         fec_target_ctl,
+        offload_ctl,
         phase_ctl,
         reconfig_tx,
         keyframe_tx,
@@ -137,6 +140,12 @@ pub(super) async fn run(task: Task) {
     let mut ctrl_reader = io::MsgReader::new(ctrl_recv);
     // After real loss, decay stops at 5 % not 1 % (`FecFloor`).
     let mut fec_floor = FecFloor::default();
+    // `None` when PUNKTFUNK_GSO pins the offload on — an A/B run must not downshift itself.
+    let mut offload_guard =
+        (!punktfunk_core::transport::offload_pinned()).then_some(OffloadGuard {
+            switch: offload_ctl,
+            over: 0,
+        });
     loop {
         tokio::select! {
             msg = ctrl_reader.read_msg() => {
@@ -206,6 +215,11 @@ pub(super) async fn run(task: Task) {
                         Ordering::Relaxed,
                     );
                 } else if let Ok(rep) = LossReport::decode(&msg) {
+                    // Before FEC: the offload guard runs even where FEC is pinned or
+                    // adaptive FEC is off — the send mode is not FEC's business.
+                    if let Some(g) = offload_guard.as_mut() {
+                        g.on_report(rep.loss_ppm);
+                    }
                     // Data-plane send loop applies `fec_target_ctl` per frame.
                     // No-op when FEC is pinned (`PUNKTFUNK_FEC_PCT`).
                     if adaptive_fec {

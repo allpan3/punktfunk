@@ -9,11 +9,22 @@ mod udp;
 
 pub use loopback::{loopback_pair, LoopbackTransport};
 pub use qos::{grow_socket_buffers, set_dscp_default, set_media_qos, MediaClass, QosFlow};
+/// The Linux GSO sibling of [`send_uso_all`], same caller and contract.
+#[cfg(target_os = "linux")]
+pub use udp::send_gso_all;
 /// Windows-only USO batch send for a caller that owns its connected socket
 /// (GameStream video) rather than going through [`UdpTransport`].
 #[cfg(target_os = "windows")]
 pub use udp::send_uso_all;
 pub use udp::{spawn_data_punch, UdpTransport, PUNCH_MAGIC};
+
+/// True when `PUNKTFUNK_GSO` pins send offload ON (set to anything but `0`) — the A/B
+/// override both platform gates read. A delivery-loss guard must stand down for such a run,
+/// or it silently downshifts the very sweep that is measuring the offload. The
+/// unsupported-path latch is unaffected: an offload the kernel rejects still falls back.
+pub fn offload_pinned() -> bool {
+    std::env::var_os("PUNKTFUNK_GSO").is_some_and(|v| v != "0")
+}
 
 /// A datagram transport. `recv` is non-blocking: `Ok(None)` means no packet
 /// is available, so the decode/present thread never blocks here.

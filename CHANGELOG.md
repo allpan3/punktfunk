@@ -148,6 +148,12 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Changed
 
+- **UDP send offload now gives itself up on a path it hurts.** Where GSO/USO is active, two
+  consecutive client loss reports above 0.4 % drop the session back to `sendmmsg` for good —
+  set `PUNKTFUNK_GSO=1` to pin the offload on and stand the guard down for a measurement run.
+- **The Linux GameStream sender can use UDP GSO.** It sent every paced burst with `sendmmsg`
+  regardless of `PUNKTFUNK_GSO`, where the Windows plane has used USO since it landed. Nothing
+  changes until GSO is enabled, which on Linux is still opt-in.
 - **`capture_health` reports the classes the driver's clocks support.** `stall_class` is now
   `worker` / `encoder` / `presentation` / `driver` (`transport` and `conversion` are gone),
   `evidence` is `input` / `canary`, and the object gains `present_to_arrival_ms` plus a
