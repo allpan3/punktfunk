@@ -68,6 +68,19 @@ pub enum RingState {
     Dead,
 }
 
+/// What an encoder that runs outside the loop's submit path (the driver's, over the AU
+/// section) says about itself: the clocks the supervisor classifies the encode leg on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EncoderTelemetry {
+    /// The last access unit's publish time; the encoder's open time before the first one, so
+    /// an encoder that never produces still reads as silent from a known instant.
+    pub last_au: Instant,
+    /// Access units published so far — a `Conversion` episode's proof clock.
+    pub published_total: u64,
+    /// Encode threads the driver abandoned after a wedge.
+    pub detached: u32,
+}
+
 /// Everything the classifier looks at, sampled at `now`. `None` clocks mean "never observed".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Snapshot {
@@ -81,7 +94,8 @@ pub struct Snapshot {
     /// The consumer last received a `FrameOrigin::Source` frame, and its sequence.
     pub last_source: Option<Instant>,
     pub source_seq: u64,
-    /// The encoder last produced an access unit from a source frame.
+    /// The encoder last produced an access unit ([`EncoderTelemetry::last_au`]); `None` for a
+    /// submit-driven backend, whose stalls the stream loop's own watch catches.
     pub last_encoded: Option<Instant>,
     /// The strongest activity evidence newer than `last_source` ([`Activity::strongest_since`]).
     pub activity: Option<Activity>,

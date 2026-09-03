@@ -110,6 +110,12 @@ impl Default for Budget {
     }
 }
 
+/// How long the `EncoderReset` actuator waits for the first access unit after the reset
+/// before it reports: the rung's cost is one IDR plus this wait. A fresh encoder's first AU
+/// lands within a couple of frames of its open, so 100 ms covers 60 Hz with room; past it the
+/// stage still counts as applied and the proof clock decides.
+pub const ENCODER_RESET_FIRST_AU: Duration = Duration::from_millis(100);
+
 impl Budget {
     /// Cooldown after `failures` consecutive failed episodes (0 = none).
     pub fn cooldown(&self, failures: u32) -> Duration {
@@ -128,7 +134,8 @@ pub enum Event {
     Verdict(HealthClass),
     /// The running stage's actuator finished.
     StageDone(Stage, StageOutcome),
-    /// `new_source_frames` NEW source sequences arrived since the last event (never regens or
+    /// `new_source_frames` NEW progress units of the episode's class arrived since the last
+    /// event — source sequences, or access units for a `Conversion` episode (never regens or
     /// holds); `assignment_changed` when a fresh swap-chain assignment was observed.
     Progress {
         new_source_frames: u32,
@@ -224,6 +231,11 @@ impl Coordinator {
     /// The stage currently running, if any.
     pub fn current_stage(&self) -> Option<Stage> {
         self.episode.as_ref().map(|e| e.stage)
+    }
+
+    /// The open episode's stall class: it decides which clock proves a stage.
+    pub fn current_class(&self) -> Option<StallClass> {
+        self.episode.as_ref().map(|e| e.class)
     }
 
     /// Stalled verdicts refused since the last episode (budget or cooldown).
@@ -572,6 +584,39 @@ mod tests {
         assert_eq!(b.cooldown(3), b.cooldown_base * 4);
         assert_eq!(b.cooldown(9), b.cooldown_cap);
         assert_eq!(b.cooldown(u32::MAX), b.cooldown_cap);
+    }
+
+    /// An encoder reset is costed by its stage record: the ctl call, the bounded first-AU wait
+    /// and the proof all land in `took`, and that wait fits inside the stage deadline.
+    #[test]
+    fn an_encoder_reset_is_costed_by_its_stage_record() {
+        let b = Budget::default();
+        assert!(ENCODER_RESET_FIRST_AU < b.stage_deadline);
+        let mut c = Coordinator::new(b);
+        let t0 = Instant::now();
+        assert_eq!(
+            c.step(t0, stalled(StallClass::Conversion)),
+            Action::Run(Stage::EncoderReset)
+        );
+        assert_eq!(c.current_class(), Some(StallClass::Conversion));
+        let reset_done = t0 + ENCODER_RESET_FIRST_AU;
+        assert_eq!(
+            c.step(
+                reset_done,
+                Event::StageDone(Stage::EncoderReset, StageOutcome::Applied)
+            ),
+            Action::None
+        );
+        let proven = reset_done + Duration::from_millis(50);
+        assert_eq!(c.step(proven, frames(3)), Action::Recovered);
+        let s = c.last_summary().unwrap();
+        assert_eq!(s.stages.len(), 1);
+        assert_eq!(s.stages[0].stage, Stage::EncoderReset);
+        assert_eq!(
+            s.stages[0].took,
+            ENCODER_RESET_FIRST_AU + Duration::from_millis(50)
+        );
+        assert_eq!(s.took, s.stages[0].took);
     }
 
     /// Non-vacuity: invert the proof rule and the machine would recover on nothing.

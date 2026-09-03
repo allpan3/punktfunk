@@ -315,6 +315,13 @@ pub trait Encoder: Send {
     fn ready_aus(&mut self, _deadline: std::time::Instant) -> Option<usize> {
         None
     }
+    /// The encoder's own clocks, for a backend nobody submits to: the capture
+    /// supervisor classifies the encode leg on them and proves an encoder
+    /// reset by access units. `None` (default): a submit-driven backend, whose
+    /// stalls the loop's own AU watch catches.
+    fn telemetry(&self) -> Option<pf_frame::health::EncoderTelemetry> {
+        None
+    }
     /// Rebuild the hardware encoder in place, keeping negotiated parameters
     /// (encode-stall watchdog: a wedged driver stops emitting AUs without
     /// returning an error). `true` = rebuilt: every submitted-but-unpolled

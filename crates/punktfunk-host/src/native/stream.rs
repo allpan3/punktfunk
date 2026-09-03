@@ -2325,6 +2325,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
         }
         let measure = perf || stats.is_armed();
         let t_cap = std::time::Instant::now();
+        capturer.observe_encoder(enc.telemetry());
         let cap_result = capturer.try_latest();
         let cap_us = if measure {
             t_cap.elapsed().as_micros() as u32
@@ -2333,6 +2334,13 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
         };
         if perf {
             st_cap.push(cap_us);
+        }
+        // A recovery rung the capturer's ladder chose but this loop must run (the encoder is
+        // ours). Its outcome goes straight back; a reset forfeited every in-flight AU.
+        if let Some(stage) = capturer.take_pending_stage() {
+            let outcome = run_loop_stage(stage, &mut enc, &mut inflight);
+            capturer.stage_done(stage, outcome);
+            last_au_at = std::time::Instant::now();
         }
         let mut repeat = false;
         match cap_result {
@@ -3715,6 +3723,33 @@ fn reset_stalled_encoder(
     inflight.clear();
     enc.request_keyframe();
     true
+}
+
+/// The ladder rungs whose actuator this loop owns. `EncoderReset` is [`reset_stalled_encoder`]
+/// plus a bounded wait for the first access unit — the rung's whole cost, one IDR included;
+/// `Applied` once the reset took, and the proof clock decides whether the AUs came back.
+fn run_loop_stage(
+    stage: pf_frame::recovery::Stage,
+    enc: &mut Box<dyn crate::encode::Encoder>,
+    inflight: &mut std::collections::VecDeque<(u64, u64, std::time::Instant)>,
+) -> pf_frame::recovery::StageOutcome {
+    use pf_frame::recovery::{Stage, StageOutcome, ENCODER_RESET_FIRST_AU};
+    match stage {
+        Stage::EncoderReset => {
+            let t0 = std::time::Instant::now();
+            if !reset_stalled_encoder(enc, inflight) {
+                return StageOutcome::Failed;
+            }
+            let first_au = enc.ready_aus(t0 + ENCODER_RESET_FIRST_AU).map(|n| n > 0);
+            tracing::warn!(
+                cost_ms = t0.elapsed().as_millis() as u64,
+                first_au,
+                "recovery: encoder reset applied — one IDR plus the first-AU wait"
+            );
+            StageOutcome::Applied
+        }
+        _ => StageOutcome::Unsupported,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

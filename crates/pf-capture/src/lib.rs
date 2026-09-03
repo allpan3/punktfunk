@@ -232,6 +232,27 @@ pub trait Capturer: Send {
         None
     }
 
+    /// The session encoder's own clocks (`Encoder::telemetry`), handed over
+    /// once per loop tick before `try_latest` so the supervisor classifies the
+    /// encode leg on them. Default: ignored.
+    fn observe_encoder(&mut self, _t: Option<pf_frame::health::EncoderTelemetry>) {}
+
+    /// A recovery rung whose actuator the stream loop owns because the
+    /// encoder does (`EncoderReset`) or the display manager does
+    /// (`DriverCycle`). The loop runs it and answers with [`Self::stage_done`].
+    /// Default: never.
+    fn take_pending_stage(&mut self) -> Option<pf_frame::recovery::Stage> {
+        None
+    }
+
+    /// The loop-owned actuator for `stage` finished with `outcome`.
+    fn stage_done(
+        &mut self,
+        _stage: pf_frame::recovery::Stage,
+        _outcome: pf_frame::recovery::StageOutcome,
+    ) {
+    }
+
     /// The monitor and WUDFHost an in-driver encoder opens against
     /// ([`open_driver_encoder`]). `None` = not an IDD-push source.
     #[cfg(all(target_os = "windows", feature = "driver-encode"))]

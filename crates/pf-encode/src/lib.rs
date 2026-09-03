@@ -312,6 +312,9 @@ impl Encoder for TrackedEncoder {
     fn ready_aus(&mut self, deadline: std::time::Instant) -> Option<usize> {
         self.inner.ready_aus(deadline)
     }
+    fn telemetry(&self) -> Option<pf_frame::health::EncoderTelemetry> {
+        self.inner.telemetry()
+    }
     fn reset(&mut self) -> bool {
         self.inner.reset()
     }

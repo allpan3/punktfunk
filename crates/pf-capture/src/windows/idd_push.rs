@@ -440,6 +440,12 @@ pub struct IddPushCapturer {
     recovery: recovery::Supervisor,
     /// A closed episode's measured outage, until the stream loop takes it (WP14).
     recovered_outage: Option<Duration>,
+    /// A rung the stream loop's actuator runs, until it takes it (`take_pending_stage`).
+    pending_stage: Option<pf_frame::recovery::Stage>,
+    /// A typed end the ladder decided off the capture path; `try_consume` returns it next.
+    pending_fault: Option<anyhow::Error>,
+    /// The session encoder's clocks from the loop's last `observe_encoder`.
+    encoder: Option<pf_frame::health::EncoderTelemetry>,
     /// Owns the shared-header file mapping + its mapped view (RAII unmap-then-close). Declared BEFORE
     /// `header`, which is a raw pointer borrowed into this view via [`MappedSection::ptr`]. Also the
     /// duplication source for the driver's header handle on every [`ChannelBroker::send`].
@@ -1612,11 +1618,12 @@ impl IddPushCapturer {
     /// the driver-death watch only catches an EXITED WUDFHost — so a known-active display could
     /// stream one stale texture indefinitely (F1). The classifier names the gap from the clocks
     /// this capturer keeps (worker heartbeat, driver acquires, ring publish, source frames,
-    /// cursor travel, an unanswered canary); the coordinator walks the ladder from that class,
-    /// one rung at a time under a deadline, and proves each rung with NEW source frames. No
-    /// evidence = plain idle = no recovery: a static desktop composes nothing, and that is
-    /// healthy. An exhausted ladder ends the plane with the typed `RingFault::SourceStalled`; the
-    /// host's pipeline rebuild is the rung above.
+    /// cursor travel, an unanswered canary) and the session encoder's own; the coordinator
+    /// walks the ladder from that class, one rung at a time under a deadline, and proves each
+    /// rung with NEW source frames — access units for an encoder stall. No evidence = plain
+    /// idle = no recovery: a static desktop composes nothing, and that is healthy. An exhausted
+    /// ladder ends the plane with the typed `RingFault::SourceStalled`; the host's pipeline
+    /// rebuild is the rung above.
     fn recovery_tick(&mut self) -> Result<()> {
         let now = Instant::now();
         let telemetry = self.telemetry();
@@ -1649,8 +1656,16 @@ impl IddPushCapturer {
             recreating: self.recovering_since.is_some(),
             secure_desktop: self.secure_active,
             topology_held: pf_win_display::topology_churn::held(),
+            encoder: self.encoder,
         };
-        let mut step = self.recovery.tick(inputs);
+        let step = self.recovery.tick(inputs);
+        self.drive(step)
+    }
+
+    /// Walk the supervisor's steps until it rests or the plane ends. A rung the stream loop
+    /// owns is parked in `pending_stage`; the loop's `stage_done` re-enters here with its
+    /// outcome.
+    fn drive(&mut self, mut step: recovery::Step) -> Result<()> {
         loop {
             match step {
                 recovery::Step::Nothing => return Ok(()),
@@ -1663,21 +1678,20 @@ impl IddPushCapturer {
                     return Ok(());
                 }
                 recovery::Step::Run(stage) => {
-                    let outcome = self.run_stage(stage);
-                    tracing::warn!(
-                        target = %self.ccd,
-                        ?stage,
-                        ?outcome,
-                        "IDD push: recovery stage"
-                    );
-                    step = self.recovery.stage_done(Instant::now(), stage, outcome);
+                    let Some(outcome) = self.run_stage(stage) else {
+                        self.pending_stage = Some(stage);
+                        return Ok(());
+                    };
+                    step = self.finish_stage(stage, outcome);
                 }
-                recovery::Step::Recovered(summary) => {
+                recovery::Step::Recovered { summary, outage } => {
                     tracing::info!(
                         target = %self.ccd,
                         ?summary,
+                        outage_ms = outage.as_millis() as u64,
                         "IDD push: recovery episode closed"
                     );
+                    self.recovered_outage = Some(outage);
                     return Ok(());
                 }
                 recovery::Step::Failed { gap, summary } => {
@@ -1699,11 +1713,30 @@ impl IddPushCapturer {
         }
     }
 
-    /// Run one ladder rung. Only the capture-thread actuators exist yet; the rest report
-    /// `Unsupported` and the ladder moves on without penalty.
-    fn run_stage(&mut self, stage: pf_frame::recovery::Stage) -> pf_frame::recovery::StageOutcome {
+    /// Record a rung's outcome with the supervisor and take its next step.
+    fn finish_stage(
+        &mut self,
+        stage: pf_frame::recovery::Stage,
+        outcome: pf_frame::recovery::StageOutcome,
+    ) -> recovery::Step {
+        tracing::warn!(
+            target = %self.ccd,
+            ?stage,
+            ?outcome,
+            "IDD push: recovery stage"
+        );
+        self.recovery.stage_done(Instant::now(), stage, outcome)
+    }
+
+    /// Run one ladder rung here, or `None` for a rung the stream loop owns: the encoder reset
+    /// under `driver-encode`, where the loop holds the encoder. Rungs without an actuator on
+    /// this host report `Unsupported` and the ladder moves on without penalty.
+    fn run_stage(
+        &mut self,
+        stage: pf_frame::recovery::Stage,
+    ) -> Option<pf_frame::recovery::StageOutcome> {
         use pf_frame::recovery::{Stage, StageOutcome};
-        match stage {
+        Some(match stage {
             Stage::RingReset => {
                 self.recovering_since.get_or_insert_with(Instant::now);
                 match self.recreate_ring(self.display_hdr, self.width, self.height) {
@@ -1721,15 +1754,19 @@ impl IddPushCapturer {
                     StageOutcome::Failed
                 }
             }
+            Stage::EncoderReset if cfg!(feature = "driver-encode") => return None,
             Stage::EncoderReset
             | Stage::SwapChainReset
             | Stage::MonitorCycle
             | Stage::DriverCycle
             | Stage::CaptureFallback => StageOutcome::Unsupported,
-        }
+        })
     }
 
     fn try_consume(&mut self) -> Result<Option<CapturedFrame>> {
+        if let Some(e) = self.pending_fault.take() {
+            return Err(e);
+        }
         self.log_driver_status_once();
         // Secure-desktop first: UAC/Winlogon may produce no frames until this edge.
         self.poll_secure_desktop();
@@ -2391,6 +2428,25 @@ impl Capturer for IddPushCapturer {
     fn health(&self) -> Option<crate::CaptureHealth> {
         let ring = self.ring_health();
         Some(self.recovery.report(Instant::now(), ring.as_ref()))
+    }
+
+    fn observe_encoder(&mut self, t: Option<pf_frame::health::EncoderTelemetry>) {
+        self.encoder = t;
+    }
+
+    fn take_pending_stage(&mut self) -> Option<pf_frame::recovery::Stage> {
+        self.pending_stage.take()
+    }
+
+    fn stage_done(
+        &mut self,
+        stage: pf_frame::recovery::Stage,
+        outcome: pf_frame::recovery::StageOutcome,
+    ) {
+        let step = self.finish_stage(stage, outcome);
+        if let Err(e) = self.drive(step) {
+            self.pending_fault = Some(e);
+        }
     }
 
     #[cfg(feature = "driver-encode")]

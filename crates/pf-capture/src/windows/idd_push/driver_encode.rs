@@ -280,6 +280,7 @@ pub fn open_driver_encoder(
         wire_chunk_warned: false,
         last_wire_seq: 0,
         last_source_seq: 0,
+        opened_at: Instant::now(),
     }))
 }
 
@@ -302,6 +303,9 @@ pub struct EncoderProxy {
     /// ground-truth clock from Phase 4 on (`progress`).
     last_wire_seq: u32,
     last_source_seq: u32,
+    /// Stands in for `last_au_qpc` until the first publish, so a never-producing encoder is
+    /// silent from a known instant rather than invisible.
+    opened_at: Instant,
 }
 
 // SAFETY: `!Send` only through the mapping's raw pointers. Built on the prep thread, used on
@@ -352,8 +356,7 @@ impl EncoderProxy {
     }
 
     /// The header telemetry the driver keeps (`encoder_state`, `detached`, `last_au_qpc`,
-    /// `drain_heartbeat_qpc`, `source_seq`, …) — the supervisor's input from Phase 4 on.
-    #[allow(dead_code)]
+    /// `drain_heartbeat_qpc`, `source_seq`, …); [`Encoder::telemetry`] is its supervisor cut.
     pub fn snapshot(&self) -> au::AuHeader {
         self.reader.view().header()
     }
@@ -470,6 +473,21 @@ impl Encoder for EncoderProxy {
             }
             self.section.wait(left.as_millis().clamp(1, 16) as u32);
         }
+    }
+
+    fn telemetry(&self) -> Option<pf_frame::health::EncoderTelemetry> {
+        let h = self.snapshot();
+        let last_au = if h.last_au_qpc == 0 {
+            self.opened_at
+        } else {
+            let age = Duration::from_micros(IddPushCapturer::qpc_age_us(h.last_au_qpc));
+            Instant::now().checked_sub(age).unwrap_or(self.opened_at)
+        };
+        Some(pf_frame::health::EncoderTelemetry {
+            last_au,
+            published_total: h.published_total,
+            detached: h.detached,
+        })
     }
 
     fn ready_aus(&mut self, deadline: Instant) -> Option<usize> {

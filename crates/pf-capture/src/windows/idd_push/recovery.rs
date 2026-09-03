@@ -1,20 +1,21 @@
 //! The capturer's recovery supervisor (immunity plan WP13 wiring): feeds the pure
-//! [`health::Classifier`] from the clocks the capturer already keeps, hands its verdicts to the
-//! pure [`recovery::Coordinator`], and tells the capturer which actuator to run. It retires the
-//! WP3b interim watchdog: same 15 s floor, same "no evidence = idle", but the ladder replaces the
-//! one-rebuild-then-terminal rule and the decision is evidence-classed.
+//! [`health::Classifier`] from the clocks the capturer keeps plus the session encoder's own
+//! ([`EncoderTelemetry`]), hands its verdicts to the pure [`recovery::Coordinator`], and tells
+//! the capturer which actuator to run. Same 15 s floor and "no evidence = idle" as the WP3b
+//! watchdog it retired; the ladder replaces the one-rebuild-then-terminal rule.
 //!
-//! This first slice runs ON the capture thread: the only actuators reachable today — a ring
-//! recreate and the same-mode presentation restart — are capture-thread-owned, and the host's
-//! pipeline rebuild (its own 5-attempt budget) is the rung above `Failed`. `MonitorCycle`,
-//! `DriverCycle` and `CaptureFallback` report `Unsupported` until the manager exposes them.
+//! It runs ON the capture thread. The presentation restart is capture-thread-owned; the encoder
+//! reset belongs to the stream loop, which polls for it and reports back. A `Conversion`
+//! episode is proven by access units, every other class by new source frames. The host's
+//! pipeline rebuild (its own 5-attempt budget) is the rung above `Failed`.
 
 use std::time::{Duration, Instant};
 
 use crate::{CaptureEpisode, CaptureHealth};
 use pf_driver_proto::frame::HealthState;
 use pf_frame::health::{
-    Activity, ActivityKind, Classifier, HealthClass, RingState, Snapshot, StallClass, Thresholds,
+    Activity, ActivityKind, Classifier, EncoderTelemetry, HealthClass, RingState, Snapshot,
+    StallClass, Thresholds,
 };
 use pf_frame::recovery::{Action, Budget, Coordinator, Event, Stage, StageOutcome, Summary};
 
@@ -72,6 +73,8 @@ pub(super) struct Inputs {
     pub recreating: bool,
     pub secure_desktop: bool,
     pub topology_held: bool,
+    /// The session encoder's clocks; `None` for a submit-driven backend.
+    pub encoder: Option<EncoderTelemetry>,
 }
 
 /// What the capturer does now.
@@ -81,7 +84,11 @@ pub(super) enum Step {
     /// Present the composition canary (the input kick).
     Canary,
     Run(Stage),
-    Recovered(Summary),
+    /// The episode closed on proof; `outage` spans the last good frame to the proving one.
+    Recovered {
+        summary: Summary,
+        outage: Duration,
+    },
     /// The ladder is exhausted; `gap` is the source gap to report in the typed fault.
     Failed {
         gap: Duration,
@@ -105,6 +112,8 @@ pub(super) struct Supervisor {
     input_at: Option<Instant>,
     /// When the last canary went out.
     canary_at: Option<Instant>,
+    /// The encoder's `published_total` at the last tick: its delta is AU progress.
+    published_last: u64,
 }
 
 impl Supervisor {
@@ -119,6 +128,7 @@ impl Supervisor {
             offered_at: None,
             input_at: None,
             canary_at: None,
+            published_last: 0,
         }
     }
 
@@ -190,12 +200,19 @@ impl Supervisor {
         }
     }
 
-    /// One tick of the classifier and coordinator over `i`.
+    /// One tick of the classifier and coordinator over `i`. Access units published since the
+    /// last tick prove a `Conversion` episode here; source frames prove every other class
+    /// through [`Self::source_frame`].
     pub(super) fn tick(&mut self, i: Inputs) -> Step {
         if !self.owns_episode() && i.now.saturating_duration_since(self.last_tick) < TICK {
             return Step::Nothing;
         }
         self.last_tick = i.now;
+        let au_progress = i.encoder.map_or(0, |t| {
+            let n = t.published_total.saturating_sub(self.published_last);
+            self.published_last = t.published_total;
+            n.min(u64::from(u32::MAX)) as u32
+        });
         if let Some(undelivered) = i.offered_undelivered {
             if undelivered != self.undelivered_last {
                 self.undelivered_last = undelivered;
@@ -212,7 +229,7 @@ impl Supervisor {
             last_publish: i.publish_age.and_then(|a| i.now.checked_sub(a)),
             last_source: Some(i.last_source),
             source_seq: i.source_seq,
-            last_encoded: None,
+            last_encoded: i.encoder.map(|t| t.last_au),
             activity: evidence(
                 i.now,
                 i.last_source,
@@ -245,9 +262,20 @@ impl Supervisor {
         if !owned && self.owns_episode() {
             self.opened = Some((verdict.source_gap, i.now));
         }
-        match self.act(action, verdict.source_gap) {
+        match self.act(i.now, action, verdict.source_gap) {
             Step::Nothing => {}
             step => return step,
+        }
+        if au_progress > 0 && self.coordinator.current_class() == Some(StallClass::Conversion) {
+            let progress = Event::Progress {
+                new_source_frames: au_progress,
+                assignment_changed: false,
+            };
+            let action = self.coordinator.step(i.now, progress);
+            match self.act(i.now, action, verdict.source_gap) {
+                Step::Nothing => {}
+                step => return step,
+            }
         }
         if verdict.wants_canary
             && verdict.source_gap >= CANARY_AFTER
@@ -264,42 +292,51 @@ impl Supervisor {
     /// The running stage's actuator finished.
     pub(super) fn stage_done(&mut self, now: Instant, stage: Stage, outcome: StageOutcome) -> Step {
         let action = self.coordinator.step(now, Event::StageDone(stage, outcome));
-        self.act(action, self.last_gap)
+        self.act(now, action, self.last_gap)
     }
 
     /// A NEW source frame arrived (never a regen or hold). Clears the gap's evidence; closes a
     /// proving episode once the budgeted count has landed, returning its summary and the
-    /// measured outage (last source frame before the stall to this one).
+    /// measured outage. A `Conversion` episode is deaf to it: source frames kept flowing
+    /// through that stall, so only access units can prove it.
     pub(super) fn source_frame(&mut self, now: Instant) -> Option<(Summary, Duration)> {
         self.input_at = None;
         self.canary_at = None;
+        if self.coordinator.current_class() == Some(StallClass::Conversion) {
+            return None;
+        }
         let progress = Event::Progress {
             new_source_frames: 1,
             assignment_changed: false,
         };
-        match self.coordinator.step(now, progress) {
-            Action::Recovered => {
-                let outage = self.opened.take().map_or(Duration::ZERO, |(gap, at)| {
-                    gap + now.saturating_duration_since(at)
-                });
-                self.coordinator
-                    .last_summary()
-                    .cloned()
-                    .map(|s| (s, outage))
-            }
+        // Two statements: `act` takes `&mut self`, so the coordinator step cannot be an
+        // argument expression of it.
+        let action = self.coordinator.step(now, progress);
+        match self.act(now, action, self.last_gap) {
+            Step::Recovered { summary, outage } => Some((summary, outage)),
             _ => None,
         }
     }
 
-    fn act(&mut self, action: Action, gap: Duration) -> Step {
+    /// The measured outage of the episode closing now: the source gap at its opening plus its
+    /// own length.
+    fn outage(&mut self, now: Instant) -> Duration {
+        self.opened.take().map_or(Duration::ZERO, |(gap, at)| {
+            gap + now.saturating_duration_since(at)
+        })
+    }
+
+    fn act(&mut self, now: Instant, action: Action, gap: Duration) -> Step {
         match action {
             Action::None => Step::Nothing,
             Action::Run(stage) => Step::Run(stage),
-            Action::Recovered => self
-                .coordinator
-                .last_summary()
-                .cloned()
-                .map_or(Step::Nothing, Step::Recovered),
+            Action::Recovered => {
+                let outage = self.outage(now);
+                self.coordinator
+                    .last_summary()
+                    .cloned()
+                    .map_or(Step::Nothing, |summary| Step::Recovered { summary, outage })
+            }
             Action::Failed => {
                 let summary = self
                     .coordinator
@@ -380,7 +417,54 @@ mod tests {
             recreating: false,
             secure_desktop: false,
             topology_held: false,
+            encoder: None,
         }
+    }
+
+    /// A driver encoder wedged under a flowing source: the ladder opens at the encoder reset,
+    /// which the loop runs; new access units — never source frames — close the episode.
+    #[test]
+    fn encoder_silence_under_flowing_source_is_proven_by_access_units() {
+        let t0 = Instant::now();
+        let s = |n: u64| t0 + Duration::from_secs(n);
+        let enc = |last_au: Instant, published_total: u64| {
+            Some(EncoderTelemetry {
+                last_au,
+                published_total,
+                detached: 0,
+            })
+        };
+        let mut sv = Supervisor::new(t0);
+        let mut i = inputs(s(1), s(1), 0, 0);
+        i.encoder = enc(s(1), 60);
+        assert_eq!(sv.tick(i), Step::Nothing);
+        // Source keeps flowing (fresh `last_source`), the encoder has published nothing for 16 s.
+        let mut i = inputs(s(17), s(17), 0, 0);
+        i.encoder = enc(s(1), 60);
+        assert_eq!(sv.tick(i), Step::Run(Stage::EncoderReset));
+        assert_eq!(
+            sv.stage_done(s(17), Stage::EncoderReset, StageOutcome::Applied),
+            Step::Nothing
+        );
+        for _ in 0..3 {
+            assert_eq!(
+                sv.source_frame(s(17)),
+                None,
+                "source frames prove nothing here"
+            );
+        }
+        assert!(sv.owns_episode());
+        let mut i = inputs(s(18), s(18), 0, 0);
+        i.encoder = enc(s(18), 63);
+        match sv.tick(i) {
+            Step::Recovered { summary, outage } => {
+                assert!(summary.recovered);
+                assert_eq!(summary.stages[0].stage, Stage::EncoderReset);
+                assert_eq!(outage, Duration::from_secs(1));
+            }
+            other => panic!("three new access units must close the episode, got {other:?}"),
+        }
+        assert!(!sv.owns_episode());
     }
 
     /// The WP3b contract survives the hand-over: under the floor nothing runs; over it, cursor
