@@ -148,7 +148,7 @@ pub(crate) struct CaptureHealth {
     /// `healthy` / `idle` / `suspect` / `stalled` / `recovering` / `rebuilding` / `secure_desktop`.
     #[schema(example = "healthy")]
     class: String,
-    /// When `class` is `stalled`: `worker` / `transport` / `conversion` / `presentation`.
+    /// When `class` is `stalled`: `worker` / `transport` / `conversion` / `presentation` / `driver`.
     #[serde(skip_serializing_if = "Option::is_none")]
     stall_class: Option<String>,
     /// Time since the last real source frame.

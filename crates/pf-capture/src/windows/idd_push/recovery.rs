@@ -25,6 +25,7 @@ fn stall_name(c: StallClass) -> &'static str {
         StallClass::Transport => "transport",
         StallClass::Conversion => "conversion",
         StallClass::Presentation => "presentation",
+        StallClass::Driver => "driver",
     }
 }
 
@@ -240,6 +241,7 @@ impl Supervisor {
             ring: ring_state(i.ring, i.recreating),
             topology_in_transaction: i.topology_held,
             secure_desktop: i.secure_desktop,
+            encoder_detached: i.encoder.map_or(0, |t| t.detached),
         };
         let (verdict, changed) = self.classifier.observe(&snap);
         self.last_gap = verdict.source_gap;
@@ -506,6 +508,29 @@ mod tests {
         // The outage is the whole hole: 16 s of missed source before the episode plus 1 s in it.
         assert_eq!(outage, Duration::from_secs(17));
         assert!(!sv.owns_episode());
+    }
+
+    /// A wedged encoder whose two resets already detached threads (`detached == 2`) skips a
+    /// third encoder reset and opens straight at the driver cycle.
+    #[test]
+    fn two_detached_threads_open_at_the_driver_cycle() {
+        let t0 = Instant::now();
+        let s = |n: u64| t0 + Duration::from_secs(n);
+        let mut sv = Supervisor::new(t0);
+        let mut i = inputs(s(1), s(1), 0, 0);
+        i.encoder = Some(EncoderTelemetry {
+            last_au: s(1),
+            published_total: 60,
+            detached: 2,
+        });
+        assert_eq!(sv.tick(i), Step::Nothing);
+        let mut i = inputs(s(17), s(17), 0, 0);
+        i.encoder = Some(EncoderTelemetry {
+            last_au: s(1),
+            published_total: 60,
+            detached: 2,
+        });
+        assert_eq!(sv.tick(i), Step::Run(Stage::DriverCycle));
     }
 
     /// One undelivered offer left behind by a dropped frame, then a static desktop: the evidence

@@ -62,7 +62,7 @@ pub struct CaptureHealth {
     /// `healthy` / `idle` / `suspect` / `stalled` / `recovering` / `rebuilding` / `secure_desktop`.
     pub class: &'static str,
     /// The stall class when `class == "stalled"`: `worker` / `transport` / `conversion` /
-    /// `presentation`.
+    /// `presentation` / `driver`.
     pub stall_class: Option<&'static str>,
     /// Time since the last real source frame.
     pub source_gap: std::time::Duration,

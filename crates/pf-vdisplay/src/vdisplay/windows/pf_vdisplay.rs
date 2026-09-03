@@ -1034,6 +1034,31 @@ pub fn ensure_available() -> Result<()> {
     result.map(|_| ())
 }
 
+/// The `DriverCycle` recovery rung (plan §2.5): reap a dead or blocked WUDFHost and reload the
+/// adapter, so the session's rebuild reopens against a fresh host process. Reuses the
+/// hostless-zombie reload — no second lever. Never joins the WUDFHost and never opens the
+/// control device: [`reload_vdisplay_adapter`] shells out with its own timeouts and
+/// `invalidate_cached_device` drops the handle without waiting on a drain, so the control plane
+/// stays live through the seconds the display is black. The caller rebuilds the pipeline after.
+pub fn force_driver_cycle() -> Result<()> {
+    let _serialize = RECOVERY.lock().unwrap_or_else(|e| e.into_inner());
+    // Release our own control handle first: an open handle vetoes the PnP disable/restart.
+    super::manager::invalidate_cached_device(
+        "driver cycle: releasing the control handle before the adapter reload",
+    );
+    match reload_vdisplay_adapter() {
+        AdapterCycle::Reloaded { .. } => Ok(()),
+        AdapterCycle::NotInstalled => {
+            anyhow::bail!(
+                "driver cycle: no pf-vdisplay adapter devnode — the driver is not installed"
+            )
+        }
+        AdapterCycle::Refused(why) => {
+            anyhow::bail!("driver cycle: the adapter devnode could not be reloaded ({why})")
+        }
+    }
+}
+
 /// Wait for an openable control interface; reload if `reload` and the devnode looks hostless.
 /// Returns the handle (so the manager's open can keep it) and whether a reload ran.
 ///

@@ -3725,9 +3725,11 @@ fn reset_stalled_encoder(
     true
 }
 
-/// The ladder rungs whose actuator this loop owns. `EncoderReset` is [`reset_stalled_encoder`]
-/// plus a bounded wait for the first access unit — the rung's whole cost, one IDR included;
-/// `Applied` once the reset took, and the proof clock decides whether the AUs came back.
+/// The ladder rungs whose actuator this loop owns because the encoder or the display manager
+/// does. `EncoderReset` is [`reset_stalled_encoder`] plus a bounded wait for the first access
+/// unit — the rung's whole cost, one IDR included. `DriverCycle` reaps the WUDFHost and reloads
+/// the adapter (seconds, the display black for the cycle); its `Applied` ends the capturer so
+/// the pipeline rebuild reopens SET_ENCODE and the ring against the fresh host.
 fn run_loop_stage(
     stage: pf_frame::recovery::Stage,
     enc: &mut Box<dyn crate::encode::Encoder>,
@@ -3747,6 +3749,24 @@ fn run_loop_stage(
                 "recovery: encoder reset applied — one IDR plus the first-AU wait"
             );
             StageOutcome::Applied
+        }
+        #[cfg(target_os = "windows")]
+        Stage::DriverCycle => {
+            let t0 = std::time::Instant::now();
+            match crate::vdisplay::driver::force_driver_cycle() {
+                Ok(()) => {
+                    tracing::warn!(
+                        cost_ms = t0.elapsed().as_millis() as u64,
+                        "recovery: driver cycle — adapter reloaded, display black for the cycle; \
+                         the session rebuilds against the fresh WUDFHost"
+                    );
+                    StageOutcome::Applied
+                }
+                Err(e) => {
+                    tracing::error!(error = %format!("{e:#}"), "recovery: driver cycle failed");
+                    StageOutcome::Failed
+                }
+            }
         }
         _ => StageOutcome::Unsupported,
     }

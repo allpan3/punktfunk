@@ -60,6 +60,7 @@ impl Stage {
             StallClass::Transport => Stage::RingReset,
             StallClass::Worker => Stage::SwapChainReset,
             StallClass::Presentation => Stage::PresentationReset,
+            StallClass::Driver => Stage::DriverCycle,
         }
     }
 
@@ -411,6 +412,7 @@ mod tests {
             Stage::first_for(StallClass::Conversion),
             Stage::EncoderReset
         );
+        assert_eq!(Stage::first_for(StallClass::Driver), Stage::DriverCycle);
         let mut s = Stage::EncoderReset;
         let mut n = 1;
         while let Some(next) = s.next() {

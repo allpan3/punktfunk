@@ -5128,7 +5128,7 @@
               "string",
               "null"
             ],
-            "description": "When `class` is `stalled`: `worker` / `transport` / `conversion` / `presentation`."
+            "description": "When `class` is `stalled`: `worker` / `transport` / `conversion` / `presentation` / `driver`."
           }
         }
       },

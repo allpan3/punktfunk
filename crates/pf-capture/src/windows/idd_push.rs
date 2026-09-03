@@ -1754,7 +1754,11 @@ impl IddPushCapturer {
                     StageOutcome::Failed
                 }
             }
-            Stage::EncoderReset if cfg!(feature = "driver-encode") => return None,
+            // Under the feature both belong to the stream loop: it holds the encoder
+            // (`EncoderReset`) and can reach the vdisplay manager (`DriverCycle`).
+            Stage::EncoderReset | Stage::DriverCycle if cfg!(feature = "driver-encode") => {
+                return None
+            }
             Stage::EncoderReset
             | Stage::SwapChainReset
             | Stage::MonitorCycle
@@ -1810,6 +1814,19 @@ impl IddPushCapturer {
         {
             self.last_liveness = Instant::now();
             if !self.broker.driver_alive() {
+                // Under the feature the reaper is the DriverCycle rung: park it for the loop,
+                // which reloads the adapter before rebuilding against a fresh WUDFHost. Off the
+                // feature the plain bail stands, so the pixel path is byte-identical.
+                #[cfg(feature = "driver-encode")]
+                {
+                    tracing::warn!(
+                        wudf_pid = self.broker.wudf_pid,
+                        "IDD push: the pf-vdisplay WUDFHost is gone — firing the driver cycle"
+                    );
+                    self.pending_stage = Some(pf_frame::recovery::Stage::DriverCycle);
+                    return Ok(None);
+                }
+                #[cfg(not(feature = "driver-encode"))]
                 bail!(
                     "IDD-push: the pf-vdisplay WUDFHost (pid {}) exited mid-session — driver died; \
                      failing the capturer so the session rebuilds the virtual output",
@@ -2443,7 +2460,17 @@ impl Capturer for IddPushCapturer {
         stage: pf_frame::recovery::Stage,
         outcome: pf_frame::recovery::StageOutcome,
     ) {
+        use pf_frame::recovery::{Stage, StageOutcome};
         let step = self.finish_stage(stage, outcome);
+        // A driver cycle reaped the WUDFHost this capturer's encoder and ring point at: end it
+        // here so the host rebuilds the whole pipeline (SET_ENCODE, ring) against the fresh host.
+        if matches!(stage, Stage::DriverCycle) && matches!(outcome, StageOutcome::Applied) {
+            self.pending_fault = Some(anyhow::anyhow!(
+                "IDD-push: the pf-vdisplay driver was cycled (adapter reload) — ending the \
+                 capturer so the session rebuilds its virtual output on the fresh WUDFHost"
+            ));
+            return;
+        }
         if let Err(e) = self.drive(step) {
             self.pending_fault = Some(e);
         }

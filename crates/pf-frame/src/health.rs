@@ -104,6 +104,9 @@ pub struct Snapshot {
     pub topology_in_transaction: bool,
     /// UAC / Winlogon secure desktop is up: a separate state, never a failed canary.
     pub secure_desktop: bool,
+    /// Encode threads the driver abandoned after a wedge ([`EncoderTelemetry::detached`]); each
+    /// encoder reset that had to detach a thread bumps it. Two means the resets stopped holding.
+    pub encoder_detached: u32,
 }
 
 /// What a stalled gap points at — and thereby its first actuator (D7 table).
@@ -117,6 +120,9 @@ pub enum StallClass {
     Conversion,
     /// Presents continue, the source sequence does not → one targeted presentation reset.
     Presentation,
+    /// An encoder stall that two resets did not hold (detached ≥ 2), or the WUDFHost is gone →
+    /// cycle the adapter and its host process.
+    Driver,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -211,6 +217,15 @@ pub fn classify(th: &Thresholds, snap: &Snapshot, start: Instant) -> Verdict {
         return verdict(HealthClass::Stalled(StallClass::Transport), false);
     }
     let advanced = |clock: Option<Instant>| clock.is_some_and(|t| t > anchor);
+    // A wedged encoder that two resets already had to detach threads for (`detached ≥ 2`) is not
+    // a third-reset case: the resets stopped holding, so cycle the driver instead.
+    let encode_class = || {
+        if snap.encoder_detached >= 2 {
+            StallClass::Driver
+        } else {
+            StallClass::Conversion
+        }
+    };
     if source_gap < th.suspect_after() {
         // Source is flowing. The one thing that can still be wrong is downstream of us: the ring
         // hands frames over, the encoder emits nothing through a whole stall floor.
@@ -218,7 +233,7 @@ pub fn classify(th: &Thresholds, snap: &Snapshot, start: Instant) -> Verdict {
             .last_encoded
             .map_or(source_gap, |t| snap.now.saturating_duration_since(t));
         if snap.last_source.is_some() && encode_gap >= th.stall_floor {
-            return verdict(HealthClass::Stalled(StallClass::Conversion), false);
+            return verdict(HealthClass::Stalled(encode_class()), false);
         }
         return verdict(HealthClass::Healthy, false);
     }
@@ -247,7 +262,7 @@ pub fn classify(th: &Thresholds, snap: &Snapshot, start: Instant) -> Verdict {
         StallClass::Transport
     } else if advanced(snap.last_publish) {
         // The ring moved but no Source frame reached the encoder: the consumer/conversion leg.
-        StallClass::Conversion
+        encode_class()
     } else {
         StallClass::Presentation
     };
@@ -345,6 +360,7 @@ mod tests {
             ring: RingState::Active,
             topology_in_transaction: false,
             secure_desktop: false,
+            encoder_detached: 0,
         }
     }
 
@@ -575,6 +591,40 @@ mod tests {
             ..snap
         };
         assert_eq!(classify(&th, &snap, s).class, HealthClass::Idle);
+    }
+
+    /// Two detached encode threads mean the resets stopped holding: an encoder stall that would
+    /// be Conversion is named Driver instead, at both the source-flowing and past-floor sites.
+    #[test]
+    fn two_detached_threads_turn_an_encoder_stall_into_a_driver_stall() {
+        let th = Thresholds::default();
+        let s = t0();
+        let now = s + 40 * S;
+        let flowing_encoder_wedged = Snapshot {
+            last_encoded: Some(now - 16 * S),
+            ..flowing(s, now, 2_000)
+        };
+        assert_eq!(
+            classify(&th, &flowing_encoder_wedged, s).class,
+            HealthClass::Stalled(StallClass::Conversion)
+        );
+        let two_detached = Snapshot {
+            encoder_detached: 2,
+            ..flowing_encoder_wedged
+        };
+        assert_eq!(
+            classify(&th, &two_detached, s).class,
+            HealthClass::Stalled(StallClass::Driver)
+        );
+        // One is still a Conversion (the first reset gets its chance).
+        let one_detached = Snapshot {
+            encoder_detached: 1,
+            ..flowing_encoder_wedged
+        };
+        assert_eq!(
+            classify(&th, &one_detached, s).class,
+            HealthClass::Stalled(StallClass::Conversion)
+        );
     }
 
     #[test]
