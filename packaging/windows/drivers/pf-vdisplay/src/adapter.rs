@@ -26,6 +26,15 @@ unsafe impl Sync for SendAdapter {}
 // in `monitor.rs` (panic = abort here, so poisoning is unreachable anyway).
 static ADAPTER: Mutex<Option<SendAdapter>> = Mutex::new(None);
 
+/// Set once this device takes the remote-session role. The OS starts that adapter itself and then
+/// expects a display on it, so the seat path presents one without waiting for a host ADD.
+static SEAT_ROLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True when this device is a seat (remote-session) adapter rather than the console one.
+pub fn is_seat_role() -> bool {
+    SEAT_ROLE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Build the adapter caps (FP16/HDR-capable) and kick off the async adapter creation. Called from
 /// `EvtDeviceD0Entry`; idempotent across re-entrant D0 transitions.
 pub fn init_adapter(device: WDFDEVICE) -> NTSTATUS {
@@ -84,6 +93,7 @@ pub fn init_adapter(device: WDFDEVICE) -> NTSTATUS {
     // id, so the seat role has to cover it too.
     let seat_devnode = hardware_ids.contains("pf_vdisplay_indirectdisplay")
         || hardware_ids.contains("rdpidd_indirectdisplay");
+    SEAT_ROLE.store(seat_devnode, std::sync::atomic::Ordering::Relaxed);
     if seat_devnode {
         // A remote adapter must also set USE_SMALLEST_MODE — IddCx rejects the pair
         // REMOTE_SESSION_DRIVER-without-it as STATUS_NOT_SUPPORTED. FP16 stays on: our monitor modes

@@ -63,6 +63,30 @@ pub unsafe extern "C" fn adapter_init_finished(
     }
     crate::adapter::set_adapter(adapter);
     crate::watchdog::start();
+    // The remoting stack starts a seat adapter itself and then drops the session if it finds no
+    // display on it ("started up successfully, but ... not usable by the remoting stack"), so the
+    // seat presents one immediately instead of waiting for a host ADD. Owner 0 is no process's pid,
+    // so this monitor belongs to the device and no host's exit reaps it.
+    if crate::adapter::is_seat_role() {
+        let made = crate::monitor::create_monitor(
+            0,
+            0,
+            1920,
+            1080,
+            60,
+            1,
+            pf_driver_proto::edid::ClientLuminance {
+                max_nits: 0,
+                max_frame_avg_nits: 0,
+                min_millinits: 0,
+            },
+            false,
+        );
+        dbglog!(
+            "[pf-vd] seat adapter: presented a display -> {}",
+            made.is_some()
+        );
+    }
     STATUS_SUCCESS
 }
 
