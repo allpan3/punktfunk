@@ -64,20 +64,47 @@ pub unsafe fn dispatch(request: WDFREQUEST, ioctl_code: u32) {
         // STATUS_NOT_FOUND as "this is not a display driver" (`RDPIDD_OPCODE_TYPE_BIND_DRIVER` ->
         // `IddInterfaceArrivalFailure`). Log what it asks for and answer, so the protocol it needs
         // can be learnt from the trace rather than guessed. The console device still refuses.
-        _ if crate::adapter::is_seat_role() => {
-            // A bare success leaves the output empty, and the stack reads that as a refusal, so
-            // fill the buffer it asked for. What it wants in there is the open question.
-            let out_len = request.output_buffer_len();
-            let st = if out_len > 0 {
-                request.copy_to_output(&vec![0u8; out_len])
-            } else {
-                STATUS_SUCCESS
-            };
-            dbglog!("[pf-vd] seat: unhandled IOCTL {ioctl_code:#010x} out={out_len} -> {st:#x}");
-            request.complete(st);
+        IOCTL_RDPIDD_TRANSPORT if crate::adapter::is_seat_role() => rdpidd_transport(request),
+        _ => {
+            if crate::adapter::is_seat_role() {
+                dbglog!("[pf-vd] seat: refusing unknown IOCTL {ioctl_code:#010x}");
+            }
+            request.complete(STATUS_NOT_FOUND)
         }
-        _ => request.complete(STATUS_NOT_FOUND),
     }
+}
+
+/// The private transport the remoting stack drives a seat display over, `RDPIDD_OPCODE_TYPE_*`.
+///
+/// One buffered IOCTL carries every opcode: the sub-opcode is a `u32` at input offset 8, and bind
+/// adds a type at 12 (1..3) and flags at 16. `STATUS_NOT_FOUND` reads as "not a display driver"
+/// and an empty output reads as a refusal, so a short zeroed reply is what lets the bind through.
+///
+/// The layout is read off RdpIdd's own `ProcessIoctl`/`ProcessBindDriver`, not documentation. It is
+/// answered, not implemented: the opcode is logged so an unhandled one shows up as a log line
+/// rather than as a session that dies with no reason.
+const IOCTL_RDPIDD_TRANSPORT: u32 = 0x8000_0040;
+
+fn rdpidd_transport(request: Request) {
+    let dword = |b: &[u8], at: usize| -> u32 {
+        b.get(at..at + 4)
+            .and_then(|s| s.try_into().ok())
+            .map_or(0, u32::from_le_bytes)
+    };
+    let (input, in_len) = request.input_bytes(64).unwrap_or_default();
+    let out_len = request.output_buffer_len();
+    dbglog!(
+        "[pf-vd] seat: rdpidd transport op={} type={} flags={:#x} in={in_len} out={out_len}",
+        dword(&input, 8),
+        dword(&input, 12),
+        dword(&input, 16)
+    );
+    let status = if out_len > 0 {
+        request.copy_to_output(&vec![0u8; out_len])
+    } else {
+        STATUS_SUCCESS
+    };
+    request.complete(status);
 }
 
 /// `IOCTL_SET_ENCODE` (v7): open an encoder on the delivered AU section. A well-formed request
