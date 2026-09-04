@@ -5,11 +5,11 @@
 //! * Microphone (`SteamStreamingMicrophone.inf`): host writes decoded voice to render; capture
 //!   is the mic host apps record.
 //!
-//! A background worker at host start mints one marked `ROOT\MEDIA` devnode per role
-//! (`PunktfunkAudioRole` in Device Parameters — names match Steam's primaries, so identity is
-//! the marker). [`minted_ids`] publishes the endpoint ids for the wiring plan. Missing Steam
-//! drivers, a denied install, or `PUNKTFUNK_NO_AUDIO_MINT` leaves the ids empty and the plan
-//! stays on the name-based ladder.
+//! A background worker mints one `ROOT\MEDIA` devnode per role and process audio identity.
+//! `PunktfunkAudioRole` owns the node; seat hosts also match `PunktfunkAudioSeat` from a
+//! validated `PUNKTFUNK_SEAT_ID`. [`minted_ids`] publishes the endpoint ids for the wiring
+//! plan. Missing Steam drivers, a denied install, or `PUNKTFUNK_NO_AUDIO_MINT` leaves the ids
+//! empty and keeps the name-based ladder.
 //!
 //! Endpoints persist across host restarts and re-resolve by marker. Evidence:
 //! `design/windows-audio-endpoints-and-vbcable.md`. Probe: `punktfunk-host audio-probe mint`.
@@ -17,13 +17,17 @@
 use super::pad_endpoint as pe;
 use super::{audio_control, wiring_plan};
 use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Durable `Device Parameters` marker. The uninstall sweep matches minted devnodes on it.
+/// Durable ownership marker. The uninstall sweep matches every minted role on it.
 pub(crate) const ROLE_MARKER: &str = "PunktfunkAudioRole";
+/// Secondary marker that partitions minted roles between validated seat hosts.
+pub(crate) const SEAT_MARKER: &str = "PunktfunkAudioSeat";
+const SEAT_MARKER_DOMAIN: &[u8] = b"punktfunk/audio-seat/v1\0";
 /// Audiosrv can take this long to register a freshly minted endpoint.
 const ENDPOINT_WAIT: Duration = Duration::from_secs(15);
 /// Floor between retries. [`ensure_provisioned`] is called from wiring passes, which recur freely.
@@ -71,6 +75,93 @@ impl Role {
             Role::Speakers => "speakers",
             Role::Mic => "mic",
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SeatIdentity {
+    id: String,
+    marker: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AudioIdentity {
+    seat: Option<SeatIdentity>,
+    role_descs: [String; 2],
+}
+
+impl AudioIdentity {
+    fn from_seat_id(raw: Option<&str>) -> std::result::Result<Self, &'static str> {
+        let seat = raw
+            .map(crate::seat::validate_seat_id)
+            .transpose()?
+            .map(|id| SeatIdentity {
+                marker: derive_seat_marker(id),
+                id: id.to_owned(),
+            });
+        let role_descs = match seat.as_ref() {
+            Some(seat) => [
+                format!("Punktfunk Speakers [seat {}]", seat.id),
+                format!("Punktfunk Microphone [seat {}]", seat.id),
+            ],
+            None => [
+                Role::Speakers.desc().to_string(),
+                Role::Mic.desc().to_string(),
+            ],
+        };
+        Ok(Self { seat, role_descs })
+    }
+
+    fn label(&self) -> &str {
+        self.seat.as_ref().map_or("console", |seat| &seat.id)
+    }
+
+    fn seat_marker(&self) -> Option<u32> {
+        self.seat.as_ref().map(|seat| seat.marker)
+    }
+
+    fn role_desc(&self, role: Role) -> &str {
+        match role {
+            Role::Speakers => &self.role_descs[0],
+            Role::Mic => &self.role_descs[1],
+        }
+    }
+
+    fn thread_name(&self) -> String {
+        match self.seat.as_ref() {
+            Some(seat) => format!("punktfunk-audio-mint-{}", seat.id),
+            None => "punktfunk-audio-mint".into(),
+        }
+    }
+}
+
+/// SHA-256's first DWORD over the canonical id and fixed domain is the durable on-disk format.
+fn derive_seat_marker(validated_id: &str) -> u32 {
+    let mut hash = Sha256::new();
+    hash.update(SEAT_MARKER_DOMAIN);
+    hash.update(validated_id.as_bytes());
+    let digest = hash.finalize();
+    u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]])
+}
+
+/// Console nodes carry only the role; seat nodes must carry the exact marker pair.
+fn markers_match(
+    identity: &AudioIdentity,
+    role: Role,
+    found_role: Option<u32>,
+    found_seat: Option<u32>,
+) -> bool {
+    found_role == Some(role.value()) && found_seat == identity.seat_marker()
+}
+
+fn process_identity() -> Result<&'static AudioIdentity> {
+    static IDENTITY: OnceLock<std::result::Result<AudioIdentity, &'static str>> = OnceLock::new();
+    let parsed = IDENTITY.get_or_init(|| {
+        crate::seat::seat_id().and_then(|id| AudioIdentity::from_seat_id(id.as_deref()))
+    });
+    match parsed {
+        Ok(identity) => Ok(identity),
+        Err(message) => bail!("{message}"),
     }
 }
 
@@ -133,7 +224,7 @@ pub(crate) fn provisioned() -> Option<Arc<MintedAudio>> {
     PROVISIONED.get().cloned()
 }
 
-/// Spawn the provisioning worker. Idempotent; returns immediately.
+/// Starts one process-identity provisioning worker. Idempotent and non-blocking.
 pub(crate) fn provision_at_startup() {
     if std::env::var_os("PUNKTFUNK_NO_AUDIO_MINT").is_some() || gave_up() {
         return;
@@ -142,12 +233,24 @@ pub(crate) fn provision_at_startup() {
         return;
     }
     *LAST_ATTEMPT.lock().unwrap() = Some(Instant::now());
+    let identity = match process_identity() {
+        Ok(identity) => identity,
+        Err(e) => {
+            PROVISIONING.store(false, Ordering::SeqCst);
+            tracing::warn!(error = %e,
+                "minted-audio provisioning rejected the seat identity — the wiring plan keeps \
+                 the name-based ladder");
+            record_unlatched_attempt();
+            return;
+        }
+    };
     let spawned = thread::Builder::new()
-        .name("punktfunk-audio-mint".into())
-        .spawn(|| {
-            match ensure_all() {
+        .name(identity.thread_name())
+        .spawn(move || {
+            match ensure_all(identity) {
                 Ok(m) if m.any() => {
                     tracing::info!(
+                        seat = identity.label(),
                         speakers = m.speakers_render.as_deref().unwrap_or("-"),
                         mic_render = m.mic_render.as_deref().unwrap_or("-"),
                         mic_capture = m.mic_capture.as_deref().unwrap_or("-"),
@@ -157,13 +260,14 @@ pub(crate) fn provision_at_startup() {
                 }
                 Ok(_) => {
                     tracing::info!(
+                        seat = identity.label(),
                         "no minted audio endpoints (Steam's streaming drivers absent?) — the \
                          wiring plan keeps the name-based ladder"
                     );
                     record_unlatched_attempt();
                 }
                 Err(e) => {
-                    tracing::warn!(error = %format!("{e:#}"),
+                    tracing::warn!(seat = identity.label(), error = %format!("{e:#}"),
                         "minted-audio provisioning failed — the wiring plan keeps the name-based \
                          ladder and a later wiring pass retries");
                     record_unlatched_attempt();
@@ -173,7 +277,8 @@ pub(crate) fn provision_at_startup() {
         });
     if let Err(e) = spawned {
         PROVISIONING.store(false, Ordering::SeqCst);
-        tracing::warn!(error = %e, "could not spawn the minted-audio provisioning thread");
+        tracing::warn!(seat = identity.label(), error = %e,
+            "could not spawn the minted-audio provisioning thread");
     }
 }
 
@@ -191,14 +296,14 @@ pub(crate) fn ensure_provisioned() {
     provision_at_startup();
 }
 
-/// One pass over both roles. A per-role failure leaves that role absent rather than failing the pair.
-fn ensure_all() -> Result<MintedAudio> {
+/// Provisions both roles for one validated identity; one failed role leaves the other usable.
+fn ensure_all(identity: &'static AudioIdentity) -> Result<MintedAudio> {
     wasapi::initialize_mta()
         .ok()
         .context("CoInitializeEx (MTA, minted-audio)")?;
     let mut out = MintedAudio::default();
     for role in [Role::Speakers, Role::Mic] {
-        match ensure_role(role) {
+        match ensure_role(identity, role) {
             Ok((devnode, render, capture)) => match role {
                 Role::Speakers => {
                     out.speakers_devnode = Some(devnode);
@@ -210,21 +315,23 @@ fn ensure_all() -> Result<MintedAudio> {
                     out.mic_capture = capture;
                 }
             },
-            Err(e) => tracing::info!(role = role.label(), error = %format!("{e:#}"),
-                "minted-audio role unavailable"),
+            Err(e) => tracing::info!(seat = identity.label(), role = role.label(),
+                error = %format!("{e:#}"), "minted-audio role unavailable"),
         }
     }
     Ok(out)
 }
 
-/// One role: reuse a marked healthy devnode, else mint; (re)bind; wait for audiosrv. A fresh endpoint can steal either default — put it back.
-fn ensure_role(role: Role) -> Result<(String, String, Option<String>)> {
-    // Healthy marked endpoints: return without a driver (re)bind. That bind broadcasts
-    // a device-change every running app services; games rebuild their audio graph on it.
-    if let Some((devnode, render, capture)) = find_healthy_role(role)? {
-        stamp_identity(&render, role, false);
+/// Reuses this identity's healthy marker pair or creates it, then restores changed defaults.
+fn ensure_role(
+    identity: &'static AudioIdentity,
+    role: Role,
+) -> Result<(String, String, Option<String>)> {
+    // A healthy endpoint skips the PnP rebind, whose broadcast makes games rebuild audio graphs.
+    if let Some((devnode, render, capture)) = find_healthy_role(identity, role)? {
+        stamp_identity(&render, identity, role, false);
         if let Some(cap) = capture.as_ref() {
-            stamp_identity(cap, role, true);
+            stamp_identity(cap, identity, role, true);
         }
         return Ok((devnode, render, capture));
     }
@@ -233,20 +340,34 @@ fn ensure_role(role: Role) -> Result<(String, String, Option<String>)> {
     let prev_capture = audio_control::default_capture_id();
 
     let (hwid, inf) = discover_driver(role.needle(), role.inf_name())?;
-    let devnode = match find_role_devnode(role)? {
+    let devnode = match find_role_devnode(identity, role)? {
         Some(inst) => inst,
-        // Register-then-mark can leave a live unmarked devnode. Adopt it before minting
-        // a second; the uninstall sweep only sees marked instances.
-        None => match adopt_orphan_devnode(role, &hwid)? {
-            Some(inst) => inst,
-            None => {
-                let inst = pe::create_media_devnode(role.desc(), &hwid, |set, did| {
-                    pe::write_devparam_dword(set, did, ROLE_MARKER, role.value())
-                })?;
-                tracing::info!(role = role.label(), devnode = %inst, "minted an audio devnode");
-                inst
+        None => {
+            // An unmarked ROOT\MEDIA node does not prove which process made it. Only the legacy
+            // console path recovers one; a seat always mints its own marker pair.
+            let orphan = if identity.seat.is_none() {
+                adopt_console_orphan_devnode(role, &hwid)?
+            } else {
+                None
+            };
+            match orphan {
+                Some(inst) => inst,
+                None => {
+                    let inst =
+                        pe::create_media_devnode(identity.role_desc(role), &hwid, |set, did| {
+                            // The role remains the ownership marker even if the seat write fails.
+                            pe::write_devparam_dword(set, did, ROLE_MARKER, role.value())?;
+                            if let Some(marker) = identity.seat_marker() {
+                                pe::write_devparam_dword(set, did, SEAT_MARKER, marker)?;
+                            }
+                            Ok(())
+                        })?;
+                    tracing::info!(seat = identity.label(), role = role.label(), devnode = %inst,
+                        "minted an audio devnode");
+                    inst
+                }
             }
-        },
+        }
     };
     pe::bind_driver(&hwid, &inf)?;
 
@@ -258,17 +379,18 @@ fn ensure_role(role: Role) -> Result<(String, String, Option<String>)> {
         Role::Speakers => None,
     };
 
-    stamp_identity(&render, role, false);
+    stamp_identity(&render, identity, role, false);
     if let Some(cap) = capture.as_ref() {
-        stamp_identity(cap, role, true);
+        stamp_identity(cap, identity, role, true);
     }
 
-    // A freshly registered endpoint can grab a default. The wiring plan owns that policy, not the mint.
+    // A fresh endpoint can grab a default; routing policy belongs to the wiring plan.
     if let Some(prev) = prev_render {
         if audio_control::default_render_id().as_deref() != Some(prev.as_str())
             && audio_control::set_default_endpoint(&prev).is_ok()
         {
             tracing::info!(
+                seat = identity.label(),
                 role = role.label(),
                 "default playback restored after minting"
             );
@@ -279,6 +401,7 @@ fn ensure_role(role: Role) -> Result<(String, String, Option<String>)> {
             && audio_control::set_default_endpoint(&prev).is_ok()
         {
             tracing::info!(
+                seat = identity.label(),
                 role = role.label(),
                 "default recording restored after minting"
             );
@@ -287,9 +410,12 @@ fn ensure_role(role: Role) -> Result<(String, String, Option<String>)> {
     Ok((devnode, render, capture))
 }
 
-/// Marker-matched devnode with every endpoint the role owes already registered, else `None` so the caller runs the full pass.
-fn find_healthy_role(role: Role) -> Result<Option<(String, String, Option<String>)>> {
-    let Some(devnode) = find_role_devnode(role)? else {
+/// Returns this identity's marker-matched devnode only when all role endpoints are registered.
+fn find_healthy_role(
+    identity: &AudioIdentity,
+    role: Role,
+) -> Result<Option<(String, String, Option<String>)>> {
+    let Some(devnode) = find_role_devnode(identity, role)? else {
         return Ok(None);
     };
     let Some(render) = pe::find_endpoint_for_devnode(&devnode)? else {
@@ -343,13 +469,14 @@ const WFX_PCM16_2CH_48K: [u8; 40] = [
     0x71, // KSDATAFORMAT_SUBTYPE_PCM
 ];
 
-/// Best-effort display name and, on the mic, the stereo format set. Never fails the role — wiring keys off the recorded id. A wider stamp makes AudioEndpointBuilder re-mint the endpoint under a new GUID.
-fn stamp_identity(endpoint_id: &str, role: Role, capture: bool) {
+/// Best-effort identity and mic-format stamps; wiring still keys off the endpoint id.
+/// A wider property set makes AudioEndpointBuilder replace the endpoint GUID.
+fn stamp_identity(endpoint_id: &str, identity: &'static AudioIdentity, role: Role, capture: bool) {
     let mut stamps = vec![
         pe::Stamp {
             label: "device-desc",
             key: pe::PKEY_DEVICE_DESC,
-            value: pe::StampValue::Str(role.desc()),
+            value: pe::StampValue::Str(identity.role_desc(role)),
         },
         pe::Stamp {
             label: "device-name",
@@ -357,8 +484,7 @@ fn stamp_identity(endpoint_id: &str, role: Role, capture: bool) {
             value: pe::StampValue::Str("Punktfunk"),
         },
     ];
-    // Both mic pins stereo 48 kHz. Capture gets the device format only — mix/host keys
-    // are render-engine properties and break shared-mode Initialize on a capture endpoint.
+    // Both mic pins are stereo 48 kHz. Mix/host keys are render-only properties.
     if role == Role::Mic {
         stamps.push(pe::Stamp {
             label: "device-format",
@@ -385,13 +511,13 @@ fn stamp_identity(endpoint_id: &str, role: Role, capture: bool) {
             ]);
         }
     }
-    // Already served (every boot after the first): no writes, no settle sleeps.
+    // Served stamps need no writes or settle delay on later boots.
     if pe::stamps_served(endpoint_id, &stamps) {
         return;
     }
     for attempt in 0..STAMP_ATTEMPTS {
         if let Err(e) = pe::write_stamps(endpoint_id, &stamps) {
-            tracing::info!(role = role.label(), endpoint = %endpoint_id,
+            tracing::info!(seat = identity.label(), role = role.label(), endpoint = %endpoint_id,
                 error = %format!("{e:#}"),
                 "could not stamp the minted endpoint's name (needs the SYSTEM ACL route) — \
                  the endpoint still wires correctly, it just keeps the driver's default name");
@@ -401,6 +527,7 @@ fn stamp_identity(endpoint_id: &str, role: Role, capture: bool) {
         if pe::stamps_served(endpoint_id, &stamps) {
             if attempt > 0 {
                 tracing::debug!(
+                    seat = identity.label(),
                     role = role.label(),
                     attempt = attempt + 1,
                     "minted endpoint name held after a re-pass"
@@ -409,7 +536,7 @@ fn stamp_identity(endpoint_id: &str, role: Role, capture: bool) {
             return;
         }
     }
-    tracing::info!(role = role.label(), endpoint = %endpoint_id,
+    tracing::info!(seat = identity.label(), role = role.label(), endpoint = %endpoint_id,
         "minted endpoint name is stored but not yet served — it appears after the next \
          audio-stack restart or reboot");
 }
@@ -437,8 +564,8 @@ fn wait_for(devnode: &str, capture: bool) -> Result<String> {
     }
 }
 
-/// Marker-matched devnode from a previous run. Names match Steam's primaries, so they are not identity.
-fn find_role_devnode(role: Role) -> Result<Option<String>> {
+/// Finds the devnode carrying this identity's exact role and optional seat marker pair.
+fn find_role_devnode(identity: &AudioIdentity, role: Role) -> Result<Option<String>> {
     let set = pe::media_class_devs()?;
     for i in 0.. {
         let mut did = pe::devinfo_data();
@@ -452,7 +579,12 @@ fn find_role_devnode(role: Role) -> Result<Option<String>> {
         {
             break;
         }
-        if pe::read_devparam_dword(&set, &did, ROLE_MARKER) == Some(role.value()) {
+        if markers_match(
+            identity,
+            role,
+            pe::read_devparam_dword(&set, &did, ROLE_MARKER),
+            pe::read_devparam_dword(&set, &did, SEAT_MARKER),
+        ) {
             if let Some(inst) = pe::instance_id(&set, &did) {
                 return Ok(Some(inst));
             }
@@ -461,13 +593,9 @@ fn find_role_devnode(role: Role) -> Result<Option<String>> {
     Ok(None)
 }
 
-/// Reclaim a `ROOT\MEDIA\NNNN` instance of this role's hwid that carries no owner marker.
-///
-/// Minting is register-then-mark; a host that dies between leaves a live, unmarked, driver-bound
-/// endpoint. The next pass would mint a duplicate the uninstall sweep cannot see. Steam's own
-/// devices are `ROOT\SteamStreamingSpeakers\*` / `ROOT\SteamStreamingMicrophone\*` — same hwid,
-/// never that instance prefix — so this cannot adopt them. Any family marker is left alone.
-fn adopt_orphan_devnode(role: Role, hwid: &str) -> Result<Option<String>> {
+/// Recovers a console `ROOT\MEDIA\NNNN` with this hwid and no ownership marker.
+/// Steam's own nodes use another instance prefix; any marked Punktfunk family stays untouched.
+fn adopt_console_orphan_devnode(role: Role, hwid: &str) -> Result<Option<String>> {
     use windows::Win32::Devices::DeviceAndDriverInstallation::{
         SetupDiEnumDeviceInfo, SPDRP_HARDWAREID,
     };
@@ -498,10 +626,11 @@ fn adopt_orphan_devnode(role: Role, hwid: &str) -> Result<Option<String>> {
         }
         pe::write_devparam_dword(&set, &mut did, ROLE_MARKER, role.value())?;
         tracing::warn!(
+            seat = "console",
             role = role.label(),
             devnode = %inst,
-            "adopted an abandoned audio devnode — one of ours whose owner marker never landed \
-             (a host that died mid-mint). Re-marked and reused instead of minting a duplicate"
+            "adopted an abandoned console audio devnode whose owner marker never landed; \
+             re-marked and reused it instead of minting a duplicate"
         );
         return Ok(Some(inst));
     }
@@ -555,15 +684,10 @@ pub(crate) fn discover_driver(needle: &str, inf_name: &str) -> Result<(String, S
     )
 }
 
-/// Synchronous pass for the mic pump's first resolve and the devtests.
+/// Runs the mic pump's first resolve without racing the startup worker.
 ///
-/// The pump's first open must not race the startup worker: wiring the cable, then parking
-/// default recording on a minted mic nobody writes, is a dead mic until reopen. Existing
-/// marked devnodes re-resolve in milliseconds; a cold boot pays the one-time mint. Latched
-/// calls and `PUNKTFUNK_NO_AUDIO_MINT` return immediately.
-///
-/// Unlatched: wait for an in-flight pass instead of racing SetupAPI; a failed pass repeats
-/// at most every [`RETRY_COOLDOWN`]; [`MAX_UNLATCHED_ATTEMPTS`] stops for this host lifetime.
+/// A latched result or `PUNKTFUNK_NO_AUDIO_MINT` returns immediately. Otherwise an in-flight
+/// pass wins, failed passes respect [`RETRY_COOLDOWN`], and the process attempt cap still applies.
 pub(crate) fn ensure_blocking() {
     if std::env::var_os("PUNKTFUNK_NO_AUDIO_MINT").is_some()
         || PROVISIONED.get().is_some()
@@ -571,7 +695,7 @@ pub(crate) fn ensure_blocking() {
     {
         return;
     }
-    // Wait for the in-flight pass rather than racing a second SetupAPI/PnP sweep.
+    // One SetupAPI/PnP sweep runs at a time inside this process.
     if PROVISIONING.swap(true, Ordering::SeqCst) {
         let deadline = Instant::now() + BLOCKING_WAIT;
         while PROVISIONING.load(Ordering::SeqCst) && Instant::now() < deadline {
@@ -579,7 +703,7 @@ pub(crate) fn ensure_blocking() {
         }
         return;
     }
-    // First resolve runs; after a failed pass the cooldown answers instead of a re-run.
+    // A failed first resolve leaves the cooldown in force for later callers.
     let run = {
         let mut last = LAST_ATTEMPT.lock().unwrap();
         if last.is_some_and(|t| t.elapsed() < RETRY_COOLDOWN) {
@@ -590,18 +714,25 @@ pub(crate) fn ensure_blocking() {
         }
     };
     if run {
-        match ensure_all() {
+        match process_identity().and_then(ensure_all) {
             Ok(m) if m.any() => {
                 let _ = PROVISIONED.set(Arc::new(m));
             }
-            _ => record_unlatched_attempt(),
+            Ok(_) => record_unlatched_attempt(),
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"),
+                    "blocking minted-audio provisioning failed");
+                record_unlatched_attempt();
+            }
         }
     }
     PROVISIONING.store(false, Ordering::SeqCst);
 }
 
 pub(crate) fn devtest_mint() -> Result<()> {
-    let m = ensure_all()?;
+    let identity = process_identity()?;
+    let m = ensure_all(identity)?;
+    println!("audio-mint: seat={}", identity.label());
     println!(
         "audio-mint: speakers devnode={} render={}",
         m.speakers_devnode.as_deref().unwrap_or("-"),
@@ -622,4 +753,64 @@ pub(crate) fn devtest_mint() -> Result<()> {
         println!("audio-mint: nothing minted (Steam's streaming drivers absent?)");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod seat_tests {
+    use super::*;
+
+    fn identity(id: Option<&str>) -> AudioIdentity {
+        AudioIdentity::from_seat_id(id).unwrap()
+    }
+
+    #[test]
+    fn seat_marker_derivation_is_stable() {
+        let first = identity(Some("550e8400e29b41d4a716446655440000"));
+        let repeated = identity(Some("550e8400e29b41d4a716446655440000"));
+        let other = identity(Some("550e8400e29b41d4a716446655440001"));
+
+        assert_eq!(first, repeated);
+        assert_eq!(first.seat_marker(), Some(0x0676_e391));
+        assert_ne!(first.seat_marker(), other.seat_marker());
+        assert_eq!(
+            first.role_desc(Role::Speakers),
+            "Punktfunk Speakers [seat 550e8400e29b41d4a716446655440000]"
+        );
+    }
+
+    #[test]
+    fn seat_ids_reject_unsafe_display_and_log_text() {
+        for raw in [
+            "",
+            "550E8400E29B41D4A716446655440000",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "seat 1",
+            "seat/1",
+            "seat.1",
+            "seat\n1",
+            "séat-1",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            assert!(AudioIdentity::from_seat_id(Some(raw)).is_err(), "{raw:?}");
+        }
+        assert!(AudioIdentity::from_seat_id(Some("0123456789abcdef0123456789abcdef")).is_ok());
+    }
+
+    #[test]
+    fn marker_matching_keeps_console_and_seats_separate() {
+        let console = identity(None);
+        let seat_a = identity(Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        let seat_b = identity(Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
+        let marker_a = seat_a.seat_marker();
+        let marker_b = seat_b.seat_marker();
+
+        assert!(markers_match(&console, Role::Speakers, Some(1), None));
+        assert!(!markers_match(&console, Role::Speakers, Some(1), marker_a));
+        assert!(markers_match(&seat_a, Role::Speakers, Some(1), marker_a));
+        assert!(!markers_match(&seat_a, Role::Speakers, Some(1), None));
+        assert!(!markers_match(&seat_a, Role::Speakers, Some(1), marker_b));
+        assert!(!markers_match(&seat_a, Role::Speakers, Some(2), marker_a));
+        assert!(!markers_match(&seat_a, Role::Speakers, None, None));
+        assert!(markers_match(&seat_b, Role::Mic, Some(2), marker_b));
+    }
 }

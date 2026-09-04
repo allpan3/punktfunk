@@ -64,6 +64,10 @@ mod install;
 #[cfg(target_os = "windows")]
 #[path = "windows/interactive.rs"]
 mod interactive;
+// What this host reads of the multi-seat contract; unset means the console host.
+#[cfg(target_os = "windows")]
+#[path = "windows/seat.rs"]
+mod seat;
 // Re-`Hello::launch` must not start a second copy — design/session-game-lifetime.md.
 mod launchreg;
 mod library;

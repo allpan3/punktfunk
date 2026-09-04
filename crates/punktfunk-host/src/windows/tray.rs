@@ -78,11 +78,6 @@ pub fn is_running() -> bool {
 /// Two misses restart the tray, so this is half the grace window.
 const WATCH_TICK: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Whether this host belongs to an add-on-managed seat rather than the console.
-fn seat_host() -> bool {
-    std::env::var("PUNKTFUNK_SEAT_SESSION").as_deref() == Ok("1")
-}
-
 /// Reads the console install's HKLM `Run` opt-in for tray supervision.
 fn wanted() -> bool {
     winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
@@ -97,7 +92,7 @@ fn wanted() -> bool {
 /// control surface. On the console, two misses trigger [`ensure`]; one miss is
 /// the tray's own Exit racing the service shutdown.
 pub fn supervise() {
-    if seat_host() {
+    if crate::seat::is_seat_host() {
         tracing::debug!("seat host: status-tray supervision disabled");
         return;
     }
@@ -138,7 +133,7 @@ pub fn start() -> Result<(Option<u32>, &'static str)> {
     let Some(exe) = tray_exe() else {
         bail!("{TRAY_EXE} is not installed next to this executable");
     };
-    if !seat_host() && is_running() {
+    if !crate::seat::is_seat_host() && is_running() {
         return Ok((None, "already running"));
     }
     // Quoting preserves an operator-chosen install path that contains spaces.
@@ -161,14 +156,14 @@ pub fn start() -> Result<(Option<u32>, &'static str)> {
 /// remains present.
 pub fn stop() -> bool {
     let was_running = is_running();
-    if !was_running && !seat_host() {
+    if !was_running && !crate::seat::is_seat_host() {
         return false;
     }
     if let Some(exe) = tray_exe() {
         if let Ok(mut child) = std::process::Command::new(&exe).arg("--quit").spawn() {
             let _ = child.wait();
         }
-        if seat_host() {
+        if crate::seat::is_seat_host() {
             return true;
         }
         for _ in 0..8 {
