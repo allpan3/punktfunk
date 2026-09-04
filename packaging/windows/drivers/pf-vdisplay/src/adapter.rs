@@ -81,13 +81,14 @@ pub fn init_adapter(device: WDFDEVICE) -> NTSTATUS {
     caps.MaxMonitorsSupported = 16;
     if hardware_ids.contains("pf_vdisplay_indirectdisplay") {
         // A remote adapter must also set USE_SMALLEST_MODE — IddCx rejects the pair
-        // REMOTE_SESSION_DRIVER-without-it as STATUS_NOT_SUPPORTED. FP16 stays off: it is a
-        // console-desktop processing cap and the two roles are exclusive. `PFVD_SEAT_CAPS`
-        // overrides the mask while the shape is still being probed.
+        // REMOTE_SESSION_DRIVER-without-it as STATUS_NOT_SUPPORTED. FP16 stays on: our monitor modes
+        // carry HDR wire bits, and without it every mode fails validation and no monitor arrives.
+        // `PFVD_SEAT_CAPS` overrides the mask while the shape is still being probed.
         let caps_override = crate::log::knob("PFVD_SEAT_CAPS").and_then(|v| v.parse::<u32>().ok());
         caps.Flags = caps_override.unwrap_or(
             iddcx::IDDCX_ADAPTER_FLAGS::IDDCX_ADAPTER_FLAGS_REMOTE_SESSION_DRIVER
-                | iddcx::IDDCX_ADAPTER_FLAGS::IDDCX_ADAPTER_FLAGS_USE_SMALLEST_MODE,
+                | iddcx::IDDCX_ADAPTER_FLAGS::IDDCX_ADAPTER_FLAGS_USE_SMALLEST_MODE
+                | iddcx::IDDCX_ADAPTER_FLAGS::IDDCX_ADAPTER_FLAGS_CAN_PROCESS_FP16,
         );
         // The OS keeps every active mode inside this bandwidth budget. Our modes report no rate of
         // their own, so it only has to be non-zero — zero leaves nothing schedulable. Seat-only:
