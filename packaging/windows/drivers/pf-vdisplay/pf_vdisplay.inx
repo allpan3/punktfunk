@@ -28,10 +28,10 @@ DriverVer=
 ; (SWD\REMOTEDISPLAYENUM\RDPIDD_INDIRECTDISPLAY&SESSIONID_N, hardware id RdpIdd_IndirectDisplay).
 ; Additive: the Root\ line above is untouched, so the shipped console device binds exactly as before.
 %DeviceName%=pf_vdisplay_Install, pf_vdisplay_IndirectDisplay
-; SPIKE E1c: claim RdpIdd's own id, to find out whether PnP ranks this driver above the inbox one
-; for the devnode csrss creates per session. Probe only — winning it hands every RDP session on the
-; box to this driver.
-%DeviceName%=pf_vdisplay_Install, RdpIdd_IndirectDisplay
+; SPIKE E1c: this driver DOES outrank the inbox one for `RdpIdd_IndirectDisplay`, and binding it is
+; what makes a seat session run on a pf-vdisplay display with nothing patched. Left commented out:
+; claiming it takes over EVERY RDP session on the machine, so it belongs behind an install choice.
+; %DeviceName%=pf_vdisplay_Install, RdpIdd_IndirectDisplay
 
 [SourceDisksFiles]
 pf_vdisplay.dll=1
