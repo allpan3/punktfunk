@@ -3,9 +3,8 @@
 //! A remote-session IddCx adapter is not a root devnode with a flag set. Microsoft's own remote
 //! display is `SWD\REMOTEDISPLAYENUM\RDPIDD_INDIRECTDISPLAY&SESSIONID_0002` carrying
 //! `DEVPKEY_Device_SessionId`, bound by the bare hardware id `RdpIdd_IndirectDisplay`. This makes
-//! the equivalent for us so `IddCxAdapterInitAsync` can be asked again with
-//! `REMOTE_SESSION_DRIVER` set. Run it INSIDE the seat session: the open question is whether the
-//! session id is inherited from the creating process.
+//! the equivalent for us, plus the `--remote-prop` boolean the kernel miniport demands before it
+//! will start such an adapter. The creating process's own session does not matter.
 //!
 //! The devnode lives only while the returned handle is open, so this parks until killed.
 
@@ -13,12 +12,13 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use windows::core::{HRESULT, PCWSTR};
-use windows::Win32::Devices::Properties::{
-    DEVPROPCOMPKEY, DEVPROPERTY, DEVPROPKEY, DEVPROP_STORE_SYSTEM, DEVPROP_TYPE_UINT32,
-};
 use windows::Win32::Devices::Enumeration::Pnp::{
-    SwDeviceCreate, HSWDEVICE, SWDeviceCapabilitiesDriverRequired,
-    SWDeviceCapabilitiesRemovable, SWDeviceCapabilitiesSilentInstall, SW_DEVICE_CREATE_INFO,
+    SWDeviceCapabilitiesDriverRequired, SWDeviceCapabilitiesRemovable,
+    SWDeviceCapabilitiesSilentInstall, SwDeviceCreate, HSWDEVICE, SW_DEVICE_CREATE_INFO,
+};
+use windows::Win32::Devices::Properties::{
+    DEVPROPCOMPKEY, DEVPROPERTY, DEVPROPKEY, DEVPROP_STORE_SYSTEM, DEVPROP_TYPE_BOOLEAN,
+    DEVPROP_TYPE_UINT32,
 };
 
 static DONE: AtomicBool = AtomicBool::new(false);
@@ -72,7 +72,9 @@ fn main() {
         let _ = windows::Win32::System::RemoteDesktop::ProcessIdToSessionId(pid, &mut s);
         s
     };
-    println!("creating enumerator={enumerator} instance={instance} hwid={hwid} from session={session}");
+    println!(
+        "creating enumerator={enumerator} instance={instance} hwid={hwid} from session={session}"
+    );
 
     let w_enum = wide(&enumerator);
     let w_parent = wide("HTREE\\ROOT\\0");
@@ -107,18 +109,48 @@ fn main() {
         fmtid: windows::core::GUID::from_u128(0x83da6326_97a6_4088_9453_a1923f573b29),
         pid: 6,
     };
-    let props = [DEVPROPERTY {
-        CompKey: DEVPROPCOMPKEY {
-            Key: session_key,
-            Store: DEVPROP_STORE_SYSTEM,
-            LocaleName: PCWSTR::null(),
-        },
-        Type: DEVPROP_TYPE_UINT32,
-        BufferSize: 4,
-        Buffer: (&raw mut session_value).cast(),
-    }];
-    let props = want_session.map(|_| &props[..]);
-    println!("session property: {props:?} (target session {session_value})");
+    // IndirectKmd's SetPreStartPrivateData refuses to start a REMOTE_SESSION_DRIVER adapter unless
+    // this BOOLEAN exists on the devnode: it checks presence, type and size, never the value, and
+    // jumps straight to its error path otherwise. RdpIdd's node carries this property family; ours
+    // carried none of it, which is what failed adapter start with INVALID_PARAMETER.
+    let mut remote_value: u8 = 0xFF; // DEVPROP_TRUE
+    let remote_key = DEVPROPKEY {
+        fmtid: windows::core::GUID::from_u128(0x60b193cb_5276_4d0f_96fc_f173abad3ec6),
+        pid: 4,
+    };
+    let want_remote = args.iter().any(|a| a == "--remote-prop");
+
+    let mut prop_list: Vec<DEVPROPERTY> = Vec::new();
+    if want_session.is_some() {
+        prop_list.push(DEVPROPERTY {
+            CompKey: DEVPROPCOMPKEY {
+                Key: session_key,
+                Store: DEVPROP_STORE_SYSTEM,
+                LocaleName: PCWSTR::null(),
+            },
+            Type: DEVPROP_TYPE_UINT32,
+            BufferSize: 4,
+            Buffer: (&raw mut session_value).cast(),
+        });
+    }
+    if want_remote {
+        prop_list.push(DEVPROPERTY {
+            CompKey: DEVPROPCOMPKEY {
+                Key: remote_key,
+                Store: DEVPROP_STORE_SYSTEM,
+                LocaleName: PCWSTR::null(),
+            },
+            Type: DEVPROP_TYPE_BOOLEAN,
+            BufferSize: 1,
+            Buffer: (&raw mut remote_value).cast(),
+        });
+    }
+    let props = if prop_list.is_empty() {
+        None
+    } else {
+        Some(&prop_list[..])
+    };
+    println!("properties: session={want_session:?} remote_prop={want_remote} (target session {session_value})");
 
     // SAFETY: every PCWSTR points at a NUL-terminated local that outlives the call and the wait
     // below; `info` is fully initialised with its own `cbSize`; the property buffer outlives it too.
