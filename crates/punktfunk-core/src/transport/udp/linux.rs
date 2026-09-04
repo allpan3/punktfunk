@@ -54,9 +54,12 @@ fn mmsghdrs(iovs: &mut [libc::iovec]) -> Vec<mmsghdr> {
 
 /// Process-wide UDP GSO latch. Opt-in (`PUNKTFUNK_GSO=1`).
 ///
-/// Super-buffer trains cut send CPU but lose delivered rate on constrained hops
-/// (queue drop in the transport path, not the video pacer). Default stays off;
-/// evidence: `design/throughput-beyond-1gbps.md`.
+/// GSO cuts send CPU but loses ~22 % of delivered rate above ~1.5 Gbps on a virtio
+/// guest (2026-09-04, fourth reproduction: peak 2453 → 1921 Mbps). The cause is NOT
+/// burst shape — pacing (`fq maxrate`), train length (64 → 4 segments) and moving
+/// segmentation above the qdisc each changed nothing, and no counter on either host
+/// sees the drop. Do not re-derive those; see `design/udp-offload-default-on.md`.
+/// Untested on bare metal, which is the only reason left to revisit the default.
 ///
 /// The gate is value-aware: `PUNKTFUNK_GSO=0` disables. Do not key on env
 /// presence — `=0` would enable here while Windows USO treats `=0` as off.
