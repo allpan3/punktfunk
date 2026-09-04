@@ -120,6 +120,15 @@ iddcx_ddi!(
     ) @ IddCxAdapterInitAsyncTableIndex as PFN_IDDCXADAPTERINITASYNC
 );
 iddcx_ddi!(
+    /// Publish a REMOTE adapter's display configuration. The OS stores it and then reconfigures the
+    /// monitors' swap chains to match; without it a remote adapter never gets one and the remoting
+    /// stack discards the session's display as unusable.
+    IddCxAdapterDisplayConfigUpdate(
+        adapter: iddcx::IDDCX_ADAPTER,
+        in_args: *const iddcx::IDARG_IN_ADAPTERDISPLAYCONFIGUPDATE,
+    ) @ IddCxAdapterDisplayConfigUpdateTableIndex as PFN_IDDCXADAPTERDISPLAYCONFIGUPDATE
+);
+iddcx_ddi!(
     /// Create a monitor on the adapter; `out.MonitorObject` is the `IDDCX_MONITOR`.
     IddCxMonitorCreate(
         adapter: iddcx::IDDCX_ADAPTER,
