@@ -58,10 +58,11 @@ HKR, , "UpperFilters", %REG_MULTI_SZ%, "IndirectKmd"
 HKR, , "Security", , "D:P(A;;GA;;;SY)(A;;GA;;;BA)"
 
 ; =================== seat (remote-session) device ====================
-; Same driver, one difference that matters: the remoting stack OPENS this device itself, as the
-; session, and a SYSTEM+Admins DACL fails that open with E_ACCESSDENIED — the server reports
-; `IddInterfaceArrivalFailure` and drops the session. RdpIdd ships `D:P(A;;GA;;;WD)` for exactly
-; this reason, so the seat device matches it. The console device keeps the locked-down DACL.
+; Same driver, one difference that matters: the remoting stack OPENS this device itself, under the
+; SESSION's own token, and a SYSTEM+Admins DACL fails that open with E_ACCESSDENIED — the server
+; reports `IddInterfaceArrivalFailure` and drops the session. RdpIdd ships `D:P(A;;GA;;;WD)`;
+; INTERACTIVE with open+IOCTL rights is the same door for the stack without opening it to every
+; principal Everyone covers. The console device keeps the locked-down DACL.
 
 [pf_vdisplay_Seat_Install.NT]
 CopyFiles=UMDriverCopy
@@ -71,7 +72,7 @@ AddReg=pf_vdisplay_SeatDeviceSettings
 
 [pf_vdisplay_SeatDeviceSettings]
 HKR, , "UpperFilters", %REG_MULTI_SZ%, "IndirectKmd"
-HKR, , "Security", , "D:P(A;;GA;;;WD)"
+HKR, , "Security", , "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)"
 
 [pf_vdisplay_Seat_Install.NT.Services]
 AddService=WUDFRd,0x000001fa,WUDFRD_ServiceInstall
