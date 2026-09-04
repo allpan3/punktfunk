@@ -60,9 +60,9 @@ HKR, , "Security", , "D:P(A;;GA;;;SY)(A;;GA;;;BA)"
 ; =================== seat (remote-session) device ====================
 ; Same driver, one difference that matters: the remoting stack OPENS this device itself, under the
 ; SESSION's own token, and a SYSTEM+Admins DACL fails that open with E_ACCESSDENIED — the server
-; reports `IddInterfaceArrivalFailure` and drops the session. RdpIdd ships `D:P(A;;GA;;;WD)`;
-; INTERACTIVE with open+IOCTL rights is the same door for the stack without opening it to every
-; principal Everyone covers. The console device keeps the locked-down DACL.
+; reports `IddInterfaceArrivalFailure` and drops the session. That opener is TermService, so
+; NETWORK SERVICE is the whole grant — no user reaches this control plane, where RdpIdd ships
+; `D:P(A;;GA;;;WD)`. The console device keeps its own locked-down DACL.
 
 [pf_vdisplay_Seat_Install.NT]
 CopyFiles=UMDriverCopy

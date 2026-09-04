@@ -150,23 +150,6 @@ fn present_seat_display() {
     }
 }
 
-/// `EvtDeviceFileCreate` — names who opens this device, which is what the seat DACL has to admit.
-/// The framework hands the create over once this is set, so it must complete the request.
-pub unsafe extern "C" fn device_file_create(
-    _device: WDFDEVICE,
-    request: WDFREQUEST,
-    _file: WDFFILEOBJECT,
-) {
-    if crate::adapter::is_seat_role() {
-        // SAFETY: `request` is the live create request the framework just handed over.
-        let pid =
-            unsafe { call_unsafe_wdf_function_binding!(WdfRequestGetRequestorProcessId, request) };
-        dbglog!("[pf-vd] seat: device opened by pid {pid}");
-    }
-    // SAFETY: as above; completing the create hands it back to the framework exactly once.
-    unsafe { call_unsafe_wdf_function_binding!(WdfRequestComplete, request, STATUS_SUCCESS) };
-}
-
 /// `EvtCleanupCallback` on the WDFDEVICE (E1): the device is being removed (PnP / driver unload) — drop
 /// every monitor's swap-chain worker so the worker threads don't linger into teardown. IddCx-free (the
 /// framework tears the monitors down with the departing device); see
