@@ -63,6 +63,7 @@ extern "C" fn driver_add(_driver: WDFDRIVER, mut init: PWDFDEVICE_INIT) -> NTSTA
     let mut files = pod_init!(wdk_sys::WDF_FILEOBJECT_CONFIG);
     files.Size = core::mem::size_of::<wdk_sys::WDF_FILEOBJECT_CONFIG>() as ULONG;
     files.EvtFileCleanup = Some(crate::watchdog::evt_file_cleanup);
+    files.EvtDeviceFileCreate = Some(crate::callbacks::device_file_create);
     files.AutoForwardCleanupClose = wdk_sys::_WDF_TRI_STATE::WdfUseDefault;
     files.FileObjectClass = wdk_sys::_WDF_FILEOBJECT_CLASS::WdfFileObjectWdfCannotUseFsContexts;
     // SAFETY: init is the framework-provided device-init; files is valid for the call.
