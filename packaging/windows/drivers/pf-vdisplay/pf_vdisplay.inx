@@ -29,9 +29,9 @@ DriverVer=
 ; Additive: the Root\ line above is untouched, so the shipped console device binds exactly as before.
 %DeviceName%=pf_vdisplay_Install, pf_vdisplay_IndirectDisplay
 ; SPIKE E1c: this driver DOES outrank the inbox one for `RdpIdd_IndirectDisplay`, and binding it is
-; what makes a seat session run on a pf-vdisplay display with nothing patched. Left commented out:
-; claiming it takes over EVERY RDP session on the machine, so it belongs behind an install choice.
-; %DeviceName%=pf_vdisplay_Install, RdpIdd_IndirectDisplay
+; what makes a seat session run on a pf-vdisplay display with nothing patched. Claiming it takes
+; over EVERY RDP session on the machine, so shipping it belongs behind an install choice.
+%DeviceName%=pf_vdisplay_Install, RdpIdd_IndirectDisplay
 
 [SourceDisksFiles]
 pf_vdisplay.dll=1
