@@ -69,14 +69,20 @@ pub fn init_adapter(device: WDFDEVICE) -> NTSTATUS {
     // with the INF still at UmdfExtensions=IddCx0102. GammaSupport stays NONE (set above). Enum is bindgen
     // ModuleConsts — the variant is a plain-int const assignable straight to the `Flags` field.
     caps.Flags = iddcx::IDDCX_ADAPTER_FLAGS::IDDCX_ADAPTER_FLAGS_CAN_PROCESS_FP16;
-    // SPIKE E1 (multi-seat O1, `design/windows-seat-display-tier.md`): a console adapter's monitors
-    // belong to the console session, so a seat cannot own one. A remote-session adapter's belong to
-    // a remote session. Knob-gated and OFF unless the machine env names it, so the shipped console
-    // install keeps exactly the caps above. Not a shipping shape: one adapter cannot hold both
-    // roles, so production needs a separate seat instance.
-    if crate::log::knob("PFVD_REMOTE_SESSION").is_some() {
+    // SPIKE E1b (multi-seat O1, `design/windows-seat-display-tier.md`). IddCx roles are exclusive:
+    // a remote-session adapter serves remote-session monitors, a console one console monitors. The
+    // role therefore has to be per DEVICE, and the devnode's own hardware id is what says which it
+    // is — the seat devnode is the per-session SWD node (`pf_vdisplay_IndirectDisplay`, RdpIdd's
+    // shape), the shipped console devnode is `Root\pf_vdisplay` and structurally cannot take this
+    // branch.
+    // SAFETY: `device` is the live WDFDEVICE this D0 entry is initialising, which is the contract
+    // `query_hardware_ids` requires.
+    let hardware_ids = unsafe { pf_umdf_util::wdf::query_hardware_ids(device) };
+    if hardware_ids.contains("pf_vdisplay_indirectdisplay") {
         caps.Flags |= iddcx::IDDCX_ADAPTER_FLAGS::IDDCX_ADAPTER_FLAGS_REMOTE_SESSION_DRIVER;
-        dbglog!("[pf-vd] adapter: REMOTE_SESSION_DRIVER set (PFVD_REMOTE_SESSION spike)");
+        dbglog!("[pf-vd] adapter: REMOTE_SESSION_DRIVER set (seat devnode: {hardware_ids})");
+    } else {
+        dbglog!("[pf-vd] adapter: console role (hwids: {hardware_ids})");
     }
     caps.MaxMonitorsSupported = 16;
     caps.EndPointDiagnostics = diag;
