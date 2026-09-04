@@ -95,13 +95,12 @@ pub fn init_adapter(device: WDFDEVICE) -> NTSTATUS {
         caps.MaxDisplayPipelineRate = crate::log::knob("PFVD_PIPELINE_RATE")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(16 * 4096 * 2160 * 144);
-        // The kernel miniport validates these two through DxgkDdiSetPreStartPrivateData and fails
-        // adapter start with INVALID_PARAMETER on a bad pair. A seat endpoint is reached over the
-        // network, not a wire, and carries the one display the seat owns.
+        // A seat carries the one display it owns. Transmission stays WIRED_OTHER: the framework
+        // validates the enum and rejects NETWORK_OTHER (9) outright, header notwithstanding.
         diag.TransmissionType = crate::log::knob("PFVD_SEAT_TRANSMISSION")
             .and_then(|v| v.parse::<u32>().ok())
             .map(|v| v as _)
-            .unwrap_or(iddcx::IDDCX_TRANSMISSION_TYPE::IDDCX_TRANSMISSION_TYPE_NETWORK_OTHER);
+            .unwrap_or(iddcx::IDDCX_TRANSMISSION_TYPE::IDDCX_TRANSMISSION_TYPE_WIRED_OTHER);
         caps.MaxMonitorsSupported = crate::log::knob("PFVD_SEAT_MONITORS")
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(1);
