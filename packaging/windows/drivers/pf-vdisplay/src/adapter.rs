@@ -79,7 +79,12 @@ pub fn init_adapter(device: WDFDEVICE) -> NTSTATUS {
     // `query_hardware_ids` requires.
     let hardware_ids = unsafe { pf_umdf_util::wdf::query_hardware_ids(device) };
     caps.MaxMonitorsSupported = 16;
-    if hardware_ids.contains("pf_vdisplay_indirectdisplay") {
+    // `rdpidd_indirectdisplay` is the devnode the terminal-services stack creates for a session and
+    // then starts itself — the one thing it will start. This driver outranks the inbox one for that
+    // id, so the seat role has to cover it too.
+    let seat_devnode = hardware_ids.contains("pf_vdisplay_indirectdisplay")
+        || hardware_ids.contains("rdpidd_indirectdisplay");
+    if seat_devnode {
         // A remote adapter must also set USE_SMALLEST_MODE — IddCx rejects the pair
         // REMOTE_SESSION_DRIVER-without-it as STATUS_NOT_SUPPORTED. FP16 stays on: our monitor modes
         // carry HDR wire bits, and without it every mode fails validation and no monitor arrives.
