@@ -1,0 +1,17 @@
+# E1b spike: create a per-session software devnode for pf-vdisplay, the way the RDP stack creates
+# RdpIdd's. Its own [workspace] table keeps it OUT of the shipping build graph.
+[workspace]
+
+[package]
+name = "pf-swdevice-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Devices_Enumeration_Pnp",
+    "Win32_Devices_Properties",
+    "Win32_System_Threading",
+] }

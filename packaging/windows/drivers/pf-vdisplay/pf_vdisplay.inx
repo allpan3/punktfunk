@@ -24,6 +24,10 @@ DriverVer=
 
 [Standard.NT$ARCH$]
 %DeviceName%=pf_vdisplay_Install, Root\pf_vdisplay
+; SPIKE E1b: the bare id a per-session SWD devnode binds by, the shape RdpIdd uses
+; (SWD\REMOTEDISPLAYENUM\RDPIDD_INDIRECTDISPLAY&SESSIONID_N, hardware id RdpIdd_IndirectDisplay).
+; Additive: the Root\ line above is untouched, so the shipped console device binds exactly as before.
+%DeviceName%=pf_vdisplay_Install, pf_vdisplay_IndirectDisplay
 
 [SourceDisksFiles]
 pf_vdisplay.dll=1
