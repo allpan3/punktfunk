@@ -97,6 +97,9 @@ extern "C" fn driver_add(_driver: WDFDRIVER, mut init: PWDFDEVICE_INIT) -> NTSTA
     cfg.EvtIddCxMonitorSetGammaRamp = Some(callbacks::set_gamma_ramp);
     cfg.EvtIddCxMonitorAssignSwapChain = Some(callbacks::assign_swap_chain);
     cfg.EvtIddCxMonitorUnassignSwapChain = Some(callbacks::unassign_swap_chain);
+    // Obligated for a remote-session adapter (the seat devnode's role); harmless on the console,
+    // where the OS never calls it because every monitor ships an EDID.
+    cfg.EvtIddCxMonitorGetPhysicalSize = Some(callbacks::monitor_get_physical_size);
     cfg.EvtIddCxDeviceIoControl = Some(callbacks::device_io_control);
 
     // SAFETY: init is the framework device-init; cfg is fully populated + sized. (Links IddCxStub.)

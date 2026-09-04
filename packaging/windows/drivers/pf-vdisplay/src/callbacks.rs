@@ -494,3 +494,19 @@ pub unsafe extern "C" fn device_io_control(
     // SAFETY: `request` is the framework-provided WDFREQUEST; `control::dispatch` completes it exactly once.
     unsafe { crate::control::dispatch(request, ioctl_code) };
 }
+
+/// `EvtIddCxMonitorGetPhysicalSize` — the remote-driver-only DDI. IddCx obligates a remote-session
+/// adapter to register it the way `CAN_PROCESS_FP16` obligates the `*2` set; the OS only CALLS it
+/// for a remote monitor with no description, and ours always ships an EDID. The size mirrors the
+/// EDID's own 16:9 block, since a zero here is invalid.
+pub unsafe extern "C" fn monitor_get_physical_size(
+    _monitor: iddcx::IDDCX_MONITOR,
+    p_out: *mut iddcx::IDARG_OUT_MONITORGETPHYSICALSIZE,
+) -> NTSTATUS {
+    // SAFETY: the framework supplies a valid out-args pointer for the call.
+    unsafe {
+        (*p_out).PhysicalWidth = 597;
+        (*p_out).PhysicalHeight = 336;
+    }
+    crate::STATUS_SUCCESS
+}
