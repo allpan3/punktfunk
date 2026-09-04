@@ -68,12 +68,21 @@ pub unsafe extern "C" fn adapter_init_finished(
     // seat presents one immediately instead of waiting for a host ADD. Owner 0 is no process's pid,
     // so this monitor belongs to the device and no host's exit reaps it.
     if crate::adapter::is_seat_role() {
+        // `PFVD_SEAT_MODE` is `<w>x<h>@<hz>`. The remoting stack matches the client's requested
+        // desktop against this, so the two have to agree until the seat learns the client's size.
+        let (w, h, hz) = crate::log::knob("PFVD_SEAT_MODE")
+            .and_then(|v| {
+                let (wh, hz) = v.split_once('@')?;
+                let (w, h) = wh.split_once('x')?;
+                Some((w.parse().ok()?, h.parse().ok()?, hz.parse().ok()?))
+            })
+            .unwrap_or((1920u32, 1080u32, 60u32));
         let made = crate::monitor::create_monitor(
             0,
             0,
-            1920,
-            1080,
-            60,
+            w,
+            h,
+            hz,
             1,
             pf_driver_proto::edid::ClientLuminance {
                 max_nits: 0,
@@ -83,7 +92,7 @@ pub unsafe extern "C" fn adapter_init_finished(
             false,
         );
         dbglog!(
-            "[pf-vd] seat adapter: presented a display -> {}",
+            "[pf-vd] seat adapter: presented {w}x{h}@{hz} -> {}",
             made.is_some()
         );
     }
