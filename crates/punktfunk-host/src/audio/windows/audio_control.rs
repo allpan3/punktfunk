@@ -133,10 +133,17 @@ pub(crate) fn host_audio_requested() -> bool {
         .prefers_host_hardware()
 }
 
-/// Skip default-device writes: `follow_default` mode, or a session's keep-host-audio ask.
+/// Skip default-device writes: `follow_default` mode, a session's keep-host-audio
+/// ask, or a seat host.
+///
+/// The default endpoints are machine-global while a seat host is one of several
+/// on the box, so parking them would hand every seat's playback to whichever
+/// seat streamed last. A seat's own endpoints carry its marker and the wiring
+/// plan finds them by id.
 pub(crate) fn keep_default_devices() -> bool {
     pf_host_config::config().audio_output_mode.keeps_default()
         || crate::audio::capture_policy::session_keeps_default()
+        || crate::seat::is_seat_host()
 }
 
 /// One wiring pass: assignment, fingerprint of the same enumeration the plan consumed
