@@ -254,18 +254,31 @@ pub fn run(opts: Options) -> Result<()> {
     let mut stats = Stats::default();
 
     let mut frame = first;
+    let deadline = started + std::time::Duration::from_secs(u64::from(opts.seconds));
     loop {
-        encoder.submit(&frame).context("encoder submit")?;
-        stats.submitted += 1;
+        // The in-driver encoder is fed by the driver, not by this process: there is nothing to
+        // submit and nothing buffered to flush, so the run is bounded by the clock and the host
+        // only collects what comes out.
+        if !driver_encode {
+            encoder.submit(&frame).context("encoder submit")?;
+            stats.submitted += 1;
+        }
         drain_encoder(encoder.as_mut(), &mut sink, lb.as_mut(), &mut stats)?;
-        if stats.submitted >= target_frames {
+        let done = if driver_encode {
+            Instant::now() >= deadline
+        } else {
+            stats.submitted >= target_frames
+        };
+        if done {
             break;
         }
         frame = capturer.next_frame().context("capture frame")?;
     }
 
-    // NVENC buffers frames internally even at delay=0 — flush and drain the tail.
-    encoder.flush().context("encoder flush")?;
+    if !driver_encode {
+        // NVENC buffers frames internally even at delay=0 — flush and drain the tail.
+        encoder.flush().context("encoder flush")?;
+    }
     drain_encoder(encoder.as_mut(), &mut sink, lb.as_mut(), &mut stats)?;
     sink.flush().context("flush output file")?;
 
