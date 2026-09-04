@@ -13,6 +13,9 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use windows::core::{HRESULT, PCWSTR};
+use windows::Win32::Devices::Properties::{
+    DEVPROPCOMPKEY, DEVPROPERTY, DEVPROPKEY, DEVPROP_STORE_SYSTEM, DEVPROP_TYPE_UINT32,
+};
 use windows::Win32::Devices::Enumeration::Pnp::{
     SwDeviceCreate, HSWDEVICE, SWDeviceCapabilitiesDriverRequired,
     SWDeviceCapabilitiesRemovable, SWDeviceCapabilitiesSilentInstall, SW_DEVICE_CREATE_INFO,
@@ -91,14 +94,41 @@ fn main() {
         pSecurityDescriptor: std::ptr::null(),
     };
 
+    // RdpIdd's devnode carries DEVPKEY_Device_SessionId; ours created from session 0 carries none,
+    // and a session-less adapter is refused. Set it explicitly so a session-0 caller (the seats
+    // supervisor, in production) can mint the device FOR a seat session.
+    let want_session: Option<u32> = args
+        .iter()
+        .position(|a| a == "--session")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| v.parse().ok());
+    let mut session_value: u32 = want_session.unwrap_or(session);
+    let session_key = DEVPROPKEY {
+        fmtid: windows::core::GUID::from_u128(0x83da6326_97a6_4088_9453_a1923f573b29),
+        pid: 6,
+    };
+    let props = [DEVPROPERTY {
+        CompKey: DEVPROPCOMPKEY {
+            Key: session_key,
+            Store: DEVPROP_STORE_SYSTEM,
+            LocaleName: PCWSTR::null(),
+        },
+        Type: DEVPROP_TYPE_UINT32,
+        BufferSize: 4,
+        Buffer: (&raw mut session_value).cast(),
+    }];
+    let props = want_session.map(|_| &props[..]);
+    println!("session property: {props:?} (target session {session_value})");
+
     // SAFETY: every PCWSTR points at a NUL-terminated local that outlives the call and the wait
-    // below; `info` is fully initialised with its own `cbSize`. The callback only stores results.
+    // below; `info` is fully initialised with its own `cbSize`; the property buffer outlives it too.
+    // The callback only stores results.
     let handle = unsafe {
         SwDeviceCreate(
             PCWSTR(w_enum.as_ptr()),
             PCWSTR(w_parent.as_ptr()),
             &mut info,
-            None,
+            props,
             Some(on_created),
             None,
         )
