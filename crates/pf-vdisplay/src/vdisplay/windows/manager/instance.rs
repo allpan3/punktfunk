@@ -1,10 +1,10 @@
-//! Cross-process single-instance guard for pf-vdisplay management.
+//! Cross-process ownership guards for pf-vdisplay management.
 //!
-//! A named mutex in `Global\` makes a second host process fail its vdisplay
-//! open loudly instead of firing `IOCTL_CLEAR_ALL` and razing the live host's
-//! monitors mid-stream. Claimed eagerly on the serve path; held for the
-//! process lifetime (the OS reclaims the name on exit). Failed claims are
-//! not memoized.
+//! The console host retains the `Global\punktfunk-vdisplay-manager` mutex.
+//! A trusted seats reservation gives each explicit seat connector its own
+//! mutex, so distinct reserved slots can coexist but duplicate owners fail.
+//! Every claim is held for the process lifetime and the OS releases it on
+//! exit. Failed claims are not memoized.
 //!
 //! DACL is SYSTEM + Administrators only. Tests pin which owner SIDs count
 //! as a sibling host versus a squat.
@@ -12,36 +12,48 @@
 use super::*;
 use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 
-/// Process-global held mutex (`None` until claimed). Not per-manager: the
-/// serve path claims it at startup, before any session opens the backend.
-/// First-comer wins; a lazy service would otherwise lose the driver to a
-/// stray second host. A failed claim is not memoized.
+/// Process-global held mutex (`None` until claimed). The serve path claims
+/// its console or fixed-seat scope before a session opens the backend.
 static INSTANCE: Mutex<Option<OwnedHandle>> = Mutex::new(None);
+
+fn instance_name_for(plan: crate::identity::WindowsSlotPlan) -> String {
+    match plan.seat_slot() {
+        Some(slot) => format!(r"Global\punktfunk-vdisplay-manager-seat-{slot}"),
+        None => r"Global\punktfunk-vdisplay-manager".to_string(),
+    }
+}
+
+fn instance_name() -> Result<String> {
+    process_slot_plan()
+        .map(instance_name_for)
+        .map_err(anyhow::Error::new)
+}
 
 pub(super) fn claim_instance() -> Result<()> {
     let mut g = INSTANCE.lock().unwrap();
     if g.is_none() {
-        *g = Some(acquire_single_instance()?);
+        let name = instance_name()?;
+        *g = Some(acquire_single_instance(&name)?);
     }
     Ok(())
 }
 
-/// Failure is a warning, not fatal — sessions then fail with the same
-/// in-use error until the other instance exits.
+/// Claims early so a duplicate console or seat owner loses before a client
+/// arrives. Failure stays visible and the later backend open fails again.
 pub fn claim_instance_eagerly() {
     if let Err(e) = claim_instance() {
-        tracing::warn!("pf-vdisplay single-instance claim failed at startup: {e:#}");
+        tracing::warn!("pf-vdisplay instance claim failed at startup: {e:#}");
     }
 }
 
-/// Hold the named mutex for the process lifetime. The OS reclaims it (and
-/// frees the name) on any exit. A second process fails its vdisplay open
-/// instead of `IOCTL_CLEAR_ALL` razing the live host's monitors.
-fn acquire_single_instance() -> Result<OwnedHandle> {
-    const IN_USE: &str = "another punktfunk-host process is already managing pf-vdisplay on this \
-         machine — refusing to touch the driver (a second manager's startup CLEAR_ALL would raze \
-         the live host's monitors mid-stream). Stop the other instance (e.g. `punktfunk-host \
-         service stop`) first.";
+/// Holds one console or seat-slot mutex for the process lifetime. A second
+/// owner of the same scope fails while owners of distinct reserved slots can
+/// coexist.
+fn acquire_single_instance(name: &str) -> Result<OwnedHandle> {
+    let in_use = format!(
+        "another punktfunk-host process already owns pf-vdisplay scope `{name}` — refusing to \
+         touch that connector scope until the other process exits"
+    );
     // `Global\` is creatable by any SeCreateGlobalPrivilege holder (includes LocalService).
     // Default DACL from the creating token lets a squatter deny SYSTEM and look like
     // "another instance". Explicit DACL so lesser principals cannot open ours; check
@@ -52,46 +64,38 @@ fn acquire_single_instance() -> Result<OwnedHandle> {
         lpSecurityDescriptor: sd.0,
         bInheritHandle: false.into(),
     };
-    // SAFETY: plain FFI create of a named mutex; `sa` (and the descriptor it points at) outlives
-    // the call, the returned handle (checked) is solely owned by the `OwnedHandle`, and
-    // `GetLastError` is read immediately after the create — the documented ERROR_ALREADY_EXISTS
-    // protocol for pre-existing named objects.
+    let wide_name = windows::core::HSTRING::from(name);
+    // SAFETY: `wide_name`, `sa`, and its descriptor outlive the call. The checked handle has one
+    // `OwnedHandle` owner, and `GetLastError` is read immediately after `CreateMutexW`.
     unsafe {
-        let h = match CreateMutexW(Some(&sa), false, w!("Global\\punktfunk-vdisplay-manager")) {
+        let h = match CreateMutexW(Some(&sa), false, windows::core::PCWSTR(wide_name.as_ptr())) {
             Ok(h) => h,
-            // ACCESS_DENIED has three causes the handle cannot tell apart: live SCM
-            // instance whose DACL denies this token OPEN; a squat with the same shape;
-            // or no SeCreateGlobalPrivilege (ordinary interactive user). Name all three.
+            // ACCESS_DENIED cannot distinguish a live protected owner, a squat,
+            // or a token that cannot create a Global object.
             Err(e) if e.code().0 == 0x8007_0005u32 as i32 => anyhow::bail!(
-                "{IN_USE}\n\nIf no other punktfunk-host is running, either this process cannot \
-                 create a `Global\\` kernel object at all (it needs SeCreateGlobalPrivilege — run \
-                 the host ELEVATED or as the installed service account; an ordinary interactive \
-                 user does not hold it), or the name `Global\\punktfunk-vdisplay-manager` has been \
-                 SQUATTED by another process — any account with that privilege can create it first \
-                 and deny us access, which disables virtual-display streaming until that process \
-                 exits. Sysinternals `handle.exe -a punktfunk-vdisplay-manager` tells the two \
-                 apart: a holder means a squat, NOTHING means the privilege."
+                "{in_use}\n\nIf no matching punktfunk-host is running, this process either cannot \
+                 create/open `{name}` (run elevated or as the installed service account), or that \
+                 name is squatted by another process. Sysinternals `handle.exe -a \
+                 punktfunk-vdisplay-manager` distinguishes a holder from a missing privilege."
             ),
             Err(e) => {
-                return Err(e).context("CreateMutexW(punktfunk-vdisplay single-instance guard)");
+                return Err(e).with_context(|| format!("CreateMutexW({name})"));
             }
         };
         let already = GetLastError() == ERROR_ALREADY_EXISTS;
         let owned = OwnedHandle::from_raw_handle(h.0 as _);
         if already {
-            // DACL let us in, which says nothing about who created it. Owner
-            // outside SYSTEM/Administrators is a squat, not a sibling host.
+            // DACL access does not identify the creator. An owner outside the
+            // privileged host accounts is a squat, not a sibling host.
             if let Some(owner) = object_owner_sid(h) {
                 if !is_privileged_sid(&owner) {
                     anyhow::bail!(
-                        "the pf-vdisplay single-instance name is held by a NON-ADMINISTRATIVE \
-                         process (owner SID {owner}) — this is not another punktfunk-host, it is a \
-                         squat on `Global\\punktfunk-vdisplay-manager`, and it blocks all \
-                         virtual-display streaming while it is held."
+                        "pf-vdisplay scope `{name}` is held by a non-administrative process (owner \
+                         SID {owner}); treating the name as squatted and refusing driver access"
                     );
                 }
             }
-            anyhow::bail!("{IN_USE}");
+            anyhow::bail!(in_use);
         }
         Ok(owned)
     }
@@ -196,7 +200,23 @@ fn is_privileged_sid(sid: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_privileged_sid;
+    use super::{instance_name_for, is_privileged_sid};
+    use crate::identity::WindowsSlotPlan;
+
+    #[test]
+    fn console_and_seat_owners_have_disjoint_mutex_scopes() {
+        let console = r"Global\punktfunk-vdisplay-manager";
+        assert_eq!(instance_name_for(WindowsSlotPlan::Unreserved), console);
+        assert_eq!(instance_name_for(WindowsSlotPlan::ReservedConsole), console);
+        assert_eq!(
+            instance_name_for(WindowsSlotPlan::Seat(12)),
+            r"Global\punktfunk-vdisplay-manager-seat-12"
+        );
+        assert_ne!(
+            instance_name_for(WindowsSlotPlan::Seat(12)),
+            instance_name_for(WindowsSlotPlan::Seat(13))
+        );
+    }
 
     /// Widening is silent: a squat starts reading as a sibling host.
     #[test]

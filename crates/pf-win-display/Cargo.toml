@@ -34,6 +34,8 @@ windows = { version = "0.62", features = [
     "Win32_System_LibraryLoader",
     # console_session_mismatch: WTSGetActiveConsoleSessionId + ProcessIdToSessionId + GetCurrentProcessId.
     "Win32_System_RemoteDesktop",
+    # Machine-level seats add-on reservation marker.
+    "Win32_System_Registry",
     # input_desktop: OpenInputDesktop/SetThreadDesktop/GetUserObjectInformationW — display writes
     # follow the input desktop so a UAC/lock screen can't refuse them.
     "Win32_System_StationsAndDesktops",

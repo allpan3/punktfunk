@@ -8,9 +8,9 @@
 
 use super::*;
 
-/// `Session` is the live key (monotonic `u64`). `Guid` is unused: nothing
-/// constructs it. Kept so the type still says the key is a per-driver choice,
-/// not a `u64` by nature.
+/// `Session` is the host-chosen live key: monotonic for legacy ownership and
+/// stable by connector under a seats reservation. `Guid` remains unused so the
+/// type still says the key is a per-driver choice, not a `u64` by nature.
 #[derive(Clone, Copy)]
 pub(crate) enum MonitorKey {
     Guid(windows::core::GUID),
@@ -35,11 +35,10 @@ pub(crate) struct AddedMonitor {
 /// `&'static` singleton reached from the pinger and linger threads.
 pub(crate) trait VdisplayDriver: Send + Sync {
     fn name(&self) -> &'static str;
-    /// `reap_orphans` (first open of the process only) `CLEAR_ALL`s monitors
-    /// orphaned by a crashed previous host. A reopen after a dead handle was
-    /// retired must not: sessions this process still considers live may be racing
-    /// it. Returns owned handle, watchdog seconds, protocol version (in-place
-    /// resize gates on it).
+    /// `reap_orphans` permits a global `CLEAR_ALL`; only the first legacy
+    /// single-owner open may set it. Reserved seats and handle reopens can
+    /// overlap live monitors. Returns the owned handle, watchdog seconds, and
+    /// protocol version.
     fn open(&self, reap_orphans: bool) -> Result<(OwnedHandle, u32, u32)>;
     /// Pins the IDD render GPU to `render_luid` when `Some`.
     /// `preferred_monitor_id` `0` = auto. `client_hdr` `None` = the driver's

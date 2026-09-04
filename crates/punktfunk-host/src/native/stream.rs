@@ -12,6 +12,9 @@
 
 use super::*;
 
+#[cfg(target_os = "windows")]
+const REJECTED_SLOT: &str = "pf-vdisplay refused this process's connector slot; see the log for the PUNKTFUNK_SEAT_DISPLAY_SLOT or reservation problem";
+
 /// Tag a wave-boundary AU with [`USER_FLAG_RECOVERY_POINT`](punktfunk_core::packet::USER_FLAG_RECOVERY_POINT).
 ///
 /// `ir_wave_pos` counts frames since the last IDR/wave start. An IDR re-phases it to 0 and is
@@ -1419,14 +1422,20 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
             vd.set_session_isolation(isolation.clone());
             // Slot-scoped: preempt only a prior session on THIS client's slot. Held before create.
             #[cfg(target_os = "windows")]
-            let _idd_setup_guard = (plan.capture == crate::session_plan::CaptureBackend::IddPush)
-                .then(|| {
-                    let slot = crate::vdisplay::manager::slot_id_for(
-                        endpoint::peer_fingerprint(&conn),
-                        (mode.width, mode.height),
-                    );
-                    crate::vdisplay::manager::vdm().begin_idd_setup(slot, stop.clone())
-                });
+            let _idd_setup_guard =
+                match plan.capture == crate::session_plan::CaptureBackend::IddPush {
+                    false => None,
+                    true => {
+                        // A rejected slot means this host would drive a connector that belongs to
+                        // another one. Refusing the session beats attaching to someone else's display.
+                        let slot = crate::vdisplay::manager::slot_id_for(
+                            endpoint::peer_fingerprint(&conn),
+                            (mode.width, mode.height),
+                        )
+                        .context(REJECTED_SLOT)?;
+                        Some(crate::vdisplay::manager::vdm().begin_idd_setup(slot, stop.clone()))
+                    }
+                };
             let pipe = build_pipeline_with_retry(
                 &mut vd,
                 mode,
@@ -3516,12 +3525,16 @@ pub(super) fn prepare_display(
     vd.set_hdr(hdr);
     vd.set_hw_cursor(cursor_forward);
     vd.set_quit_flag(quit.clone());
-    let _idd_setup_guard =
-        (plan.capture == crate::session_plan::CaptureBackend::IddPush).then(|| {
+    let _idd_setup_guard = match plan.capture == crate::session_plan::CaptureBackend::IddPush {
+        false => None,
+        true => {
+            // As above: a rejected slot is a configuration fault, not something to stream through.
             let slot =
-                crate::vdisplay::manager::slot_id_for(client_identity, (mode.width, mode.height));
-            crate::vdisplay::manager::vdm().begin_idd_setup(slot, stop.clone())
-        });
+                crate::vdisplay::manager::slot_id_for(client_identity, (mode.width, mode.height))
+                    .context(REJECTED_SLOT)?;
+            Some(crate::vdisplay::manager::vdm().begin_idd_setup(slot, stop.clone()))
+        }
+    };
     let pipeline = build_pipeline_with_retry(
         &mut vd,
         mode,
