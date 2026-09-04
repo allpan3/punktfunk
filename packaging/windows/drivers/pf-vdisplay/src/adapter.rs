@@ -96,15 +96,16 @@ pub fn init_adapter(device: WDFDEVICE) -> NTSTATUS {
         caps.MaxDisplayPipelineRate = crate::log::knob("PFVD_PIPELINE_RATE")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(16 * 4096 * 2160 * 144);
-        // A seat carries the one display it owns. Transmission stays WIRED_OTHER: the framework
-        // validates the enum and rejects NETWORK_OTHER (9) outright, header notwithstanding.
+        // Transmission stays WIRED_OTHER: the framework validates the enum and rejects
+        // NETWORK_OTHER (9) outright, header notwithstanding. The monitor count keeps the console's
+        // 16 because a monitor id has to be BELOW it, and the host numbers its first monitor 1.
         diag.TransmissionType = crate::log::knob("PFVD_SEAT_TRANSMISSION")
             .and_then(|v| v.parse::<u32>().ok())
             .map(|v| v as _)
             .unwrap_or(iddcx::IDDCX_TRANSMISSION_TYPE::IDDCX_TRANSMISSION_TYPE_WIRED_OTHER);
         caps.MaxMonitorsSupported = crate::log::knob("PFVD_SEAT_MONITORS")
             .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(1);
+            .unwrap_or(16);
         dbglog!(
             "[pf-vd] adapter: seat devnode ({hardware_ids}) caps={:#x} monitors={} transmission={} rate={}",
             caps.Flags,
