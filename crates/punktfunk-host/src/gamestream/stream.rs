@@ -679,16 +679,22 @@ fn open_gs_virtual_source(
     // Register an unread stop flag so a later session can preempt (3 s grace, then force).
     // Anonymous slot 0 — only another slot-0 connect preempts it.
     #[cfg(target_os = "windows")]
-    let _idd_setup_guard = matches!(
+    let _idd_setup_guard = match matches!(
         crate::session_plan::CaptureBackend::resolve(),
         crate::session_plan::CaptureBackend::IddPush
-    )
-    .then(|| {
-        crate::vdisplay::manager::vdm().begin_idd_setup(
-            0,
-            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        )
-    });
+    ) {
+        false => None,
+        true => {
+            // GameStream has no client identity, so it takes the anonymous slot — which under a
+            // seats reservation resolves to this host's own connector, not a bare 0.
+            let slot = crate::vdisplay::manager::slot_id_for(None, (cfg.width, cfg.height))
+                .context("pf-vdisplay refused this process's connector slot")?;
+            Some(crate::vdisplay::manager::vdm().begin_idd_setup(
+                slot,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            ))
+        }
+    };
     let vout = crate::vdisplay::registry::acquire(
         &mut vd,
         punktfunk_core::Mode {

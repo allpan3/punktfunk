@@ -64,6 +64,10 @@ mod install;
 #[cfg(target_os = "windows")]
 #[path = "windows/interactive.rs"]
 mod interactive;
+// What this host reads of the multi-seat contract; unset means the console host.
+#[cfg(target_os = "windows")]
+#[path = "windows/seat.rs"]
+mod seat;
 // Re-`Hello::launch` must not start a second copy — design/session-game-lifetime.md.
 mod launchreg;
 mod library;
@@ -736,6 +740,7 @@ fn parse_spike(args: &[String]) -> Result<Options> {
     let mut fps = 60u32;
     let mut seconds = 5u32;
     let mut codec = Codec::H265;
+    let mut hdr = false;
     let mut bitrate_mbps = 20u64;
     let mut out: Option<PathBuf> = None;
     let mut loopback = true;
@@ -756,11 +761,12 @@ fn parse_spike(args: &[String]) -> Result<Options> {
                     "synthetic" => Source::Synthetic,
                     "synthetic-nv12" => Source::SyntheticNv12,
                     "portal" => Source::Portal,
-                    "kwin-virtual" => Source::KwinVirtual,
+                    // `kwin-virtual` is what this was called when only KWin had one.
+                    "virtual" | "kwin-virtual" => Source::Virtual,
                     other => {
                         bail!(
                             "unknown --source '{other}' \
-                             (synthetic|synthetic-nv12|portal|kwin-virtual)"
+                             (synthetic|synthetic-nv12|portal|virtual)"
                         )
                     }
                 }
@@ -791,6 +797,7 @@ fn parse_spike(args: &[String]) -> Result<Options> {
                     other => bail!("unknown --codec '{other}' (h264|h265|av1|pyrowave)"),
                 }
             }
+            "--hdr" => hdr = true,
             "--bitrate" => {
                 bitrate_mbps = next()?
                     .parse()
@@ -825,7 +832,7 @@ fn parse_spike(args: &[String]) -> Result<Options> {
             // Concatenated packets; not an FFmpeg-playable stream.
             Codec::PyroWave => "pyrowave",
         };
-        PathBuf::from(format!("/tmp/punktfunk-spike.{ext}"))
+        std::env::temp_dir().join(format!("punktfunk-spike.{ext}"))
     });
 
     Ok(Options {
@@ -835,6 +842,7 @@ fn parse_spike(args: &[String]) -> Result<Options> {
         fps,
         seconds,
         codec,
+        hdr,
         bitrate_bps: bitrate_mbps.saturating_mul(1_000_000),
         out,
         loopback,
@@ -917,17 +925,19 @@ PUNKTFUNK1-HOST OPTIONS:
                                  clients use --connect HOST:PORT). Also PUNKTFUNK_MDNS=0
 
 SPIKE OPTIONS:
-    --source <synthetic|portal|kwin-virtual>
-                                 frame source (default: portal). 'kwin-virtual' creates a
-                                 KWin virtual output at --width x --height and captures it
+    --source <synthetic|synthetic-nv12|portal|virtual>
+                                 frame source (default: portal). 'virtual' creates a platform
+                                 virtual display at --width x --height; 'kwin-virtual' is an alias
     --seconds <N>                capture duration in seconds (default: 5)
     --fps <N>                    target frame rate (default: 60)
     --codec <h264|h265|av1|pyrowave>
                                  encode codec (default: h265). 'pyrowave' also wants
                                  PUNKTFUNK_ENCODER=pyrowave so capture takes the passthrough
+    --hdr                        request HDR capture and a 10-bit encode; on Windows this is
+                                 the seat readiness gate and fails rather than falls back
     --bitrate <MBPS>             target bitrate in Mbps (default: 20)
     --width <W> --height <H>     synthetic source size (default: 1920x1080)
-    --out <PATH>                 raw Annex-B output (default: /tmp/punktfunk-spike.<ext>)
+    --out <PATH>                 raw output (default: the system temp dir)
     --no-loopback                skip the punktfunk_core round-trip verification
     --wire-chunk <BYTES>         PyroWave datagram-aligned packetization at this shard payload
                                  (a real session passes its negotiated shard_payload, e.g. 1408).

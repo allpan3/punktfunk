@@ -3,7 +3,12 @@
 //!
 //! Not the production host path; that is [`crate::pipeline`]. Sources are a
 //! synthetic BGRx pattern, a Windows synthetic NV12 GPU texture, the xdg
-//! ScreenCast portal, or a compositor virtual output.
+//! ScreenCast portal, or a platform virtual display.
+//!
+//! The virtual source is also the readiness gate the multi-seat supervisor runs
+//! before it calls a seat healthy, so on Windows it drives the real path: the
+//! driver owns the pixels and the encoder, and a run that produces no access
+//! unit exits nonzero.
 
 use crate::capture::{self, Capturer, SyntheticCapturer};
 use crate::encode::{self, Codec, EncodedFrame, Encoder};
@@ -24,8 +29,9 @@ pub enum Source {
     SyntheticNv12,
     /// Live monitor via the xdg ScreenCast portal + PipeWire.
     Portal,
-    /// Compositor virtual output at `width`×`height` (zkde_screencast / equivalent).
-    KwinVirtual,
+    /// Platform virtual display at `width`×`height`: a compositor output on
+    /// Linux, a pf-vdisplay monitor with in-driver encode on Windows.
+    Virtual,
 }
 
 #[derive(Clone, Debug)]
@@ -37,6 +43,8 @@ pub struct Options {
     pub fps: u32,
     pub seconds: u32,
     pub codec: Codec,
+    /// Ask for HDR capture and a 10-bit encode. The gate the seat supervisor runs.
+    pub hdr: bool,
     pub bitrate_bps: u64,
     /// Annex-B elementary-stream path (`.h265`/`.h264`/`.obu`).
     pub out: PathBuf,
@@ -48,6 +56,30 @@ pub struct Options {
 }
 
 pub fn run(opts: Options) -> Result<()> {
+    let hdr = opts.hdr || std::env::var("PUNKTFUNK_SPIKE_HDR").as_deref() == Ok("1");
+    if hdr && matches!(opts.source, Source::Synthetic | Source::SyntheticNv12) {
+        anyhow::bail!("--hdr needs a real source: --source portal or --source virtual");
+    }
+    if hdr && !opts.codec.supports_10bit() {
+        anyhow::bail!("--hdr needs a 10-bit codec (h265, av1 or pyrowave)");
+    }
+    if hdr && !encode::can_encode_10bit(opts.codec) {
+        anyhow::bail!(
+            "--hdr asked for {:?} at 10 bits and the resolved encoder cannot do it",
+            opts.codec
+        );
+    }
+    // On Windows the virtual source proves a seat can stream, so a software encoder is a
+    // failure rather than a fallback: the driver is what encodes, and it needs a GPU.
+    #[cfg(target_os = "windows")]
+    if opts.source == Source::Virtual && !encode::resolved_backend_is_gpu() {
+        anyhow::bail!(
+            "--source virtual is the Windows seat gate and needs a GPU encoder; the resolved \
+             backend is software"
+        );
+    }
+    let bit_depth: u8 = if hdr { 10 } else { 8 };
+
     let mut capturer: Box<dyn Capturer> = match opts.source {
         Source::Synthetic => {
             tracing::info!(
@@ -93,15 +125,20 @@ pub fn run(opts: Options) -> Result<()> {
             // Encoder open passes `cursor_blend = false`, so a metadata pointer would composite nowhere.
             capture::open_portal_monitor(want_hdr, false).context("open portal capturer")?
         }
-        Source::KwinVirtual => {
-            let compositor = crate::vdisplay::detect().unwrap_or(crate::vdisplay::Compositor::Kwin);
+        Source::Virtual => {
+            #[cfg(target_os = "windows")]
+            let compositor = crate::vdisplay::Compositor::Kwin;
+            #[cfg(not(target_os = "windows"))]
+            let compositor = crate::vdisplay::detect().context("detect compositor")?;
             tracing::info!(
                 width = opts.width,
                 height = opts.height,
+                hdr,
                 ?compositor,
-                "spike source: virtual output (PUNKTFUNK_COMPOSITOR)"
+                "spike source: platform virtual display"
             );
             let mut vd = crate::vdisplay::open(compositor).context("open virtual display")?;
+            vd.set_hdr(hdr);
             let vout = vd
                 .create(punktfunk_core::Mode {
                     width: opts.width,
@@ -113,8 +150,7 @@ pub fn run(opts: Options) -> Result<()> {
             // negotiates it). On Linux that flag is raw-dmabuf passthrough; overwrite
             // from the spike codec so `--codec pyrowave` does not encode off a
             // non-PyroWave capture.
-            let mut want =
-                capture::OutputFormat::resolve(false, crate::encode::resolved_backend_is_gpu());
+            let mut want = capture::OutputFormat::resolve(hdr, encode::resolved_backend_is_gpu());
             want.pyrowave = opts.codec == Codec::PyroWave;
             capture::capture_virtual_output(
                 vout,
@@ -136,23 +172,61 @@ pub fn run(opts: Options) -> Result<()> {
         height = h,
         format = ?first.format,
         codec = ?opts.codec,
+        bit_depth,
         bitrate_bps = opts.bitrate_bps,
         "opening video encoder"
     );
-    let mut encoder = encode::open_video(
-        opts.codec,
-        first.format,
-        w,
-        h,
-        opts.fps,
-        opts.bitrate_bps,
-        first.is_cuda(),
-        8, // 8-bit; spike has no HDR client
-        encode::ChromaFormat::Yuv420,
-        false, // no cursor to blend
-        4,     // no client decoder; keep the backend multi-slice default
-    )
-    .context("open encoder")?;
+    // Windows IDD-push keeps the pixels in the driver and hands this process access units,
+    // so the frame here carries no bytes and an in-process encoder would encode nothing. The
+    // driver encoder is the real path, and it is what the seat gate has to exercise.
+    #[cfg(target_os = "windows")]
+    let driver_encode = opts.source == Source::Virtual
+        && crate::session_plan::CaptureBackend::resolve()
+            == crate::session_plan::CaptureBackend::IddPush;
+    #[cfg(not(target_os = "windows"))]
+    let driver_encode = false;
+
+    let mut encoder = if driver_encode {
+        #[cfg(target_os = "windows")]
+        {
+            let plan = crate::session_plan::SessionPlan::resolve(
+                bit_depth,
+                hdr,
+                encode::ChromaFormat::Yuv420,
+                opts.codec,
+                false, // IDD composites the pointer
+                false, // no mid-stream cursor-forward flip in a spike
+                false, // no client decoder to slice for
+            );
+            capture::open_driver_encoder(
+                &plan,
+                capturer.as_ref(),
+                (w, h),
+                opts.fps,
+                opts.bitrate_bps,
+                bit_depth,
+                0,
+            )
+            .context("open the in-driver encoder")?
+        }
+        #[cfg(not(target_os = "windows"))]
+        unreachable!("the driver encoder is Windows-only")
+    } else {
+        encode::open_video(
+            opts.codec,
+            first.format,
+            w,
+            h,
+            opts.fps,
+            opts.bitrate_bps,
+            first.is_cuda(),
+            bit_depth,
+            encode::ChromaFormat::Yuv420,
+            false, // no cursor to blend
+            4,     // no client decoder; keep the backend multi-slice default
+        )
+        .context("open encoder")?
+    };
 
     // Also the gate for `supports_chunked_poll()` (needs `PUNKTFUNK_PYROWAVE_STREAMED_AU=1`).
     if let Some(c) = opts.wire_chunk {
@@ -180,20 +254,43 @@ pub fn run(opts: Options) -> Result<()> {
     let mut stats = Stats::default();
 
     let mut frame = first;
+    let deadline = started + std::time::Duration::from_secs(u64::from(opts.seconds));
     loop {
-        encoder.submit(&frame).context("encoder submit")?;
-        stats.submitted += 1;
+        // The in-driver encoder is fed by the driver, not by this process: there is nothing to
+        // submit and nothing buffered to flush, so the run is bounded by the clock and the host
+        // only collects what comes out.
+        if !driver_encode {
+            encoder.submit(&frame).context("encoder submit")?;
+            stats.submitted += 1;
+        }
         drain_encoder(encoder.as_mut(), &mut sink, lb.as_mut(), &mut stats)?;
-        if stats.submitted >= target_frames {
+        let done = if driver_encode {
+            Instant::now() >= deadline
+        } else {
+            stats.submitted >= target_frames
+        };
+        if done {
             break;
         }
         frame = capturer.next_frame().context("capture frame")?;
     }
 
-    // NVENC buffers frames internally even at delay=0 — flush and drain the tail.
-    encoder.flush().context("encoder flush")?;
+    if !driver_encode {
+        // NVENC buffers frames internally even at delay=0 — flush and drain the tail.
+        encoder.flush().context("encoder flush")?;
+    }
     drain_encoder(encoder.as_mut(), &mut sink, lb.as_mut(), &mut stats)?;
     sink.flush().context("flush output file")?;
+
+    // The readiness question this command answers: did the whole chain actually produce
+    // something? A run that captured and encoded nothing has exited 0 until now.
+    if stats.encoded == 0 || stats.bytes_out == 0 {
+        anyhow::bail!(
+            "capture ran for {}s and the encoder produced no access unit — the display or the \
+             encoder is not working on this desktop",
+            opts.seconds
+        );
+    }
 
     let elapsed = started.elapsed().as_secs_f64();
     tracing::info!(

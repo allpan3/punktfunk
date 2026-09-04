@@ -15,7 +15,6 @@
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -42,11 +41,22 @@ use super::{Mode, VirtualDisplay, VirtualOutput};
 const PF_VDISPLAY_INTERFACE: GUID =
     GUID::from_u128(pf_driver_proto::PF_VDISPLAY_INTERFACE_GUID_U128);
 
-/// Per-session `u64` for `IOCTL_ADD`/`IOCTL_REMOVE`. Collision safety lives in the host refcount
-/// manager (a stale session cannot REMOVE a live one), so a monotonic counter is enough.
-static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
-fn next_session_id() -> u64 {
-    NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed)
+/// `PFSLOT` namespace, so a slot key can never collide with a key from an
+/// older host that still counts monotonically.
+const SLOT_SESSION_PREFIX: u64 = 0x5046_534c_4f54_0000;
+
+/// The driver's key for a monitor, derived from the connector it sits on.
+///
+/// An `IOCTL_ADD` whose key is already live departs the incumbent monitor, and
+/// a monotonic counter starts at 1 in every process — so a second host's first
+/// ADD used to tear down the first host's display. Keying on the connector
+/// makes that impossible: two hosts only share a key if they are fighting over
+/// one connector, which the slot plan and the instance mutex already prevent.
+///
+/// A restarted owner reclaiming its own connector still displaces the orphan it
+/// left behind, which is what recovery wants.
+fn session_id_for(preferred_monitor_id: u32) -> u64 {
+    SLOT_SESSION_PREFIX | u64::from(preferred_monitor_id)
 }
 
 /// One METHOD_BUFFERED `DeviceIoControl`. Empty `input`/`output` are allowed; `bytemuck` at the
@@ -630,8 +640,33 @@ impl VdisplayDriver for PfVdisplayDriver {
             info.protocol_version,
             watchdog_s
         );
-        // CLEAR_ALL only on the first open of the process. A reopen can race sessions that still
-        // believe they are live; an unconditional CLEAR_ALL would raze them.
+        // Per-version gaps. Bumps since v3 are additive; a blanket `< PROTOCOL_VERSION` named
+        // the wrong missing capability (told a v4 driver it lacked a v4 feature).
+        if info.protocol_version < 4 {
+            tracing::warn!(
+                "pf-vdisplay protocol {}: driver lacks the in-place mid-stream resize \
+                 (IOCTL_UPDATE_MODES, added in v4) — every mid-stream resize costs a monitor \
+                 re-arrival (one hotplug per switch) until the driver is updated",
+                info.protocol_version
+            );
+        }
+        if info.protocol_version < 5 {
+            tracing::warn!(
+                "pf-vdisplay protocol {}: driver lacks the IddCx hardware-cursor channel (added in \
+                 v5) — the pointer stays composited into the captured frame",
+                info.protocol_version
+            );
+        }
+        if info.protocol_version < 6 {
+            tracing::info!(
+                "pf-vdisplay protocol {}: driver lacks the mid-stream cursor-forward flip \
+                 (IOCTL_SET_CURSOR_FORWARD, added in v6) — the cursor model declared at monitor ADD \
+                 stands for the whole session",
+                info.protocol_version
+            );
+        }
+        // CLEAR_ALL needs sole ownership of the device. A reopen races sessions this process
+        // still believes live, and under a seats reservation another host owns monitors here.
         if !reap_orphans {
             reap_ghost_monitors();
             return Ok((device, watchdog_s, info.protocol_version));
@@ -659,7 +694,7 @@ impl VdisplayDriver for PfVdisplayDriver {
         client_hdr: Option<pf_frame::HdrMeta>,
         hw_cursor: bool,
     ) -> Result<AddedMonitor> {
-        let session_id = next_session_id();
+        let session_id = session_id_for(preferred_monitor_id);
         // EDID CTA HDR block; all-zero = unknown → driver defaults (also what a driver that
         // reads only the legacy 24-byte prefix does).
         let (max_luminance_nits, max_frame_avg_nits, min_luminance_millinits) = client_hdr
@@ -1120,6 +1155,15 @@ mod tests {
     use super::*;
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn reserved_session_ids_are_stable_and_slot_scoped() {
+        assert_eq!(session_id_for(0), SLOT_SESSION_PREFIX);
+        assert_eq!(session_id_for(12), SLOT_SESSION_PREFIX | 12);
+        assert_ne!(session_id_for(12), session_id_for(13));
+        // Every key is far above any counter an older host could reach.
+        assert!(session_id_for(15) > u64::from(u32::MAX));
+    }
 
     /// A refusal must decode as a refusal, carrying its reason. PnP Status after a refused
     /// disable still reads `OK` and must never decode as `Reloaded`.
