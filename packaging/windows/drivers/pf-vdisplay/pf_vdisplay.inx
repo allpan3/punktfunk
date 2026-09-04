@@ -27,11 +27,11 @@ DriverVer=
 ; SPIKE E1b: the bare id a per-session SWD devnode binds by, the shape RdpIdd uses
 ; (SWD\REMOTEDISPLAYENUM\RDPIDD_INDIRECTDISPLAY&SESSIONID_N, hardware id RdpIdd_IndirectDisplay).
 ; Additive: the Root\ line above is untouched, so the shipped console device binds exactly as before.
-%DeviceName%=pf_vdisplay_Install, pf_vdisplay_IndirectDisplay
-; SPIKE E1c: this driver DOES outrank the inbox one for `RdpIdd_IndirectDisplay`, and binding it is
-; what makes a seat session run on a pf-vdisplay display with nothing patched. Claiming it takes
-; over EVERY RDP session on the machine, so shipping it belongs behind an install choice.
-%DeviceName%=pf_vdisplay_Install, RdpIdd_IndirectDisplay
+%DeviceName%=pf_vdisplay_Seat_Install, pf_vdisplay_IndirectDisplay
+; SPIKE E1c: this driver outranks the inbox one for `RdpIdd_IndirectDisplay`, and binding it is what
+; makes a seat session run on a pf-vdisplay display with nothing patched. Claiming it takes over
+; EVERY RDP session on the machine, so shipping it belongs behind an install choice.
+%DeviceName%=pf_vdisplay_Seat_Install, RdpIdd_IndirectDisplay
 
 [SourceDisksFiles]
 pf_vdisplay.dll=1
@@ -56,6 +56,32 @@ HKR, , "UpperFilters", %REG_MULTI_SZ%, "IndirectKmd"
 ; ACE (SudoVDA ships one for its user-mode host): the control plane creates/removes monitors and
 ; opens the encoder on the sealed AU section (IOCTL_SET_ENCODE), so it is not for unprivileged callers.
 HKR, , "Security", , "D:P(A;;GA;;;SY)(A;;GA;;;BA)"
+
+; =================== seat (remote-session) device ====================
+; Same driver, one difference that matters: the remoting stack OPENS this device itself, as the
+; session, and a SYSTEM+Admins DACL fails that open with E_ACCESSDENIED — the server reports
+; `IddInterfaceArrivalFailure` and drops the session. RdpIdd ships `D:P(A;;GA;;;WD)` for exactly
+; this reason, so the seat device matches it. The console device keeps the locked-down DACL.
+
+[pf_vdisplay_Seat_Install.NT]
+CopyFiles=UMDriverCopy
+
+[pf_vdisplay_Seat_Install.NT.hw]
+AddReg=pf_vdisplay_SeatDeviceSettings
+
+[pf_vdisplay_SeatDeviceSettings]
+HKR, , "UpperFilters", %REG_MULTI_SZ%, "IndirectKmd"
+HKR, , "Security", , "D:P(A;;GA;;;WD)"
+
+[pf_vdisplay_Seat_Install.NT.Services]
+AddService=WUDFRd,0x000001fa,WUDFRD_ServiceInstall
+
+[pf_vdisplay_Seat_Install.NT.Wdf]
+UmdfService=pf_vdisplay, pf_vdisplay_Install
+UmdfServiceOrder=pf_vdisplay
+UmdfKernelModeClientPolicy=AllowKernelModeClients
+UmdfHostProcessSharing=ProcessSharingDisabled
+UmdfFileObjectPolicy=AllowNullAndUnknownFileObjects
 
 [pf_vdisplay_Install.NT.Services]
 AddService=WUDFRd,0x000001fa,WUDFRD_ServiceInstall
