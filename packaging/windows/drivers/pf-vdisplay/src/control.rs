@@ -60,6 +60,14 @@ pub unsafe fn dispatch(request: WDFREQUEST, ioctl_code: u32) {
             let reply = crate::encode_probe::status();
             write_output_prefix_complete(request, &reply, size_of::<control::EncodeProbeReply>());
         }
+        // The remoting stack drives a seat display over RdpIdd's own private opcodes and treats
+        // STATUS_NOT_FOUND as "this is not a display driver" (`RDPIDD_OPCODE_TYPE_BIND_DRIVER` ->
+        // `IddInterfaceArrivalFailure`). Log what it asks for and answer, so the protocol it needs
+        // can be learnt from the trace rather than guessed. The console device still refuses.
+        _ if crate::adapter::is_seat_role() => {
+            dbglog!("[pf-vd] seat: unhandled IOCTL {ioctl_code:#010x} - answering SUCCESS");
+            request.complete(STATUS_SUCCESS);
+        }
         _ => request.complete(STATUS_NOT_FOUND),
     }
 }
