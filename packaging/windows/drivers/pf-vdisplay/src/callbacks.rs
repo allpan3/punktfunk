@@ -100,23 +100,27 @@ pub unsafe extern "C" fn adapter_init_finished(
         if let Some((id, ..)) = made
             && let Some(object) = crate::registry::find(|m| m.id == id).and_then(|m| m.object())
         {
-            let mut path = pod_init!(iddcx::IDDCX_DISPLAYCONFIGPATH);
-            path.Size = core::mem::size_of::<iddcx::IDDCX_DISPLAYCONFIGPATH>() as u32;
+            let mut path = pod_init!(iddcx::IDDCX_DISPLAYCONFIGPATH2);
+            path.Size = core::mem::size_of::<iddcx::IDDCX_DISPLAYCONFIGPATH2>() as u32;
+            path.Flags = iddcx::IDDCX_DISPLAYCONFIGPATH2_FLAGS::IDDCX_DISPLAYCONFIGPATH2_FLAGS_MODE_VALID
+                | iddcx::IDDCX_DISPLAYCONFIGPATH2_FLAGS::IDDCX_DISPLAYCONFIGPATH2_FLAGS_MONITOR_SCALE_FACTOR_VALID;
             path.MonitorObject = object;
-            path.Resolution.cx = w;
-            path.Resolution.cy = h;
-            path.Rotation = 1; // DISPLAYCONFIG_ROTATION_IDENTITY
-            path.RefreshRate.Numerator = hz;
-            path.RefreshRate.Denominator = 1;
-            path.VSyncFreqDivider = 1;
+            path.Mode.Resolution.cx = w;
+            path.Mode.Resolution.cy = h;
+            path.Mode.Rotation = 1; // DISPLAYCONFIG_ROTATION_IDENTITY
+            path.Mode.RefreshRate.Numerator = hz;
+            path.Mode.RefreshRate.Denominator = 1;
+            path.Mode.VSyncFreqDivider = 1;
+            path.Mode.MonitorColorMode =
+                iddcx::IDDCX_DISPLAYCONFIG_MONITOR_COLORMODE::IDDCX_DISPLAYCONFIG_MONITOR_COLORMODE_SDR;
             path.MonitorScaleFactor = 100;
-            let args = iddcx::IDARG_IN_ADAPTERDISPLAYCONFIGUPDATE {
+            let args = iddcx::IDARG_IN_ADAPTERDISPLAYCONFIGUPDATE2 {
                 PathCount: 1,
                 pPaths: &raw mut path,
             };
             // SAFETY: `adapter` is the object this callback was handed; `args`/`path` are live
             // locals the DDI reads synchronously.
-            let st = unsafe { wdk_iddcx::IddCxAdapterDisplayConfigUpdate(adapter, &args) };
+            let st = unsafe { wdk_iddcx::IddCxAdapterDisplayConfigUpdate2(adapter, &args) };
             dbglog!("[pf-vd] seat adapter: display config update -> {st:#x}");
         }
     }
