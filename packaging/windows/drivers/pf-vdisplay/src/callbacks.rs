@@ -133,10 +133,20 @@ fn present_seat_display() {
             PathCount: 1,
             pPaths: &raw mut path,
         };
-        // SAFETY: `adapter` is the object this callback was handed; `args`/`path` are live
-        // locals the DDI reads synchronously.
-        let st = unsafe { wdk_iddcx::IddCxAdapterDisplayConfigUpdate2(adapter, &args) };
-        dbglog!("[pf-vd] seat adapter: display config update -> {st:#x}");
+        // The session's display stack is still coming up, and a config published before it is
+        // ready is accepted and then ignored: no swap chain, and the stack discards the display.
+        // Republishing is free once one has landed, so repeat until it does.
+        for attempt in 0..8 {
+            // SAFETY: `adapter` is the stashed adapter object; `args`/`path` are live locals the
+            // DDI reads synchronously.
+            let st = unsafe { wdk_iddcx::IddCxAdapterDisplayConfigUpdate2(adapter, &args) };
+            let live = crate::registry::find(|m| m.id == id).is_some_and(|m| m.has_swap_chain());
+            dbglog!("[pf-vd] seat: display config #{attempt} -> {st:#x} (swap={live})");
+            if live {
+                break;
+            }
+            std::thread::sleep(core::time::Duration::from_millis(400));
+        }
     }
 }
 

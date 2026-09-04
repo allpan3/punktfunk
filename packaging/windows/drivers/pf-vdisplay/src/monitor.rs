@@ -238,6 +238,11 @@ impl Monitor {
     }
 
     /// The IddCx handle — `None` until `IddCxMonitorCreate` returned.
+    /// True once the OS has assigned this monitor a swap chain — the seat bring-up waits on it.
+    pub fn has_swap_chain(&self) -> bool {
+        lock(&self.swap).is_some()
+    }
+
     pub fn object(&self) -> Option<iddcx::IDDCX_MONITOR> {
         self.object.get().map(|o| o.0)
     }
