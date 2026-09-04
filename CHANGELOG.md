@@ -42,6 +42,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **Multi-seat contract for the opt-in seats add-on.** With `HKLM\SOFTWARE\Punktfunk\Seats`
+  present, display connectors 12 through 15 are reserved, and a host given
+  `PUNKTFUNK_SEAT_SESSION`, `PUNKTFUNK_SEAT_ID` and `PUNKTFUNK_SEAT_DISPLAY_SLOT` owns one of
+  them, launches into its own Windows session and mints its own audio endpoints. Nothing
+  changes without the marker, and the new Multi-seat contract page is the reference.
 - **Decky: Punktfunk hosts in Steam's "Play from" menu.** The plugin patches
   `/library/app/:appid`, lists hosts whose library carries `steam:<appid>` in the Play button's
   ▾ menu, re-dresses Steam's Play button as Stream while one is chosen, and streams under a
@@ -198,6 +203,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **`spike --source virtual` encodes again on Windows.** It fed the driver's now-empty CPU
+  frame to an in-process encoder and still exited 0; it uses the in-driver encoder now and
+  fails when no access unit comes out. The source is renamed from `kwin-virtual`, which stays
+  as an alias, and `--hdr` replaces the portal-only environment variable.
 - **HDR plus 4:4:4 carries full chroma again on Windows.** The in-driver encoder took P010 for
   every HDR session, so NVENC emitted 4:2:0 while the `SET_ENCODE` reply still promised 4:4:4.
   Nothing to do: such a session now opens on the packed 10-bit RGB input.
