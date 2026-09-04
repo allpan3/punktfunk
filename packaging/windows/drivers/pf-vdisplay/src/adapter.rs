@@ -78,6 +78,7 @@ pub fn init_adapter(device: WDFDEVICE) -> NTSTATUS {
     // SAFETY: `device` is the live WDFDEVICE this D0 entry is initialising, which is the contract
     // `query_hardware_ids` requires.
     let hardware_ids = unsafe { pf_umdf_util::wdf::query_hardware_ids(device) };
+    caps.MaxMonitorsSupported = 16;
     if hardware_ids.contains("pf_vdisplay_indirectdisplay") {
         // A remote adapter must also set USE_SMALLEST_MODE — IddCx rejects the pair
         // REMOTE_SESSION_DRIVER-without-it as STATUS_NOT_SUPPORTED. FP16 stays off: it is a
@@ -94,19 +95,26 @@ pub fn init_adapter(device: WDFDEVICE) -> NTSTATUS {
         caps.MaxDisplayPipelineRate = crate::log::knob("PFVD_PIPELINE_RATE")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(16 * 4096 * 2160 * 144);
+        // The kernel miniport validates these two through DxgkDdiSetPreStartPrivateData and fails
+        // adapter start with INVALID_PARAMETER on a bad pair. A seat endpoint is reached over the
+        // network, not a wire, and carries the one display the seat owns.
+        diag.TransmissionType = crate::log::knob("PFVD_SEAT_TRANSMISSION")
+            .and_then(|v| v.parse::<u32>().ok())
+            .map(|v| v as _)
+            .unwrap_or(iddcx::IDDCX_TRANSMISSION_TYPE::IDDCX_TRANSMISSION_TYPE_NETWORK_OTHER);
+        caps.MaxMonitorsSupported = crate::log::knob("PFVD_SEAT_MONITORS")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(1);
         dbglog!(
-            "[pf-vd] adapter: seat devnode ({hardware_ids}) caps={:#x}{}",
+            "[pf-vd] adapter: seat devnode ({hardware_ids}) caps={:#x} monitors={} transmission={} rate={}",
             caps.Flags,
-            if caps_override.is_some() {
-                " (PFVD_SEAT_CAPS)"
-            } else {
-                ""
-            }
+            caps.MaxMonitorsSupported,
+            diag.TransmissionType,
+            caps.MaxDisplayPipelineRate
         );
     } else {
         dbglog!("[pf-vd] adapter: console role (hwids: {hardware_ids})");
     }
-    caps.MaxMonitorsSupported = 16;
     caps.EndPointDiagnostics = diag;
 
     // The adapter WDF object's attributes. Execution/Synchronization must be spelled out: a zeroed
