@@ -74,22 +74,36 @@ pub unsafe fn dispatch(request: WDFREQUEST, ioctl_code: u32) {
     }
 }
 
-/// The private transport the remoting stack drives a seat display over, `RDPIDD_OPCODE_TYPE_*`.
+/// The private transport the remoting stack drives a seat display over.
 ///
-/// One buffered IOCTL carries every opcode: the sub-opcode is a `u32` at input offset 8, and bind
-/// adds a type at 12 (1..3) and flags at 16. `STATUS_NOT_FOUND` reads as "not a display driver"
-/// and an empty output reads as a refusal, so a short zeroed reply is what lets the bind through.
+/// One buffered IOCTL carries every message, and none of it is documented — this layout is read off
+/// the wire and off RdpIdd's own `ProcessIoctl`:
 ///
-/// The layout is read off RdpIdd's own `ProcessIoctl`/`ProcessBindDriver`, not documentation. It is
-/// answered, not implemented: the opcode is logged so an unhandled one shows up as a log line
-/// rather than as a session that dies with no reason.
+/// ```text
+/// +0x00  u64  total message length (equals the input buffer size)
+/// +0x08  u32  opcode
+/// +0x0c  ..   opcode-specific payload
+/// ```
+///
+/// Observed: `0x408` binds the driver and is the only one wanting output (12 bytes); `0x409`,
+/// `0x40a` and `0x40b` follow it and want none. `STATUS_NOT_FOUND` reads as "not a display driver"
+/// and an empty output reads as a refusal, so the reply is a zeroed buffer of the size asked for.
+///
+/// This is ANSWERED, not implemented: the payloads are not understood, so an opcode outside the
+/// observed set is logged rather than silently accepted as understood.
 const IOCTL_RDPIDD_TRANSPORT: u32 = 0x8000_0040;
+const RDPIDD_OPCODES_SEEN: core::ops::RangeInclusive<u32> = 0x408..=0x40b;
 
 fn rdpidd_transport(request: Request) {
-    let (input, in_len) = request.input_bytes(24).unwrap_or_default();
+    let (input, in_len) = request.input_bytes(16).unwrap_or_default();
+    let opcode = input
+        .get(8..12)
+        .and_then(|s| s.try_into().ok())
+        .map_or(0, u32::from_le_bytes);
     let out_len = request.output_buffer_len();
-    let head: String = input.iter().take(24).map(|b| format!("{b:02x}")).collect();
-    dbglog!("[pf-vd] seat: rdpidd transport in={in_len} out={out_len} head={head}");
+    if !RDPIDD_OPCODES_SEEN.contains(&opcode) {
+        dbglog!("[pf-vd] seat: unknown rdpidd opcode {opcode:#x} in={in_len} out={out_len}");
+    }
     let status = if out_len > 0 {
         request.copy_to_output(&vec![0u8; out_len])
     } else {
