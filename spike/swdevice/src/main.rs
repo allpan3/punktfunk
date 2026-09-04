@@ -65,10 +65,8 @@ fn main() {
 
     let session = unsafe {
         let mut s = 0u32;
-        let _ = windows::Win32::System::Threading::ProcessIdToSessionId(
-            windows::Win32::System::Threading::GetCurrentProcessId(),
-            &mut s,
-        );
+        let pid = windows::Win32::System::Threading::GetCurrentProcessId();
+        let _ = windows::Win32::System::RemoteDesktop::ProcessIdToSessionId(pid, &mut s);
         s
     };
     println!("creating enumerator={enumerator} instance={instance} hwid={hwid} from session={session}");
