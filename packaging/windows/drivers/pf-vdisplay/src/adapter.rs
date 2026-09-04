@@ -69,6 +69,15 @@ pub fn init_adapter(device: WDFDEVICE) -> NTSTATUS {
     // with the INF still at UmdfExtensions=IddCx0102. GammaSupport stays NONE (set above). Enum is bindgen
     // ModuleConsts — the variant is a plain-int const assignable straight to the `Flags` field.
     caps.Flags = iddcx::IDDCX_ADAPTER_FLAGS::IDDCX_ADAPTER_FLAGS_CAN_PROCESS_FP16;
+    // SPIKE E1 (multi-seat O1, `design/windows-seat-display-tier.md`): a console adapter's monitors
+    // belong to the console session, so a seat cannot own one. A remote-session adapter's belong to
+    // a remote session. Knob-gated and OFF unless the machine env names it, so the shipped console
+    // install keeps exactly the caps above. Not a shipping shape: one adapter cannot hold both
+    // roles, so production needs a separate seat instance.
+    if crate::log::knob("PFVD_REMOTE_SESSION").is_some() {
+        caps.Flags |= iddcx::IDDCX_ADAPTER_FLAGS::IDDCX_ADAPTER_FLAGS_REMOTE_SESSION_DRIVER;
+        dbglog!("[pf-vd] adapter: REMOTE_SESSION_DRIVER set (PFVD_REMOTE_SESSION spike)");
+    }
     caps.MaxMonitorsSupported = 16;
     caps.EndPointDiagnostics = diag;
 
