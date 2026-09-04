@@ -86,19 +86,10 @@ pub unsafe fn dispatch(request: WDFREQUEST, ioctl_code: u32) {
 const IOCTL_RDPIDD_TRANSPORT: u32 = 0x8000_0040;
 
 fn rdpidd_transport(request: Request) {
-    let dword = |b: &[u8], at: usize| -> u32 {
-        b.get(at..at + 4)
-            .and_then(|s| s.try_into().ok())
-            .map_or(0, u32::from_le_bytes)
-    };
-    let (input, in_len) = request.input_bytes(64).unwrap_or_default();
+    let (input, in_len) = request.input_bytes(24).unwrap_or_default();
     let out_len = request.output_buffer_len();
-    dbglog!(
-        "[pf-vd] seat: rdpidd transport op={} type={} flags={:#x} in={in_len} out={out_len}",
-        dword(&input, 8),
-        dword(&input, 12),
-        dword(&input, 16)
-    );
+    let head: String = input.iter().take(24).map(|b| format!("{b:02x}")).collect();
+    dbglog!("[pf-vd] seat: rdpidd transport in={in_len} out={out_len} head={head}");
     let status = if out_len > 0 {
         request.copy_to_output(&vec![0u8; out_len])
     } else {
