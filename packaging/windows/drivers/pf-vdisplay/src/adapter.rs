@@ -82,7 +82,7 @@ pub fn init_adapter(device: WDFDEVICE) -> NTSTATUS {
         // The roles are exclusive, so the seat adapter declares ONLY the remote role: FP16 is a
         // console-desktop processing cap and pairing the two is what `IddCxAdapterInitAsync`
         // rejects. `PFVD_SEAT_CAPS` overrides the mask while the shape is still being probed.
-        let caps_override = crate::log::knob("PFVD_SEAT_CAPS").and_then(|v| v.parse::<i32>().ok());
+        let caps_override = crate::log::knob("PFVD_SEAT_CAPS").and_then(|v| v.parse::<u32>().ok());
         caps.Flags = caps_override
             .unwrap_or(iddcx::IDDCX_ADAPTER_FLAGS::IDDCX_ADAPTER_FLAGS_REMOTE_SESSION_DRIVER);
         dbglog!(
