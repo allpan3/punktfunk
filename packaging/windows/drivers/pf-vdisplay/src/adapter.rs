@@ -79,12 +79,21 @@ pub fn init_adapter(device: WDFDEVICE) -> NTSTATUS {
     // `query_hardware_ids` requires.
     let hardware_ids = unsafe { pf_umdf_util::wdf::query_hardware_ids(device) };
     if hardware_ids.contains("pf_vdisplay_indirectdisplay") {
-        // The roles are exclusive, so the seat adapter declares ONLY the remote role: FP16 is a
-        // console-desktop processing cap and pairing the two is what `IddCxAdapterInitAsync`
-        // rejects. `PFVD_SEAT_CAPS` overrides the mask while the shape is still being probed.
+        // A remote adapter must also set USE_SMALLEST_MODE — IddCx rejects the pair
+        // REMOTE_SESSION_DRIVER-without-it as STATUS_NOT_SUPPORTED. FP16 stays off: it is a
+        // console-desktop processing cap and the two roles are exclusive. `PFVD_SEAT_CAPS`
+        // overrides the mask while the shape is still being probed.
         let caps_override = crate::log::knob("PFVD_SEAT_CAPS").and_then(|v| v.parse::<u32>().ok());
-        caps.Flags = caps_override
-            .unwrap_or(iddcx::IDDCX_ADAPTER_FLAGS::IDDCX_ADAPTER_FLAGS_REMOTE_SESSION_DRIVER);
+        caps.Flags = caps_override.unwrap_or(
+            iddcx::IDDCX_ADAPTER_FLAGS::IDDCX_ADAPTER_FLAGS_REMOTE_SESSION_DRIVER
+                | iddcx::IDDCX_ADAPTER_FLAGS::IDDCX_ADAPTER_FLAGS_USE_SMALLEST_MODE,
+        );
+        // The OS keeps every active mode inside this bandwidth budget. Our modes report no rate of
+        // their own, so it only has to be non-zero — zero leaves nothing schedulable. Seat-only:
+        // the console adapter shipped with 0 and stays untouched. Pixels/s at 16 × 4K144.
+        caps.MaxDisplayPipelineRate = crate::log::knob("PFVD_PIPELINE_RATE")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(16 * 4096 * 2160 * 144);
         dbglog!(
             "[pf-vd] adapter: seat devnode ({hardware_ids}) caps={:#x}{}",
             caps.Flags,
