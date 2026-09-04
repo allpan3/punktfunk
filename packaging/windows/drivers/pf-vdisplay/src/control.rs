@@ -65,8 +65,16 @@ pub unsafe fn dispatch(request: WDFREQUEST, ioctl_code: u32) {
         // `IddInterfaceArrivalFailure`). Log what it asks for and answer, so the protocol it needs
         // can be learnt from the trace rather than guessed. The console device still refuses.
         _ if crate::adapter::is_seat_role() => {
-            dbglog!("[pf-vd] seat: unhandled IOCTL {ioctl_code:#010x} - answering SUCCESS");
-            request.complete(STATUS_SUCCESS);
+            // A bare success leaves the output empty, and the stack reads that as a refusal, so
+            // fill the buffer it asked for. What it wants in there is the open question.
+            let out_len = request.output_buffer_len();
+            let st = if out_len > 0 {
+                request.copy_to_output(&vec![0u8; out_len])
+            } else {
+                STATUS_SUCCESS
+            };
+            dbglog!("[pf-vd] seat: unhandled IOCTL {ioctl_code:#010x} out={out_len} -> {st:#x}");
+            request.complete(st);
         }
         _ => request.complete(STATUS_NOT_FOUND),
     }
