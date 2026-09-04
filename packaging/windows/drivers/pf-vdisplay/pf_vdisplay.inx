@@ -72,7 +72,7 @@ AddReg=pf_vdisplay_SeatDeviceSettings
 
 [pf_vdisplay_SeatDeviceSettings]
 HKR, , "UpperFilters", %REG_MULTI_SZ%, "IndirectKmd"
-HKR, , "Security", , "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;IU)"
+HKR, , "Security", , "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)"
 
 [pf_vdisplay_Seat_Install.NT.Services]
 AddService=WUDFRd,0x000001fa,WUDFRD_ServiceInstall
