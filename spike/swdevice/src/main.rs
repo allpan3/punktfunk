@@ -119,6 +119,14 @@ fn main() {
         pid: 4,
     };
     let want_remote = args.iter().any(|a| a == "--remote-prop");
+    // The miniport also reads pid 5 and keeps its value; a missing one is tolerated. Setting it is
+    // the last input we have any evidence the kernel looks at.
+    let mut remote5_value: u8 = 0xFF;
+    let remote5_key = DEVPROPKEY {
+        fmtid: windows::core::GUID::from_u128(0x60b193cb_5276_4d0f_96fc_f173abad3ec6),
+        pid: 5,
+    };
+    let want_remote5 = args.iter().any(|a| a == "--remote-prop5");
 
     let mut prop_list: Vec<DEVPROPERTY> = Vec::new();
     if want_session.is_some() {
@@ -145,12 +153,24 @@ fn main() {
             Buffer: (&raw mut remote_value).cast(),
         });
     }
+    if want_remote5 {
+        prop_list.push(DEVPROPERTY {
+            CompKey: DEVPROPCOMPKEY {
+                Key: remote5_key,
+                Store: DEVPROP_STORE_SYSTEM,
+                LocaleName: PCWSTR::null(),
+            },
+            Type: DEVPROP_TYPE_BOOLEAN,
+            BufferSize: 1,
+            Buffer: (&raw mut remote5_value).cast(),
+        });
+    }
     let props = if prop_list.is_empty() {
         None
     } else {
         Some(&prop_list[..])
     };
-    println!("properties: session={want_session:?} remote_prop={want_remote} (target session {session_value})");
+    println!("properties: session={want_session:?} remote_prop={want_remote} remote_prop5={want_remote5} (target session {session_value})");
 
     // SAFETY: every PCWSTR points at a NUL-terminated local that outlives the call and the wait
     // below; `info` is fully initialised with its own `cbSize`; the property buffer outlives it too.
