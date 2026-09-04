@@ -77,13 +77,18 @@ pub unsafe extern "C" fn adapter_init_finished(
                 Some((w.parse().ok()?, h.parse().ok()?, hz.parse().ok()?))
             })
             .unwrap_or((1920u32, 1080u32, 60u32));
+        // The id becomes the monitor's EDID serial, so two seats sharing it present one monitor
+        // identity to the OS and only the first is usable.
+        let monitor_id = crate::log::knob("PFVD_SEAT_MONITOR_ID")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(1);
         let made = crate::monitor::create_monitor(
             0,
             0,
             w,
             h,
             hz,
-            1,
+            monitor_id,
             pf_driver_proto::edid::ClientLuminance {
                 max_nits: 0,
                 max_frame_avg_nits: 0,
