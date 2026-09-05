@@ -1377,11 +1377,13 @@ impl VirtualDisplayManager {
                     gdi = %n,
                     "IDD target activated into a display path"
                 );
-                // ADD only advertises; force the mode so DXGI captures the
-                // requested size. Exclusive: first member captures restore;
-                // later members re-isolate the grown set (never deactivate a
-                // sibling). Primary/Extend leave physicals lit.
-                set_active_mode(n, mode);
+                // ADD only advertises; force the mode so DXGI captures the requested size. CCD
+                // takes it as data; GDI can only pick from an enumeration that has not refreshed
+                // this soon after arrival. Exclusive: first member captures restore, later ones
+                // re-isolate the grown set. Primary/Extend leave physicals lit.
+                if !pf_win_display::win_display::set_active_mode_ccd(added_key, mode) {
+                    set_active_mode(n, mode);
+                }
                 use crate::policy::Topology;
                 let first_member = inner.slots.is_empty();
                 match topology_action() {
@@ -1765,8 +1767,13 @@ impl VirtualDisplayManager {
                     backend = self.driver.name(),
                     "re-arrival target {added_key} -> {n}"
                 );
-                // ADD only advertises; force the mode so DXGI/IDD capture the new size.
-                set_active_mode(n, mode);
+                // ADD only advertises; force the mode so DXGI/IDD capture the new size. CCD first:
+                // it takes the size as data, while GDI can only pick from an enumeration that has
+                // not refreshed this soon after the arrival — which left the path on the old mode,
+                // and on a seat with no swap chain at all.
+                if !pf_win_display::win_display::set_active_mode_ccd(added_key, mode) {
+                    set_active_mode(n, mode);
+                }
                 // 4. Re-isolate the composited set with the NEW target replacing the old — preserving
                 //    the group's first-member restore snapshot. Under the `state` lock (the caller
                 //    holds it and lent us `inner`), as its topology-mutator discipline requires.
