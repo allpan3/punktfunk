@@ -834,6 +834,28 @@ impl VirtualDisplayManager {
                 return Ok(out);
             }
             // Same mode — concurrent-session join (refcount++), no re-arrival.
+            // A monitor the OS never activated carries no GDI name, and a plain join hands that
+            // same dead target back, so the caller's whole retry budget re-reads one failure. The
+            // monitor is live, so run the activation ladder again before joining.
+            let unresolved = match inner.slots.get(&slot) {
+                Some(SlotState::Active { mon, .. }) if mon.gdi_name.is_none() => {
+                    Some(mon.ccd_key())
+                }
+                _ => None,
+            };
+            if let Some(key) = unresolved {
+                if let Some(name) = self.resolve_target_gdi(key) {
+                    tracing::info!(
+                        slot,
+                        target = %key,
+                        gdi_name = %name,
+                        "virtual-display target activated on a later acquire"
+                    );
+                    if let Some(SlotState::Active { mon, .. }) = inner.slots.get_mut(&slot) {
+                        mon.gdi_name = Some(name);
+                    }
+                }
+            }
             let Some(SlotState::Active { mon, refs }) = inner.slots.get_mut(&slot) else {
                 unreachable!("just matched Active");
             };
