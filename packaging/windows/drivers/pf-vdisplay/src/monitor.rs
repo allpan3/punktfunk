@@ -609,6 +609,11 @@ pub fn set_cursor_forward(owner: u32, target_id: u32, enable: bool) -> bool {
 /// departure is only valid for an arrived monitor, and a leaked object pins its slot against the
 /// adapter's monitor budget. The entry is removed before that delete so a concurrent clear or
 /// reap cannot depart the handle being deleted.
+/// The seat placeholder's owner and session. Pid 0 is never a requestor, so it cannot collide
+/// with a host, and the pair is what [`create_monitor`] departs when a real host takes over.
+pub const SEAT_PLACEHOLDER_OWNER: u32 = 0;
+pub const SEAT_PLACEHOLDER_SESSION: u64 = 0;
+
 pub fn create_monitor(
     owner: u32,
     req: &pf_driver_proto::control::AddRequest,
@@ -623,6 +628,17 @@ pub fn create_monitor(
         min_millinits: req.min_luminance_millinits,
     };
     let adapter = crate::adapter::adapter()?;
+    // The seat placeholder exists only so the remoting stack keeps the session alive at adapter
+    // init, before any host exists to say what size the client wants. Once a real host brings its
+    // own monitor it has to go: the OS pins a monitor's settable modes AT ARRIVAL, so leaving it
+    // caps the seat at whatever `PFVD_SEAT_MODE` said and every other client resolution fails the
+    // mode-set. Owner-scoped dedup below cannot reach it, because its owner is not the host's.
+    if owner != SEAT_PLACEHOLDER_OWNER && crate::adapter::is_seat_role() {
+        if registry::find(|m| m.owner == SEAT_PLACEHOLDER_OWNER).is_some() {
+            dbglog!("[pf-vd] seat placeholder departing — the host's monitor owns the mode now");
+            remove_monitor(SEAT_PLACEHOLDER_OWNER, SEAT_PLACEHOLDER_SESSION);
+        }
+    }
     // One identity per owner and session: a re-ADD of a still-live `session_id` departs the
     // stale monitor first, so no duplicate EDID/target lingers. Another owner's same key is
     // a different monitor.

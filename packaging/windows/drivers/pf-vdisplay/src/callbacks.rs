@@ -92,13 +92,15 @@ fn present_seat_display() {
     let monitor_id = crate::log::knob("PFVD_SEAT_MONITOR_ID")
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(1);
-    // Owner 0: this monitor belongs to the driver, not to a host process. No requestor exists —
-    // the OS started the adapter — and pid 0 is never one, so it cannot collide with a real host.
-    // It also keeps the seat display out of the owner-gone reap: it lives with the adapter.
+    // Driver-owned, not any host's: no requestor exists because the OS started the adapter, and
+    // pid 0 is never one. It is a PLACEHOLDER — it exists so the remoting stack keeps the session
+    // at init, and `create_monitor` departs it as soon as a host brings a monitor at the size the
+    // client actually asked for. It also stays out of the owner-gone reap: it lives with the
+    // adapter.
     let made = crate::monitor::create_monitor(
-        0,
+        crate::monitor::SEAT_PLACEHOLDER_OWNER,
         &pf_driver_proto::control::AddRequest {
-            session_id: 0,
+            session_id: crate::monitor::SEAT_PLACEHOLDER_SESSION,
             width: w,
             height: h,
             refresh_hz: hz,
