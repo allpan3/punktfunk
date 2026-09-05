@@ -56,21 +56,39 @@ pub(super) fn exclusive_reassert_ms() -> u64 {
 
 /// Topology for a freshly-created monitor (never `Auto`): console
 /// [`effective_topology`](crate::effective_topology) when configured, else
-/// `PUNKTFUNK_NO_ISOLATE` → `Extend`, otherwise `Exclusive`.
+/// `PUNKTFUNK_NO_ISOLATE` → `Extend`, otherwise `Exclusive`. A seat never
+/// isolates — see [`resolve_topology_action`].
 pub(super) fn topology_action() -> crate::policy::Topology {
     let configured = crate::policy::prefs()
         .configured_effective()
         .map(|_| crate::effective_topology());
-    resolve_topology_action(configured, std::env::var("PUNKTFUNK_NO_ISOLATE").is_ok())
+    resolve_topology_action(
+        configured,
+        std::env::var("PUNKTFUNK_NO_ISOLATE").is_ok(),
+        crate::identity::is_seat_session_marker(
+            std::env::var_os("PUNKTFUNK_SEAT_SESSION").as_deref(),
+        ),
+    )
 }
 
 /// Unconfigured host: `PUNKTFUNK_NO_ISOLATE` → `Extend`, else `Exclusive`.
 /// A configured answer is passed through; the env knob does not override it.
+///
+/// A SEAT is `Extend` whatever it was told. The display topology is one
+/// machine-wide set, not a per-session one, so an isolate deactivates the other
+/// seats' displays and the re-assert watchdog keeps them down — a seat that
+/// starts second then never gets an active path. On a seats box those displays
+/// belong to somebody, the same reason a seat never issues the device-wide
+/// monitor clear.
 fn resolve_topology_action(
     configured: Option<crate::policy::Topology>,
     no_isolate_env: bool,
+    seat: bool,
 ) -> crate::policy::Topology {
     use crate::policy::Topology;
+    if seat {
+        return Topology::Extend;
+    }
     match configured {
         Some(t) => t,
         None if no_isolate_env => Topology::Extend,
@@ -119,11 +137,29 @@ mod tests {
     /// without saying so.
     #[test]
     fn the_unconfigured_topology_rungs_never_yield_auto() {
-        assert_eq!(resolve_topology_action(None, false), Topology::Exclusive);
-        assert_eq!(resolve_topology_action(None, true), Topology::Extend);
         assert_eq!(
-            resolve_topology_action(Some(Topology::Primary), true),
+            resolve_topology_action(None, false, false),
+            Topology::Exclusive
+        );
+        assert_eq!(resolve_topology_action(None, true, false), Topology::Extend);
+        assert_eq!(
+            resolve_topology_action(Some(Topology::Primary), true, false),
             Topology::Primary
+        );
+    }
+
+    /// A seat extends whatever it was told: isolating deactivates the other
+    /// seats' displays, and the re-assert watchdog keeps them down.
+    #[test]
+    fn a_seat_never_isolates_however_it_is_configured() {
+        assert_eq!(resolve_topology_action(None, false, true), Topology::Extend);
+        assert_eq!(
+            resolve_topology_action(Some(Topology::Exclusive), false, true),
+            Topology::Extend
+        );
+        assert_eq!(
+            resolve_topology_action(Some(Topology::Primary), false, true),
+            Topology::Extend
         );
     }
 }
