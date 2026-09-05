@@ -124,6 +124,22 @@ which driver owns each live seat display, compares both driver dates and warns b
 be lost, and names the Windows edition — a client edition serves one session at a time however
 well the display works.
 
+## Seat audio needs a driver on disk
+
+A seat with no sound card has nothing to loopback-capture, so the host mints its own render
+endpoint per seat. Minting binds Valve's Remote Play streaming drivers, which means
+`SteamStreamingSpeakers.inf` and `SteamStreamingMicrophone.inf` have to be present — either
+already bound to a device, or in Steam's driver directory. Steam never has to run. Without them
+a seat starts, streams video and is silently mute.
+
+```
+powershell -File check-seat-audio.ps1
+```
+
+A virtual cable is not a substitute. The wiring plan refuses a cable as a loopback source,
+because capturing one re-records whatever is written into it, and `PUNKTFUNK_MIC_DEVICE` only
+pins the microphone. Both address the microphone, not desktop audio.
+
 ## What the host never knows
 
 How a Windows session is created, which account a seat runs as, that RDP exists, and anything
