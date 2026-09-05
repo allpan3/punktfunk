@@ -327,6 +327,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   forever. It now binds the endpoint its own wiring plan minted. Seat audio also needs Valve's
   Remote Play streaming drivers on disk; `packaging/windows/check-seat-audio.ps1` says whether
   they are there.
+- **A seat mints its own virtual pointer.** The resident HID mouse took pad index 0 on every
+  host, so the second seat on a box was refused the bootstrap mailbox `Global\pfmouse-boot-0`
+  and streamed a cursor-less desktop with no HID display-wake kick. A seat host now names the
+  mouse after the display connector it owns, so nothing is shared; the console host keeps index
+  0 and is unchanged.
 - **The Windows host is per-monitor DPI aware from launch.** Windows hands a DPI-unaware process
   the cursor bitmap for the DPI it was started at, so a host started on a 300 % desktop kept
   forwarding a 96 px pointer onto the 96 DPI virtual display, three times too large on every

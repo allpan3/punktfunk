@@ -2,12 +2,13 @@
 //!
 //! With no pointing device, win32k reports `SM_MOUSEPRESENT` = 0 and DWM never composites
 //! a cursor into the pf-vdisplay frame — `SendInput` still moves an invisible pointer.
-//! One `pf_mouse_0` HID devnode for the host process lifetime makes Windows draw it.
+//! One `pf_mouse_<index>` HID devnode for the host process lifetime makes Windows draw it.
 //! Sessions still inject via [`super::sendinput`]; `punktfunk-host vmouse-spike` drives
 //! the report path here.
 //!
 //! Transport is the sealed pad channel ([`PadChannel`], `design/gamepad-channel-sealing.md`):
-//! unnamed 64-B `MouseShm` duplicated into WUDFHost, bootstrapped via `Global\pfmouse-boot-0`.
+//! unnamed 64-B `MouseShm` duplicated into WUDFHost, bootstrapped via
+//! `Global\pfmouse-boot-<index>` ([`mouse_index_for_slot`] — one host per seat, one index each).
 //! [`ensure_resident`] never drops the devnode; it dies with the host service.
 
 use super::dualsense_windows::{create_swdevice, SwDeviceProfile};
@@ -27,7 +28,26 @@ const OFF_DRIVER_PROTO: usize = core::mem::offset_of!(MouseShm, driver_proto);
 const OFF_DRIVER_HEARTBEAT: usize = core::mem::offset_of!(MouseShm, driver_heartbeat);
 const OFF_PAD_INDEX: usize = core::mem::offset_of!(MouseShm, pad_index);
 
-/// Process-lifetime `pf_mouse_0` plus sealed `MouseShm`. Dropping it removes the pointer.
+/// The reserved display connector a seat host owns; unset on the console.
+/// `docs-site/content/docs/multi-seat-contract.md` is the contract of record.
+const SEAT_SLOT_ENV: &str = "PUNKTFUNK_SEAT_DISPLAY_SLOT";
+const FIRST_SEAT_SLOT: u8 = 12;
+const LAST_SEAT_SLOT: u8 = 15;
+
+/// This host's mouse index, from [`SEAT_SLOT_ENV`]. Every OS name the mouse needs — the
+/// `Global\pfmouse-boot-<i>` mailbox, the `pf_mouse_<i>` devnode, its container id — is
+/// machine-wide, so the several hosts on a seats box must each pick a different `i`. A seat's
+/// connector is already unique to it, so it is the index; the console keeps 0. A slot the
+/// display plane would refuse reads as the console, which is what an ordinary host has always
+/// done.
+fn mouse_index_for_slot(raw: Option<&std::ffi::OsStr>) -> u8 {
+    raw.and_then(std::ffi::OsStr::to_str)
+        .and_then(|slot| slot.parse::<u8>().ok())
+        .filter(|slot| (FIRST_SEAT_SLOT..=LAST_SEAT_SLOT).contains(slot))
+        .unwrap_or(0)
+}
+
+/// Process-lifetime `pf_mouse_<index>` plus sealed `MouseShm`. Dropping it removes the pointer.
 pub struct VirtualMouse {
     /// `None` if `SwDeviceCreate` failed; injection then uses an out-of-band devnode.
     _sw: Option<super::gamepad_raii::SwDevice>,
@@ -37,21 +57,24 @@ pub struct VirtualMouse {
 }
 
 impl VirtualMouse {
-    /// Unnamed DATA + `Global\pfmouse-boot-0`. Stamp index, then magic LAST.
+    /// Unnamed DATA + `Global\pfmouse-boot-<index>` for this host's [`mouse_index_for_slot`].
+    /// Stamp index, then magic LAST.
     pub fn open() -> Result<VirtualMouse> {
-        let boot_name = mouse_boot_name(0);
+        let index = mouse_index_for_slot(std::env::var_os(SEAT_SLOT_ENV).as_deref());
+        let boot_name = mouse_boot_name(index);
         let mut channel = PadChannel::create(boot_name.clone(), SHM_SIZE)?;
         let base = channel.data_base();
         // SAFETY: base points at SHM_SIZE writable bytes; the OFF_* offsets are in range. Index
         // first, magic LAST — the same publish order the pads use.
         unsafe {
-            std::ptr::write_unaligned(base.add(OFF_PAD_INDEX) as *mut u32, 0u32);
+            std::ptr::write_unaligned(base.add(OFF_PAD_INDEX) as *mut u32, u32::from(index));
             std::ptr::write_unaligned(base as *mut u32, MOUSE_MAGIC);
         }
+        let instance = format!("pf_mouse_{index}");
         let (hsw, instance_id) = match create_swdevice(&SwDeviceProfile {
-            instance: "pf_mouse_0",
+            instance: &instance,
             container_tag: 0x5046_4D4F, // "PFMO" — never grouped with a pad's container
-            container_index: 0,
+            container_index: index,
             hwid: "pf_mouse",
             // Virtual identity (PF:MO). USB tokens are inert for a mouse; shared profile = one path.
             usb_vid_pid: "VID_5046&PID_4D4F",
@@ -65,7 +88,11 @@ impl VirtualMouse {
             }
         };
         // Bind to this devnode's serving pid, not the LocalService-writable mailbox.
-        channel.bind_devnode(0, instance_id.clone(), ProofTransport::HidSerialString);
+        channel.bind_devnode(
+            u32::from(index),
+            instance_id.clone(),
+            ProofTransport::HidSerialString,
+        );
         let _sw = hsw.map(super::gamepad_raii::SwDevice::new);
         channel.deliver_eager(Duration::from_millis(1500));
         Ok(VirtualMouse {
@@ -376,4 +403,39 @@ pub fn channel_proof_probe() -> Result<()> {
         ),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    /// Two seat hosts must never derive the same mouse index, and the console keeps 0.
+    #[test]
+    fn only_a_reserved_seat_connector_moves_the_mouse_off_index_zero() {
+        assert_eq!(mouse_index_for_slot(None), 0);
+        for refused in [
+            "", "0", "11", "16", "255", "999", "12.0", "-1", " 12", "12 ",
+        ] {
+            assert_eq!(
+                mouse_index_for_slot(Some(OsStr::new(refused))),
+                0,
+                "{refused}"
+            );
+        }
+        let mut seen = Vec::new();
+        for slot in FIRST_SEAT_SLOT..=LAST_SEAT_SLOT {
+            let index = mouse_index_for_slot(Some(OsStr::new(&slot.to_string())));
+            assert_eq!(index, slot);
+            assert!(
+                !seen.contains(&index),
+                "seat slot {slot} reused index {index}"
+            );
+            seen.push(index);
+        }
+        assert!(
+            !seen.contains(&0),
+            "a seat must not land on the console index"
+        );
+    }
 }

@@ -79,6 +79,10 @@ pairing and its own name.
 - **Its audio endpoints are its own.** The minted speaker and microphone devices carry the seat's
   id, so a seat finds its own devices and never adopts a neighbour's. A seat host also leaves the
   machine's default playback and recording devices alone, since those are shared by the whole box.
+- **Its virtual pointer is its own.** The resident HID mouse that keeps Windows drawing a cursor
+  into the stream is named after the seat's connector, so each seat mints its own instead of the
+  second one finding the first's name taken. Virtual gamepads are not partitioned this way yet: a
+  seat can still be refused a pad another host on the box holds.
 - **No status tray.** The tray is a per-user, per-session icon and the supervisor is the control
   surface for seats, so a seat host does not supervise one.
 
