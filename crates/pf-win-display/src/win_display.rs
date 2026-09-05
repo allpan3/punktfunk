@@ -671,8 +671,10 @@ pub fn set_active_mode_ccd(key: CcdTargetKey, mode: Mode) -> bool {
 
 /// Force `gdi_name` to `mode`. ADD only advertises; Windows otherwise lights
 /// an IDD at 1280×720. `CDS_TEST` first so an unadvertised mode leaves the
-/// default instead of failing the session.
-pub fn set_active_mode(gdi_name: &str, mode: Mode) {
+/// default instead of failing the session. `false` if nothing was written —
+/// callers using this as [`set_active_mode_ccd`]'s fallback owe that a log,
+/// or a display left on the wrong mode looks like it was never asked.
+pub fn set_active_mode(gdi_name: &str, mode: Mode) -> bool {
     let wname: Vec<u16> = gdi_name.encode_utf16().chain(std::iter::once(0)).collect();
 
     // Prefer same WxH: exact Hz, else highest advertised ≤ requested, else
@@ -770,7 +772,7 @@ pub fn set_active_mode(gdi_name: &str, mode: Mode) {
             chosen_hz,
             disp_change_reason(test.0)
         );
-        return;
+        return false;
     }
     // SAFETY: same inputs as the CDS_TEST above; both outlive the call.
     // CDS_UPDATEREGISTRY applies the already-validated mode; API only reads.
@@ -794,16 +796,17 @@ pub fn set_active_mode(gdi_name: &str, mode: Mode) {
             mode.height,
             chosen_hz
         );
-    } else {
-        tracing::warn!(
-            result = apply.0,
-            "{gdi_name}: failed to apply {}x{}@{} ({})",
-            mode.width,
-            mode.height,
-            chosen_hz,
-            disp_change_reason(apply.0)
-        );
+        return true;
     }
+    tracing::warn!(
+        result = apply.0,
+        "{gdi_name}: failed to apply {}x{}@{} ({})",
+        mode.width,
+        mode.height,
+        chosen_hz,
+        disp_change_reason(apply.0)
+    );
+    false
 }
 
 /// Decode a failed `ChangeDisplaySettingsExW`. `BADMODE` = not advertised;

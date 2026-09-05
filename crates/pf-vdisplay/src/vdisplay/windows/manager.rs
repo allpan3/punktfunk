@@ -1381,8 +1381,14 @@ impl VirtualDisplayManager {
                 // takes it as data; GDI can only pick from an enumeration that has not refreshed
                 // this soon after arrival. Exclusive: first member captures restore, later ones
                 // re-isolate the grown set. Primary/Extend leave physicals lit.
-                if !pf_win_display::win_display::set_active_mode_ccd(added_key, mode) {
-                    set_active_mode(n, mode);
+                if !pf_win_display::win_display::set_active_mode_ccd(added_key, mode)
+                    && !set_active_mode(n, mode)
+                {
+                    tracing::warn!(
+                        target = %added_key,
+                        mode = %format!("{}x{}@{}", mode.width, mode.height, mode.refresh_hz),
+                        "neither CCD nor GDI wrote the mode — the display stays on the one it runs"
+                    );
                 }
                 use crate::policy::Topology;
                 let first_member = inner.slots.is_empty();
@@ -1630,7 +1636,15 @@ impl VirtualDisplayManager {
             }
         }
         let advertised_ms = t0.elapsed().as_millis() as u64;
-        set_active_mode(&gdi, mode);
+        if !pf_win_display::win_display::set_active_mode_ccd(mon_key, mode)
+            && !set_active_mode(&gdi, mode)
+        {
+            tracing::warn!(
+                target = %mon_key,
+                mode = %format!("{}x{}@{}", mode.width, mode.height, mode.refresh_hz),
+                "neither CCD nor GDI wrote the mode — the display stays on the one it runs"
+            );
+        }
         // Same committed-state predicate as create. Uncommitted within the
         // ceiling routes to the re-arrival fallback.
         let settle_start = Instant::now();
@@ -1771,8 +1785,14 @@ impl VirtualDisplayManager {
                 // it takes the size as data, while GDI can only pick from an enumeration that has
                 // not refreshed this soon after the arrival — which left the path on the old mode,
                 // and on a seat with no swap chain at all.
-                if !pf_win_display::win_display::set_active_mode_ccd(added_key, mode) {
-                    set_active_mode(n, mode);
+                if !pf_win_display::win_display::set_active_mode_ccd(added_key, mode)
+                    && !set_active_mode(n, mode)
+                {
+                    tracing::warn!(
+                        target = %added_key,
+                        mode = %format!("{}x{}@{}", mode.width, mode.height, mode.refresh_hz),
+                        "neither CCD nor GDI wrote the mode — the display stays on the one it runs"
+                    );
                 }
                 // 4. Re-isolate the composited set with the NEW target replacing the old — preserving
                 //    the group's first-member restore snapshot. Under the `state` lock (the caller
