@@ -113,7 +113,11 @@ pub fn insert(
     let mut reg = registry();
     let live: Vec<u32> = reg.monitors.iter().map(|m| m.id).collect();
     let id = vdisplay::resolve_id(&live, preferred_id);
-    if let Some((_, prev)) = reg.mode_history.iter().find(|(i, _)| *i == id) {
+    // Not on a seat: its adapter declares USE_SMALLEST_MODE, so every mode carried over here is one
+    // the OS can pick INSTEAD of the size the client asked for. A seat advertises that size alone.
+    if !crate::adapter::is_seat_role()
+        && let Some((_, prev)) = reg.mode_history.iter().find(|(i, _)| *i == id)
+    {
         vdisplay::union_modes(&mut modes, prev);
     }
     let monitor = Arc::new(Monitor::pending(owner, id, session_id, hw_cursor, modes));
