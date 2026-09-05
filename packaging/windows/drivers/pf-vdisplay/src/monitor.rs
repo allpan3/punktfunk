@@ -600,6 +600,18 @@ pub fn set_cursor_forward(owner: u32, target_id: u32, enable: bool) -> bool {
     true
 }
 
+/// The modes a monitor advertises. A seat rides a remote-session adapter, which IddCx obliges to
+/// declare `USE_SMALLEST_MODE`, and the OS then drives the monitor at the SMALLEST mode on the
+/// list — so a seat offers exactly what the client asked for and nothing else. Adding the usual
+/// fallbacks there pins every seat to the smallest of those instead of the client's resolution.
+fn advertised_modes(requested: Mode) -> Vec<Mode> {
+    let mut modes = vec![requested];
+    if !crate::adapter::is_seat_role() {
+        modes.extend(vdisplay::default_modes());
+    }
+    modes
+}
+
 /// The seat placeholder's owner and session. Pid 0 is never a requestor, so the pair cannot
 /// collide with a host's, and it is what [`create_monitor`] departs when a host takes over.
 pub const SEAT_PLACEHOLDER_OWNER: u32 = 0;
@@ -652,12 +664,11 @@ pub fn create_monitor(
         );
         remove_monitor(owner, session_id);
     }
-    let mut modes = vec![Mode {
+    let modes = advertised_modes(Mode {
         width,
         height,
         refresh_rates: vec![refresh],
-    }];
-    modes.extend(vdisplay::default_modes());
+    });
     let monitor = registry::insert(owner, session_id, hw_cursor, preferred_id, modes);
     let id = monitor.id;
 
@@ -759,12 +770,14 @@ pub fn update_monitor_modes(
     };
     let (old_modes, new_modes) = {
         let mut modes = lock(&m.modes);
-        let mut new_modes = vec![Mode {
+        let mut new_modes = advertised_modes(Mode {
             width,
             height,
             refresh_rates: vec![refresh],
-        }];
-        vdisplay::union_modes(&mut new_modes, &modes);
+        });
+        if !crate::adapter::is_seat_role() {
+            vdisplay::union_modes(&mut new_modes, &modes);
+        }
         (
             core::mem::replace(&mut *modes, new_modes.clone()),
             new_modes,
