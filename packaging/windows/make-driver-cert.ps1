@@ -30,6 +30,10 @@
 .EXAMPLE
   pwsh -File make-driver-cert.ps1
 #>
+# PublicKey.GetRSAPublicKey() is .NET 6+, so Windows PowerShell 5.1 dies in the final report -
+# AFTER the .pfx and both secret files are on disk, which reads as "the cert failed" when it did
+# not. Fail up front instead: this is a pwsh script, as the example above already said.
+#Requires -Version 7.0
 [CmdletBinding()]
 param(
     [string]$OutDir,
@@ -104,8 +108,12 @@ if ($signtool) {
     $out = & $signtool sign /fd SHA256 /f $pfxPath /p $pw $scratch 2>&1 | Out-String
     if ($LASTEXITCODE -eq 0) {
         # Assert the signature is present and carries our subject. /pa chain trust FAILS until the
-        # cert is in the machine's trust stores - expected, and not what this checks.
+        # cert is in the machine's trust stores - expected, and not what this checks. signtool
+        # writes that failure to stderr, and under EAP=Stop the 2>&1 turns it into a terminating
+        # error, so keep EAP off across the call or the self-test dies on its own expected result.
+        $ErrorActionPreference = 'Continue'
         $v = & $signtool verify /pa /v $scratch 2>&1 | Out-String
+        $ErrorActionPreference = 'Stop'
         $selftest = if ($v -match 'punktfunk-driver') { 'PASS (signtool signed; signature carries CN=punktfunk-driver)' }
                     else { 'PASS (signtool signed)' }
     }
