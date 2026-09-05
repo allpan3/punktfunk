@@ -157,6 +157,17 @@ enum Next {
     Reopen(TargetMode),
 }
 
+/// `(bind_plan, assert_plan)`: which endpoint this open captures, and whether it may park the
+/// playback default on it.
+///
+/// `keep_default` normally means both — capture whatever the operator chose and write nothing.
+/// A seat splits them: its planned endpoint is its own minted sink, while the box's defaults are
+/// shared with every other seat, so it binds the plan and still writes nothing.
+fn binding(mode: TargetMode, keep_default: bool, seat: bool) -> (bool, bool) {
+    let assert = mode == TargetMode::Assert;
+    (assert && (!keep_default || seat), assert && !keep_default)
+}
+
 /// First reopen wait after a transient failure. Doubles per miss up to [`REOPEN_BACKOFF_CAP`];
 /// resets on success or an endpoint-set change. Do not retry flat at 2 s — each attempt re-runs
 /// the wiring pass, IPolicyConfig included.
@@ -375,8 +386,8 @@ fn capture_once(
     // 4 bytes per f32 sample, interleaved.
     let block_align = channels as usize * 4;
     let keep_default = audio_control::keep_default_devices();
-    // Only this shape parks the playback default.
-    let assert_plan = mode == TargetMode::Assert && !keep_default;
+    let seat = crate::seat::is_seat_host();
+    let (bind_plan, assert_plan) = binding(mode, keep_default, seat);
     let mut plan = audio_control::wire_now_full(assert_plan);
 
     // Client-only audio wants a silent sink with working loopback. Latch is once per INF-STATE,
@@ -418,15 +429,15 @@ fn capture_once(
         }
     }
     let wiring = &plan.wiring;
-    // Last-resort is Assert-only: Follow captures the operator default, and `judge_default`
-    // never routes Follow onto Steam Speakers (`excluded_from_loopback`).
-    let last_resort = assert_plan && wiring.loopback_last_resort;
+    // Last resort belongs to the plan's pick: a capture that follows the default never lands on
+    // Steam Speakers, because `judge_default` calls them `excluded_from_loopback`.
+    let last_resort = bind_plan && wiring.loopback_last_resort;
     let plan_fp = plan.fingerprint;
 
     let en = DeviceEnumerator::new().context("DeviceEnumerator")?;
     // Echo guard: the plan reserves `mic_render` for the virtual mic. Capturing it streams
     // the client's voice back to them — fall back to the plan's loopback, or refuse.
-    let (device, dev_name, dev_id) = if assert_plan {
+    let (device, dev_name, dev_id) = if bind_plan {
         let Some(ep) = wiring.loopback_render.clone() else {
             // Typed: the plan is a pure function of the set, so wait on the fingerprint.
             return Err(PlanUnsatisfiable::from_plan(&plan).into());
@@ -530,7 +541,7 @@ fn capture_once(
         let _ = r.send(Ok(()));
     }
     tracing::info!(device = %dev_name,
-        follow = matches!(mode, TargetMode::Follow) || keep_default,
+        follow = !bind_plan,
         last_resort,
         // Asked vs settled — they differ only when an upward request was declined.
         requested_hz = rate_hz,
@@ -687,8 +698,9 @@ fn capture_once(
             stats = CaptureStats::default();
         }
 
-        // Default render id changed — operator picked a different output mid-stream.
-        if last_check.elapsed() >= DEFAULT_CHECK_EVERY {
+        // Default render id changed — operator picked a different output mid-stream. A seat has
+        // no operator default: the box's is somebody else's, and following it streams their audio.
+        if !seat && last_check.elapsed() >= DEFAULT_CHECK_EVERY {
             last_check = Instant::now();
             if let Some((_, nid)) = default_render(&en) {
                 if seen_default.as_deref() != Some(nid.as_str()) {
@@ -804,6 +816,23 @@ fn judge_default(wiring: &wiring_plan::Wiring, id: &str) -> DefaultKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The seat rule may only add plan binding. Every console verdict is what it always was.
+    #[test]
+    fn a_seat_binds_the_plan_and_still_parks_nothing() {
+        for keep in [false, true] {
+            for mode in [TargetMode::Assert, TargetMode::Follow] {
+                let was = mode == TargetMode::Assert && !keep;
+                assert_eq!(
+                    binding(mode, keep, false),
+                    (was, was),
+                    "console keep={keep}"
+                );
+            }
+        }
+        // A seat is `keep_default` by construction (`audio_control::keep_default_devices`).
+        assert_eq!(binding(TargetMode::Assert, true, true), (true, false));
+    }
 
     /// Live loopback round trip. Skipped unless `PUNKTFUNK_WASAPI_LIVE=1` and a render endpoint exists.
     #[test]

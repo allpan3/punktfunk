@@ -321,6 +321,12 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **A seat captures its own audio endpoint, not the machine's.** A seat host leaves the box's
+  default playback device alone, and the loopback capture read that as "capture whatever the
+  default is" — so seats on one box shared an endpoint, or found none at all and retried
+  forever. It now binds the endpoint its own wiring plan minted. Seat audio also needs Valve's
+  Remote Play streaming drivers on disk; `packaging/windows/check-seat-audio.ps1` says whether
+  they are there.
 - **The Windows host is per-monitor DPI aware from launch.** Windows hands a DPI-unaware process
   the cursor bitmap for the DPI it was started at, so a host started on a 300 % desktop kept
   forwarding a 96 px pointer onto the 96 DPI virtual display, three times too large on every
