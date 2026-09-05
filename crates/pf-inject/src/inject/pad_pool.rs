@@ -10,9 +10,13 @@
 //! A session's wire index stays its own; the OS slot is claimed on first frame
 //! and released when the pad (or this map) goes away. Name format is unchanged,
 //! so drivers that parse the index need no change. Lazy claim, not per-session
-//! windows: one session still reaches [`MAX_PADS`]. The pool is process-global
-//! because the names are. A separate live process remains
-//! [`crate::pad_slots::PadCreateFault::IndexOwnedElsewhere`].
+//! windows: one session still reaches [`MAX_PADS`].
+//!
+//! The bitmap is per process but the names are per MACHINE, so on a multi-seat
+//! box every host would otherwise start at 0 and all but one would be refused
+//! [`crate::pad_slots::PadCreateFault::IndexOwnedElsewhere`] — and the wire→slot
+//! map memoizes, so that retry never advances. [`PadSlotPool::claim`] therefore
+//! skips an index whose mailbox already opens.
 //!
 //! Tests in this file pin the contract.
 
@@ -38,11 +42,12 @@ impl PadSlotPool {
         }
     }
 
-    /// Lowest free slot. Not round-robin: a single session still maps wire 0 → slot 0.
+    /// Lowest slot free in this process AND unclaimed on the machine. Not
+    /// round-robin: a lone host still maps wire 0 → slot 0.
     pub fn claim(&self) -> Option<u8> {
         let mut taken = self.lock();
         (0..MAX_PADS).find_map(|i| {
-            (*taken & (1 << i) == 0).then(|| {
+            (*taken & (1 << i) == 0 && !owned_elsewhere(i as u8)).then(|| {
                 *taken |= 1 << i;
                 i as u8
             })
@@ -67,6 +72,50 @@ impl PadSlotPool {
     fn taken_mask(&self) -> u16 {
         *self.lock()
     }
+}
+
+/// Whether another live process on this machine already serves pad index `i`.
+///
+/// The bootstrap mailboxes are `Global\\` names, so they are the machine-wide
+/// record of who owns an index — cheaper and more honest than asking the driver.
+/// A losing create is unrecoverable within a session (the wire→slot map keeps
+/// the slot it was given), so this is checked BEFORE claiming rather than after
+/// failing. Two hosts claiming in the same instant can still both pick one; that
+/// one create fails as before and heals on the next claim, when the winner's
+/// mailbox is visible here.
+#[cfg(windows)]
+fn owned_elsewhere(i: u8) -> bool {
+    use pf_driver_proto::gamepad::{pad_boot_name, xusb_boot_name};
+    [xusb_boot_name(i), pad_boot_name(i)]
+        .iter()
+        .any(|name| mailbox_exists(name))
+}
+
+/// `true` if a section by this name exists. Opening is the only way to ask; the
+/// handle is closed immediately and nothing is mapped.
+#[cfg(windows)]
+fn mailbox_exists(name: &str) -> bool {
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Memory::{OpenFileMappingW, FILE_MAP_READ};
+    let wide = HSTRING::from(name);
+    // SAFETY: `wide` is a live NUL-terminated UTF-16 name for the call. A returned
+    // handle is owned here and closed before this returns; nothing else escapes.
+    unsafe {
+        match OpenFileMappingW(FILE_MAP_READ.0, false, &wide) {
+            Ok(h) if !h.is_invalid() => {
+                let _ = CloseHandle(h);
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Other platforms name pads per process, so an index is this host's to take.
+#[cfg(not(windows))]
+fn owned_elsewhere(_i: u8) -> bool {
+    false
 }
 
 pub fn global() -> &'static PadSlotPool {
