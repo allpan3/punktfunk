@@ -162,6 +162,12 @@ impl Monitor {
         }
     }
 
+    /// Whether [`teardown`](Self::teardown) has run; a waiter stops rather than block on a
+    /// monitor that is going away.
+    pub fn gone(&self) -> bool {
+        self.gone.load(Ordering::Acquire)
+    }
+
     /// Record the render adapter a swap-chain was just assigned on.
     pub fn set_render_luid(&self, luid: windows::Win32::Foundation::LUID) {
         let packed = (i64::from(luid.HighPart) << 32) | i64::from(luid.LowPart);
@@ -594,6 +600,11 @@ pub fn set_cursor_forward(owner: u32, target_id: u32, enable: bool) -> bool {
     true
 }
 
+/// The seat placeholder's owner and session. Pid 0 is never a requestor, so the pair cannot
+/// collide with a host's, and it is what [`create_monitor`] departs when a host takes over.
+pub const SEAT_PLACEHOLDER_OWNER: u32 = 0;
+pub const SEAT_PLACEHOLDER_SESSION: u64 = 0;
+
 /// `IOCTL_ADD`: create + arrive `owner`'s virtual monitor at the requested mode, named by
 /// `req.preferred_monitor_id` (the host's per-client stable id; `0` = lowest free) and
 /// advertising the client display's luminance volume in its EDID (all-zero = the built-in
@@ -621,6 +632,17 @@ pub fn create_monitor(
         min_millinits: req.min_luminance_millinits,
     };
     let adapter = crate::adapter::adapter()?;
+    // The seat placeholder is a display for the remoting stack at adapter init, before any host
+    // exists. It goes as soon as a host brings its own: on a mid-stream re-arrival the OS makes
+    // the placeholder active again and moves the swap chain to it, leaving the host's monitor
+    // without one. The owner-scoped dedup below cannot reach it — its owner is not the host's.
+    if owner != SEAT_PLACEHOLDER_OWNER
+        && crate::adapter::is_seat_role()
+        && registry::find(|m| m.owner == SEAT_PLACEHOLDER_OWNER).is_some()
+    {
+        dbglog!("[pf-vd] seat placeholder departing — the host's monitor drives the seat now");
+        remove_monitor(SEAT_PLACEHOLDER_OWNER, SEAT_PLACEHOLDER_SESSION);
+    }
     // One identity per owner and session: a re-ADD of a still-live `session_id` departs the
     // stale monitor first, so no duplicate EDID/target lingers. Another owner's same key is
     // a different monitor.
