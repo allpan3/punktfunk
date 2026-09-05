@@ -1765,8 +1765,13 @@ impl VirtualDisplayManager {
                     backend = self.driver.name(),
                     "re-arrival target {added_key} -> {n}"
                 );
-                // ADD only advertises; force the mode so DXGI/IDD capture the new size.
-                set_active_mode(n, mode);
+                // ADD only advertises; force the mode so DXGI/IDD capture the new size. CCD first:
+                // it takes the size as data, while GDI can only pick from an enumeration that has
+                // not refreshed this soon after the arrival — which left the path on the old mode,
+                // and on a seat with no swap chain at all.
+                if !pf_win_display::win_display::set_active_mode_ccd(added_key, mode) {
+                    set_active_mode(n, mode);
+                }
                 // 4. Re-isolate the composited set with the NEW target replacing the old — preserving
                 //    the group's first-member restore snapshot. Under the `state` lock (the caller
                 //    holds it and lent us `inner`), as its topology-mutator discipline requires.
