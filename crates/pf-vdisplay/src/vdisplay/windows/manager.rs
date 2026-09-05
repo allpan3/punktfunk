@@ -314,6 +314,19 @@ fn shrink_action(ccd_exclusive: bool, has_saved: bool) -> ShrinkAction {
     }
 }
 
+/// Whether this host runs a seat. A seat's display sits on a remote-session IddCx adapter, which
+/// IddCx obliges to declare `USE_SMALLEST_MODE`: the OS takes the mode from the monitor's
+/// advertised list AT ARRIVAL. Nothing moves a live one, so a seat resizes by re-creating.
+/// Read once — the supervisor sets this before the host starts.
+fn is_seat_host() -> bool {
+    static SEAT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SEAT.get_or_init(|| {
+        super::identity::is_seat_session_marker(
+            std::env::var_os("PUNKTFUNK_SEAT_SESSION").as_deref(),
+        )
+    })
+}
+
 /// Mode `target_id` is actually running, for a caller about to record it.
 /// `requested` is the fallback when the read-back cannot be trusted.
 ///
@@ -736,8 +749,9 @@ impl VirtualDisplayManager {
                 // In-place first: an already-advertised resolution is CCD-forced
                 // on the same monitor (identity, swap-chain, stash survive).
                 // Out-of-list fails fast in `resize_in_place` and falls through
-                // to re-arrival.
-                {
+                // to re-arrival. A seat skips it: the OS there takes its mode
+                // from the arrival list, so nothing reaches a live monitor.
+                if !is_seat_host() {
                     let in_place = {
                         let Some(SlotState::Active { mon, refs }) = inner.slots.get_mut(&slot)
                         else {
@@ -783,6 +797,31 @@ impl VirtualDisplayManager {
                 let Some(SlotState::Active { mon, refs }) = inner.slots.remove(&slot) else {
                     unreachable!("just matched Active");
                 };
+                if is_seat_host() {
+                    // Measured: the OS re-lights a seat display only on a FRESH target. Reusing
+                    // this one — re-arrival, re-create, even a new EDID identity — keeps the old
+                    // mode and yields no swap chain, so the stream goes black. One connector is
+                    // one target, and a seat owns exactly one. Keep the mode instead.
+                    tracing::warn!(
+                        slot,
+                        refs = refs + 1,
+                        current = %format!("{}x{}", mon.mode.width, mon.mode.height),
+                        requested = %format!("{}x{}", mode.width, mode.height),
+                        "a seat cannot resize a live display — keeping the current mode (connect \
+                         at the size you want)"
+                    );
+                    inner.slots.insert(
+                        slot,
+                        SlotState::Active {
+                            mon,
+                            refs: refs + 1,
+                        },
+                    );
+                    let Some(SlotState::Active { mon, .. }) = inner.slots.get(&slot) else {
+                        unreachable!("just inserted Active");
+                    };
+                    return Ok(self.output_for(slot, mon, quit.clone()));
+                }
                 // SAFETY: the `dev` Arc `ensure_device()` returned above is held across this call
                 // (so the handle stays open); `re_add` touches the live topology under the held
                 // `state` lock. `mon` is owned here (removed from the map).
