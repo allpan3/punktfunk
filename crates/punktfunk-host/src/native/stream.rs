@@ -3466,27 +3466,37 @@ fn try_inplace_resize(
         return false;
     }
     trace.mark("presentation_restored");
-    // The driver's pool is still built for the OLD geometry, so it refuses every composed frame
-    // and stays stale until the next SET_ENCODE - which only this re-open sends. Waiting for a
-    // new-size frame first can therefore never succeed. The open wants the geometry, which the
-    // accepted mode already carries, not a frame.
+    let open_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    // The driver's pool is still built for the OLD geometry, so no composed frame passes until
+    // this SET_ENCODE rebuilds it — the frame wait below cannot come first. A re-arrival gets its
+    // swap chain after the arrival, so an open in that window fails for a display about to be
+    // fine: retry to its own deadline rather than drop the resize to a full rebuild.
     let pre_opened = if plan.capture == crate::session_plan::CaptureBackend::IddPush {
-        match crate::capture::open_driver_encoder(
-            &plan,
-            &**capturer,
-            (new_mode.width, new_mode.height),
-            effective_hz,
-            enc_of.enc_kbps(bitrate_kbps) as u64 * 1000,
-            bit_depth,
-            wire_seq_base,
-        ) {
-            Ok(e) => Some(e),
-            Err(e) => {
-                tracing::warn!(error = %format!("{e:#}"),
-                    "resize: re-opening the driver encoder at the new mode failed - full rebuild");
-                return false;
+        let opened = loop {
+            match crate::capture::open_driver_encoder(
+                &plan,
+                &**capturer,
+                (new_mode.width, new_mode.height),
+                effective_hz,
+                enc_of.enc_kbps(bitrate_kbps) as u64 * 1000,
+                bit_depth,
+                wire_seq_base,
+            ) {
+                Ok(e) => break Some(e),
+                Err(e) => {
+                    if std::time::Instant::now() >= open_deadline || quit.load(Ordering::Relaxed) {
+                        tracing::warn!(error = %format!("{e:#}"),
+                            "resize: re-opening the driver encoder at the new mode failed - full rebuild");
+                        break None;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
             }
+        };
+        if opened.is_none() {
+            return false;
         }
+        opened
     } else {
         None
     };
