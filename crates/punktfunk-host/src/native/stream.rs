@@ -2048,6 +2048,13 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                 resize_trace.finish("pipeline_rebuilt");
                 // Reconfigured clears baselines, not the straddling window or slow start.
                 announce_pipeline_gap(&gap_tx, resize_trace.total_slot().load(Ordering::Relaxed));
+                // This resize moved the topology itself, so the watchdog's re-assert lands as a
+                // bump the eviction check below would read as somebody else's. Capture just
+                // rebuilt at the new mode, which is what that check would do anyway.
+                #[cfg(target_os = "windows")]
+                {
+                    seen_reassert_gen = crate::vdisplay::manager::topology_reassert_gen();
+                }
             }
         }
         #[cfg(target_os = "windows")]
@@ -2084,10 +2091,59 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                     trace.finish("pipeline_rebuilt");
                     announce_pipeline_gap(&gap_tx, trace.total_slot().load(Ordering::Relaxed));
                 } else {
-                    return Err(anyhow!(
-                        "exclusive-topology eviction recovery failed — ending the session for a \
-                         clean reconnect (a fresh bring-up re-attaches capture)"
-                    ));
+                    // The in-place recovery proves the OS resumed presenting by waiting for a
+                    // NEWER frame, which an idle desktop never produces — so its failure is not
+                    // evidence the display is gone. Rebuild the pipeline outright instead of
+                    // ending the session, which on an idle desktop just loops the client.
+                    match build_pipeline(
+                        &mut vd,
+                        cur_mode,
+                        bitrate_kbps,
+                        bitrate_auto,
+                        bit_depth,
+                        enc_derive(fec_target.load(Ordering::Relaxed)),
+                        plan,
+                        &quit,
+                        cur_display_gen,
+                        None,
+                        Some(trace.as_ref()),
+                        au_seq,
+                    ) {
+                        Ok(next_pipe) => {
+                            let old_display_gen = cur_display_gen;
+                            // Same mode as before the bounce, so the built bitrate is the one
+                            // already in force: nothing to adopt.
+                            (
+                                capturer,
+                                enc,
+                                frame,
+                                interval,
+                                cur_node_id,
+                                cur_display_gen,
+                                _,
+                            ) = next_pipe;
+                            if let Some(g) = old_display_gen.filter(|g| cur_display_gen != Some(*g))
+                            {
+                                crate::vdisplay::registry::retire(g);
+                            }
+                            enc_src = (frame.format, frame.width, frame.height);
+                            inflight.clear();
+                            last_au_at = std::time::Instant::now();
+                            encoder_resets = 0;
+                            last_forced_idr = Some(std::time::Instant::now());
+                            trace.finish("pipeline_rebuilt");
+                            announce_pipeline_gap(
+                                &gap_tx,
+                                trace.total_slot().load(Ordering::Relaxed),
+                            );
+                        }
+                        Err(e) => {
+                            return Err(e).context(
+                                "exclusive-topology eviction recovery failed, and the full \
+                                 pipeline rebuild after it failed too",
+                            );
+                        }
+                    }
                 }
             }
         }
