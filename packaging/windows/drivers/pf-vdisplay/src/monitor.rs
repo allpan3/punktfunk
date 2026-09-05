@@ -644,17 +644,6 @@ pub fn create_monitor(
         min_millinits: req.min_luminance_millinits,
     };
     let adapter = crate::adapter::adapter()?;
-    // The seat placeholder is a display for the remoting stack at adapter init, before any host
-    // exists. It goes as soon as a host brings its own: on a mid-stream re-arrival the OS makes
-    // the placeholder active again and moves the swap chain to it, leaving the host's monitor
-    // without one. The owner-scoped dedup below cannot reach it — its owner is not the host's.
-    if owner != SEAT_PLACEHOLDER_OWNER
-        && crate::adapter::is_seat_role()
-        && registry::find(|m| m.owner == SEAT_PLACEHOLDER_OWNER).is_some()
-    {
-        dbglog!("[pf-vd] seat placeholder departing — the host's monitor drives the seat now");
-        remove_monitor(SEAT_PLACEHOLDER_OWNER, SEAT_PLACEHOLDER_SESSION);
-    }
     // One identity per owner and session: a re-ADD of a still-live `session_id` departs the
     // stale monitor first, so no duplicate EDID/target lingers. Another owner's same key is
     // a different monitor.
@@ -740,6 +729,18 @@ pub fn create_monitor(
     // before the arrival makes this entry findable by target.
     lock(&monitor.cursor).forward_on = registry::cursor_forward_desired(arrival.target_id);
     let _ = monitor.arrival.set(arrival);
+    // The seat placeholder is the remoting stack's display from adapter init, and it goes only
+    // once the host's monitor has ARRIVED. Departed any earlier the session holds no active path,
+    // and the OS commits none for a monitor arriving into an empty topology. Kept past this point
+    // it would take the swap chain back on a mid-stream re-arrival. Owner-scoped dedup above
+    // cannot reach it — its owner is not the host's.
+    if owner != SEAT_PLACEHOLDER_OWNER
+        && crate::adapter::is_seat_role()
+        && registry::find(|m| m.owner == SEAT_PLACEHOLDER_OWNER).is_some()
+    {
+        dbglog!("[pf-vd] seat placeholder departing — the host's monitor drives the seat now");
+        remove_monitor(SEAT_PLACEHOLDER_OWNER, SEAT_PLACEHOLDER_SESSION);
+    }
     Some((id, arrival.target_id, arrival.luid_low, arrival.luid_high))
 }
 
