@@ -880,9 +880,10 @@ pub fn av1_hardware_decodable(vk: Option<&VulkanDecodeDevice>) -> bool {
 /// Can this machine decode HEVC at all? There is no CPU rung, so a `false` here
 /// means the session would negotiate a codec with no decoder and reconnect.
 ///
-/// Vulkan `DECODE_H265` on the decode family, or (Windows) D3D11 import for DXVA.
-/// Linux always answers `true`: VAAPI is the rung below and asking it costs a
-/// `VADisplay` per Hello, which is too early and too often.
+/// Vulkan `DECODE_H265` on the decode family, or the rung below: VAAPI on Linux,
+/// D3D11 import for DXVA on Windows. The VAAPI answer is probed once per process
+/// ([`crate::video_vaapi_native::hevc_decodable`]) — a machine with neither rung
+/// that advertises HEVC anyway ends its session in a codec-fallback reconnect.
 pub fn hevc_hardware_decodable(vk: Option<&VulkanDecodeDevice>) -> bool {
     if vk.is_some_and(|v| v.video_decode && v.decode_video_caps & VIDEO_CODEC_OP_DECODE_H265 != 0) {
         return true;
@@ -890,8 +891,11 @@ pub fn hevc_hardware_decodable(vk: Option<&VulkanDecodeDevice>) -> bool {
     // Per-platform second answer, bound to a name: a cfg'd `return` is `needless_return` on Windows (`-D warnings`).
     #[cfg(windows)]
     let below = vk.is_some_and(|v| v.d3d11_import);
-    #[cfg(target_os = "linux")]
-    let below = true;
+    #[cfg(all(target_os = "linux", feature = "desktop"))]
+    let below = crate::video_vaapi_native::hevc_decodable(vk.map(|v| v.vendor_id));
+    // No `desktop` feature is no VAAPI rung compiled in at all.
+    #[cfg(all(target_os = "linux", not(feature = "desktop")))]
+    let below = false;
     #[cfg(not(any(target_os = "linux", windows)))]
     let below = false;
     below
@@ -2523,15 +2527,23 @@ mod tests {
     }
 
     /// HEVC has no CPU rung, so the advertisement is a promise about hardware.
-    /// Linux is the exception: VAAPI is the rung below and is not probed here.
+    /// Vulkan `DECODE_H265` keeps that promise on its own; without it the answer
+    /// is whatever the rung below says, which is why it is asked and not assumed.
     #[test]
     fn hevc_is_advertised_only_where_a_hardware_rung_could_take_it() {
         let mut dev = decode_device(0x8086, "test");
         dev.decode_video_caps = VIDEO_CODEC_OP_DECODE_H265;
         assert!(hevc_hardware_decodable(Some(&dev)));
         dev.decode_video_caps = VIDEO_CODEC_OP_DECODE_H264;
-        #[cfg(target_os = "linux")]
-        assert!(hevc_hardware_decodable(Some(&dev)), "VAAPI is below");
+        // Below Vulkan the answer is the machine's, so pin the relationship, not a
+        // constant: on a box with no VAAPI HEVC this must come out false, and that is
+        // the case the old `true` concealed.
+        #[cfg(all(target_os = "linux", feature = "desktop"))]
+        assert_eq!(
+            hevc_hardware_decodable(Some(&dev)),
+            crate::video_vaapi_native::hevc_decodable(Some(dev.vendor_id)),
+            "the Linux answer is the VAAPI probe's"
+        );
         #[cfg(not(target_os = "linux"))]
         {
             assert!(!hevc_hardware_decodable(Some(&dev)));
