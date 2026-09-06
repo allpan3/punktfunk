@@ -877,6 +877,26 @@ pub fn av1_hardware_decodable(vk: Option<&VulkanDecodeDevice>) -> bool {
     d3d11
 }
 
+/// Can this machine decode HEVC at all? There is no CPU rung, so a `false` here
+/// means the session would negotiate a codec with no decoder and reconnect.
+///
+/// Vulkan `DECODE_H265` on the decode family, or (Windows) D3D11 import for DXVA.
+/// Linux always answers `true`: VAAPI is the rung below and asking it costs a
+/// `VADisplay` per Hello, which is too early and too often.
+pub fn hevc_hardware_decodable(vk: Option<&VulkanDecodeDevice>) -> bool {
+    if vk.is_some_and(|v| v.video_decode && v.decode_video_caps & VIDEO_CODEC_OP_DECODE_H265 != 0) {
+        return true;
+    }
+    // Per-platform second answer, bound to a name: a cfg'd `return` is `needless_return` on Windows (`-D warnings`).
+    #[cfg(windows)]
+    let below = vk.is_some_and(|v| v.d3d11_import);
+    #[cfg(target_os = "linux")]
+    let below = true;
+    #[cfg(not(any(target_os = "linux", windows)))]
+    let below = false;
+    below
+}
+
 /// Can this client decode 4:4:4 HEVC — the promise `VIDEO_CAP_444` makes.
 ///
 /// Vulkan only: VAAPI/DXVA/CPU are 4:2:0. Advertising 4:4:4 without a Vulkan
@@ -965,6 +985,18 @@ pub fn decodable_codecs_for(vk: Option<&VulkanDecodeDevice>, decoder_pref: &str)
         tracing::info!(
             "HEVC not advertised: decode is pinned to software and there is no software \
              HEVC decoder in this build"
+        );
+        bits &= !punktfunk_core::quic::CODEC_HEVC;
+    }
+    // Same rule for a device with no HEVC rung: the ladder would end at the CPU,
+    // which has no HEVC, and the session's only exit is a codec-fallback reconnect.
+    if bits & punktfunk_core::quic::CODEC_HEVC != 0
+        && bits & !punktfunk_core::quic::CODEC_HEVC != 0
+        && !hevc_hardware_decodable(vk)
+    {
+        tracing::info!(
+            "HEVC not advertised: no hardware HEVC decode on this device, and there is \
+             no software HEVC decoder in this build"
         );
         bits &= !punktfunk_core::quic::CODEC_HEVC;
     }
@@ -2479,5 +2511,28 @@ mod tests {
         assert!(known_decoder_pref(crate::video_vaapi_native::DECODER_PIN));
         #[cfg(windows)]
         assert!(known_decoder_pref(crate::video_d3d11_native::DECODER_PIN));
+    }
+
+    /// HEVC has no CPU rung, so the advertisement is a promise about hardware.
+    /// Linux is the exception: VAAPI is the rung below and is not probed here.
+    #[test]
+    fn hevc_is_advertised_only_where_a_hardware_rung_could_take_it() {
+        let mut dev = decode_device(0x8086, "test");
+        dev.decode_video_caps = VIDEO_CODEC_OP_DECODE_H265;
+        assert!(hevc_hardware_decodable(Some(&dev)));
+        dev.decode_video_caps = VIDEO_CODEC_OP_DECODE_H264;
+        #[cfg(target_os = "linux")]
+        assert!(hevc_hardware_decodable(Some(&dev)), "VAAPI is below");
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert!(!hevc_hardware_decodable(Some(&dev)));
+            assert!(!hevc_hardware_decodable(None));
+            assert_eq!(decodable_codecs_for(Some(&dev), "auto") & CODEC_HEVC, 0);
+        }
+        #[cfg(windows)]
+        {
+            dev.d3d11_import = true;
+            assert!(hevc_hardware_decodable(Some(&dev)), "DXVA is below");
+        }
     }
 }
