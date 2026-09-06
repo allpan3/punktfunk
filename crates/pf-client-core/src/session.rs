@@ -1294,8 +1294,11 @@ fn pump(
                                 // GPU decode lands inside `display` and this figure
                                 // re-counts it. Recorded for `decode_overlaps_display`.
                                 decode_overlaps = true;
+                                // One sample per stats window, and the wait is on the
+                                // decode thread: 5 ms ≈ a third of a 60 Hz frame. A
+                                // slower decode leaves the sample to the next frame.
                                 if decode_us.is_empty()
-                                    && decoder.wait_hw_decoded(sem, value, 50_000_000)
+                                    && decoder.wait_hw_decoded(sem, value, 5_000_000)
                                 {
                                     decode_us.push(now_ns().saturating_sub(received_ns) / 1000);
                                 }
