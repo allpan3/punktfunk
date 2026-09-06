@@ -62,7 +62,9 @@ impl DsUhidIdentity {
 /// Virtual DualSense on `/dev/uhid`. Drop sends `UHID_DESTROY` and unbinds `hid-playstation`.
 pub struct DualSensePad {
     fd: File,
-    seq: u8,
+    /// Report counter: the low byte is the report's `seq_number`, the whole of it the
+    /// packet sequence at struct offset 11.
+    seq: u32,
     clock: SensorClock,
 }
 

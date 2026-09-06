@@ -507,7 +507,9 @@ pub struct DualSenseUsbip {
     feedback: Arc<Mutex<DsFeedback>>,
     clock: SensorClock,
     pad: u8,
-    seq: u8,
+    /// Report counter: the low byte is the report's `seq_number`, the whole of it the
+    /// packet sequence at struct offset 11.
+    seq: u32,
     _attach: UsbipAttachment,
 }
 

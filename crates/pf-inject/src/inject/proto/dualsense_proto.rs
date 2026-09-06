@@ -195,6 +195,8 @@ pub struct DsState {
     /// The client pad's own battery, stamped into the report by both DualSense and
     /// DualShock 4 serializers. Default is wired-and-full — see [`PadPower`].
     pub power: PadPower,
+    /// Last contact id handed out — see [`DsState::contact_id`].
+    next_contact: u8,
 }
 
 impl DsState {
@@ -230,6 +232,7 @@ impl DsState {
         self.gyro = fresh.gyro;
         self.accel = fresh.accel;
         self.power = fresh.power;
+        self.next_contact = fresh.next_contact;
     }
 
     /// Carry every field that arrives on the rich plane out of `prev`. `from_gamepad` builds
@@ -242,6 +245,7 @@ impl DsState {
         self.gyro = prev.gyro;
         self.accel = prev.accel;
         self.power = prev.power;
+        self.next_contact = prev.next_contact;
     }
 
     /// GameStream/XInput frame → DualSense fields. Invert Y in i16 (XInput `+y` is up, DualSense
@@ -361,11 +365,11 @@ impl DsState {
                 y,
                 ..
             } => {
-                // Two contacts. Clamp the untrusted wire `finger` and keep contact id = slot.
+                // Two contacts; clamp the untrusted wire `finger`.
                 let slot = (finger as usize).min(1);
                 self.touch[slot] = Touch {
                     active,
-                    id: slot as u8,
+                    id: self.contact_id(slot, active),
                     x: scale(x as u32, touch_w),
                     y: scale(y as u32, touch_h),
                 };
@@ -396,7 +400,7 @@ impl DsState {
                 };
                 self.touch[slot] = Touch {
                     active: touch,
-                    id: slot as u8,
+                    id: self.contact_id(slot, touch),
                     x: tx,
                     y: scale(n(y), touch_h),
                 };
@@ -410,6 +414,19 @@ impl DsState {
         }
     }
 
+    /// The 7-bit contact id this slot's point carries, minting a new one on a landing. A real
+    /// pad holds an id for the life of one contact and never reuses it for the next, so a
+    /// tap-tap is two ids; a consumer that compares ids across reports (libScePad-style tap
+    /// detection) reads a fixed id as one long touch. One counter for both points, because an
+    /// id identifies a contact, not a slot. SDL and the kernel read only the active bit.
+    fn contact_id(&mut self, slot: usize, active: bool) -> u8 {
+        if !active || self.touch[slot].active {
+            return self.touch[slot].id;
+        }
+        self.next_contact = self.next_contact.wrapping_add(1) & 0x7F;
+        self.next_contact
+    }
+
     /// `buttons[2]` plus the touchpad-click bit if any [`DsState::touch_click`] slot is held.
     pub fn buttons2_with_click(&self) -> u8 {
         let mut b = self.buttons[2];
@@ -421,9 +438,12 @@ impl DsState {
 }
 
 /// Report `0x01`. Offsets match kernel `struct dualsense_input_report` (id at `r[0]`, so
-/// struct offset N is `r[N + 1]`): x..rz 0–5, seq 6, buttons[4] 7–10, reserved[4] 11–14,
+/// struct offset N is `r[N + 1]`): x..rz 0–5, seq 6, buttons[4] 7–10, packet sequence 11–14,
 /// gyro[3] 15–20, accel[3] 21–26, sensor_timestamp 27–30, reserved2 31, points[2] 32–39.
-pub fn serialize_state(r: &mut [u8; DS_INPUT_REPORT_LEN], st: &DsState, seq: u8, ts: u32) {
+///
+/// `seq` feeds both counters: the byte at struct offset 6 and the 32-bit packet sequence the
+/// kernel calls `reserved` and SDL reads to spot a stale report from a dongle.
+pub fn serialize_state(r: &mut [u8; DS_INPUT_REPORT_LEN], st: &DsState, seq: u32, ts: u32) {
     r[0] = 0x01;
     r[1] = st.lx;
     r[2] = st.ly;
@@ -431,11 +451,12 @@ pub fn serialize_state(r: &mut [u8; DS_INPUT_REPORT_LEN], st: &DsState, seq: u8,
     r[4] = st.ry;
     r[5] = st.l2;
     r[6] = st.r2;
-    r[7] = seq; // seq_number (struct off 6)
+    r[7] = seq as u8; // seq_number (struct off 6)
     r[8] = (st.dpad & 0x0F) | (st.buttons[0] & 0xF0); // off 7: dpad + face buttons
     r[9] = st.buttons[1];
     r[10] = st.buttons2_with_click(); // off 9: PS/touchpad-click/mute; rich pad clicks OR in
     r[11] = st.buttons[3];
+    r[12..16].copy_from_slice(&seq.to_le_bytes()); // packet sequence (struct off 11)
     for (i, v) in st.gyro.iter().enumerate() {
         r[16 + i * 2..18 + i * 2].copy_from_slice(&v.to_le_bytes()); // gyro at struct off 15
     }
@@ -611,7 +632,6 @@ mod tests {
             DS_TOUCH_H,
         );
         assert!(s.touch[0].active);
-        assert_eq!(s.touch[0].id, 0);
         assert_eq!(s.touch[0].x, (DS_TOUCH_W / 2 - 1) / 2); // centre of 0..=959
         assert_eq!(s.touch[0].y, (DS_TOUCH_H - 1) / 2);
         // Right pad, top-right corner → right edge of the RIGHT half, y = 0 (screen top).
@@ -630,7 +650,8 @@ mod tests {
             DS_TOUCH_H,
         );
         assert!(s.touch[1].active);
-        assert_eq!(s.touch[1].id, 1);
+        // Each surface's landing minted its own contact id (see `contact_id`).
+        assert_ne!(s.touch[1].id, s.touch[0].id);
         assert_eq!(s.touch[1].x, DS_TOUCH_W - 1);
         assert_eq!(s.touch[1].y, 0);
         assert!(s.touch_click[1]);
@@ -814,6 +835,40 @@ mod tests {
         // claim the DualShock 4 and Switch codecs make. Status 0 drew a "discharging"
         // battery icon on one family of virtual pad and not the others.
         assert_eq!(r[53], 0x2A);
+    }
+
+    /// A tap, then another tap, is two contact ids — a held id reads as one long touch to a
+    /// consumer that detects taps by comparing ids. Both points draw from one counter: an id
+    /// names a contact, so two live contacts can never share one.
+    #[test]
+    fn each_landing_mints_a_new_contact_id() {
+        let mut s = DsState::neutral();
+        let mut touch = |finger: u8, active: bool| {
+            s.apply_rich(
+                RichInput::Touchpad {
+                    pad: 0,
+                    finger,
+                    active,
+                    x: 100,
+                    y: 100,
+                },
+                DS_TOUCH_W,
+                DS_TOUCH_H,
+            );
+            s.touch[finger as usize].id
+        };
+        let first = touch(0, true);
+        assert_eq!(
+            touch(0, true),
+            first,
+            "one contact keeps its id while it lasts"
+        );
+        touch(0, false);
+        let second = touch(0, true);
+        assert_ne!(second, first, "a second tap is a second contact");
+        let other = touch(1, true);
+        assert_ne!(other, second, "two live contacts never share an id");
+        assert!([first, second, other].iter().all(|id| *id < 0x80), "7-bit");
     }
 
     /// The client pad's battery reaches the report, survives the button frames that rebuild

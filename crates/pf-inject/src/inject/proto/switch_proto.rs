@@ -330,7 +330,9 @@ pub fn switch_mac(index: u8) -> [u8; 6] {
 /// Stick cal: [`STICK_CENTER`] ± [`STICK_RANGE`]. Left = max ++ center ++ min;
 /// right = center ++ min ++ max (`joycon_read_stick_calibration`). User magics
 /// at `0x8010`/`0x801B`/`0x8026` are not `0xB2 0xA1`, so consumers take factory.
-fn flash_blocks() -> [(u32, Vec<u8>); 6] {
+/// `0x6050` colours: body, buttons, then both grips — a Pro Controller's factory
+/// values. Zero there is a black pad with black buttons in every glyph Steam draws.
+fn flash_blocks() -> [(u32, Vec<u8>); 7] {
     let cal_pair = pack12(STICK_RANGE, STICK_RANGE);
     let center_pair = pack12(STICK_CENTER, STICK_CENTER);
     let mut imu = Vec::with_capacity(24);
@@ -344,6 +346,15 @@ fn flash_blocks() -> [(u32, Vec<u8>); 6] {
     }
     [
         (0x6020, imu),
+        (
+            0x6050,
+            vec![
+                0x32, 0x31, 0x32, // body
+                0xFF, 0xFF, 0xFF, // buttons
+                0x32, 0x31, 0x32, // left grip
+                0x32, 0x31, 0x32, // right grip
+            ],
+        ),
         (0x603D, [cal_pair, center_pair, cal_pair].concat()),
         (0x6046, [center_pair, cal_pair, cal_pair].concat()),
         (0x8010, vec![0xFF, 0xFF]),
@@ -584,9 +595,12 @@ mod tests {
         assert_eq!(&d[6..8], &16384u16.to_le_bytes());
         assert_eq!(&d[12..18], &[0; 6]);
         assert_eq!(&d[18..20], &13371u16.to_le_bytes());
-        let gap = spi_flash_read(0x6050, 12);
-        assert_eq!(&gap[..5], &[0x50, 0x60, 0, 0, 12]);
-        assert_eq!(&gap[5..], &[0u8; 12]);
+        // Colours: a black body with black buttons is what zero here draws.
+        let colours = spi_flash_read(0x6050, 12);
+        assert_eq!(&colours[..5], &[0x50, 0x60, 0, 0, 12]);
+        assert_eq!(&colours[5..8], &[0x32, 0x31, 0x32]);
+        assert_eq!(&colours[8..11], &[0xFF, 0xFF, 0xFF]);
+        assert_ne!(&colours[11..], &[0u8; 6]);
     }
 
     /// SDL reads 18 factory bytes at `0x603D` and 22 user bytes at `0x8010` — shapes

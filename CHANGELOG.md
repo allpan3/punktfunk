@@ -338,6 +338,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **A virtual pad's touch contacts, packet sequence and body colour carry real values.** Every
+  new touch mints its own 7-bit contact id where the id used to be the slot index (a tap-tap
+  read as one long touch), the DualSense's 32-bit packet sequence counts instead of staying
+  zero, and a virtual Switch Pro reports the factory colours rather than a black body. Nothing
+  to do; no consumer we know of read the old values.
 - **A virtual DualSense with no battery sample claims wired and full, like its siblings.** It
   reported "discharging, 100 %" where the DualShock 4 and Switch Pro codecs report a wired, full
   pad, so a host shell drew a draining battery for one family of virtual pad and not the others.
