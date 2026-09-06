@@ -329,6 +329,9 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **A damaged AV1 stream fails its access unit instead of the client.** Four panics in the AV1
+  parser — a reserved header bit, a missing size field, an unaligned header and a zero-tile frame
+  group — were reachable from any flipped byte on the wire, so nothing to do but update the client.
 - **H.264 pictures reach the screen on the stream's reorder bound, not a full DPB.** The client
   planner held every decoded picture until the buffer filled — three to five frames of latency on
   a stream that reorders nothing — and NVENC now states that bound, so update host and client

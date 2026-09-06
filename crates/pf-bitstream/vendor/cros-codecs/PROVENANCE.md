@@ -303,5 +303,21 @@ in the future."
     `a_unit_behind_a_broken_frame_header_plans_its_own_header`.
     **Report upstream — not yet filed.**
 
+20. `src/codec/av1/parser.rs` — `parse_obu_header`: `obu_reserved_1bit` set is an
+    error, not an `assert!`. 5.3.2 requires zero, so upstream asserts; a flipped bit on
+    the wire then aborts the decode thread instead of failing the AU.
+
+21. `src/codec/av1/parser.rs` — `parse_obu`: a low-overhead OBU with no size field, and
+    a header that does not end byte-aligned, are errors rather than `assert!`s. Both are
+    reachable from a damaged extension flag.
+
+22. `src/codec/av1/parser.rs` — `parse_tile_group_obu` refuses `num_tiles == 0`. A
+    damaged tile-info OBU can zero either dimension, and the single-tile arm then
+    computes `num_tiles - 1`, which underflows and panics.
+
+    Regression test for 20–22: `tests/damaged_streams.rs`
+    (`a_damaged_stream_is_answered_not_survived_by_luck`), which found all three.
+    **Report upstream — not yet filed.**
+
 Re-sync procedure: fetch the AOSP tree, re-apply this trim, diff `codec/` +
 `bitstream_utils.rs` (expect near-zero conflicts), update the commit pin above.
