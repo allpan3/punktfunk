@@ -27,11 +27,6 @@ pub struct VkRef {
 #[derive(Debug, Clone)]
 pub struct DecodePlanVk {
     pub std_pic: hh::StdVideoDecodeH264PictureInfo,
-    /// Slice NALU byte offsets in the AU as planned, start code included.
-    /// AU-relative, not submission-final: the recording layer packs SLICE
-    /// NALUs only (non-VCL in the decode range hangs VCN) and rebases these
-    /// for Vulkan's `pSliceOffsets`.
-    pub slice_offsets: Vec<u32>,
     /// The slot the decoded picture activates (`pSetupReferenceSlot`).
     pub setup_slot: u8,
     /// Setup-slot identity: this picture's FrameNum/POC, already long-term when
@@ -43,8 +38,15 @@ pub struct DecodePlanVk {
     /// exists for this decode plus remaining DPB residency, and this AU's
     /// `removed` may already have released it.
     pub setup_is_reference: bool,
-    /// The unique referenced pictures across all slices, in first-appearance order.
+    /// Pictures this decode binds: the unique slice-list references in
+    /// first-appearance order, then the rest of the marked DPB. FFmpeg binds
+    /// the whole DPB too — the driver derives its own lists from what it is
+    /// given, so a truncated set is a different DPB.
     pub refs: Vec<VkRef>,
+    /// How many leading [`Self::refs`] the slices name. The caller may drop the
+    /// tail to fit `maxActiveReferencePictures`; dropping into this prefix
+    /// cannot be concealed.
+    pub slice_ref_count: usize,
     /// Pictures this AU's end-of-picture bookkeeping retires while the decode
     /// op still binds them. Release once that op is recorded — never inside
     /// the conversion, and never dropped: a leak per AU reaches
@@ -69,7 +71,6 @@ pub enum PlanToVkError {
     /// A reference id holds no slot — an earlier plan never went through this map.
     UnresolvedReference(PicId),
     Slot(SlotError),
-    OffsetOverflow(usize),
     /// Map DPB depth differs from this plan's `max_dpb_frames` — SPS
     /// renegotiation. Rebuild the video session and its [`SlotMap`]; converting
     /// against the stale map would hand out slot indices the image pool lacks.
@@ -93,9 +94,6 @@ impl std::fmt::Display for PlanToVkError {
                 write!(f, "referenced picture {id} holds no DPB slot in this map")
             }
             PlanToVkError::Slot(err) => write!(f, "slot assignment failed: {err}"),
-            PlanToVkError::OffsetOverflow(offset) => {
-                write!(f, "slice offset {offset} exceeds u32")
-            }
             PlanToVkError::CapacityMismatch { required, capacity } => {
                 write!(
                     f,
@@ -179,6 +177,23 @@ pub fn plan_to_vk(
             });
         }
     }
+    let slice_ref_count = refs.len();
+
+    // Then the rest of the marked DPB, so the driver's own 8.2.4 derivation
+    // sees the DPB the slice headers were written against. A picture this map
+    // never assigned predates it; skipping is not an error.
+    for rp in &plan.dpb_refs {
+        if refs.iter().any(|existing| existing.id == rp.id) {
+            continue;
+        }
+        if let Some(slot) = slots.slot_of(rp.id) {
+            refs.push(VkRef {
+                slot,
+                std: ref_info(rp),
+                id: rp.id,
+            });
+        }
+    }
 
     let pic = &plan.picture;
 
@@ -231,14 +246,6 @@ pub fn plan_to_vk(
         None => setup_ref.FrameNum = pic.frame_num,
     }
 
-    let mut slice_offsets = Vec::with_capacity(plan.slices.len());
-    for slice in &plan.slices {
-        slice_offsets.push(
-            u32::try_from(slice.data.start)
-                .map_err(|_| PlanToVkError::OffsetOverflow(slice.data.start))?,
-        );
-    }
-
     // Mutations last (fn docs). Removals are not applied here.
     // The AU's own picture can appear in `removed`: a non-reference with no
     // free frame buffer is stored-and-evicted in one plan. Assign it, then
@@ -258,12 +265,12 @@ pub fn plan_to_vk(
 
     Ok(DecodePlanVk {
         std_pic,
-        slice_offsets,
         setup_slot,
         setup_ref,
         setup_id,
         setup_is_reference: pic.is_reference,
         refs,
+        slice_ref_count,
         release_after_decode,
     })
 }
@@ -420,6 +427,49 @@ mod tests {
         );
     }
 
+    /// The driver derives its own 8.2.4 lists from `pReferenceSlots`, so the
+    /// bind is the marked DPB, not the truncated per-slice lists. FFmpeg's
+    /// Vulkan hwaccel binds the same set.
+    #[test]
+    fn the_bind_is_the_marked_dpb_not_just_this_aus_reference_lists() {
+        let aus = split_into_aus(TEST_25FPS);
+        let mut planner = H264Planner::new();
+        let mut slots: Option<SlotMap> = None;
+        let mut widened = 0usize;
+
+        for au in &aus {
+            let plan = planner.plan_au(au).expect("the clean vector plans");
+            let slots = slots.get_or_insert_with(|| SlotMap::new(plan.picture.max_dpb_frames));
+            let vk = plan_to_vk(&plan, slots, 0).expect("the clean vector converts");
+
+            let listed: Vec<PicId> = vk.refs[..vk.slice_ref_count].iter().map(|r| r.id).collect();
+            for slice in &plan.slices {
+                for rp in slice.ref_list0.iter().chain(&slice.ref_list1) {
+                    assert!(listed.contains(&rp.id), "a slice-list entry lost its bind");
+                }
+            }
+            for r in &vk.refs {
+                assert!(
+                    plan.dpb_refs.iter().any(|d| d.id == r.id),
+                    "the bind names a picture the marked DPB does not hold"
+                );
+                assert_ne!(r.slot, vk.setup_slot, "a reference aliases the setup slot");
+            }
+            if vk.refs.len() > vk.slice_ref_count {
+                widened += 1;
+            }
+            for id in &vk.release_after_decode {
+                slots.release(*id);
+            }
+        }
+
+        assert!(
+            widened > 0,
+            "this vector must hold marked references the slice lists do not name, \
+             else the test asserts nothing"
+        );
+    }
+
     #[test]
     fn the_full_25fps_vector_converts_with_stable_slots_and_start_code_offsets() {
         let aus = split_into_aus(TEST_25FPS);
@@ -441,17 +491,6 @@ mod tests {
                     "a referenced picture's slot changed while it was referenced"
                 );
                 assert_ne!(r.slot, vk.setup_slot, "a reference aliases the setup slot");
-            }
-
-            assert_eq!(vk.slice_offsets.len(), plan.slices.len());
-            for (offset, slice) in vk.slice_offsets.iter().zip(&plan.slices) {
-                let offset = *offset as usize;
-                assert_eq!(offset, slice.data.start);
-                let at = &au[offset..];
-                assert!(
-                    at.starts_with(&[0, 0, 1]) || at.starts_with(&[0, 0, 0, 1]),
-                    "slice offset {offset} does not sit on a start code"
-                );
             }
 
             assert_eq!(vk.std_pic.frame_num, plan.picture.frame_num);

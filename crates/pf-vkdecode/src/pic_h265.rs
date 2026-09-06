@@ -214,26 +214,39 @@ fn ref_info(rp: &RefPic) -> hh::StdVideoDecodeH265ReferenceInfo {
     std
 }
 
-/// `NumDeltaPocsOfRefRpsIdx`: when the first slice's inline `st_ref_pic_set()`
-/// uses inter-RPS prediction, hardware re-parses those slice bits and needs
-/// `NumDeltaPocs[RefRpsIdx]` of the source candidate to size the
-/// `used_by_curr_pic_flag`/`use_delta_flag` loop (7.4.8); otherwise 0.
+/// `NumDeltaPocsOfRefRpsIdx`: `NumDeltaPocs[RefRpsIdx]` of the candidate the
+/// active RPS predicts from, which sizes the `used_by_curr_pic_flag` /
+/// `use_delta_flag` loop (7.4.8); 0 when the active RPS is not inter-predicted.
+///
+/// Both cases, as FFmpeg fills it: the active RPS is the slice header's own
+/// when `short_term_ref_pic_set_sps_flag` is 0, else `sps[CurrRpsIdx]`.
 fn num_delta_pocs_of_ref_rps_idx(plan: &AuPlan) -> Result<u8, PlanToVkH265Error> {
     let hdr = &plan
         .slices
         .first()
         .expect("caller validated the plan holds slices")
         .header;
-    // Inline means CurrRpsIdx == num_short_term_ref_pic_sets (8.3.2 NOTE 2); an
-    // SPS-indexed RPS re-parses nothing in the slice header.
-    let inline = !hdr.short_term_ref_pic_set_sps_flag
-        && hdr.curr_rps_idx == plan.sps.num_short_term_ref_pic_sets;
-    if !inline || !hdr.short_term_ref_pic_set.inter_ref_pic_set_prediction_flag {
+    let active = if hdr.short_term_ref_pic_set_sps_flag {
+        // An index past the SPS list is a stream error the parser already
+        // bounded; nothing to size here.
+        match plan
+            .sps
+            .short_term_ref_pic_set
+            .get(usize::from(hdr.curr_rps_idx))
+        {
+            Some(rps) => rps,
+            None => return Ok(0),
+        }
+    } else {
+        &hdr.short_term_ref_pic_set
+    };
+    if !active.inter_ref_pic_set_prediction_flag {
         return Ok(0);
     }
-    // RefRpsIdx = stRpsIdx - (delta_idx_minus1 + 1), stRpsIdx = CurrRpsIdx here
-    // (equation 7-59). u16 so a hostile delta cannot wrap.
-    let delta = hdr.short_term_ref_pic_set.delta_idx_minus1;
+    // RefRpsIdx = stRpsIdx - (delta_idx_minus1 + 1), stRpsIdx = CurrRpsIdx
+    // (equation 7-59); `delta_idx_minus1` is 0 for an SPS-indexed set, which
+    // codes no such element. u16 so a hostile delta cannot wrap.
+    let delta = active.delta_idx_minus1;
     let source = u16::from(hdr.curr_rps_idx)
         .checked_sub(u16::from(delta) + 1)
         .and_then(|idx| plan.sps.short_term_ref_pic_set.get(usize::from(idx)))
@@ -265,7 +278,9 @@ pub fn plan_to_vk_h265(
     let first_slice = plan.slices.first().ok_or(PlanToVkH265Error::NoSlices)?;
     let setup_id = plan.dpb.stored.ok_or(PlanToVkH265Error::NoStoredId)?;
 
-    let required = plan.picture.max_dpb_frames + 1;
+    // No `+ 1`: `sps_max_dec_pic_buffering_minus1 + 1` already counts the
+    // picture being decoded, unlike H.264's `max_num_ref_frames`.
+    let required = plan.picture.max_dpb_frames;
     if slots.capacity() != required {
         return Err(PlanToVkH265Error::CapacityMismatch {
             required,
@@ -476,7 +491,7 @@ mod tests {
 
         for au in aus {
             let plan = planner.plan_au(au).expect("the low-delay stream plans");
-            let map = slots.get_or_insert_with(|| SlotMap::new(plan.picture.max_dpb_frames));
+            let map = slots.get_or_insert_with(|| SlotMap::new(plan.picture.max_dpb_frames - 1));
 
             // Marked DPB as `decode_rps` found it: previous AU's snapshot plus
             // the picture it stored — `dpb_snapshot()` from above `decode_rps`.
@@ -536,7 +551,7 @@ mod tests {
 
         for au in &aus {
             let plan = planner.plan_au(au).expect("the clean vector plans");
-            let slots = slots.get_or_insert_with(|| SlotMap::new(plan.picture.max_dpb_frames));
+            let slots = slots.get_or_insert_with(|| SlotMap::new(plan.picture.max_dpb_frames - 1));
             let vk = plan_to_vk_h265(&plan, slots).expect("the clean vector converts");
             converted += 1;
 
@@ -645,6 +660,65 @@ mod tests {
         assert_eq!(slots.active(), 0);
     }
 
+    /// A lost picture must not renumber the RPS: hardware rebuilds
+    /// `RefPicListTemp0` from these arrays by position, so a compacted set
+    /// shifts every later `ref_idx` and disagrees with `NumPicTotalCurr`.
+    #[test]
+    fn a_dropped_picture_keeps_the_rps_index_array_positions() {
+        let aus = split_into_aus(TEST_25FPS);
+        // A reference picture whose loss ten later access units still name.
+        const DROPPED: usize = 5;
+
+        // Per surviving AU: its index, the coded set length, the positions the
+        // index array actually names, and whether a hole was substituted.
+        let plan_run = |skip: Option<usize>| -> Vec<(usize, usize, usize, bool)> {
+            let mut planner = H265Planner::new();
+            let mut slots: Option<SlotMap> = None;
+            let mut out = Vec::new();
+            for (index, au) in aus.iter().enumerate() {
+                if Some(index) == skip {
+                    continue;
+                }
+                let plan = planner.plan_au(au).expect("the vector plans");
+                let map =
+                    slots.get_or_insert_with(|| SlotMap::new(plan.picture.max_dpb_frames - 1));
+                let vk = plan_to_vk_h265(&plan, map).expect("the vector converts");
+                let set = &plan.rps.st_curr_before;
+                let used = vk
+                    .std_pic
+                    .RefPicSetStCurrBefore
+                    .iter()
+                    .filter(|e| **e != UNUSED_RPS_ENTRY)
+                    .count();
+                let substituted = set.windows(2).any(|w| w[0].id == w[1].id);
+                out.push((index, set.len(), used, substituted));
+            }
+            out
+        };
+
+        let clean = plan_run(None);
+        let dropped = plan_run(Some(DROPPED));
+        assert_eq!(dropped.len() + 1, clean.len(), "one AU removed");
+
+        let mut substituted = 0usize;
+        for &(index, set_len, used, sub) in &dropped {
+            let &(_, clean_len, _, _) = clean
+                .iter()
+                .find(|(i, _, _, _)| *i == index)
+                .expect("same AU in both runs");
+            assert_eq!(
+                set_len, clean_len,
+                "AU {index}: RefPicSetStCurrBefore was compacted by the loss"
+            );
+            assert_eq!(used, set_len, "AU {index}: a position lost its slot");
+            substituted += usize::from(sub);
+        }
+        assert_eq!(
+            substituted, 8,
+            "the drop must actually leave holes for the substitute to fill"
+        );
+    }
+
     #[test]
     fn the_b_frame_vector_populates_both_current_index_arrays_around_the_picture() {
         let aus = split_into_aus(TEST_64X64_I_P_B_P);
@@ -654,7 +728,7 @@ mod tests {
 
         for au in &aus {
             let plan = planner.plan_au(au).expect("the clean vector plans");
-            let slots = slots.get_or_insert_with(|| SlotMap::new(plan.picture.max_dpb_frames));
+            let slots = slots.get_or_insert_with(|| SlotMap::new(plan.picture.max_dpb_frames - 1));
             let vk = plan_to_vk_h265(&plan, slots).expect("the clean vector converts");
 
             if plan.rps.st_curr_after.is_empty() {
@@ -845,7 +919,7 @@ mod tests {
 
     #[test]
     fn a_long_term_rps_entry_carries_the_flag_and_its_index_lands_in_lt_curr() {
-        let mut slots = SlotMap::new(4);
+        let mut slots = SlotMap::new(3);
         // Anchor (id 10, slot 0) then previous (id 11, slot 1): RPS order is
         // the reverse of slot order, so a positional reading would swap them.
         slots.assign(10).unwrap();
@@ -887,7 +961,7 @@ mod tests {
     fn a_failed_conversion_leaves_the_slot_map_untouched_and_the_session_recovers() {
         // Right-sized map that never saw the reference's AU: fail, do not
         // fabricate a slot.
-        let mut slots = SlotMap::new(4);
+        let mut slots = SlotMap::new(3);
         slots.assign(999).unwrap();
 
         let plan = mini_plan(
@@ -917,11 +991,48 @@ mod tests {
         assert_eq!(slots.active(), 2);
     }
 
+    /// `sps_max_dec_pic_buffering_minus1 + 1` counts the picture being decoded,
+    /// unlike H.264's `max_num_ref_frames`. Asking for one more refused the
+    /// deepest legal stream on a 16-slot device and idled a slot on every other.
+    #[test]
+    fn a_sixteen_deep_hevc_dpb_needs_sixteen_slots_not_seventeen() {
+        let mut slots = SlotMap::new(15);
+        assert_eq!(slots.capacity(), 16);
+        for id in 0..15u64 {
+            slots.assign(id).unwrap();
+        }
+        let refs: Vec<RefPic> = (0..8).map(|i| st_ref(i, i as i32)).collect();
+        let plan = mini_plan(
+            20,
+            15,
+            RpsPlan {
+                st_curr_before: refs,
+                st_curr_after: Vec::new(),
+                lt_curr: Vec::new(),
+            },
+            Vec::new(),
+            16,
+        );
+        let vk = plan_to_vk_h265(&plan, &mut slots).expect("16 pictures fit 16 slots");
+        assert_eq!(vk.setup_slot, 15, "the last slot is the current picture's");
+
+        // A seventeenth slot is the H.264 shape; here it is a renegotiation.
+        let mut too_many = SlotMap::new(16);
+        assert_eq!(
+            plan_to_vk_h265(&plan, &mut too_many).unwrap_err(),
+            PlanToVkH265Error::CapacityMismatch {
+                required: 16,
+                capacity: 17
+            }
+        );
+    }
+
     #[test]
     fn an_sps_switch_that_resizes_the_dpb_is_a_capacity_mismatch_not_a_guess() {
         // Map sized for a 6-deep DPB; a renegotiated stream plans with 16.
         // Refuse rather than hand out slots the image pool does not have.
-        let mut slots = SlotMap::new(6);
+        // HEVC's depth counts the current picture, so a 6-deep DPB is 6 slots.
+        let mut slots = SlotMap::new(5);
         plan_to_vk_h265(
             &mini_plan(0, 0, RpsPlan::default(), Vec::new(), 6),
             &mut slots,
@@ -932,8 +1043,8 @@ mod tests {
         assert_eq!(
             plan_to_vk_h265(&renegotiated, &mut slots).unwrap_err(),
             PlanToVkH265Error::CapacityMismatch {
-                required: 17,
-                capacity: 7
+                required: 16,
+                capacity: 6
             }
         );
         assert_eq!(slots.active(), 1);
@@ -941,7 +1052,7 @@ mod tests {
 
     #[test]
     fn empty_and_flush_shaped_plans_are_rejected_with_typed_errors() {
-        let mut slots = SlotMap::new(4);
+        let mut slots = SlotMap::new(3);
 
         let mut no_slices = mini_plan(0, 0, RpsPlan::default(), Vec::new(), 4);
         no_slices.slices.clear();
@@ -968,7 +1079,7 @@ mod tests {
 
     #[test]
     fn an_rps_set_deeper_than_the_std_index_arrays_is_rejected_not_truncated() {
-        let mut slots = SlotMap::new(16);
+        let mut slots = SlotMap::new(15);
         for id in 0..9u64 {
             slots.assign(id).unwrap();
         }
@@ -996,7 +1107,7 @@ mod tests {
 
     #[test]
     fn a_slice_list_entry_outside_the_rps_sets_fails_closed() {
-        let mut slots = SlotMap::new(4);
+        let mut slots = SlotMap::new(3);
         slots.assign(1).unwrap();
         slots.assign(2).unwrap();
         let mut plan = mini_plan(
@@ -1023,7 +1134,7 @@ mod tests {
     fn a_stored_and_evicted_picture_still_gets_a_slot_for_the_decode_itself() {
         // Stored id also in this plan's `removed`: slot exists for the decode
         // and is released right after, so the next picture can reuse it.
-        let mut slots = SlotMap::new(1); // capacity = max_dpb_frames + 1
+        let mut slots = SlotMap::new(0); // capacity = max_dpb_frames
         let mut plan = mini_plan(0, 0, RpsPlan::default(), Vec::new(), 1);
         plan.dpb.removed = vec![0];
         let vk = plan_to_vk_h265(&plan, &mut slots).unwrap();
@@ -1034,7 +1145,7 @@ mod tests {
 
     #[test]
     fn num_delta_pocs_of_ref_rps_idx_derives_from_the_predicted_inline_rps() {
-        let mut slots = SlotMap::new(4);
+        let mut slots = SlotMap::new(3);
         slots.assign(1).unwrap();
 
         // SPS carries two candidates; the inline slice RPS predicts from the
@@ -1113,9 +1224,72 @@ mod tests {
         );
     }
 
+    /// The field describes the active RPS, whichever way it was coded. FFmpeg
+    /// fills it from the SPS set too; only `inter_ref_pic_set_prediction_flag`
+    /// decides whether there is a source candidate to count.
+    #[test]
+    fn num_delta_pocs_of_ref_rps_idx_also_derives_from_an_sps_indexed_rps() {
+        let mut slots = SlotMap::new(3);
+        slots.assign(1).unwrap();
+
+        let mut sps = (*mini_sps()).clone();
+        sps.num_short_term_ref_pic_sets = 2;
+        sps.short_term_ref_pic_set = vec![
+            ShortTermRefPicSet {
+                num_delta_pocs: 3,
+                ..Default::default()
+            },
+            // Predicts from candidate 0 (`delta_idx_minus1` is 0 for an
+            // SPS-indexed set, which codes no such element).
+            ShortTermRefPicSet {
+                num_delta_pocs: 5,
+                inter_ref_pic_set_prediction_flag: true,
+                ..Default::default()
+            },
+        ];
+        let sps = Rc::new(sps);
+        let pps = mini_pps(&sps);
+
+        let header = SliceHeader {
+            short_term_ref_pic_set_sps_flag: true,
+            curr_rps_idx: 1,
+            ..Default::default()
+        };
+        let mut plan = mini_plan(
+            2,
+            1,
+            RpsPlan {
+                st_curr_before: vec![st_ref(1, 0)],
+                st_curr_after: Vec::new(),
+                lt_curr: Vec::new(),
+            },
+            Vec::new(),
+            4,
+        );
+        plan.sps = Rc::clone(&sps);
+        plan.pps = Rc::clone(&pps);
+        plan.slices[0].header = header;
+
+        let vk = plan_to_vk_h265(&plan, &mut slots).unwrap();
+        assert_eq!(
+            vk.std_pic.NumDeltaPocsOfRefRpsIdx, 3,
+            "the SOURCE candidate's count, not the active set's"
+        );
+        assert_eq!(vk.std_pic.flags.short_term_ref_pic_set_sps_flag(), 1);
+
+        // The same set without inter-RPS prediction has no source to count.
+        let mut plain = (*sps).clone();
+        plain.short_term_ref_pic_set[1].inter_ref_pic_set_prediction_flag = false;
+        let mut plan = plan.clone();
+        plan.sps = Rc::new(plain);
+        plan.dpb.stored = Some(3);
+        let vk = plan_to_vk_h265(&plan, &mut slots).unwrap();
+        assert_eq!(vk.std_pic.NumDeltaPocsOfRefRpsIdx, 0);
+    }
+
     #[test]
     fn parameter_set_ids_flow_from_the_plans_activated_sets() {
-        let mut slots = SlotMap::new(4);
+        let mut slots = SlotMap::new(3);
         let mut sps = (*mini_sps()).clone();
         sps.video_parameter_set_id = 3;
         sps.seq_parameter_set_id = 7;
@@ -1139,7 +1313,7 @@ mod tests {
         // Concealment can resolve an LSB-masked long-term entry and a
         // short-term entry to the same stored picture; each slot binds once,
         // with both index arrays pointing at that one entry.
-        let mut slots = SlotMap::new(4);
+        let mut slots = SlotMap::new(3);
         slots.assign(1).unwrap();
         let plan = mini_plan(
             2,

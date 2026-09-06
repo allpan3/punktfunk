@@ -316,6 +316,26 @@ impl VkH265Decoder {
         result
     }
 
+    /// Queue the pictures `outputs` names that are already decoded, building
+    /// their frames from the pool that holds them. Only outputs: `removed`
+    /// waits for the submit, which may still bind those slots.
+    fn settle_outputs_from_live_pool(&mut self, outputs: &[PicId]) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        let (ready, _) = crate::decoder::settle_dpb_ids(&mut self.pending, outputs, &[]);
+        for entry in ready {
+            let frame = build_frame(
+                &mut state.pool,
+                state.dpb.is_none(),
+                state.image_extent,
+                &entry,
+                self.generation,
+            );
+            self.ready.push_back(frame);
+        }
+    }
+
     /// Submission half of one decode, after the planner has advanced. Split
     /// out so [`Self::decode_inner`] can latch recovery on any failure past
     /// that line without a flag on every exit. `au` is the buffer `plan`'s
@@ -328,6 +348,11 @@ impl VkH265Decoder {
         recovery: crate::recovery::RecoveryMark,
         decode_order: u64,
     ) -> Result<Option<DecodedVkFrame>, VkDecodeError> {
+        // Pictures this plan outputs were decoded into the pool `ensure_state`
+        // may retire. A renegotiation IRAP outputs the whole DPB, so settle from
+        // the live pool first; the frames then hold it into the graveyard.
+        // The AU's own picture is not pending yet — it settles after the submit.
+        self.settle_outputs_from_live_pool(&plan.dpb.outputs);
         self.ensure_state(plan)?;
 
         // Stream VPS, or the fallback identity when the join missed the VPS
@@ -444,17 +469,16 @@ impl VkH265Decoder {
         }
         let query_index = (submission % u64::from(state.ops.query_count)) as u32;
 
-        let device = self.dev.ash().clone();
+        let device = self.dev.ash();
         let mut poll = |token: &(vk::Semaphore, u64)| -> Result<bool, VkDecodeError> {
             // SAFETY: live device; the token's semaphore is a pool semaphore.
             let current = unsafe { device.get_semaphore_counter_value(token.0) }
                 .map_err(VkDecodeError::from)?;
             Ok(current >= token.1)
         };
-        let device2 = self.dev.ash().clone();
         let mut wait = |token: &(vk::Semaphore, u64)| -> Result<(), VkDecodeError> {
             // SAFETY: as above.
-            unsafe { wait_timeline(&device2, token.0, token.1, "bitstream slot drain") }
+            unsafe { wait_timeline(device, token.0, token.1, "bitstream slot drain") }
         };
         // Slice-segment NALUs only. Non-VCL (AUD/SEI, IRAP VPS/SPS/PPS) inside
         // the decode range hangs VCN; parameter sets ride the session object.
@@ -515,7 +539,9 @@ impl VkH265Decoder {
             .pending
             .set_pending(upload.slot, (dst_sem, signal_value));
 
-        state.slot_refs[setup] = Some(vk_plan.setup_ref);
+        // Only a picture later AUs may reference belongs in the next
+        // begin-coding scope; a non-reference holds its slot for output.
+        state.slot_refs[setup] = vk_plan.setup_is_reference.then_some(vk_plan.setup_ref);
         for r in &vk_plan.refs {
             state.slot_refs[usize::from(r.slot)] = Some(r.std);
         }
@@ -700,8 +726,9 @@ impl VkH265Decoder {
 
     /// Read `frame`'s decode status without waiting.
     ///
-    /// [`DecodeStatus::Failed`] covers driver-reported errors and a query slot
-    /// re-armed before it was read (status then unprovable — same conservative
+    /// [`DecodeStatus::Failed`] is a driver-reported error or a lost device; a
+    /// query slot re-armed before it was read answers [`DecodeStatus::Unknown`]
+    /// (status then unprovable — but not corruption
     /// verdict). Without `queryResultStatusSupport`, `Ok` means the decode op
     /// completed on the timeline — no per-op integrity verdict.
     pub fn poll_status(&mut self, frame: &DecodedVkFrame) -> DecodeStatus {
@@ -760,11 +787,8 @@ impl VkH265Decoder {
         };
         let slot = frame.query_slot as usize;
         if slot >= state.query_marks.len() || state.query_marks[slot] != frame.submission {
-            trace!(
-                slot,
-                "status query slot re-armed before it was read — unprovable, reported Failed"
-            );
-            return DecodeStatus::Failed;
+            trace!(slot, "status query slot re-armed before it was read");
+            return DecodeStatus::Unknown;
         }
         let flags = if block {
             vk::QueryResultFlags::WAIT | vk::QueryResultFlags::WITH_STATUS_KHR
@@ -926,15 +950,12 @@ impl VkH265Decoder {
     /// Pools with consumer holds retire intact; every frame and token carries
     /// its generation. Session objects (query pool included) die only after
     /// [`Self::drain_gpu`], with no consumer-facing handle pointing at them.
+    /// Undelivered `ready` frames stay queued and keep the retired pool alive.
     fn rebuild_state(&mut self, plan: &AuPlan) -> Result<(), VkDecodeError> {
         self.drain_gpu()?;
         if let Some(state) = self.state.take() {
             debug!("rebuilding H.265 decode session (stream renegotiation)");
             let SessionStateH265 { mut pool, .. } = state;
-            for frame in self.ready.drain(..) {
-                let picture = &mut pool.pictures[frame.picture as usize];
-                picture.held = picture.held.saturating_sub(1);
-            }
             for (_, entry) in std::mem::take(&mut self.pending) {
                 pool.pictures[entry.image].pending = false;
             }
@@ -958,7 +979,9 @@ impl VkH265Decoder {
 
         let (key, caps) = self.caps.as_ref().expect("ensure_state queried caps");
         let key = *key;
-        let required_slots = plan.picture.max_dpb_frames as u32 + 1;
+        // No `+ 1`: `sps_max_dec_pic_buffering_minus1 + 1` already counts the
+        // picture being decoded, unlike H.264's `max_num_ref_frames`.
+        let required_slots = plan.picture.max_dpb_frames as u32;
         if required_slots > caps.max_dpb_slots {
             return Err(VkDecodeError::Unsupported(format!(
                 "stream needs {required_slots} DPB slots, device caps at {}",
@@ -1041,7 +1064,9 @@ impl VkH265Decoder {
             .map_err(VkDecodeError::from)?;
             SessionStateH265 {
                 session,
-                slots: SlotMap::new(plan.picture.max_dpb_frames),
+                // `SlotMap::new` adds the in-flight slot H.264 needs; HEVC's
+                // depth already holds it, so ask for one fewer.
+                slots: SlotMap::new(plan.picture.max_dpb_frames.saturating_sub(1)),
                 slot_refs: vec![None; required_slots as usize],
                 slot_image: vec![None; required_slots as usize],
                 cmd_marks: vec![None; RING_SLOTS as usize],

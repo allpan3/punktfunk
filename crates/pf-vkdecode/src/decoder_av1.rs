@@ -42,7 +42,6 @@ use crate::caps_av1::derive_caps_av1;
 use crate::caps_av1::query_av1_caps;
 use crate::caps_av1::Av1ProfileKey;
 use crate::decoder::build_frame;
-use crate::decoder::settle_dpb_ids;
 use crate::decoder::wait_timeline;
 use crate::decoder::DecodeStatus;
 use crate::decoder::DecodedVkFrame;
@@ -452,6 +451,9 @@ pub struct VkAv1Decoder {
     /// Hidden frames waiting on a later `show_existing_frame`. A `show_frame`
     /// picture is settled into `ready` by the plan that decoded it.
     pending: BTreeMap<PicId, PendingPic>,
+    /// Already-displayed pictures, so a `show_existing_frame` naming one can be
+    /// served again. Entries die with the DPB slot ([`Self::settle`]).
+    shown: BTreeMap<PicId, PendingPic>,
     /// Display-ready frames not yet handed out. A temporal unit can fill several.
     ready: VecDeque<DecodedVkFrame>,
     /// Retired generations' pools with consumer-held images (die on last token).
@@ -497,6 +499,7 @@ impl VkAv1Decoder {
             caps: None,
             state: None,
             pending: BTreeMap::new(),
+            shown: BTreeMap::new(),
             ready: VecDeque::new(),
             graveyard: Vec::new(),
             last_warnings: Vec::new(),
@@ -528,7 +531,7 @@ impl VkAv1Decoder {
         let wanted = key
             .output_format()
             .expect("from_negotiated gated the sampling/depth combination");
-        derive_caps_av1(&raw, wanted)?;
+        derive_caps_av1(&raw, wanted, key.film_grain)?;
         Ok(())
     }
 
@@ -625,6 +628,11 @@ impl VkAv1Decoder {
         self.decoded = self.decoded.saturating_add(1);
         let decode_order = self.decoded;
 
+        // Pictures this plan shows were decoded into the pool `ensure_state`
+        // may retire, so settle from the live pool first; the frames then hold
+        // it into the graveyard. Removals wait for the submit, which may still
+        // bind those slots, and this frame is not pending yet.
+        self.settle(&plan.dpb.outputs, &[]);
         self.ensure_state(plan)?;
 
         // Recreate destroys an existing parameters object; drain first. The
@@ -713,17 +721,16 @@ impl VkAv1Decoder {
         };
         let tiles = submitted_tiles(&packed).map_err(VkDecodeError::TilesAv1)?;
 
-        let device = self.dev.ash().clone();
+        let device = self.dev.ash();
         let mut poll = |token: &(vk::Semaphore, u64)| -> Result<bool, VkDecodeError> {
             // SAFETY: live device; token semaphore is a pool semaphore.
             let current = unsafe { device.get_semaphore_counter_value(token.0) }
                 .map_err(VkDecodeError::from)?;
             Ok(current >= token.1)
         };
-        let device2 = self.dev.ash().clone();
         let mut wait = |token: &(vk::Semaphore, u64)| -> Result<(), VkDecodeError> {
             // SAFETY: live device; token semaphore is a pool semaphore.
-            unsafe { wait_timeline(&device2, token.0, token.1, "bitstream slot drain") }
+            unsafe { wait_timeline(device, token.0, token.1, "bitstream slot drain") }
         };
         // SAFETY: live device; segments are in-bounds plan ranges; pending tokens
         // are the completion signals of the submissions that consumed the slots.
@@ -827,12 +834,28 @@ impl VkAv1Decoder {
     }
 
     /// Outputs become ready (pending → held); removed-never-shown free their images.
+    ///
+    /// A `show_existing_frame` may name a picture that was already displayed.
+    /// Its record left `pending` then, so [`Self::shown`] answers instead — but
+    /// only while the picture still binds a DPB slot, which is what keeps its
+    /// pool image from being handed to another decode.
     fn settle(&mut self, outputs: &[PicId], removed: &[PicId]) {
-        let (ready, dropped) = settle_dpb_ids(&mut self.pending, outputs, removed);
         let Some(state) = self.state.as_mut() else {
             return;
         };
-        for entry in ready {
+        for &id in outputs {
+            let entry = match self.pending.remove(&id) {
+                Some(entry) => entry,
+                None => match self.shown.get(&id) {
+                    Some(entry) if state.pool.pictures[entry.image].bound => entry.clone(),
+                    // Planned before this decoder existed, or lost to a rebuild;
+                    // in distinct mode the output copy is not the DPB picture.
+                    _ => {
+                        trace!(id, "output id without a picture to display");
+                        continue;
+                    }
+                },
+            };
             let frame = build_frame(
                 &mut state.pool,
                 state.dpb.is_none(),
@@ -841,13 +864,17 @@ impl VkAv1Decoder {
                 self.generation,
             );
             self.ready.push_back(frame);
+            self.shown.insert(id, entry);
         }
-        for entry in dropped {
-            debug!(
-                order_hint = entry.poc,
-                "picture displaced from every slot without being shown — freeing its image"
-            );
-            state.pool.pictures[entry.image].pending = false;
+        for &id in removed {
+            self.shown.remove(&id);
+            if let Some(entry) = self.pending.remove(&id) {
+                debug!(
+                    order_hint = entry.poc,
+                    "picture displaced from every slot without being shown — freeing its image"
+                );
+                state.pool.pictures[entry.image].pending = false;
+            }
         }
     }
 
@@ -982,8 +1009,9 @@ impl VkAv1Decoder {
     }
 
     /// Decode status without waiting. [`DecodeStatus::Failed`] is a driver error
-    /// or a query slot re-armed before it was read. Without
-    /// `queryResultStatusSupport` (RADV), `Ok` means the timeline completed.
+    /// or a lost device; a query slot re-armed before it was read answers
+    /// [`DecodeStatus::Unknown`]. Without `queryResultStatusSupport` (RADV),
+    /// `Ok` means the timeline completed.
     pub fn poll_status(&mut self, frame: &DecodedVkFrame) -> DecodeStatus {
         self.read_status(frame, false)
     }
@@ -1037,11 +1065,8 @@ impl VkAv1Decoder {
         };
         let slot = frame.query_slot as usize;
         if slot >= state.query_marks.len() || state.query_marks[slot] != frame.submission {
-            trace!(
-                slot,
-                "status query slot re-armed before it was read — unprovable, reported Failed"
-            );
-            return DecodeStatus::Failed;
+            trace!(slot, "status query slot re-armed before it was read");
+            return DecodeStatus::Unknown;
         }
         let flags = if block {
             vk::QueryResultFlags::WAIT | vk::QueryResultFlags::WITH_STATUS_KHR
@@ -1134,7 +1159,7 @@ impl VkAv1Decoder {
             // SAFETY: live device (constructor contract).
             let raw =
                 unsafe { query_av1_caps(&self.dev, key) }.map_err(|r| caps_query_error(r, key))?;
-            self.caps = Some((key, derive_caps_av1(&raw, wanted)?));
+            self.caps = Some((key, derive_caps_av1(&raw, wanted, key.film_grain)?));
         }
         // Declared level above maxLevel is not a refusal: extent and DPB depth
         // are the physical facts. `seq_level_idx` 31 is Annex A's "maximum
@@ -1163,15 +1188,13 @@ impl VkAv1Decoder {
 
     /// Drain the current generation, graveyard any consumer-held images, and build
     /// a fresh session. Bumps [`Self::generation`] so old frames route there.
+    /// Undelivered `ready` frames stay queued and keep the retired pool alive.
     fn rebuild_state(&mut self, plan: &AuPlan) -> Result<(), VkDecodeError> {
         self.drain_gpu()?;
         if let Some(state) = self.state.take() {
             debug!("rebuilding AV1 decode session (stream renegotiation)");
             let SessionStateAv1 { mut pool, .. } = state;
-            for frame in self.ready.drain(..) {
-                let picture = &mut pool.pictures[frame.picture as usize];
-                picture.held = picture.held.saturating_sub(1);
-            }
+            self.shown.clear();
             for (_, entry) in std::mem::take(&mut self.pending) {
                 pool.pictures[entry.image].pending = false;
             }
@@ -1756,6 +1779,7 @@ unsafe fn record_and_submit_av1(
 
 #[cfg(test)]
 mod tests {
+    use crate::decoder::settle_dpb_ids;
     use ash::vk::Handle as _;
     use cros_codecs::bitstream_utils::IvfIterator;
     use cros_codecs::codec::av1::parser::ObuAction;

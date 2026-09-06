@@ -80,9 +80,11 @@ const DECODE_TIMEOUT_NS: u64 = 5_000_000_000;
 pub enum DecodeStatus {
     Pending,
     Ok,
-    /// Error, recycled query, or device lost: content is unproven; conceal
-    /// (`want_keyframe`).
+    /// Driver-reported error, or device lost: conceal (`want_keyframe`).
     Failed,
+    /// The op's query slot was re-armed before it was read, so the driver's
+    /// verdict is gone. Not corruption: no picture is dropped for it.
+    Unknown,
 }
 
 /// Display-ready pool image; the decoder does not touch it until
@@ -513,6 +515,7 @@ impl Drop for OpRing {
 
 /// Decoded picture waiting for its output verdict, plus the fields its
 /// [`DecodedVkFrame`] needs. Codec-agnostic; the H.265 decoder uses the same map.
+#[derive(Clone)]
 pub(crate) struct PendingPic {
     pub(crate) image: usize,
     pub(crate) submission: u64,
@@ -778,7 +781,7 @@ impl VkH264Decoder {
                 Err(e) => return Err(VkDecodeError::Convert(e)),
             }
         }
-        let vk_plan = vk_plan.expect("the rebuilt session matches its own plan");
+        let mut vk_plan = vk_plan.expect("the rebuilt session matches its own plan");
 
         // From here to the deferred release is one ledger unit. `plan_to_vk`
         // committed the setup assignment and withheld `release_after_decode`.
@@ -788,13 +791,16 @@ impl VkH264Decoder {
             let state = self.state.as_mut().expect("ensured above");
             // Session was created with maxActiveReferencePictures; binding more
             // in one op is a silent VUID violation on the drivers that matter.
+            // The DPB tail past the slice lists is context, so it truncates;
+            // losing a picture a slice names cannot be concealed.
             let max_active = state.session.config.max_active_references as usize;
-            if vk_plan.refs.len() > max_active {
+            if vk_plan.slice_ref_count > max_active {
                 return Err(VkDecodeError::Unsupported(format!(
                     "AU references {} pictures, session allows {max_active} active references",
-                    vk_plan.refs.len()
+                    vk_plan.slice_ref_count
                 )));
             }
+            vk_plan.refs.truncate(max_active);
 
             // Coincide: released slots unbind (pictures may still be pending/held).
             // Clear the setup slot's previous binding before it binds fresh.
@@ -824,9 +830,11 @@ impl VkH264Decoder {
                 return Err(VkDecodeError::NoFreeSlot);
             };
 
-            // Cross-queue waits: dst's last timeline (presenter write-back after
-            // release), plus — coincide — every referenced image, so reference
-            // reads order after a reported layout restore.
+            // Cross-queue waits: dst's last timeline (presenter write-back),
+            // plus — coincide — every referenced image, so reference reads
+            // order after a reported layout restore. Ordering is all this does:
+            // dropping the layout trip needs `VK_KHR_unified_image_layouts`, or
+            // a GENERAL-layout sampling path on a driver measured to need one.
             let mut waits: Vec<(vk::Semaphore, u64)> = Vec::new();
             {
                 let dst_pic = &state.pool.pictures[dst];
@@ -854,17 +862,16 @@ impl VkH264Decoder {
             }
             let query_index = (submission % u64::from(state.ops.query_count)) as u32;
 
-            let device = self.dev.ash().clone();
+            let device = self.dev.ash();
             let mut poll = |token: &(vk::Semaphore, u64)| -> Result<bool, VkDecodeError> {
                 // SAFETY: live device; the token's semaphore is a pool semaphore.
                 let current = unsafe { device.get_semaphore_counter_value(token.0) }
                     .map_err(VkDecodeError::from)?;
                 Ok(current >= token.1)
             };
-            let device2 = self.dev.ash().clone();
             let mut wait = |token: &(vk::Semaphore, u64)| -> Result<(), VkDecodeError> {
                 // SAFETY: as above.
-                unsafe { wait_timeline(&device2, token.0, token.1, "bitstream slot drain") }
+                unsafe { wait_timeline(device, token.0, token.1, "bitstream slot drain") }
             };
             // Bitstream is slice NALUs only. A real AU opens with AUD/SEI
             // (and SPS/PPS at IDRs); feeding those to VCN inside the decode
@@ -922,7 +929,9 @@ impl VkH264Decoder {
                 .pending
                 .set_pending(upload.slot, (dst_sem, signal_value));
 
-            state.slot_refs[setup] = Some(vk_plan.setup_ref);
+            // Only a picture later AUs may reference belongs in the next
+            // begin-coding scope; a non-reference holds its slot for output.
+            state.slot_refs[setup] = vk_plan.setup_is_reference.then_some(vk_plan.setup_ref);
             for r in &vk_plan.refs {
                 state.slot_refs[usize::from(r.slot)] = Some(r.std);
             }
@@ -1109,8 +1118,8 @@ impl VkH264Decoder {
 
     /// Read `frame`'s decode status without waiting.
     ///
-    /// [`DecodeStatus::Failed`] covers driver errors and a query slot re-armed
-    /// before it was read (unprovable → same conservative verdict).
+    /// [`DecodeStatus::Failed`] is a driver error or a lost device; a query
+    /// slot re-armed before it was read answers [`DecodeStatus::Unknown`].
     ///
     /// Without `queryResultStatusSupport`, `Ok` means the op completed on the
     /// timeline — the same information FFmpeg has on every driver.
@@ -1175,11 +1184,8 @@ impl VkH264Decoder {
         };
         let slot = frame.query_slot as usize;
         if slot >= state.query_marks.len() || state.query_marks[slot] != frame.submission {
-            trace!(
-                slot,
-                "status query slot re-armed before it was read — unprovable, reported Failed"
-            );
-            return DecodeStatus::Failed;
+            trace!(slot, "status query slot re-armed before it was read");
+            return DecodeStatus::Unknown;
         }
         let flags = if block {
             vk::QueryResultFlags::WAIT | vk::QueryResultFlags::WITH_STATUS_KHR
@@ -1507,11 +1513,28 @@ impl Drop for VkH264Decoder {
 
 /// Map `profile_idc` to the Std code point. Identity for the four
 /// Vulkan-representable profiles; reject otherwise.
+///
+/// The session profile chain is 8-bit 4:2:0 (`crate::caps`), so a High 4:4:4 stream
+/// that actually uses 4:4:4 or more than 8 bits would decode into NV12 as if it
+/// were 4:2:0. Refuse it here, before a session exists.
 fn std_profile_for(plan: &AuPlan) -> Result<hh::StdVideoH264ProfileIdc, VkDecodeError> {
-    match u32::from(plan.picture.profile_idc) {
+    let pic = &plan.picture;
+    if pic.chroma_format_idc != 1
+        || pic.bit_depth_luma_minus8 != 0
+        || pic.bit_depth_chroma_minus8 != 0
+    {
+        return Err(VkDecodeError::Unsupported(format!(
+            "H.264 profile {} codes chroma_format_idc {} at {}/{} bits; this decoder              hosts 8-bit 4:2:0 only",
+            pic.profile_idc,
+            pic.chroma_format_idc,
+            pic.bit_depth_luma_minus8 as u16 + 8,
+            pic.bit_depth_chroma_minus8 as u16 + 8
+        )));
+    }
+    match u32::from(pic.profile_idc) {
         p @ (66 | 77 | 100 | 244) => Ok(p),
         _ => Err(VkDecodeError::Params(ParamsError::UnmappableProfileIdc(
-            plan.picture.profile_idc,
+            pic.profile_idc,
         ))),
     }
 }
