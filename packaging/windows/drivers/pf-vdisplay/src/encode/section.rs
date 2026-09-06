@@ -171,6 +171,12 @@ impl AuSection {
         self.u64_at(off).store(v, Ordering::Relaxed);
     }
 
+    /// Read back a word this side owns — only the encode thread writes them, so a
+    /// read-modify-write over one is uncontended.
+    pub fn load_u64(&self, off: usize) -> u64 {
+        self.u64_at(off).load(Ordering::Relaxed)
+    }
+
     pub fn add_u32(&self, off: usize, n: u32) -> u32 {
         self.u32_at(off).fetch_add(n, Ordering::Relaxed) + n
     }

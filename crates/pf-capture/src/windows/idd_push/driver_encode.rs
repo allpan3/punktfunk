@@ -384,6 +384,9 @@ impl EncoderProxy {
     /// A slice never takes this long; past it the access unit is truncated and the loop's
     /// stall path resets the encoder.
     const CHUNK_WAIT: Duration = Duration::from_millis(500);
+    /// How long a bitrate change waits for the encode thread to answer — two 60 Hz frames,
+    /// since the op is drained between frames. Only ever spent on an ABR step.
+    const BITRATE_WAIT: Duration = Duration::from_millis(33);
 
     fn ctl(&self, op: u32, arg0: u32, arg1: u32, payload: [u8; 28]) -> Result<()> {
         (self.ctl)(&EncodeCtlRequest {
@@ -411,13 +414,22 @@ impl EncoderProxy {
 
     /// One taken slot as a wire chunk, recording the progress clocks on the way through:
     /// the sequence pair the supervisor reads as encoder progress, and how old the OS present
-    /// stamp already is — the ground truth for "late, not missing". The diagnostic dump takes
-    /// its copy here, so a chunked session writes the same bytes in the same order.
+    /// stamp already is — the ground truth for "late, not missing". The slot's `wire_seq` rides
+    /// along as the frame index, so the loop stamps the index the encoder was submitted under.
+    /// The diagnostic dump takes its copy here, so a chunked session writes the same bytes in
+    /// the same order.
     fn chunk(&mut self, t: Taken) -> AuChunk {
         self.last_wire_seq = t.wire_seq;
         self.last_source_seq = t.source_seq;
         self.last_arrival =
             (t.qpc_pts != 0).then(|| Duration::from_micros(IddPushCapturer::qpc_age_us(t.qpc_pts)));
+        if t.flags & au::AU_ABORTED != 0 {
+            tracing::warn!(
+                target_id = self.target_id,
+                wire_seq = t.wire_seq,
+                "driver encode: access unit truncated in the driver — closing it, keyframe owed"
+            );
+        }
         let chunk = AuChunk {
             data: t.data,
             pts_ns: pts_from_qpc(t.qpc_pts),
@@ -426,6 +438,7 @@ impl EncoderProxy {
             chunk_aligned: t.flags & au::AU_CHUNK_ALIGNED != 0,
             first: t.flags & au::AU_FIRST != 0,
             last: t.flags & au::AU_LAST != 0,
+            wire_index: Some(t.wire_seq),
         };
         if self.dump.as_mut().is_some_and(|d| !d.write(&chunk)) {
             self.dump = None;
@@ -606,8 +619,13 @@ impl Encoder for EncoderProxy {
         true
     }
 
+    /// The IOCTL only queues the op, so wait for the encode thread's answer in the header:
+    /// `false` is a backend that declined in place, which sends the loop to its rebuild. A
+    /// driver that predates the word never answers, and the timeout keeps the old contract —
+    /// assume applied — rather than rebuilding the encoder on every step.
     fn reconfigure_bitrate(&mut self, bps: u64) -> bool {
         let kbps = (bps / 1000).min(u64::from(u32::MAX)) as u32;
+        let before = au::applied_bitrate_seq(self.snapshot().applied_bitrate);
         if !self.ctl_logged(
             "bitrate reconfigure",
             encode::ENCODE_CTL_RECONFIGURE_BITRATE,
@@ -616,8 +634,24 @@ impl Encoder for EncoderProxy {
         ) {
             return false;
         }
-        self.applied_bps = u64::from(kbps) * 1000;
-        true
+        let deadline = Instant::now() + Self::BITRATE_WAIT;
+        loop {
+            let word = self.snapshot().applied_bitrate;
+            if au::applied_bitrate_seq(word) != before {
+                let applied = au::applied_bitrate_kbps(word);
+                if applied == 0 {
+                    return false;
+                }
+                self.applied_bps = u64::from(applied) * 1000;
+                return true;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                self.applied_bps = u64::from(kbps) * 1000;
+                return true;
+            }
+            self.section.wait(left.as_millis().clamp(1, 8) as u32);
+        }
     }
 
     fn applied_bitrate_bps(&self) -> Option<u64> {

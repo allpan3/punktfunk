@@ -117,12 +117,13 @@ pub struct Drive<'a> {
     pool: &'a Pool,
     session: &'a EncodeSession,
     ring: HeapRing,
-    /// Next wire index to stamp; every published AU takes exactly one, a dropped AU none.
+    /// Next wire index to hand `submit_indexed`; every submit takes exactly one, so the index
+    /// the encoder names in an RFI is the index the AU is published under.
     wire_seq: u32,
     /// Publish-token sequence, per session thread.
     publish_seq: u32,
-    /// `(slot, qpc, source_seq)` of every frame whose AU is owed, in submit order.
-    inflight: VecDeque<(usize, u64, u64)>,
+    /// `(slot, qpc, source_seq, wire index)` of every frame whose AU is owed, in submit order.
+    inflight: VecDeque<(usize, u64, u64, u32)>,
     /// A partially drained AU must finish through `poll_chunk`.
     mid_au: bool,
     /// The AU in progress could not be placed; its remaining chunks are dropped too.
@@ -202,7 +203,7 @@ impl Drive<'_> {
                 encoded += 1;
                 block_if_armed(block, encoded);
             }
-            let index = self.wire_seq.wrapping_add(self.inflight.len() as u32);
+            let index = self.wire_seq;
             if let Err(e) = self.enc.submit_indexed(&frame, index) {
                 dbglog!("[pf-vd] encode: submit failed: {e:#}");
                 self.pool.release(slot);
@@ -219,7 +220,8 @@ impl Drive<'_> {
                 continue;
             }
             self.submit_failures = 0;
-            self.inflight.push_back((slot, qpc, seq));
+            self.wire_seq = self.wire_seq.wrapping_add(1);
+            self.inflight.push_back((slot, qpc, seq, index));
             self.collect(MAX_INFLIGHT);
         }
         // No flush on the way out: a stopped session has nowhere to send the last AUs. A
@@ -230,6 +232,16 @@ impl Drive<'_> {
             }
             self.pool.set_live(false);
         }
+    }
+
+    /// The rate the backend took, into the header word the host's `reconfigure_bitrate` waits
+    /// on; `0` = declined, which sends the host to its rebuild path. The sequence only rises,
+    /// so a `RESET`'s fresh thread cannot hand back a number the host already saw.
+    fn answer_bitrate(&self, kbps: u32) {
+        let section = &self.session.section;
+        let at = offset_of!(AuHeader, applied_bitrate);
+        let seq = au::applied_bitrate_seq(section.load_u64(at));
+        section.store_u64(at, au::applied_bitrate(seq.wrapping_add(1), kbps));
     }
 
     /// The `ENCODE_CTL` ops queued since the last frame, in order. An RFI the backend cannot
@@ -252,9 +264,15 @@ impl Drive<'_> {
                 }
                 Ctl::DistrustReferences => self.enc.distrust_references(),
                 Ctl::ReconfigureBitrate(kbps) => {
-                    if !self.enc.reconfigure_bitrate(u64::from(kbps) * 1000) {
+                    let applied = if self.enc.reconfigure_bitrate(u64::from(kbps) * 1000) {
+                        self.enc
+                            .applied_bitrate_bps()
+                            .map_or(kbps, |bps| (bps / 1000) as u32)
+                    } else {
                         dbglog!("[pf-vd] encode: backend declined bitrate {kbps} kbps in place");
-                    }
+                        0
+                    };
+                    self.answer_bitrate(applied);
                 }
                 Ctl::SetHdrMeta(bytes) => self.enc.set_hdr_meta(Some(hdr_meta(&bytes))),
                 Ctl::Flush => {
@@ -346,7 +364,7 @@ impl Drive<'_> {
     /// One chunk of the oldest in-flight AU: published, or dropped with the rest of its AU. A
     /// detached thread returning from its wedge touches neither the pool nor the section.
     fn on_chunk(&mut self, chunk: AuChunk) {
-        let Some(&(slot, qpc, seq)) = self.inflight.front() else {
+        let Some(&(slot, qpc, seq, index)) = self.inflight.front() else {
             return;
         };
         if !self.live.load(Ordering::Acquire) {
@@ -358,7 +376,16 @@ impl Drive<'_> {
             self.au_published = false;
         }
         if !self.dropping_au {
-            if self.publish(&chunk, qpc, seq) {
+            let flags = [
+                (chunk.first, au::AU_FIRST),
+                (chunk.last, au::AU_LAST),
+                (chunk.keyframe, au::AU_KEYFRAME),
+                (chunk.recovery_anchor, au::AU_RECOVERY_ANCHOR),
+                (chunk.chunk_aligned, au::AU_CHUNK_ALIGNED),
+            ]
+            .into_iter()
+            .fold(0, |acc, (on, bit)| if on { acc | bit } else { acc });
+            if self.publish(&chunk.data, flags, qpc, seq, index) {
                 self.au_published = true;
             } else {
                 self.dropping_au = true;
@@ -368,7 +395,12 @@ impl Drive<'_> {
         }
         if chunk.last {
             if self.au_published {
-                self.wire_seq = self.wire_seq.wrapping_add(1);
+                if self.dropping_au {
+                    // The host opened this wire frame from the FIRST that did land. Without a
+                    // LAST it waits out its chunk timeout and resets the encoder, undoing the
+                    // keyframe already asked for above.
+                    self.publish(&[], au::AU_LAST | au::AU_ABORTED, qpc, seq, index);
+                }
                 let n = self
                     .session
                     .section
@@ -386,11 +418,12 @@ impl Drive<'_> {
         }
     }
 
-    /// Heap bytes, slot record, `latest`, event — in that order. `false` when no placement
-    /// came free within [`SLOT_WAIT`].
-    fn publish(&mut self, chunk: &AuChunk, qpc: u64, seq: u64) -> bool {
+    /// Heap bytes, slot record, `latest`, event — in that order, under `index`: the wire index
+    /// the encoder was submitted with, so an RFI naming it names the picture it encoded.
+    /// `false` when no placement came free within [`SLOT_WAIT`].
+    fn publish(&mut self, data: &[u8], flags: u32, qpc: u64, seq: u64, index: u32) -> bool {
         let section = &self.session.section;
-        let len = chunk.data.len() as u32;
+        let len = data.len() as u32;
         let deadline = Instant::now() + SLOT_WAIT;
         let (slot, offset) = loop {
             let states = self.states();
@@ -402,24 +435,15 @@ impl Drive<'_> {
             }
             std::thread::sleep(Duration::from_millis(1));
         };
-        if !self.live.load(Ordering::Acquire) || !section.write_heap(offset, &chunk.data) {
+        if !self.live.load(Ordering::Acquire) || !section.write_heap(offset, data) {
             return false;
         }
-        let flags = [
-            (chunk.first, au::AU_FIRST),
-            (chunk.last, au::AU_LAST),
-            (chunk.keyframe, au::AU_KEYFRAME),
-            (chunk.recovery_anchor, au::AU_RECOVERY_ANCHOR),
-            (chunk.chunk_aligned, au::AU_CHUNK_ALIGNED),
-        ]
-        .into_iter()
-        .fold(0, |acc, (on, bit)| if on { acc | bit } else { acc });
         section.publish_slot(
             slot,
             &AuSlot {
                 offset,
                 len,
-                wire_seq: self.wire_seq,
+                wire_seq: index,
                 source_seq: seq as u32,
                 qpc_pts: qpc,
                 flags,

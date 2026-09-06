@@ -1174,6 +1174,10 @@ pub mod encode {
         /// The AU's chunks are cut on the codec's own window boundaries (PyroWave); the host
         /// forwards it as the wire's chunk-aligned user flag.
         pub const AU_CHUNK_ALIGNED: u32 = 1 << 4;
+        /// Empty [`AU_LAST`]: the driver could not place the rest of this AU and asked its
+        /// encoder for a keyframe. Additive — a host that does not know the bit still closes the
+        /// AU on the LAST, which is the whole point of publishing it.
+        pub const AU_ABORTED: u32 = 1 << 5;
 
         /// [`AuSlot::state`]: the encode thread may take this slot. There is no WRITING state —
         /// the encode thread fills the heap before it claims a slot.
@@ -1228,8 +1232,35 @@ pub mod encode {
             pub driver_status: u32,
             /// Raw detail for `driver_status`.
             pub driver_status_detail: u32,
+            /// The encode thread's answer to the last
+            /// [`ENCODE_CTL_RECONFIGURE_BITRATE`](super::ENCODE_CTL_RECONFIGURE_BITRATE), packed
+            /// by [`applied_bitrate`] so the pair is never torn. Zero means no answer yet — a
+            /// driver that predates the word never writes it, so the host keeps its old
+            /// assume-applied contract instead of rebuilding on every step.
+            pub applied_bitrate: u64,
             /// Pads the header to [`AU_HEADER_SIZE`]; zero.
-            pub _reserved: [u8; 32],
+            pub _reserved: [u8; 24],
+        }
+
+        /// `(answer sequence, applied kbps)` as the one word the driver publishes. The sequence
+        /// rises on every answer and outlives a `RESET` (which reopens the thread, not the
+        /// section), so the host reads a bump as "this request was answered"; `kbps == 0` is a
+        /// backend that declined in place.
+        #[must_use]
+        pub const fn applied_bitrate(seq: u32, kbps: u32) -> u64 {
+            ((seq as u64) << 32) | kbps as u64
+        }
+
+        /// The sequence half of [`applied_bitrate`].
+        #[must_use]
+        pub const fn applied_bitrate_seq(word: u64) -> u32 {
+            (word >> 32) as u32
+        }
+
+        /// The rate half of [`applied_bitrate`], in kbps.
+        #[must_use]
+        pub const fn applied_bitrate_kbps(word: u64) -> u32 {
+            word as u32
         }
 
         /// One slot: where an access unit (or one chunk of one) sits in the heap, and what the host
@@ -1405,7 +1436,8 @@ pub mod encode {
             assert!(offset_of!(AuHeader, published_total) == 80);
             assert!(offset_of!(AuHeader, driver_status) == 88);
             assert!(offset_of!(AuHeader, driver_status_detail) == 92);
-            assert!(offset_of!(AuHeader, _reserved) == 96);
+            assert!(offset_of!(AuHeader, applied_bitrate) == 96);
+            assert!(offset_of!(AuHeader, _reserved) == 104);
 
             assert!(size_of::<AuSlot>() == AU_SLOT_SIZE);
             assert!(offset_of!(AuSlot, offset) == 0);
@@ -3343,7 +3375,8 @@ mod tests {
         assert_eq!(offset_of!(AuHeader, published_total), 80);
         assert_eq!(offset_of!(AuHeader, driver_status), 88);
         assert_eq!(offset_of!(AuHeader, driver_status_detail), 92);
-        assert_eq!(offset_of!(AuHeader, _reserved), 96);
+        assert_eq!(offset_of!(AuHeader, applied_bitrate), 96);
+        assert_eq!(offset_of!(AuHeader, _reserved), 104);
 
         assert_eq!(size_of::<AuSlot>(), 32);
         assert_eq!(offset_of!(AuSlot, offset), 0);
@@ -3359,6 +3392,13 @@ mod tests {
         assert_eq!(au::slot_offset(au::AU_SLOTS as usize), au::HEAP_OFFSET);
         assert_eq!(au::HEAP_OFFSET, 640);
         assert_eq!(&au::AU_MAGIC.to_le_bytes(), b"PFAU");
+        // The bitrate answer came out of the reserved tail, so a driver that never writes it
+        // reads back as "no answer" and the sequence can never be mistaken for the rate.
+        let word = au::applied_bitrate(7, 20_000);
+        assert_eq!(au::applied_bitrate_seq(word), 7);
+        assert_eq!(au::applied_bitrate_kbps(word), 20_000);
+        assert_eq!(au::applied_bitrate_seq(0), 0);
+        assert_eq!(au::applied_bitrate_kbps(au::applied_bitrate(1, 0)), 0);
         // The retired ring header's magic — a v6 section must never read as an AU one.
         assert_ne!(au::AU_MAGIC, 0x4456_4650);
     }
@@ -3372,10 +3412,13 @@ mod tests {
             AU_KEYFRAME,
             AU_RECOVERY_ANCHOR,
             AU_CHUNK_ALIGNED,
+            AU_ABORTED,
         ];
         println!("AU flags: {flags:?}; states: {FREE} {PUBLISHED} {READING}");
-        assert_eq!(flags, [1, 2, 4, 8, 16]);
-        assert_eq!(flags.iter().fold(0, |a, b| a | b), 0b1_1111);
+        assert_eq!(flags, [1, 2, 4, 8, 16, 32]);
+        assert_eq!(flags.iter().fold(0, |a, b| a | b), 0b11_1111);
+        // An old host masks the bits it knows; a new bit must not fall inside them.
+        assert_eq!(AU_ABORTED & 0b1_1111, 0);
         // A whole non-key AU is FIRST|LAST — the two must not alias.
         assert_eq!(AU_FIRST | AU_LAST, 3);
         assert_eq!([FREE, PUBLISHED, READING], [0, 1, 2]);

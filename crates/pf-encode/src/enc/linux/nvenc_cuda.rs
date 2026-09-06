@@ -2191,6 +2191,7 @@ impl Encoder for NvencCudaEncoder {
                             chunk_aligned: false,
                             first,
                             last: false,
+                            wire_index: None,
                         }));
                     }
                     let _ = (api().unlock_bitstream)(self.encoder, bs);
@@ -2282,6 +2283,7 @@ impl Encoder for NvencCudaEncoder {
                 chunk_aligned: false,
                 first: !cs.opened,
                 last: true,
+                wire_index: None,
             }))
         }
     }

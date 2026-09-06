@@ -76,6 +76,13 @@ pub struct AuChunk {
     pub first: bool,
     /// Closes the AU and releases the encoder's in-flight slot.
     pub last: bool,
+    /// The index this AU was encoded under, when the backend owns the numbering
+    /// (the in-driver encoder: it consumes one per
+    /// [`submit_indexed`](Encoder::submit_indexed), published or dropped). The
+    /// caller stamps it as the wire frame index, so RFI names the picture the
+    /// encoder invalidated. `None` — every submit-driven backend — leaves the
+    /// caller counting.
+    pub wire_index: Option<u32>,
 }
 
 impl AuChunk {
@@ -90,6 +97,7 @@ impl AuChunk {
             chunk_aligned: f.chunk_aligned,
             first: true,
             last: true,
+            wire_index: None,
         }
     }
 }

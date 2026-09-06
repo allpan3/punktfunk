@@ -332,6 +332,7 @@ impl AuChunker {
             chunk_aligned: self.chunk_aligned,
             first,
             last,
+            wire_index: None,
         }
     }
 }

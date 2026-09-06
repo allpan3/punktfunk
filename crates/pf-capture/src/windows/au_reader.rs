@@ -83,7 +83,8 @@ impl AuView {
             published_total: u64_at(offset_of!(AuHeader, published_total)),
             driver_status: u32_at(offset_of!(AuHeader, driver_status)),
             driver_status_detail: u32_at(offset_of!(AuHeader, driver_status_detail)),
-            _reserved: [0; 32],
+            applied_bitrate: u64_at(offset_of!(AuHeader, applied_bitrate)),
+            _reserved: [0; 24],
         }
     }
 
@@ -236,6 +237,14 @@ impl AuReader {
         }
     }
 
+    /// Whether `s` is the open access unit's next chunk. `HeapRing::take` places at the bump
+    /// head or, on a wrap, at the heap's start, so those two offsets are the only ones that
+    /// continue it; any other is a later chunk whose predecessor this pass has not seen.
+    fn continues(&self, s: &AuSlot) -> bool {
+        self.open_au
+            .is_some_and(|(_, end)| s.offset == end || s.offset == au::HEAP_OFFSET as u32)
+    }
+
     /// `from` → `to` on slot `i`'s state; `false` when the slot moved under us.
     fn transition(&self, i: usize, from: u32, to: u32) -> bool {
         self.view
@@ -295,7 +304,9 @@ impl AuReader {
     /// A pass is not a snapshot: a slot the driver published before the one a pass found is
     /// only guaranteed visible after that later slot's Acquire load. So a pass whose best slot
     /// is not the expected next chunk is repeated once before it is read as a skipped access
-    /// unit (adopted) or a chunk without its FIRST (freed unread).
+    /// unit (adopted) or a chunk without its FIRST (freed unread). A mid-access-unit candidate
+    /// must also sit where the writer's bump allocator would have put it ([`Self::continues`]),
+    /// or a chunk further along still gets concatenated in the wrong order.
     pub(crate) fn take_next(&mut self) -> Result<Option<Taken>, AuFault> {
         if !self.published_for_us() {
             return Ok(None);
@@ -306,7 +317,7 @@ impl AuReader {
                 return Ok(None);
             };
             let first = s.flags & au::AU_FIRST != 0;
-            if rel == 0 && (first || self.open_au.is_some()) {
+            if rel == 0 && (first || self.continues(&s)) {
                 chosen = Some((i, s));
                 break;
             }
@@ -314,7 +325,12 @@ impl AuReader {
                 continue;
             }
             if !first {
-                self.free_unread(i);
+                // A chunk of the open access unit that is not its next placement: its
+                // predecessor is not published yet, so leave it and rescan. Anything else can
+                // never be taken.
+                if rel != 0 || self.open_au.is_none() {
+                    self.free_unread(i);
+                }
                 return Ok(None);
             }
             self.gaps += 1;
@@ -624,6 +640,57 @@ mod tests {
         prod.publish(b"skip", 205, 205, 0, WHOLE);
         assert_eq!(rd.take_next().unwrap().unwrap().wire_seq, 205);
         assert_eq!((rd.gaps, rd.next_wire_seq()), (1, 206));
+    }
+
+    /// The writer places a chunk at the bump head or, on a wrap, at the heap's start. A slot
+    /// further along is a later chunk whose predecessor this pass has not seen; splicing it on
+    /// would hand the client an access unit with its middle missing.
+    #[test]
+    fn a_chunk_past_the_open_access_units_end_waits_for_its_predecessor() {
+        let mut buf = section();
+        let (p, len) = base(&mut buf);
+        let mut prod = Producer::init(p, len, 1, 0);
+        let mut rd = reader(&mut buf, 0);
+        prod.publish(b"aaa", 0, 0, 0, au::AU_FIRST);
+        assert_eq!(rd.take_next().unwrap().unwrap().data, b"aaa");
+        let mid = prod.publish(b"bb", 0, 0, 0, 0);
+        let tail = prod.publish(b"c", 0, 0, 0, au::AU_LAST);
+        // The middle chunk is published but not yet visible to this pass.
+        rd.view()
+            .slot32(mid, STATE)
+            .store(au::FREE, Ordering::Release);
+        assert!(rd.take_next().unwrap().is_none());
+        assert_eq!(
+            prod.slot_state(tail),
+            au::PUBLISHED,
+            "the tail is left alone"
+        );
+        assert_eq!(rd.freed_unread, 0);
+        rd.view()
+            .slot32(mid, STATE)
+            .store(au::PUBLISHED, Ordering::Release);
+        let mut rest = Vec::new();
+        while let Some(t) = rd.take_next().unwrap() {
+            rest.push(t.data);
+        }
+        assert_eq!(rest, vec![b"bb".to_vec(), b"c".to_vec()]);
+        assert!(!rd.mid_au() && rd.next_wire_seq() == 1);
+    }
+
+    /// A driver that cannot place the rest of an access unit closes it with an empty aborted
+    /// LAST, so the host finishes the wire frame instead of timing the chunk out.
+    #[test]
+    fn an_aborted_last_closes_the_access_unit() {
+        let mut buf = section();
+        let (p, len) = base(&mut buf);
+        let mut prod = Producer::init(p, len, 1, 0);
+        let mut rd = reader(&mut buf, 0);
+        prod.publish(b"aa", 0, 0, 0, au::AU_FIRST);
+        assert!(rd.take_next().unwrap().is_some() && rd.mid_au());
+        prod.publish(b"", 0, 0, 0, au::AU_LAST | au::AU_ABORTED);
+        let t = rd.take_next().unwrap().unwrap();
+        assert!(t.data.is_empty() && t.flags & au::AU_ABORTED != 0);
+        assert!(!rd.mid_au() && rd.next_wire_seq() == 1);
     }
 
     #[test]

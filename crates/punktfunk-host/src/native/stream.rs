@@ -3083,6 +3083,12 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                         }
                         au_seq = au_seq.wrapping_add(1);
                     }
+                    // A backend that owns the numbering (the in-driver encoder) spends an index
+                    // on every submit, published or not, and RFI names that index. Follow it, or
+                    // one dropped AU leaves the two domains apart for the session.
+                    if let Some(idx) = c.wire_index {
+                        au_seq = idx;
+                    }
                     wire_frame_open = !c.last;
                     if c.first {
                         first_chunk_us = t_wait.elapsed().as_micros() as u32;

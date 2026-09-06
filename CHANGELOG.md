@@ -329,6 +329,18 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **Reference invalidation on the Windows driver path names the right picture.** The driver
+  predicted an access unit's index at submit and stamped a different one at publish, so one
+  dropped unit put the two a frame apart for the rest of the session and every later recovery
+  repaired a picture the client already had. Nothing to do; install the matching host and driver.
+- **A truncated access unit costs one keyframe, not an encoder reset.** The driver dropped the
+  rest of a unit it could not place and said nothing, leaving the host to time the missing tail
+  out and rebuild the encoder over a keyframe that was already on its way. It now closes the
+  unit on the wire (new `AU_ABORTED` flag; an older host still reads the close).
+- **A Windows driver bitrate step the encoder refuses is answered.** The bitrate control only
+  queued the op, so a backend that declined in place was logged inside the driver while the host
+  went on believing the rate had moved — adaptive bitrate could not descend. The applied rate now
+  comes back through the section, and a refusal rebuilds the encoder as it does everywhere else.
 - **A recovered capture stall sends its keyframe.** The host stamped the forced-IDR cooldown as
   it noticed the stall had ended, so the keyframe it asked for a few lines later was coalesced
   away and the picture resumed on references the client no longer holds. Nothing to do; update
