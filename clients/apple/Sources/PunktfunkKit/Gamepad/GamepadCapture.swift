@@ -890,16 +890,18 @@ public final class GamepadCapture {
     /// input report and no other source for it, so a game or the host's shell otherwise reads
     /// a controller that is always full. GameController exposes no cable state: charging and
     /// fully-charged both mean one is attached.
+    ///
+    /// Nothing goes out for a pad with no readable level: the host's own default already says
+    /// wired and full, which is the right answer for a controller nobody can measure.
     private func sendPadStatus(_ slot: Slot) {
-        guard let wire else { return }
-        let battery = slot.controller.battery
-        let level = battery?.batteryLevel ?? -1
-        let charging = battery?.batteryState == .charging
+        guard let wire, let battery = slot.controller.battery, battery.batteryLevel >= 0
+        else { return }
+        let charging = battery.batteryState == .charging
         wire.sendPadStatus(
             pad: UInt8(truncatingIfNeeded: slot.pad),
-            battery: level >= 0 ? UInt8(min(100, max(0, (level * 100).rounded()))) : nil,
+            battery: UInt8(min(100, max(0, (battery.batteryLevel * 100).rounded()))),
             charging: charging,
-            wired: charging || battery?.batteryState == .full)
+            wired: charging || battery.batteryState == .full)
     }
 
     /// Arm the disconnect timer when ANY forwarded pad holds the full escape chord, disarm the

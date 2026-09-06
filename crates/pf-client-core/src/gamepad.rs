@@ -72,21 +72,26 @@ fn battery_of(pad: &sdl3::gamepad::Gamepad) -> Option<PadBattery> {
     })
 }
 
-/// The forwarded pad's power state for [`RichInput::PadStatus`]. SDL reports charge without
-/// a cable state on most drivers, so charging implies the cable; `Wired` covers a pad with
-/// no pack at all, which reads as no battery.
-fn pad_status_of(pad: &sdl3::gamepad::Gamepad) -> (u8, u8) {
-    use punktfunk_core::quic::{PAD_BATTERY_UNKNOWN, PAD_STATUS_CHARGING, PAD_STATUS_WIRED};
-    let power = battery_of(pad);
-    let charging = power.is_some_and(|b| b.charging);
-    let wired = charging
+/// The forwarded pad's power state for [`RichInput::PadStatus`], or `None` when SDL reports
+/// no level for this pad. Sending "wireless, level unknown" would move a DualShock 4 or
+/// Switch Pro off the wired-and-full claim it makes with no sample at all, which is the right
+/// answer for a pad nobody can measure — silence keeps it.
+///
+/// SDL reports charge without a cable state on most drivers, so charging implies the cable.
+fn pad_status_of(pad: &sdl3::gamepad::Gamepad) -> Option<(u8, u8)> {
+    use punktfunk_core::quic::{PAD_STATUS_CHARGING, PAD_STATUS_WIRED};
+    let power = battery_of(pad)?;
+    let wired = power.charging
         || matches!(
             pad.connection_state(),
             Ok(sdl3::joystick::ConnectionState::Wired)
         );
-    let flags =
-        if charging { PAD_STATUS_CHARGING } else { 0 } | if wired { PAD_STATUS_WIRED } else { 0 };
-    (power.map_or(PAD_BATTERY_UNKNOWN, |b| b.percent), flags)
+    let flags = if power.charging {
+        PAD_STATUS_CHARGING
+    } else {
+        0
+    } | if wired { PAD_STATUS_WIRED } else { 0 };
+    Some((power.percent, flags))
 }
 
 /// Valve HIDAPI on/off. The Deck driver sends `ID_CLEAR_DIGITAL_MAPPINGS` +
@@ -1593,7 +1598,9 @@ impl Worker {
                 continue;
             }
             slot.status_at = Some(now);
-            let (battery, flags) = pad_status_of(&slot.pad);
+            let Some((battery, flags)) = pad_status_of(&slot.pad) else {
+                continue;
+            };
             let _ = c.send_rich_input(RichInput::PadStatus {
                 pad: slot.index,
                 battery,

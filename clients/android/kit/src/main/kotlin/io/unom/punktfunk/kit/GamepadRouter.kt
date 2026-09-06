@@ -310,28 +310,23 @@ class GamepadRouter(
     }
 
     /**
-     * One slot's battery onto the wire. Synthetic slots ([ExternalPad], negative ids) have no
-     * [InputDevice] to ask; their capture links own their own reports. Pre-31 has no per-device
-     * battery API at all, so those pads keep the host's default (wired and full).
+     * One slot's battery onto the wire. Nothing goes out without a readable level — the host's
+     * own default already says wired and full, which is the right answer for a pad nobody can
+     * measure. Synthetic slots ([ExternalPad], negative ids) have no [InputDevice] to ask,
+     * their capture links own their own reports, and pre-31 has no per-device battery API.
      */
     private fun sendPadStatus(deviceId: Int, slot: Slot) {
         if (!forwarding || deviceId < 0 || android.os.Build.VERSION.SDK_INT < 31) return
         val b = InputDevice.getDevice(deviceId)?.batteryState ?: return
-        var battery = NativeBridge.PAD_BATTERY_UNKNOWN
+        if (!b.isPresent || b.capacity < 0f) return
         var flags = 0
-        if (b.isPresent && b.capacity >= 0f) {
-            battery = (b.capacity * 100f).toInt().coerceIn(0, 100)
-            if (b.status == android.os.BatteryManager.BATTERY_STATUS_CHARGING) {
-                flags = flags or NativeBridge.PAD_STATUS_CHARGING or NativeBridge.PAD_STATUS_WIRED
-            }
-            if (b.status == android.os.BatteryManager.BATTERY_STATUS_FULL) {
-                flags = flags or NativeBridge.PAD_STATUS_WIRED
-            }
-        } else {
-            // No pack: a wired pad. Anything else would draw an empty battery on a pad that
-            // cannot have one.
-            flags = NativeBridge.PAD_STATUS_WIRED
+        if (b.status == android.os.BatteryManager.BATTERY_STATUS_CHARGING) {
+            flags = NativeBridge.PAD_STATUS_CHARGING or NativeBridge.PAD_STATUS_WIRED
         }
+        if (b.status == android.os.BatteryManager.BATTERY_STATUS_FULL) {
+            flags = flags or NativeBridge.PAD_STATUS_WIRED
+        }
+        val battery = (b.capacity * 100f).toInt().coerceIn(0, 100)
         NativeBridge.nativeSendPadStatus(handle, slot.index, battery, flags)
     }
 
