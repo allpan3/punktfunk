@@ -953,6 +953,16 @@ impl NativeVulkanDecoder {
             }
             match dec.poll_status(&s.frame) {
                 DecodeStatus::Ok => s.resolved = true,
+                // The query slot was recycled before it was read. No verdict,
+                // so no verdict is counted and the picture stands.
+                DecodeStatus::Unknown => {
+                    tracing::debug!(
+                        poc = s.frame.poc,
+                        slot = s.frame.query_slot,
+                        "decode status query slot recycled — verdict unknowable"
+                    );
+                    s.resolved = true;
+                }
                 DecodeStatus::Failed => {
                     s.resolved = true;
                     if status_queries {
