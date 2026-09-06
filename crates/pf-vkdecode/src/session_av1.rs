@@ -58,7 +58,11 @@ impl ParamsLedgerAv1 {
     /// Action for activating `sequence`. Pure; mutate via [`Self::commit`].
     pub(crate) fn plan(&self, sequence: &Rc<SequenceHeaderObu>) -> ParamsActionAv1 {
         match &self.sequence {
-            Some(stored) if **stored == **sequence => ParamsActionAv1::Current,
+            // Same allocation is the same content; the deep compare is only for
+            // the re-parse a keyframe hands out as a fresh `Rc`.
+            Some(stored) if Rc::ptr_eq(stored, sequence) || **stored == **sequence => {
+                ParamsActionAv1::Current
+            }
             _ => ParamsActionAv1::Recreate,
         }
     }

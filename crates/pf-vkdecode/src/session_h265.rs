@@ -123,13 +123,15 @@ impl ParamsLedgerH265 {
                 return ParamsActionH265::Recreate;
             }
         }
+        // Same allocation is the same content; the deep compare is only for the
+        // re-parse an IRAP hands out as a fresh `Rc`.
         if let Some((_, stored)) = stored_sps {
-            if **stored != **sps {
+            if !Rc::ptr_eq(stored, sps) && **stored != **sps {
                 return ParamsActionH265::Recreate;
             }
         }
         if let Some((_, stored)) = stored_pps {
-            if **stored != **pps {
+            if !Rc::ptr_eq(stored, pps) && **stored != **pps {
                 return ParamsActionH265::Recreate;
             }
         }
