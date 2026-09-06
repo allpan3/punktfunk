@@ -249,5 +249,29 @@ in the future."
     `frame_size_with_refs`, and authoring the syntax by hand is out of proportion for a
     two-line zero check. **Not filed upstream.**
 
+16. `src/codec/h264/dpb.rs` — `max_num_reorder_frames` becomes usable, two edits, one
+    defect. Upstream reaches the C.4.5.3 bumping process only from `bump_as_needed`,
+    which returns early unless the DPB has no empty frame buffer, and then uses
+    `max_num_reorder_frames` as a floor (`len() >= max_num_reorder_frames`). E.2.1 makes
+    it a trigger: a decoder outputs while more pictures are held for output than the
+    stream says it reorders. A host that signals `max_num_reorder_frames = 0` therefore
+    got a whole DPB of output latency — three to five frames — because nothing was
+    displayed until the buffer filled. H.265 has the rule upstream
+    (`h265/dpb.rs::needs_additional_bumping`, C.5.2.3); H.264 does not.
+
+    - new `bump_reorder_excess()`, the E.2.1 loop, bumping the lowest POC while the
+      needed-for-output count exceeds the bound. `pf-bitstream`'s `H264Planner` calls it
+      after `store_picture` and after each `frame_num` gap placeholder;
+    - `clear()` now preserves `max_num_reorder_frames` the way it already preserves
+      `max_num_pics` and `interlaced`. It restores neither today, so the bound was
+      silently zeroed by the first IDR (`clear` runs from `drain`), which with the new
+      trigger would output a reordering stream out of order.
+
+    Both are needed together: the loop alone reads a bound the first IDR has already
+    wiped. Regression-tested in `pf-bitstream`
+    (`a_zero_reorder_vui_outputs_every_picture_in_its_own_plan`, plus the 25 fps vector's
+    ascending-POC order test, which pins the no-VUI stream's behaviour as unchanged).
+    **Report upstream — not yet filed.**
+
 Re-sync procedure: fetch the AOSP tree, re-apply this trim, diff `codec/` +
 `bitstream_utils.rs` (expect near-zero conflicts), update the commit pin above.

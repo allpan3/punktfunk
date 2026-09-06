@@ -826,6 +826,14 @@ impl H264Planner {
         self.pending_outputs.extend(bumped.into_iter().flatten());
     }
 
+    /// Queue pictures held past `max_num_reorder_frames` (E.2.1). C.4.5.3 alone
+    /// outputs only when the DPB fills, which is a whole DPB of latency on a
+    /// stream that reorders nothing.
+    fn bump_reorder_excess(&mut self) {
+        let bumped = self.dpb.bump_reorder_excess();
+        self.pending_outputs.extend(bumped.into_iter().flatten());
+    }
+
     fn drain_dpb(&mut self) {
         let pics = self.dpb.drain();
         self.pending_outputs.extend(pics.into_iter().flatten());
@@ -1280,6 +1288,9 @@ impl H264Planner {
             });
         }
         let interlaced = !sps.frame_mbs_only_flag;
+        // E.2.1: without the VUI restriction this is MaxDpbFrames, so a host
+        // that omits it pays a DPB of output latency. Not assumed away here —
+        // a no-VUI stream that reorders would then emit out of order.
         let max_num_order_frames = sps.max_num_order_frames() as usize;
         let max_num_reorder_frames = if max_num_order_frames > max_dpb_frames {
             0
@@ -1340,6 +1351,8 @@ impl H264Planner {
             self.dpb.sliding_window_marking(&mut pic, sps);
 
             self.bump_as_needed(&pic);
+            // A placeholder needs a frame buffer; E.2.1 excess may still hold one.
+            self.bump_reorder_excess();
 
             // Envelope keeps the DPB progressive; no interlaced field-split.
             if let Err(err) = self.dpb.store_picture(pic.into_rc(), None) {
@@ -1614,6 +1627,9 @@ impl H264Planner {
             self.dpb
                 .store_picture(pic.into_rc(), Some(id))
                 .map_err(|err| PlanError::Parse(err.to_string()))?;
+            // E.2.1 output trigger. A zero-reorder stream outputs this picture
+            // here, in its own plan; the IDR too, the DPB above being empty.
+            self.bump_reorder_excess();
         } else {
             self.add_to_ready_queue(pic, id);
         }
@@ -1719,6 +1735,65 @@ mod tests {
         }
         aus.push(&stream[au_start..]);
         aus
+    }
+
+    /// 64x64, three-frame DPB, `max_num_reorder_frames = 0`: the VUI a host
+    /// that reorders nothing should emit.
+    fn sps_three_deep_no_reorder() -> Sps {
+        Sps {
+            profile_idc: Profile::Main as u8,
+            level_idc: Level::L4,
+            frame_mbs_only_flag: true,
+            direct_8x8_inference_flag: true,
+            max_num_ref_frames: 2,
+            pic_width_in_mbs_minus1: 3,
+            pic_height_in_map_units_minus1: 3,
+            vui_parameters_present_flag: true,
+            vui_parameters: VuiParams {
+                bitstream_restriction_flag: true,
+                max_num_reorder_frames: 0,
+                max_dec_frame_buffering: 3,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// E.2.1: a picture the stream promises not to reorder is display-ready as
+    /// soon as it is decoded. Waiting for a full DPB is three frames of latency.
+    #[test]
+    fn a_zero_reorder_vui_outputs_every_picture_in_its_own_plan() {
+        let sps = Rc::new(sps_three_deep_no_reorder());
+        let pps = PpsBuilder::new(Rc::clone(&sps))
+            .pic_parameter_set_id(0)
+            .pic_init_qp(26)
+            .build();
+        let mut planner = H264Planner::new();
+
+        let mut au = param_set_au(&sps, &pps);
+        au.extend(write_idr_slice());
+        let idr = planner.plan_au(&au).unwrap();
+        assert_eq!(
+            idr.dpb.outputs,
+            vec![idr.dpb.stored.unwrap()],
+            "the IDR outputs in its own plan"
+        );
+
+        for frame_num in 1..6u32 {
+            let plan = planner
+                .plan_au(&write_p_slice(frame_num, frame_num * 2, 1, 1, None))
+                .unwrap();
+            assert_eq!(
+                plan.dpb.outputs,
+                vec![plan.dpb.stored.unwrap()],
+                "P {frame_num} outputs in its own plan"
+            );
+        }
+
+        assert!(
+            planner.flush().outputs.is_empty(),
+            "nothing is left buffered"
+        );
     }
 
     #[test]

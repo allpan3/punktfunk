@@ -329,6 +329,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **H.264 pictures reach the screen on the stream's reorder bound, not a full DPB.** The client
+  planner held every decoded picture until the buffer filled — three to five frames of latency on
+  a stream that reorders nothing — and NVENC now states that bound, so update host and client
+  together to collect it.
 - **An Android Steam Controller 2 over Bluetooth writes to the right GATT characteristics.**
   Valve routes each output report id to its own characteristic at `id + 0x35` and every feature
   command to `100F6C34`, id byte stripped in both cases, where the link had written every frame

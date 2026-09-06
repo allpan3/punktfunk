@@ -439,11 +439,14 @@ impl<T: Clone> Dpb<T> {
         debug!("Clearing the DPB");
 
         let max_num_pics = self.max_num_pics;
+        let max_num_reorder_frames = self.max_num_reorder_frames;
         let interlaced = self.interlaced;
 
         *self = Default::default();
 
+        // Limits are configuration from the active SPS; `clear` drops pictures.
         self.max_num_pics = max_num_pics;
+        self.max_num_reorder_frames = max_num_reorder_frames;
         self.interlaced = interlaced;
     }
 
@@ -496,6 +499,25 @@ impl<T: Clone> Dpb<T> {
                 };
             }
         }
+    }
+
+    /// Bumps while more pictures are held for output than
+    /// `max_num_reorder_frames` allows (E.2.1). `bump_as_needed` reaches the
+    /// bumping process only through a full DPB, so the reorder bound gates
+    /// output there but never triggers it.
+    pub fn bump_reorder_excess(&mut self) -> Vec<Option<T>> {
+        let mut pics = vec![];
+        while self.entries.iter().filter(|e| e.needed_for_output).count()
+            > self.max_num_reorder_frames
+        {
+            match self.bump() {
+                Some(pic) => pics.push(pic),
+                None => return pics,
+            }
+            self.remove_unused();
+        }
+
+        pics
     }
 
     /// Bumps the DPB if needed. DPB bumping is described on C.4.5.3.
