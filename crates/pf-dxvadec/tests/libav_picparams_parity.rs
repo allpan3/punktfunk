@@ -167,7 +167,7 @@ fn our_h264_submissions() -> Vec<OurSubmission> {
         out.push(OurSubmission {
             pic_params: pf_dxvadec::as_bytes(&dxva.pic_params).to_vec(),
             qmatrix: Some(pf_dxvadec::as_bytes(&dxva.qmatrix).to_vec()),
-            descriptors: pf_dxvadec::descriptors_h264(&dxva, &packed),
+            descriptors: pf_dxvadec::descriptors_h264(dxva.mb_count, &packed),
             records: packed.records,
             tiles: Vec::new(),
             unpadded,
@@ -203,7 +203,7 @@ fn our_hevc_submissions() -> Vec<OurSubmission> {
                 .qmatrix
                 .as_ref()
                 .map(|qm| pf_dxvadec::as_bytes(qm).to_vec()),
-            descriptors: pf_dxvadec::descriptors_h265(&dxva, &packed),
+            descriptors: pf_dxvadec::descriptors_h265(dxva.qmatrix.is_some(), &packed),
             records: packed.records,
             tiles: Vec::new(),
             unpadded,
@@ -2198,7 +2198,7 @@ fn hevc_case(enabled: bool, sps_coded: Option<u8>, pps_coded: Option<u8>) -> Our
             .qmatrix
             .as_ref()
             .map(|qm| pf_dxvadec::as_bytes(qm).to_vec()),
-        descriptors: pf_dxvadec::descriptors_h265(&dxva, &packed),
+        descriptors: pf_dxvadec::descriptors_h265(dxva.qmatrix.is_some(), &packed),
         records: packed.records,
         tiles: Vec::new(),
         unpadded,

@@ -773,50 +773,25 @@ impl NativeD3d11Decoder {
             },
         )?;
 
-        // Descriptor table is pf-dxvadec's (CPU-tested: types, order, sizes, zero
-        // `NumMBsInBuffer`). This arm only checks the writers' byte counts against it.
-        let descs = pf_dxvadec::descriptors_av1(&packed);
-        let written = [
-            (pf_dxvadec::BUFFER_PICTURE_PARAMETERS, pp_size),
-            (pf_dxvadec::BUFFER_BITSTREAM, bs_size),
-            (pf_dxvadec::BUFFER_SLICE_CONTROL, tc_size),
-        ];
-        let mut out: Vec<D3D11_VIDEO_DECODER_BUFFER_DESC> = Vec::with_capacity(descs.len());
-        for desc in &descs {
-            let wrote = written
-                .iter()
-                .find(|(kind, _)| *kind == desc.buffer_type)
-                .map(|(_, size)| *size)
-                .ok_or_else(|| anyhow!("no writer for AV1 buffer type {}", desc.buffer_type))?;
-            if wrote != desc.data_size as usize {
-                bail!(
-                    "AV1 buffer type {} was written with {wrote} bytes, the descriptor \
-                     declares {}",
-                    desc.buffer_type,
-                    desc.data_size
-                );
-            }
-            out.push(buffer_desc(
-                buffer_kind(desc.buffer_type)?,
-                desc.data_size as usize,
-                desc.num_mbs_in_buffer,
-            ));
-        }
-
-        // SAFETY: a COM call on the live video context with the live decoder and a slice of
-        // fully-initialized descriptors that outlives the call. Every buffer named by a
-        // descriptor was released back to the driver by `write_buffer` before this runs,
-        // which is what makes them submittable.
-        unsafe {
-            self.video_context
-                .SubmitDecoderBuffers(&session.decoder, &out)
-        }
-        .ok()
-        .context("SubmitDecoderBuffers (AV1)")
+        submit_buffers(
+            &self.video_context,
+            &session.decoder,
+            &pf_dxvadec::descriptors_av1(&packed),
+            &[
+                (pf_dxvadec::BUFFER_PICTURE_PARAMETERS, pp_size),
+                (pf_dxvadec::BUFFER_BITSTREAM, bs_size),
+                (pf_dxvadec::BUFFER_SLICE_CONTROL, tc_size),
+            ],
+        )
+        .context("AV1 decoder buffers")
     }
 
+    /// H.264 / HEVC buffer set: picture parameters, an optional quantization
+    /// matrix, bitstream, slice control. HEVC omits the matrix when scaling
+    /// lists are off — the picture parameters already told the driver to ignore
+    /// it, and libavcodec submits no buffer either.
     fn fill_and_submit_slices(&self, au: &[u8], sub: &Submission, session: &Session) -> Result<()> {
-        let mut descs: Vec<D3D11_VIDEO_DECODER_BUFFER_DESC> = Vec::with_capacity(4);
+        let mut written: Vec<(u32, usize)> = Vec::with_capacity(4);
 
         let pp_size = write_buffer(
             &self.video_context,
@@ -827,14 +802,8 @@ impl NativeD3d11Decoder {
                 Ok(sub.pic_params.len())
             },
         )?;
-        descs.push(buffer_desc(
-            D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS,
-            pp_size,
-            0,
-        ));
+        written.push((pf_dxvadec::BUFFER_PICTURE_PARAMETERS, pp_size));
 
-        // HEVC with scaling lists disabled submits no such buffer — libavcodec's
-        // condition. Picture parameters already told the driver to ignore the matrix.
         if let Some(qmatrix) = &sub.qmatrix {
             let qm_size = write_buffer(
                 &self.video_context,
@@ -845,11 +814,7 @@ impl NativeD3d11Decoder {
                     Ok(qmatrix.len())
                 },
             )?;
-            descs.push(buffer_desc(
-                D3D11_VIDEO_DECODER_BUFFER_INVERSE_QUANTIZATION_MATRIX,
-                qm_size,
-                0,
-            ));
+            written.push((pf_dxvadec::BUFFER_INVERSE_QUANTIZATION_MATRIX, qm_size));
         }
 
         // Packed in the driver's mapping. Returns slice locations the control
@@ -867,12 +832,16 @@ impl NativeD3d11Decoder {
                 Ok(size)
             },
         )?;
-        descs.push(buffer_desc(
-            D3D11_VIDEO_DECODER_BUFFER_BITSTREAM,
-            bs_size,
-            sub.mb_count,
-        ));
+        written.push((pf_dxvadec::BUFFER_BITSTREAM, bs_size));
         let packed = packed.expect("the writer above ran or returned an error");
+
+        // `fill_and_submit` dispatched AV1 to the other arm. A fourth codec must
+        // fail to compile here rather than pack tiles as H.264 slices.
+        let descs = match sub.codec {
+            Codec::H264 => pf_dxvadec::descriptors_h264(sub.mb_count, &packed),
+            Codec::H265 => pf_dxvadec::descriptors_h265(sub.qmatrix.is_some(), &packed),
+            Codec::Av1 => bail!("AV1 has its own descriptor table"),
+        };
 
         let sc_size = write_buffer(
             &self.video_context,
@@ -891,28 +860,57 @@ impl NativeD3d11Decoder {
                     copy_into(dst, bytes)?;
                     Ok(bytes.len())
                 }
-                // `fill_and_submit` dispatched AV1 to the other arm. A fourth codec
-                // must fail to compile here rather than pack tiles as H.264 slices.
                 Codec::Av1 => bail!("AV1 does not submit slice-control records"),
             },
         )?;
-        descs.push(buffer_desc(
-            D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL,
-            sc_size,
-            sub.mb_count,
-        ));
+        written.push((pf_dxvadec::BUFFER_SLICE_CONTROL, sc_size));
 
-        // SAFETY: a COM call on the live video context with the live decoder and a slice of
-        // fully-initialized descriptors that outlives the call. Every buffer named by a
-        // descriptor was released back to the driver by `write_buffer` before this runs,
-        // which is what makes them submittable.
-        unsafe {
-            self.video_context
-                .SubmitDecoderBuffers(&session.decoder, &descs)
+        submit_buffers(&self.video_context, &session.decoder, &descs, &written)
+            .with_context(|| format!("{:?} decoder buffers", sub.codec))
+    }
+}
+
+/// Cross-check every writer against pf-dxvadec's descriptor table, then submit.
+///
+/// The table is the CPU-tested policy: buffer types, their order, `DataSize`,
+/// and `NumMBsInBuffer`. `written` is what each writer actually put in the
+/// driver's mapping; a disagreement would declare a `DataSize` past the bytes
+/// the driver holds.
+fn submit_buffers(
+    context: &ID3D11VideoContext,
+    decoder: &ID3D11VideoDecoder,
+    descs: &[pf_dxvadec::BufferDescriptor],
+    written: &[(u32, usize)],
+) -> Result<()> {
+    let mut out: Vec<D3D11_VIDEO_DECODER_BUFFER_DESC> = Vec::with_capacity(descs.len());
+    for desc in descs {
+        let wrote = written
+            .iter()
+            .find(|(kind, _)| *kind == desc.buffer_type)
+            .map(|(_, size)| *size)
+            .ok_or_else(|| anyhow!("no writer for DXVA buffer type {}", desc.buffer_type))?;
+        if wrote != desc.data_size as usize {
+            bail!(
+                "DXVA buffer type {} was written with {wrote} bytes, the descriptor \
+                 declares {}",
+                desc.buffer_type,
+                desc.data_size
+            );
         }
+        out.push(buffer_desc(
+            buffer_kind(desc.buffer_type)?,
+            desc.data_size as usize,
+            desc.num_mbs_in_buffer,
+        ));
+    }
+
+    // SAFETY: a COM call on the live video context with the live decoder and a slice of
+    // fully-initialized descriptors that outlives the call. Every buffer named by a
+    // descriptor was released back to the driver by `write_buffer` before this runs,
+    // which is what makes them submittable.
+    unsafe { context.SubmitDecoderBuffers(decoder, &out) }
         .ok()
         .context("SubmitDecoderBuffers")
-    }
 }
 
 /// pf-bitstream H.273 code points as the presenter's [`ColorDesc`].

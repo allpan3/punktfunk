@@ -22,8 +22,6 @@ use crate::dxva_av1::PicParamsAv1;
 use crate::dxva_av1::TileAv1;
 use crate::pack::Packed;
 use crate::pack_av1::PackedAv1;
-use crate::pic::DecodePlanDxva;
-use crate::pic_h265::DecodePlanDxvaH265;
 
 /// `D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS`.
 pub const BUFFER_PICTURE_PARAMETERS: u32 = 0;
@@ -65,8 +63,9 @@ fn slice_control_size(record_size: usize, records: usize) -> u32 {
     u32::try_from(record_size.saturating_mul(records)).unwrap_or(u32::MAX)
 }
 
-pub fn descriptors_h264(plan: &DecodePlanDxva, packed: &Packed) -> Vec<BufferDescriptor> {
-    let mb_count = plan.mb_count;
+/// `mb_count` is [`crate::pic::DecodePlanDxva::mb_count`]; H.264 always
+/// carries a matrix.
+pub fn descriptors_h264(mb_count: u32, packed: &Packed) -> Vec<BufferDescriptor> {
     vec![
         BufferDescriptor::new(
             BUFFER_PICTURE_PARAMETERS,
@@ -87,14 +86,15 @@ pub fn descriptors_h264(plan: &DecodePlanDxva, packed: &Packed) -> Vec<BufferDes
     ]
 }
 
-pub fn descriptors_h265(plan: &DecodePlanDxvaH265, packed: &Packed) -> Vec<BufferDescriptor> {
+/// `qmatrix` is whether [`crate::pic_h265::DecodePlanDxvaH265::qmatrix`] is present.
+pub fn descriptors_h265(qmatrix: bool, packed: &Packed) -> Vec<BufferDescriptor> {
     let mut out = Vec::with_capacity(4);
     out.push(BufferDescriptor::new(
         BUFFER_PICTURE_PARAMETERS,
         size_of::<PicParamsHevc>() as u32,
         0,
     ));
-    if plan.qmatrix.is_some() {
+    if qmatrix {
         out.push(BufferDescriptor::new(
             BUFFER_INVERSE_QUANTIZATION_MATRIX,
             size_of::<QmatrixHevc>() as u32,
@@ -133,37 +133,7 @@ pub fn descriptors_av1(packed: &PackedAv1) -> Vec<BufferDescriptor> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dxva::PicEntry;
     use crate::pack::SliceRecord;
-    use crate::pic::DxvaRef;
-
-    /// Stub plan: only `mb_count` is read. Whole-stream evidence lives in
-    /// `tests/libav_picparams_parity.rs`.
-    fn h264_plan(mb_count: u32) -> DecodePlanDxva {
-        DecodePlanDxva {
-            pic_params: PicParamsH264::zeroed(),
-            qmatrix: QmatrixH264::zeroed(),
-            slice_ranges: Vec::new(),
-            setup_slot: 0,
-            setup_id: 1,
-            setup_is_reference: true,
-            release_after_decode: Vec::new(),
-            refs: Vec::<DxvaRef>::new(),
-            mb_count,
-        }
-    }
-
-    fn h265_plan(qmatrix: Option<QmatrixHevc>) -> DecodePlanDxvaH265 {
-        DecodePlanDxvaH265 {
-            pic_params: PicParamsHevc::zeroed(),
-            qmatrix,
-            slice_ranges: Vec::new(),
-            setup_slot: 0,
-            setup_id: 1,
-            setup_is_reference: true,
-            refs: Vec::new(),
-        }
-    }
 
     fn packed(slices: usize, data_size: u32) -> Packed {
         Packed {
@@ -189,7 +159,7 @@ mod tests {
 
     #[test]
     fn an_h264_submission_carries_four_buffers_in_libavcodecs_order() {
-        let descs = descriptors_h264(&h264_plan(300), &packed(2, 512));
+        let descs = descriptors_h264(300, &packed(2, 512));
         assert_eq!(
             descs.iter().map(|d| d.buffer_type).collect::<Vec<_>>(),
             vec![
@@ -207,7 +177,7 @@ mod tests {
 
     #[test]
     fn only_the_h264_bitstream_and_slice_control_buffers_carry_a_macroblock_count() {
-        let descs = descriptors_h264(&h264_plan(300), &packed(1, 256));
+        let descs = descriptors_h264(300, &packed(1, 256));
         assert_eq!(descs[0].num_mbs_in_buffer, 0, "picture parameters");
         assert_eq!(descs[1].num_mbs_in_buffer, 0, "quantization matrices");
         assert_eq!(descs[2].num_mbs_in_buffer, 300, "bitstream");
@@ -216,7 +186,7 @@ mod tests {
 
     #[test]
     fn an_hevc_submission_omits_the_quantization_matrix_buffer_when_there_is_none() {
-        let descs = descriptors_h265(&h265_plan(None), &packed(1, 384));
+        let descs = descriptors_h265(false, &packed(1, 384));
         assert_eq!(
             descs.iter().map(|d| d.buffer_type).collect::<Vec<_>>(),
             vec![
@@ -233,7 +203,7 @@ mod tests {
 
     #[test]
     fn an_hevc_submission_carries_the_quantization_matrix_buffer_when_there_is_one() {
-        let descs = descriptors_h265(&h265_plan(Some(QmatrixHevc::zeroed())), &packed(3, 640));
+        let descs = descriptors_h265(true, &packed(3, 640));
         assert_eq!(
             descs.iter().map(|d| d.buffer_type).collect::<Vec<_>>(),
             vec![
@@ -253,8 +223,8 @@ mod tests {
     fn the_hevc_descriptors_carry_no_macroblock_count_at_all() {
         // libavcodec writes 0 here; a CTB count would be the other-direction miss.
         for descs in [
-            descriptors_h265(&h265_plan(None), &packed(1, 256)),
-            descriptors_h265(&h265_plan(Some(QmatrixHevc::zeroed())), &packed(4, 1024)),
+            descriptors_h265(false, &packed(1, 256)),
+            descriptors_h265(true, &packed(4, 1024)),
         ] {
             for desc in descs {
                 assert_eq!(
@@ -268,8 +238,8 @@ mod tests {
 
     #[test]
     fn every_descriptor_starts_at_byte_zero_of_its_own_buffer() {
-        let h264 = descriptors_h264(&h264_plan(1), &packed(2, 256));
-        let h265 = descriptors_h265(&h265_plan(Some(QmatrixHevc::zeroed())), &packed(2, 256));
+        let h264 = descriptors_h264(1, &packed(2, 256));
+        let h265 = descriptors_h265(true, &packed(2, 256));
         for desc in h264.into_iter().chain(h265) {
             assert_eq!(desc.data_offset, 0);
         }
@@ -282,9 +252,9 @@ mod tests {
         assert_eq!(size_of::<SliceH264Short>(), 10);
         assert_eq!(size_of::<SliceHevcShort>(), 10);
         for slices in [1usize, 2, 5, 68] {
-            let h264 = descriptors_h264(&h264_plan(1), &packed(slices, 4096));
+            let h264 = descriptors_h264(1, &packed(slices, 4096));
             assert_eq!(h264[3].data_size, 10 * slices as u32);
-            let h265 = descriptors_h265(&h265_plan(None), &packed(slices, 4096));
+            let h265 = descriptors_h265(false, &packed(slices, 4096));
             assert_eq!(h265[2].data_size, 10 * slices as u32);
         }
     }
@@ -345,23 +315,5 @@ mod tests {
             let descs = descriptors_av1(&packed_av1(tiles, 4096));
             assert_eq!(descs[2].data_size, 16 * tiles as u32);
         }
-    }
-
-    #[test]
-    fn a_reference_entry_in_the_plan_does_not_reach_the_descriptors() {
-        let mut plan = h264_plan(300);
-        plan.refs.push(DxvaRef {
-            slot: 2,
-            id: 7,
-            is_long_term: true,
-            top_field_order_cnt: 4,
-            bottom_field_order_cnt: 4,
-            frame_num_or_lt_idx: 1,
-        });
-        plan.pic_params.RefFrameList[0] = PicEntry::new(2, true);
-        assert_eq!(
-            descriptors_h264(&plan, &packed(1, 256)),
-            descriptors_h264(&h264_plan(300), &packed(1, 256))
-        );
     }
 }
