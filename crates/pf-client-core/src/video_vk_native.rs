@@ -488,9 +488,12 @@ fn picture_format(codec: &str, stream: crate::video::StreamFormat) -> Result<vk:
 /// header, never softened), same backstop as a level above `maxLevelIdc`.
 const AV1_PROBE_FILM_GRAIN: bool = false;
 
-/// Worst-case delivered-but-unreleased frames the client pipeline holds at once.
-/// [`pf_vkdecode::HOLD_HEADROOM`] enumerates 4–7; the bound uses the maximum.
-const PIPELINE_HOLD: usize = 7;
+/// Worst-case delivered-but-unreleased frames the client pipeline holds at once,
+/// under the deepest smoothing setting (`Smooth { buffer: 3 }`): 2 in the pump's
+/// frame channel, 1 in the wake forwarder's hand, 2 in the presenter's wake
+/// channel, 3 in the smoothing store, 1 parked in the presenter's `retired_hw`
+/// until the next present's fence wait.
+const PIPELINE_HOLD: usize = 9;
 
 /// Display-ready frames this backend may hold for later AUs ([`trim_deliverable`]).
 ///
@@ -503,7 +506,7 @@ const PIPELINE_HOLD: usize = 7;
 /// per temporal unit). A frame waiting `MAX_DELIVERABLE` AUs burns
 /// `2 * (MAX_DELIVERABLE + 1)` slots unread; overrun reads as `Failed` and
 /// [`NativeVulkanDecoder::settle_statuses`] attributes it to `driver_failed`.
-/// At this depth the wait is ~4 of 17.
+/// At this depth the wait is ~4 of 19.
 ///
 /// H.265 bumping can produce a burst; AV1 spec admits one shown frame per temporal
 /// unit, so this is defence against a non-conformant stream. Oldest-first drop: the

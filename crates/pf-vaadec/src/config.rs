@@ -111,10 +111,10 @@ pub fn rt_format(chroma_format_idc: u8, depth: u8) -> Result<u32, ConfigError> {
 }
 
 /// Zero-copy: a presented surface cannot be decoded into. Size the pool to DPB
-/// and the decoder stalls behind display. 8 matches `pf_vkdecode::images::HOLD_HEADROOM`.
-/// Do not copy FFmpeg's `extra_hw_frames = 4`: `av_hwframe_get_buffer` blocks;
-/// this pool does not.
-pub const PRESENTER_HEADROOM: usize = 8;
+/// and the decoder stalls behind display. Matches `pf_vkdecode::images::HOLD_HEADROOM`
+/// — one client pipeline, one depth. Do not copy FFmpeg's `extra_hw_frames = 4`:
+/// `av_hwframe_get_buffer` blocks; this pool does not.
+pub const PRESENTER_HEADROOM: usize = 10;
 
 /// VAAPI has no driver minimum. AV1 passes [`AV1_MAX_DPB_FRAMES`] (codec constant, not a sequence header).
 pub fn surface_count(max_dpb_frames: usize) -> usize {

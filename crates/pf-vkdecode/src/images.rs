@@ -29,9 +29,10 @@ use crate::device::DecodeDevice;
 
 /// Extra pictures the consumer may hold (delivered, unreleased) on top of
 /// the stream's DPB depth. Pool size is `required_slots + HOLD_HEADROOM`.
-/// 8 covers ~4–7 in-flight frames with one frame of slack; holding more
-/// is `NoFreeSlot`.
-pub const HOLD_HEADROOM: u32 = 8;
+/// The client pipeline at its deepest holds 9 (`PIPELINE_HOLD`, counted in
+/// `pf-client-core`'s `video_vk_native`), and one more may wait in the
+/// backend's deliverable queue. Holding past that is `NoFreeSlot`.
+pub const HOLD_HEADROOM: u32 = 10;
 
 /// Pool layout for one `(caps, required_slots)` pair. No GPU allocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
