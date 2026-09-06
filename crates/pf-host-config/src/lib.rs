@@ -370,6 +370,12 @@ fn parse_refresh_rates(raw: Option<&str>) -> Vec<u32> {
 }
 
 impl HostConfig {
+    pub fn display_hz(&self, session_hz: u32) -> u32 {
+        session_hz
+            .saturating_mul(self.vdisplay_hz_mult.max(1))
+            .min(0xffff)
+    }
+
     /// Compositor refresh for the GAME: the session rate, capped by [`Self::max_fps`].
     /// Session mode, encoder, and wire never go through here.
     ///
@@ -427,6 +433,49 @@ mod tests {
         assert_eq!(c.game_fps(30), 30);
         // An invalid rate stays invalid rather than being laundered into a real one.
         assert_eq!(c.game_fps(0), 0);
+    }
+
+    #[test]
+    fn display_hz_defaults_to_session_rate() {
+        let c = HostConfig::default();
+        assert_eq!(c.vdisplay_hz_mult, 0);
+        for hz in [24, 30, 60, 120, 144, 240] {
+            assert_eq!(c.display_hz(hz), hz);
+        }
+    }
+
+    #[test]
+    fn display_hz_multiplies_independently_of_game_fps_cap() {
+        for (mult, expected) in [(1, 120), (2, 240), (4, 480)] {
+            let c = HostConfig {
+                vdisplay_hz_mult: mult,
+                max_fps: Some(60),
+                ..Default::default()
+            };
+            assert_eq!(c.display_hz(120), expected);
+        }
+    }
+
+    #[test]
+    fn display_hz_bounds_overflow() {
+        for (hz, mult) in [(65_535, 1), (65_536, 1), (32_768, 2), (u32::MAX, 4)] {
+            let c = HostConfig {
+                vdisplay_hz_mult: mult,
+                ..Default::default()
+            };
+            assert_eq!(c.display_hz(hz), 65_535);
+        }
+    }
+
+    #[test]
+    fn display_hz_preserves_zero() {
+        for mult in [0, 1, 2, 4, u32::MAX] {
+            let c = HostConfig {
+                vdisplay_hz_mult: mult,
+                ..Default::default()
+            };
+            assert_eq!(c.display_hz(0), 0);
+        }
     }
 
     #[test]

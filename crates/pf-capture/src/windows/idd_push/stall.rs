@@ -11,6 +11,152 @@
 
 use super::*;
 
+#[cfg(test)]
+mod attribution_tests {
+    use super::super::dxgkrnl_etw::EtwWindowCounts;
+    use super::*;
+
+    fn evidence(counts: Option<EtwWindowCounts>) -> StallEvidence {
+        StallEvidence {
+            max_heartbeat_age_ms: Some(16),
+            probes: None,
+            etw: None,
+            etw_counts: counts,
+            cursor_moved_px: Some(0),
+        }
+    }
+
+    #[test]
+    fn stationary_cursor_without_etw_does_not_prove_idle() {
+        let verdict = attribute(Duration::from_millis(600), &evidence(None));
+        assert_ne!(verdict, StallVerdict::DamageIdle);
+        assert!(!verdict.to_string().contains("DWM composed nothing"));
+    }
+
+    #[test]
+    fn dwm_only_lookback_does_not_override_in_gap_activity() {
+        for (presents, queue_adds) in [(40, 0), (0, 2)] {
+            let verdict = attribute(
+                Duration::from_millis(600),
+                &evidence(Some(EtwWindowCounts {
+                    presents,
+                    queue_adds,
+                    present_history: true,
+                    queue_history: true,
+                    flow_dwm_only: true,
+                })),
+            );
+            assert_ne!(verdict, StallVerdict::DamageIdle);
+            assert!(!verdict.to_string().contains("DWM composed nothing"));
+        }
+    }
+
+    #[test]
+    fn idle_requires_live_quiet_etw_witnesses() {
+        for (present_history, queue_history, flow_dwm_only, expected) in [
+            (false, false, false, StallVerdict::Unknown),
+            (true, false, true, StallVerdict::Unknown),
+            (false, true, true, StallVerdict::Unknown),
+            (true, true, false, StallVerdict::Unknown),
+            (true, true, true, StallVerdict::DamageIdle),
+        ] {
+            let e = evidence(Some(EtwWindowCounts {
+                present_history,
+                queue_history,
+                flow_dwm_only,
+                ..Default::default()
+            }));
+            assert_eq!(attribute(Duration::from_millis(600), &e), expected);
+        }
+    }
+
+    #[test]
+    fn unknown_holes_remain_counted_without_display_cause_warnings() {
+        let mut watch = StallWatch::new();
+        let base = Instant::now();
+        for i in 0..8 {
+            watch.report(
+                &Stall {
+                    gap: Duration::from_millis(600),
+                },
+                base + Duration::from_secs(i * 5),
+                &evidence(None),
+            );
+        }
+        assert_eq!(watch.seen, 8);
+        assert_eq!(watch.verdicts[4], 8);
+        assert!(watch.rate_window.is_empty());
+        assert!(watch.last_rate_warn.is_none());
+        let mut fresh = pf_frame::metronome::Metronome::new();
+        for i in 8..12 {
+            let now = base + Duration::from_secs(i * 5);
+            assert_eq!(watch.cycle(now, false), fresh.note(now));
+        }
+    }
+
+    #[test]
+    fn drop_counter_changes_do_not_prove_compose_silence_or_encoder_failure() {
+        let mut watch = StallWatch::new();
+        watch.note_dropped_total(Some(10));
+        watch.finish_gap();
+        watch.note_dropped_total(Some(11));
+        let mut e = evidence(None);
+        e.cursor_moved_px = Some(42);
+        assert_eq!(
+            watch.verdict(Duration::from_millis(600), &e),
+            StallVerdict::Unknown
+        );
+        watch.note_dropped_total(Some(11));
+        assert_eq!(
+            watch.verdict(Duration::from_millis(600), &e),
+            StallVerdict::Unknown
+        );
+        e.max_heartbeat_age_ms = Some(400);
+        assert_eq!(
+            watch.verdict(Duration::from_millis(600), &e),
+            StallVerdict::WorkerStalled
+        );
+        e.max_heartbeat_age_ms = Some(16);
+        watch.finish_gap();
+        assert_eq!(
+            watch.verdict(Duration::from_millis(600), &e),
+            StallVerdict::ComposeSilence
+        );
+    }
+
+    #[test]
+    fn drop_counter_reset_is_not_a_compose_witness() {
+        let mut watch = StallWatch::new();
+        watch.note_dropped_total(Some(10));
+        watch.finish_gap();
+        watch.note_dropped_total(Some(0));
+        let e = evidence(Some(EtwWindowCounts {
+            present_history: true,
+            queue_history: true,
+            flow_dwm_only: true,
+            ..Default::default()
+        }));
+        assert_eq!(
+            watch.verdict(Duration::from_millis(600), &e),
+            StallVerdict::Unknown
+        );
+        watch.finish_gap();
+        assert_eq!(
+            watch.verdict(Duration::from_millis(600), &e),
+            StallVerdict::DamageIdle
+        );
+    }
+
+    #[test]
+    fn cursor_motion_does_not_prove_composition_stopped() {
+        let mut e = evidence(None);
+        e.cursor_moved_px = Some(42);
+        assert!(!attribute(Duration::from_millis(600), &e)
+            .to_string()
+            .contains("DWM composed nothing"));
+    }
+}
+
 /// A hole in DWM delivery that opened after recent active compose ([`StallWatch`]).
 ///
 /// The metronome is not fed here. [`StallWatch::report`] feeds it after the
@@ -170,6 +316,7 @@ pub(super) enum StallVerdict {
     /// Compose silence with a cursor that never moved: nothing was dirty. An input pause,
     /// not a display stall — kept out of the metronome and both repeated-stall warns.
     DamageIdle,
+    Unknown,
 }
 
 impl std::fmt::Display for StallVerdict {
@@ -177,8 +324,9 @@ impl std::fmt::Display for StallVerdict {
         f.write_str(match self {
             Self::NoTelemetry => "no driver telemetry yet (no verdict)",
             Self::WorkerStalled => "driver-worker-stalled (heartbeat silent) — host CPU/MMCSS or a dead WUDFHost, NOT the display path",
-            Self::ComposeSilence => "compose-silence (the driver's pool took no frame) — DWM composed nothing; the disturbance is below capture",
-            Self::DamageIdle => "damage-idle (the cursor sat still through the hole) — nothing was dirty, so DWM correctly composed nothing; an input pause, not a display stall",
+            Self::ComposeSilence => "compose-silence candidate (no pool-accepted frame despite cursor motion) — composition versus capture-side loss is unresolved",
+            Self::DamageIdle => "damage-idle candidate (stationary cursor and quiet ETW witnesses after DWM-only flow) — content inactivity is plausible, not proven",
+            Self::Unknown => "pool-delivery-gap (cause unknown) — available evidence cannot distinguish content inactivity, composition stalls, or capture-side drops",
         })
     }
 }
@@ -198,11 +346,19 @@ pub(super) fn attribute(gap: Duration, evidence: &StallEvidence) -> StallVerdict
     if hb_age_ms >= (gap_ms / 2).max(250) {
         return StallVerdict::WorkerStalled;
     }
-    let dwm_only = evidence.etw_counts.is_none_or(|c| c.flow_dwm_only);
-    if evidence.cursor_moved_px == Some(0) && dwm_only {
-        StallVerdict::DamageIdle
-    } else {
-        StallVerdict::ComposeSilence
+    if evidence
+        .etw_counts
+        .is_some_and(|c| c.presents > 0 || c.queue_adds > 0)
+    {
+        return StallVerdict::Unknown;
+    }
+    let idle_witness = evidence
+        .etw_counts
+        .is_some_and(|c| c.flow_dwm_only && c.present_history && c.queue_history);
+    match evidence.cursor_moved_px {
+        Some(0) if idle_witness => StallVerdict::DamageIdle,
+        Some(n) if n > 0 => StallVerdict::ComposeSilence,
+        _ => StallVerdict::Unknown,
     }
 }
 
@@ -222,7 +378,9 @@ pub(super) struct StallWatch {
     with_os_events: u32,
     /// Per-verdict counts in [`StallVerdict`] order. The metronomic WARN prints
     /// the session, not just the stall that tripped the beat.
-    verdicts: [u32; 4],
+    verdicts: [u32; 5],
+    last_dropped_total: Option<u64>,
+    drop_counter_changed: bool,
     /// Open stretch; every stall-sized hole feeds it until sustained flow returns.
     episode: Option<Episode>,
     pending_recovery: Option<Recovery>,
@@ -234,6 +392,27 @@ pub(super) struct StallWatch {
 }
 
 impl StallWatch {
+    pub(super) fn note_dropped_total(&mut self, total: Option<u64>) {
+        self.drop_counter_changed |=
+            self.last_dropped_total.is_some() && self.last_dropped_total != total;
+        self.last_dropped_total = total;
+    }
+
+    pub(super) fn finish_gap(&mut self) {
+        self.drop_counter_changed = false;
+    }
+
+    fn verdict(&self, gap: Duration, evidence: &StallEvidence) -> StallVerdict {
+        match attribute(gap, evidence) {
+            StallVerdict::ComposeSilence | StallVerdict::DamageIdle
+                if self.drop_counter_changed =>
+            {
+                StallVerdict::Unknown
+            }
+            verdict => verdict,
+        }
+    }
+
     /// Pre-gap frames that must be tight for active flow. Stalls are then spaced
     /// ≥ this many frame times — no extra log rate limit.
     const RECENT: usize = 8;
@@ -261,7 +440,9 @@ impl StallWatch {
             cadence: pf_frame::metronome::Metronome::new(),
             seen: 0,
             with_os_events: 0,
-            verdicts: [0; 4],
+            verdicts: [0; 5],
+            last_dropped_total: None,
+            drop_counter_changed: false,
             episode: None,
             pending_recovery: None,
             rate_window: std::collections::VecDeque::new(),
@@ -297,8 +478,12 @@ impl StallWatch {
     /// Per-verdict log token, indexed in [`StallVerdict`] declaration order.
     fn verdict_tally(&self) -> String {
         format!(
-            "worker-stalled {}, compose-silence {}, damage-idle {}, no-telemetry {}",
-            self.verdicts[1], self.verdicts[2], self.verdicts[3], self.verdicts[0]
+            "worker-stalled {}, compose-silence {}, damage-idle {}, no-telemetry {}, unknown {}",
+            self.verdicts[1],
+            self.verdicts[2],
+            self.verdicts[3],
+            self.verdicts[0],
+            self.verdicts[4]
         )
     }
 
@@ -307,6 +492,8 @@ impl StallWatch {
     /// predate the restart.
     pub(super) fn reset(&mut self) {
         self.recent.clear();
+        self.last_dropped_total = None;
+        self.finish_gap();
         self.close_episode();
     }
 
@@ -430,18 +617,20 @@ impl StallWatch {
         if !events.is_empty() {
             self.with_os_events = self.with_os_events.saturating_add(1);
         }
-        let verdict = attribute(stall.gap, evidence);
+        let verdict = self.verdict(stall.gap, evidence);
         self.verdicts[match verdict {
             StallVerdict::NoTelemetry => 0,
             StallVerdict::WorkerStalled => 1,
             StallVerdict::ComposeSilence => 2,
             StallVerdict::DamageIdle => 3,
+            StallVerdict::Unknown => 4,
         }] += 1;
         // Damage-idle is still a delivery hole (episode/recovery count it) but
         // not display-disturbance evidence: skip metronome, rate WARN, and
         // connected-inactive trial. The per-stall line still carries evidence.
         let damage_idle = verdict == StallVerdict::DamageIdle;
-        let metronomic = self.cycle(now, damage_idle);
+        let unknown = verdict == StallVerdict::Unknown;
+        let metronomic = self.cycle(now, damage_idle || unknown);
         // debug, not warn: a single hole is a legitimate content pause. The
         // reportable signal is the metronomic cycle below.
         tracing::debug!(
@@ -458,13 +647,14 @@ impl StallWatch {
             cursor_moved_px_during_gap = evidence.cursor_moved_px,
             flow_dwm_only = evidence.etw_counts.map(|c| c.flow_dwm_only),
             max_heartbeat_age_ms = evidence.max_heartbeat_age_ms,
+            drop_counter_changed_during_gap = self.drop_counter_changed,
             "IDD-push capture stall — the desktop was composing at speed, then the driver's \
              pool took no frame for the gap; the verdict names the clock that stopped"
         );
         // Aperiodic 150+ ms holes still need the triage payload. Skip when
         // this stall completed a metronomic cycle (richer arms below) or is
         // damage-idle.
-        if metronomic.is_none() && !damage_idle {
+        if metronomic.is_none() && !damage_idle && !unknown {
             if let Some(stalls_in_window) = self.note_for_rate_warn(now) {
                 let suspects = pf_win_display::display_events::connected_inactive_physicals();
                 let suspects = if suspects.is_empty() {
@@ -530,10 +720,10 @@ impl StallWatch {
                     rt_gpu_host,
                     verdicts = %verdict_tally,
                     "capture stalls are METRONOMIC with NO coinciding OS display event — \
-                     the disturbance is BELOW Windows (damage-idle holes — the cursor \
-                     stationary through the hole, i.e. input pauses — are already \
-                     excluded from this beat; see cursor_moved_px_during_gap on the \
-                     per-stall lines). Suspects: the GPU driver servicing a \
+                     the cause remains unresolved (damage-idle candidates and unknown \
+                     holes are excluded from this beat; see the verdict and \
+                     cursor_moved_px_during_gap on the per-stall lines). Suspects: \
+                     the GPU driver servicing a \
                      connected-but-asleep sink (standby HPD/DDC/link probing), \
                      display-poller software (the SteelSeries-GG/SignalRGB class — \
                      correlate 'slow display-descriptor poll' lines), or the DWM present \
@@ -543,7 +733,7 @@ impl StallWatch {
                      masks this class at most — a quiet A/B is attenuation, not \
                      attribution. If connected_inactive lists a \
                      display, its standby servicing is a suspect — cursor motion through \
-                     the holes is what convicts the display stack. For an external \
+                     the holes alone does not prove a display-stack fault. For an external \
                      display: keep it active while streaming, disable its OSD auto input \
                      scan (TVs: instant-on/quick-start + CEC off), unplug it at the GPU, \
                      or use an HPD-holding adapter/dummy. For a LAPTOP PANEL: keep it \

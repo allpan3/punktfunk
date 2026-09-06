@@ -67,6 +67,7 @@ pub enum Offer {
     Taken(u64),
     /// Counted; the new drop total.
     Dropped(u64),
+    Paced,
     /// Not this pool's surface — nothing counted. Carries what arrived against what the pool
     /// was built for, because the three reasons are indistinguishable from the outside and a
     /// stuck session shows only this line.
@@ -78,6 +79,7 @@ pub enum Offer {
 
 struct State {
     targets: Targets,
+    cadence: Option<wire::EncodeCadence>,
     free: Vec<usize>,
     /// `(slot, PresentDisplayQPCTime, source_seq)` in acquire order.
     full: VecDeque<(usize, u64, u64)>,
@@ -146,6 +148,7 @@ impl Pool {
             source_format: DXGI_FORMAT(source_format(kind).0),
             state: Mutex::new(State {
                 targets,
+                cadence: None,
                 free: (0..SLOTS).collect(),
                 full: VecDeque::new(),
                 encoding: Vec::new(),
@@ -208,6 +211,9 @@ impl Pool {
         let Ok(mut st) = self.state.try_lock() else {
             return self.drop_one();
         };
+        if st.live && st.cadence.as_mut().is_some_and(|c| !c.admit(qpc_now())) {
+            return Offer::Paced;
+        }
         let i = if self.bypass {
             // A surface still held means the previous access unit is not out; this frame is
             // dropped rather than queued behind it, so the hold below is never nested.
@@ -260,6 +266,10 @@ impl Pool {
     /// One more frame dropped; the new total, for the header.
     pub fn drop_one(&self) -> Offer {
         Offer::Dropped(self.dropped.fetch_add(1, Ordering::Relaxed) + 1)
+    }
+
+    pub fn limit_fps(&self, fps: u32) {
+        lock(&self.state).cadence = Some(wire::EncodeCadence::new(fps, qpc_frequency()));
     }
 
     /// The encode thread starts (`true`: only the newest full slot is kept, the stash) or
@@ -466,6 +476,7 @@ impl Attached {
         let session = self.session.as_deref();
         let mut held = false;
         match pool.offer(device, tex, display_qpc) {
+            Offer::Paced => {}
             Offer::Dropped(n) => {
                 if let Some(s) = session {
                     s.section.store_u64(offset_of!(AuHeader, dropped_total), n);

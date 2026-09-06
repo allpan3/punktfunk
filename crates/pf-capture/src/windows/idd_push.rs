@@ -633,22 +633,19 @@ mod tests {
         // Heartbeat silent for most of the hole → worker starved.
         assert_eq!(verdict(600, Some(400), None), StallVerdict::WorkerStalled);
         // ≤16 ms heartbeat; 200 ms silence on a 300 ms gap is under max(gap/2, 250 ms).
-        assert_eq!(verdict(300, Some(200), None), StallVerdict::ComposeSilence);
+        assert_eq!(verdict(300, Some(200), None), StallVerdict::Unknown);
         assert_eq!(
             verdict(300, Some(20), Some(312)),
             StallVerdict::ComposeSilence
         );
         // Long holes scale the bar: 900 ms silence on a 3 s gap is not half.
-        assert_eq!(
-            verdict(3_000, Some(900), None),
-            StallVerdict::ComposeSilence
-        );
+        assert_eq!(verdict(3_000, Some(900), None), StallVerdict::Unknown);
         assert_eq!(
             verdict(3_000, Some(1_600), None),
             StallVerdict::WorkerStalled
         );
         // The cursor never moved through the hole: nothing was dirty.
-        assert_eq!(verdict(600, Some(16), Some(0)), StallVerdict::DamageIdle);
+        assert_eq!(verdict(600, Some(16), Some(0)), StallVerdict::Unknown);
         // A starved worker is never demoted by a still cursor.
         assert_eq!(
             verdict(600, Some(400), Some(0)),
@@ -680,7 +677,7 @@ mod tests {
                 },
             )
         };
-        assert_eq!(verdict(false), StallVerdict::ComposeSilence);
-        assert_eq!(verdict(true), StallVerdict::DamageIdle);
+        assert_eq!(verdict(false), StallVerdict::Unknown);
+        assert_eq!(verdict(true), StallVerdict::Unknown);
     }
 }

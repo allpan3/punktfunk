@@ -106,6 +106,8 @@ impl IddPushCapturer {
         }
         // The driver's pool counter is the only source clock this side has. Before the
         // encoder opens there is no counter at all, and the loop needs one frame to open it.
+        self.stall_watch
+            .note_dropped_total(self.encoder.map(|t| t.dropped_total));
         let opened = self.encoder.is_some();
         let driver_seq = self.encoder.map_or(0, |t| t.source_seq);
         let geometry = (self.width, self.height, self.out_format());
@@ -188,6 +190,7 @@ impl IddPushCapturer {
         }
         self.last_fresh = now;
         self.max_hb_age_us = 0;
+        self.stall_watch.finish_gap();
         // Pending sample is the ending frame's move — discarded, never folded.
         self.cursor_gap_px = 0;
         self.cursor_pending_px = 0;

@@ -215,6 +215,7 @@ fn run(stop: HANDLE, ctx: ThreadCtx, live: Arc<AtomicBool>) {
         },
     };
     drop(monitor);
+    pool.limit_fps(spec.fps);
     dbglog!(
         "[pf-vd] encode: backend {} open {}x{} {:?} mode={} (target {})",
         reply.backend_opened,

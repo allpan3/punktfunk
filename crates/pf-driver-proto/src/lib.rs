@@ -1115,6 +1115,38 @@ pub mod encode {
 
     impl core::error::Error for ReplyTooShort {}
 
+    pub struct EncodeCadence {
+        fps: u32,
+        clock_hz: u64,
+        last_tick: Option<u64>,
+        credit: u128,
+    }
+
+    impl EncodeCadence {
+        pub fn new(fps: u32, clock_hz: u64) -> Self {
+            let clock_hz = clock_hz.max(1);
+            Self {
+                fps: fps.max(1),
+                clock_hz,
+                last_tick: None,
+                credit: u128::from(clock_hz) * 5 / 4,
+            }
+        }
+
+        pub fn admit(&mut self, tick: u64) -> bool {
+            let last = self.last_tick.unwrap_or(tick);
+            let earned = u128::from(tick.saturating_sub(last)) * u128::from(self.fps);
+            let frame = u128::from(self.clock_hz);
+            self.credit = (self.credit + earned).min(frame * 5 / 4);
+            self.last_tick = Some(tick.max(last));
+            if self.credit < frame {
+                return false;
+            }
+            self.credit -= frame;
+            true
+        }
+    }
+
     /// Which pool slot a keyframe request re-encodes when the desktop composed nothing:
     /// `stash`, the newest slot the encode thread took, but only while `queued` is 0 — a
     /// composed frame already carries the IDR — and the slot sits in `idle`, so no drain pass
@@ -3353,6 +3385,45 @@ mod tests {
         assert_eq!(ops, [1, 2, 3, 4, 5, 6, 7, 8]);
         // `0` stays unassigned: a zeroed request is not a silent keyframe.
         assert!(!ops.contains(&0));
+    }
+
+    #[test]
+    fn encode_cadence_caps_multiplied_display_without_capping_slow_games() {
+        for source_hz in [60, 117, 120, 240, 480] {
+            let mut cadence = encode::EncodeCadence::new(120, 10_000_000);
+            let admitted = (0..source_hz * 10)
+                .filter(|i| cadence.admit(i * 10_000_000 / source_hz))
+                .count();
+            assert_eq!(admitted, source_hz.min(120) as usize * 10, "{source_hz} Hz");
+        }
+    }
+
+    #[test]
+    fn encode_cadence_tolerates_source_jitter_without_losing_117_fps() {
+        let mut cadence = encode::EncodeCadence::new(120, 10_000_000);
+        for i in 0..1170 {
+            let tick = i * 10_000_000 / 117 + if i % 2 == 0 { 0 } else { 10_000 };
+            assert!(cadence.admit(tick), "frame {i}");
+        }
+    }
+
+    #[test]
+    fn encode_cadence_cannot_bank_a_post_stall_burst() {
+        let mut cadence = encode::EncodeCadence::new(120, 10_000_000);
+        assert!(cadence.admit(0));
+        assert!(!cadence.admit(0));
+        assert!(cadence.admit(100_000_000));
+        assert!(!cadence.admit(100_000_000));
+        assert!(!cadence.admit(100_040_000));
+        assert!(cadence.admit(100_083_334));
+    }
+
+    #[test]
+    fn encode_cadence_does_not_mint_credit_when_the_clock_rewinds() {
+        let mut cadence = encode::EncodeCadence::new(120, 10_000_000);
+        assert!(cadence.admit(1_000_000));
+        assert!(!cadence.admit(0));
+        assert!(!cadence.admit(1_000_000));
     }
 
     #[test]

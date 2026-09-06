@@ -2443,11 +2443,10 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                     } else {
                         tracing::warn!(
                             period_s = format!("{:.1}", period.as_secs_f64()),
-                            "client keyframe recoveries are METRONOMIC — a periodic host/display \
-                             disturbance (display-topology churn, display-poller software, \
-                             virtual-display timing) is the likely cause, not random network \
-                             loss; correlate with 'slow display-descriptor poll' / 'display \
-                             descriptor changed' / 'IDD-push capture stall' lines"
+                            "client keyframe recoveries are METRONOMIC — timing alone cannot \
+                             distinguish host/display stalls, transport loss, or client backlog; \
+                             correlate capture and send counters with the client's receive, \
+                             reassembly, and decode logs"
                         );
                     }
                 }
@@ -2845,13 +2844,16 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
         }
         if perf && diag_at.elapsed() >= std::time::Duration::from_secs(2) {
             let secs = diag_at.elapsed().as_secs_f64();
+            let driver = enc.telemetry();
             tracing::info!(
                 new_fps = format!("{:.0}", diag_new as f64 / secs),
                 repeat_fps = format!("{:.0}", diag_repeat as f64 / secs),
                 regen_fps = format!("{:.0}", diag_regen as f64 / secs),
-                "capture diag: NEW frames from the source vs REPEATS vs cursor REGENS (low new_fps \
-                 at high send rate ⇒ the source isn't producing frames, not an encode stall; \
-                 regens alone are a cursor over a frozen image)"
+                driver_source_total = driver.map(|t| t.source_seq),
+                driver_published_total = driver.map(|t| t.published_total),
+                driver_dropped_total = driver.map(|t| t.dropped_total),
+                "capture diag: source observations vs repeats and cursor regenerations; \
+                 driver counters distinguish pool acceptance, published AUs, and drops"
             );
             let wait_max = st_wait.iter().copied().max().unwrap_or(0);
             tracing::info!(

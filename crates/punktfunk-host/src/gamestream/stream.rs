@@ -703,7 +703,7 @@ fn open_gs_virtual_source(
         punktfunk_core::Mode {
             width: cfg.width,
             height: cfg.height,
-            refresh_hz: cfg.fps,
+            refresh_hz: pf_host_config::config().display_hz(cfg.fps),
         },
         // Quit App / management stop / game exit skip linger; only a real drop lingers.
         quit.clone(),
