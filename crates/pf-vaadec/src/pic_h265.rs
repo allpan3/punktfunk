@@ -252,7 +252,13 @@ pub fn plan_to_va_h265(
         slice_data.push(payload);
 
         rec.slice_segment_address = hdr.segment_address;
-        rec.collocated_ref_idx = hdr.collocated_ref_idx;
+        // 7.4.7.1: the index is only signalled under temporal MVP. libavcodec
+        // writes 0xFF otherwise, so no driver keys a collocated picture off it.
+        rec.collocated_ref_idx = if hdr.temporal_mvp_enabled_flag {
+            hdr.collocated_ref_idx
+        } else {
+            0xFF
+        };
         rec.num_ref_idx_l0_active_minus1 = hdr.num_ref_idx_l0_active_minus1;
         rec.num_ref_idx_l1_active_minus1 = hdr.num_ref_idx_l1_active_minus1;
         rec.slice_qp_delta = hdr.qp_delta;
