@@ -983,7 +983,11 @@ mod drain_tests {
             super::super::xbox_windows::XBOX_IDENTITIES
                 .iter()
                 .map(|i| i.hwid),
-        ) {
+        )
+        // The unfiltered Xbox line the host falls back to where `xinputhid` is not a service.
+        .chain(std::iter::once(
+            super::super::xbox_windows::XBOX_UNFILTERED_HWID,
+        )) {
             let want = hwid.to_ascii_lowercase();
             let rooted = format!("root\\{want}");
             assert!(

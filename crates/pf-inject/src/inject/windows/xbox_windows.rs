@@ -102,6 +102,65 @@ pub(super) static XBOX_IDENTITIES: [WinXboxIdentity; 3] = [
     WinXboxIdentity::elite(),
 ];
 
+/// The `pfGamepad` (unfiltered) Xbox model line in `pf_gamepad.inx`. Not in
+/// [`XBOX_IDENTITIES`]: the INF tests require every id in that table to sit on
+/// a `pfGamepadXbox` line, and this one deliberately does not.
+pub(super) const XBOX_UNFILTERED_HWID: &str = "pf_xbox_nofilter";
+
+/// Whether `xinputhid` is a registered service on this machine.
+///
+/// `pfGamepadXbox` appends it to the devnode's `UpperFilters`, and PnP treats a
+/// filter service it cannot resolve as fatal. Windows Server — the SKU every
+/// seat runs on — ships no `xinputhid` at all.
+fn xinputhid_registered() -> bool {
+    use windows::core::w;
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ,
+    };
+    let mut key = HKEY::default();
+    // SAFETY: a static wide literal, a live out-param, and the handle is closed
+    // on the success path only — `RegOpenKeyExW` writes `key` only when it wins.
+    let ok = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            w!(r"SYSTEM\CurrentControlSet\Services\xinputhid"),
+            None,
+            KEY_READ,
+            &mut key,
+        )
+        .is_ok()
+    };
+    if ok {
+        // SAFETY: `key` is the handle the call above just opened.
+        unsafe {
+            let _ = RegCloseKey(key);
+        }
+    }
+    ok
+}
+
+/// The hardware id to enumerate `id` under: its own when `xinputhid` can promote
+/// the pad, else the unfiltered line. Without the service the promotion the
+/// filter exists for is impossible anyway, and asking for it costs the whole
+/// device — `CM_PROB_REGISTRY`, no driver, no pad.
+fn inf_hwid(id: &WinXboxIdentity) -> &'static str {
+    static PROMOTABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *PROMOTABLE.get_or_init(|| {
+        let present = xinputhid_registered();
+        if !present {
+            tracing::info!(
+                "no xinputhid service on this Windows SKU — virtual Xbox pads enumerate unfiltered \
+                 (HID and WGI see them; classic XInput cannot, which needs that service anyway)"
+            );
+        }
+        present
+    }) {
+        id.hwid
+    } else {
+        XBOX_UNFILTERED_HWID
+    }
+}
+
 /// Virtual Xbox pad: `SwDeviceCreate`'d `pf_xbox_<index>` plus the sealed
 /// channel. Drop removes the devnode and closes both sections.
 pub struct XboxWinPad {
@@ -137,13 +196,14 @@ impl XboxWinPad {
             std::ptr::write_unaligned(base as *mut u32, SHM_MAGIC);
         }
         let inst = format!("{}_{index}", id.instance_prefix);
+        let hwid = inf_hwid(id);
         let (hsw, instance_id) = create_swdevice(&SwDeviceProfile {
             instance: &inst,
             // Per-family tag. The three identities share it: only one can hold
             // a given pad index, so their containers never collide.
             container_tag: 0x5046_5842, // "PFXB"
             container_index: index,
-            hwid: id.hwid,
+            hwid,
             usb_vid_pid: id.usb_vid_pid,
             // Bluetooth pad, not USB composite — no interface number. Deck
             // Steam promotion needs `&MI_02`; Xbox does not.
@@ -163,7 +223,7 @@ impl XboxWinPad {
             _sw,
             channel,
             attach: super::gamepad_raii::DriverAttach::new(
-                id.hwid,
+                hwid,
                 "pf_gamepad.inf", // one package, every identity
                 "C:\\Windows\\ServiceProfiles\\LocalService\\AppData\\Local\\Temp\\pf_gamepad-driver.log",
                 boot_name,

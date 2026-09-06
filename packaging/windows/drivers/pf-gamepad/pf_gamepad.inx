@@ -64,6 +64,13 @@ pf_gamepad.dll=1
 %DeviceDescXbox%=pfGamepadXbox, root\pf_xboxwireless, pf_xboxwireless
 %DeviceDescXboxOneS%=pfGamepadXbox, root\pf_xboxones, pf_xboxones
 %DeviceDescXboxElite%=pfGamepadXbox, root\pf_xboxelite, pf_xboxelite
+; The same three pads on a SKU with no `xinputhid` service — Windows Server, where every seat runs.
+; A missing filter service is fatal to PnP (`CM_PROB_REGISTRY`, `STATUS_OBJECT_NAME_NOT_FOUND`), so
+; the pad would enumerate broken and no driver would serve it. Nothing can promote the pad there
+; anyway, so the host picks this id instead and keeps a plain HID gamepad. Identity still comes from
+; the `device_type` byte and the synthesized VID/PID, not from the hardware id, so one id covers all
+; three models.
+%DeviceDescXboxNoFilter%=pfGamepad, root\pf_xbox_nofilter, pf_xbox_nofilter
 
 [pfGamepad.NT]
 CopyFiles=UMDriverCopy
@@ -196,3 +203,4 @@ DeviceDescXbox     ="Punktfunk Virtual Xbox Wireless Controller"
 ; however, has to let a human tell our two virtual pads apart, and this string is ours to choose.
 DeviceDescXboxOneS ="Punktfunk Virtual Xbox One S Controller"
 DeviceDescXboxElite="Punktfunk Virtual Xbox Elite Wireless Controller Series 2"
+DeviceDescXboxNoFilter="Punktfunk Virtual Xbox Controller"
