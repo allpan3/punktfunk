@@ -499,9 +499,10 @@ struct VaRelease {
 /// Pins one shipped picture's surface until the presenter has waited its fence.
 /// The presenter dups every imported fd; drop means the GPU is done reading.
 pub struct VaFrameGuard {
-    /// One `OwnedFd` per OBJECT, not per plane. Planes share objects; closing a
-    /// shared fd twice would close an unrelated file.
-    _fds: Vec<OwnedFd>,
+    /// The surface's exported fds, one per OBJECT and shared with the session's
+    /// cache: the last holder closes them, so a rebuild cannot pull the pixels out
+    /// from under a frame the presenter has not imported yet.
+    _fds: std::sync::Arc<Vec<OwnedFd>>,
     tx: mpsc::Sender<VaRelease>,
     release: VaRelease,
 }
@@ -530,11 +531,22 @@ struct PendingPicture {
     facts: PictureFacts,
 }
 
+/// One surface's PRIME export, taken once and reused for every frame that surface
+/// ships. The fds are shared, not owned by the frame: a rebuilt session drops its
+/// copy while an in-flight guard still keeps those pixels mapped.
+struct CachedExport {
+    exported: pf_vaadec::ExportedSurface,
+    fds: std::sync::Arc<Vec<OwnedFd>>,
+}
+
 struct Session {
     shape: StreamShape,
     config: VaConfigId,
     context: VaContextId,
     surfaces: Vec<VaSurfaceId>,
+    /// Per surface, filled at its first [`ship`]. A surface is a fixed allocation
+    /// for the session, so the descriptor a re-decode would return is the same one.
+    exports: Vec<Option<CachedExport>>,
     /// Cleared when the release token returns. Also covers a frame waiting in
     /// [`NativeVaapiDecoder::deliverable`]: the guard returns the surface either way.
     held: Vec<bool>,
@@ -719,6 +731,7 @@ impl Session {
                 config,
                 context,
                 surfaces,
+                exports: (0..count).map(|_| None).collect(),
                 held: vec![false; count],
                 slot_surface: vec![None; slot_count],
                 pending: Vec::new(),
@@ -1611,7 +1624,9 @@ fn settle(s: &mut Session, outputs: &[u64], removed: &[u64]) -> Vec<PendingPictu
     claimed
 }
 
-/// Export and take the consumer's hold. Flush uses the same walk as [`finish`].
+/// Sync, export once per surface, then take the consumer's hold. Flush uses the
+/// same walk as [`finish`]. The sync stays per frame — libva gives the importer no
+/// fence — while the descriptor is cached: the surface's memory does not move.
 fn ship(
     d: &Display,
     s: &mut Session,
@@ -1621,24 +1636,37 @@ fn ship(
     let surface_index = picture.surface;
     let surface = s.surfaces[surface_index];
 
-    // Fds are owned from the successful export; later refusals close them by drop.
-    let (exported, fds) = export(d, surface)?;
-    if exported.fourcc != s.fourcc {
-        // Driver silently substituted a different layout than the pool was created with.
-        bail!(
-            "surface exported fourcc {:#010x}, the pool was created as {:#010x}",
-            exported.fourcc,
-            s.fourcc
-        );
+    // SAFETY: a live display and a surface from its own pool.
+    d.va.check("vaSyncSurface", unsafe {
+        (d.va.sync_surface)(d.display, surface)
+    })?;
+    if s.exports[surface_index].is_none() {
+        // Fds are owned from the successful export; a refusal below closes them by drop.
+        let (exported, fds) = export(d, surface)?;
+        if exported.fourcc != s.fourcc {
+            // Driver silently substituted a different layout than the pool was created with.
+            bail!(
+                "surface exported fourcc {:#010x}, the pool was created as {:#010x}",
+                exported.fourcc,
+                s.fourcc
+            );
+        }
+        if exported.planes.len() < 2 {
+            bail!(
+                "a two-plane surface exported {} plane(s) — the chroma is missing",
+                exported.planes.len()
+            );
+        }
+        s.exports[surface_index] = Some(CachedExport {
+            exported,
+            fds: std::sync::Arc::new(fds),
+        });
     }
-    if exported.planes.len() < 2 {
-        bail!(
-            "a two-plane surface exported {} plane(s) — the chroma is missing",
-            exported.planes.len()
-        );
-    }
-
-    s.held[surface_index] = true;
+    let cached = s.exports[surface_index]
+        .as_ref()
+        .expect("exported just above");
+    let exported = &cached.exported;
+    let fds = std::sync::Arc::clone(&cached.fds);
     let planes = exported
         .planes
         .iter()
@@ -1648,12 +1676,14 @@ fn ship(
             stride: p.stride,
         })
         .collect();
+    let (fourcc, modifier) = (exported.fourcc, exported.modifier);
+    s.held[surface_index] = true;
     Ok(DmabufFrame {
         // Coded size would show granule padding.
         width: picture.facts.display.0,
         height: picture.facts.display.1,
-        fourcc: exported.fourcc,
-        modifier: exported.modifier,
+        fourcc,
+        modifier,
         planes,
         color: picture.facts.color,
         keyframe: picture.facts.keyframe,
@@ -1692,15 +1722,10 @@ fn finish(
     Ok(frames)
 }
 
-/// Sync then export. VAAPI has no fence for the importer; without the wait the
-/// presenter would sample a surface still being written. Fds are owned from success
-/// so later refusals close them. One fd per object, even when planes share it.
+/// One surface's PRIME descriptor. Fds are owned from success so later refusals
+/// close them; one fd per object, even when planes share it. The caller syncs the
+/// surface — this is a memory-handle call, not a wait.
 fn export(d: &Display, surface: VaSurfaceId) -> Result<(pf_vaadec::ExportedSurface, Vec<OwnedFd>)> {
-    // SAFETY: a live display and a surface from its own pool.
-    d.va.check("vaSyncSurface", unsafe {
-        (d.va.sync_surface)(d.display, surface)
-    })?;
-
     let mut desc = pf_vaadec::VaDrmPrimeSurfaceDescriptor::zeroed();
     // SAFETY: a live display and surface; `desc` is a local of exactly the layout
     // `VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2` writes (measured by
@@ -1761,6 +1786,7 @@ mod tests {
             config: VA_INVALID_ID,
             context: VA_INVALID_ID,
             surfaces: (0..surfaces as u32).map(|i| 0x100 + i).collect(),
+            exports: (0..surfaces).map(|_| None).collect(),
             held: vec![false; surfaces],
             slot_surface: vec![None; slots],
             pending: Vec::new(),
@@ -2140,7 +2166,7 @@ mod tests {
             color: PLAIN.color,
             keyframe: false,
             guard: DrmFrameGuard(VaFrameGuard {
-                _fds: Vec::new(),
+                _fds: std::sync::Arc::new(Vec::new()),
                 tx: tx.clone(),
                 release: VaRelease {
                     surface,
