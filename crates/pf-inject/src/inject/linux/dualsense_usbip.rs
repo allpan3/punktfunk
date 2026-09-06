@@ -14,7 +14,7 @@
 //! audio; concurrency needs seqnum-keyed out-of-order completions.
 
 use super::dualsense_proto::{
-    ds_pairing_reply, parse_ds_output, serialize_state, DsFeedback, DsState,
+    ds_pairing_reply, parse_ds_output, serialize_state, DsFeedback, DsState, DsTriggers,
     DS_FEATURE_CALIBRATION, DS_FEATURE_FIRMWARE, DS_INPUT_REPORT_LEN, DS_PRODUCT, DS_VENDOR,
     DUALSENSE_RDESC,
 };
@@ -508,6 +508,7 @@ pub struct DualSenseUsbip {
     clock: SensorClock,
     pad: u8,
     seq: u8,
+    triggers: DsTriggers,
     _attach: UsbipAttachment,
 }
 
@@ -546,6 +547,7 @@ impl DualSenseUsbip {
             clock: SensorClock::dualsense(),
             pad: index,
             seq: 0,
+            triggers: DsTriggers::default(),
             _attach: attach,
         })
     }
@@ -556,6 +558,7 @@ impl DualSenseUsbip {
         let ts = self.clock.ds_ticks(Instant::now());
         let mut r = [0u8; DS_INPUT_REPORT_LEN];
         serialize_state(&mut r, st, self.seq, ts);
+        self.triggers.stamp(&mut r, st.l2, st.r2);
         if let Ok(mut g) = self.report.lock() {
             *g = r;
         }
@@ -563,10 +566,13 @@ impl DualSenseUsbip {
 
     /// Drain HID feedback written since the last call.
     pub fn service(&mut self) -> DsFeedback {
-        self.feedback
+        let fb = self
+            .feedback
             .lock()
             .map(|mut f| std::mem::take(&mut *f))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        self.triggers.observe(&fb.hidout);
+        fb
     }
 }
 

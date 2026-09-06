@@ -11,8 +11,8 @@
 
 use super::dualsense_proto::{
     ds_pairing_reply, edge_paddle_bits, parse_ds_output, serialize_state, DsFeedback, DsState,
-    DS_EDGE_PRODUCT, DS_FEATURE_CALIBRATION, DS_FEATURE_FIRMWARE, DS_INPUT_REPORT_LEN, DS_PRODUCT,
-    DS_TOUCH_H, DS_TOUCH_W, DS_VENDOR, DUALSENSE_EDGE_RDESC, DUALSENSE_RDESC,
+    DsTriggers, DS_EDGE_PRODUCT, DS_FEATURE_CALIBRATION, DS_FEATURE_FIRMWARE, DS_INPUT_REPORT_LEN,
+    DS_PRODUCT, DS_TOUCH_H, DS_TOUCH_W, DS_VENDOR, DUALSENSE_EDGE_RDESC, DUALSENSE_RDESC,
 };
 use crate::sensor_clock::SensorClock;
 use crate::uhid_abi::{
@@ -64,6 +64,7 @@ pub struct DualSensePad {
     fd: File,
     seq: u8,
     clock: SensorClock,
+    triggers: DsTriggers,
 }
 
 impl DualSensePad {
@@ -81,6 +82,7 @@ impl DualSensePad {
             fd,
             seq: 0,
             clock: SensorClock::dualsense(),
+            triggers: DsTriggers::default(),
         };
         ds.send_create2(index, id)
             .context("UHID_CREATE2 DualSense")?;
@@ -111,6 +113,7 @@ impl DualSensePad {
         let ts = self.clock.ds_ticks(Instant::now());
         let mut r = [0u8; DS_INPUT_REPORT_LEN];
         serialize_state(&mut r, st, self.seq, ts);
+        self.triggers.stamp(&mut r, st.l2, st.r2);
 
         let mut ev = [0u8; UHID_EVENT_SIZE];
         ev[0..4].copy_from_slice(&UHID_INPUT2.to_ne_bytes());
@@ -157,6 +160,7 @@ impl DualSensePad {
                 _ => {}
             }
         }
+        self.triggers.observe(&fb.hidout);
         fb
     }
 

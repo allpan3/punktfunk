@@ -12,8 +12,8 @@
 //! installed.
 
 use super::dualsense_proto::{
-    parse_ds_output, serialize_state, DsFeedback, DsState, DS_INPUT_REPORT_LEN, DS_TOUCH_H,
-    DS_TOUCH_W,
+    parse_ds_output, serialize_state, DsFeedback, DsState, DsTriggers, DS_INPUT_REPORT_LEN,
+    DS_TOUCH_H, DS_TOUCH_W,
 };
 use super::gamepad_raii::{sw_create_cb, PadChannel, SwCreateCtx};
 use crate::sensor_clock::SensorClock;
@@ -241,6 +241,7 @@ pub struct DsWinPad {
     /// v2.3 input-seqlock generation — see [`publish_input`].
     input_gen: u32,
     drain: OutputDrain,
+    triggers: DsTriggers,
 }
 
 /// PnP identity for a virtual controller devnode, so one [`create_swdevice`] builds DualSense or
@@ -500,6 +501,7 @@ impl DsWinPad {
             clock: SensorClock::dualsense(),
             input_gen: 0,
             drain: OutputDrain::new(),
+            triggers: DsTriggers::default(),
         })
     }
 
@@ -508,6 +510,7 @@ impl DsWinPad {
         let ts = self.clock.ds_ticks(Instant::now());
         let mut r = [0u8; DS_INPUT_REPORT_LEN];
         serialize_state(&mut r, st, self.seq, ts);
+        self.triggers.stamp(&mut r, st.l2, st.r2);
         // No driver-polled change-detect on this plane; the timer copies the whole slot. Seqlock:
         // see `publish_input`.
         // SAFETY: `data_base()` points at a live PAD_SHM_SIZE-byte section and `r` is the 64-byte
@@ -529,6 +532,7 @@ impl DsWinPad {
         fb.resync = self
             .drain
             .drain(base, |bytes| parse_ds_output(pad, bytes, &mut fb));
+        self.triggers.observe(&fb.hidout);
         fb
     }
 }

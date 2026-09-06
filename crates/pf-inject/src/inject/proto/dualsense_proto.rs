@@ -429,6 +429,100 @@ pub fn serialize_state(r: &mut [u8; DS_INPUT_REPORT_LEN], st: &DsState, seq: u8,
     r[53] = 0x0A;
 }
 
+/// Adaptive-trigger status the game reads back: report `0x01` struct offsets 41 (R2) and 42
+/// (L2), high nibble = status, low nibble = the zone the trigger stops in. A game that arms a
+/// Weapon effect fires on the 1 → 2 transition, so a pad that leaves these zero swallows every
+/// shot while adaptive triggers are on. Only the official modes move the nibble; the firmware
+/// derives it from the armed effect and the trigger position, and so does this.
+///
+/// Lives on the pad, not [`DsState`]: [`parse_ds_output`] and [`serialize_state`] meet there.
+#[derive(Clone, Copy, Default)]
+pub struct DsTriggers([TriggerFb; 2]);
+
+/// Official effect modes. Every other mode (simple, limited, unofficial) leaves the status
+/// nibble at zero on real firmware.
+mod trig_mode {
+    pub const FEEDBACK: u8 = 0x21;
+    pub const WEAPON: u8 = 0x25;
+    pub const VIBRATION: u8 = 0x26;
+}
+
+/// One trigger's armed effect. `zones` is the 10-bit active-zone mask the official modes carry
+/// in parameters 1-2: Feedback/Vibration set every resisting zone, Weapon just start and stop.
+#[derive(Clone, Copy, Default)]
+struct TriggerFb {
+    mode: u8,
+    zones: u16,
+    /// Weapon only: past the stop. Held until the trigger comes back before the start zone,
+    /// so easing off inside the effect does not re-arm the shot.
+    fired: bool,
+}
+
+impl DsTriggers {
+    /// Latch what the game just armed. Re-arming the same effect keeps `fired` — a game that
+    /// re-sends its effect every frame would otherwise never hold a shot.
+    pub fn observe(&mut self, hidout: &[HidOutput]) {
+        for h in hidout {
+            let HidOutput::Trigger { which, effect, .. } = h else {
+                continue;
+            };
+            let at = |i: usize| effect.get(i).copied().unwrap_or(0);
+            let (mode, zones) = (at(0), u16::from_le_bytes([at(1), at(2)]) & 0x03FF);
+            let t = &mut self.0[usize::from(*which).min(1)];
+            if (t.mode, t.zones) != (mode, zones) {
+                *t = TriggerFb {
+                    mode,
+                    zones,
+                    fired: false,
+                };
+            }
+        }
+    }
+
+    /// Stamp both status bytes into a serialized report `0x01`. Call after [`serialize_state`]
+    /// with the same trigger positions.
+    pub fn stamp(&mut self, r: &mut [u8; DS_INPUT_REPORT_LEN], l2: u8, r2: u8) {
+        r[42] = self.0[1].status_byte(r2); // wire `which` 1 = R2, struct off 41
+        r[43] = self.0[0].status_byte(l2); // wire `which` 0 = L2, struct off 42
+    }
+}
+
+impl TriggerFb {
+    /// Status nibble over stop zone for the current trigger position.
+    fn status_byte(&mut self, pos: u8) -> u8 {
+        if self.zones == 0 {
+            return 0;
+        }
+        // Ten equal zones across the travel; the effect parameters are named in the same units.
+        let zone = (u16::from(pos) * 10 / 256) as u8;
+        let start = self.zones.trailing_zeros() as u8;
+        let stop = (15 - self.zones.leading_zeros()) as u8;
+        match self.mode {
+            trig_mode::WEAPON => {
+                if zone < start {
+                    self.fired = false;
+                } else if zone >= stop {
+                    self.fired = true;
+                }
+                let status = if self.fired {
+                    2
+                } else if zone >= start {
+                    1
+                } else {
+                    0
+                };
+                status << 4 | stop
+            }
+            // Resisting or vibrating only inside an active zone, so read the mask, not the span.
+            trig_mode::FEEDBACK | trig_mode::VIBRATION => {
+                let inside = self.zones & (1 << zone.min(15)) != 0;
+                u8::from(inside) << 4 | start
+            }
+            _ => 0,
+        }
+    }
+}
+
 fn pack_touch(dst: &mut [u8], t: &Touch) {
     // byte0: bit7 = NOT active (1 = no contact), bits0-6 = contact id.
     dst[0] = (t.id & 0x7F) | if t.active { 0 } else { 0x80 };
@@ -725,6 +819,65 @@ mod tests {
             })
             .collect();
         assert_eq!(triggers, vec![(1, 0x21), (0, 0x26)]);
+    }
+
+    /// The whole path a game drives: arm a Weapon effect on R2, pull through the stop, ease off.
+    /// Status rides the HIGH nibble (0 before the effect, 1 inside, 2 past the stop) over the stop
+    /// zone. Zero here is the bug this models — the game never sees the shot.
+    #[test]
+    fn weapon_effect_reports_the_shot_in_the_trigger_status_nibble() {
+        // Weapon (0x25), start zone 2, stop zone 8 — Nielk1's factory packs both as a zone mask.
+        let mut data = vec![0u8; 48];
+        data[0] = 0x02;
+        data[1] = 0x04; // valid_flag0: R2 block only
+        data[11] = 0x25;
+        data[12..14].copy_from_slice(&((1u16 << 2) | (1 << 8)).to_le_bytes());
+        let mut fb = DsFeedback::default();
+        parse_ds_output(0, &data, &mut fb);
+        let mut trig = DsTriggers::default();
+        trig.observe(&fb.hidout);
+
+        let byte = |t: &mut DsTriggers, r2| {
+            let mut r = [0u8; DS_INPUT_REPORT_LEN];
+            serialize_state(&mut r, &DsState::neutral(), 0, 0);
+            t.stamp(&mut r, 0, r2);
+            (r[42], r[43])
+        };
+        assert_eq!(byte(&mut trig, 0), (0x08, 0), "released: before the effect");
+        assert_eq!(byte(&mut trig, 0x60), (0x18, 0), "held inside the effect");
+        assert_eq!(
+            byte(&mut trig, 0xFF),
+            (0x28, 0),
+            "past the stop: shot fired"
+        );
+        assert_eq!(byte(&mut trig, 0x60), (0x28, 0), "eased off: still fired");
+        assert_eq!(byte(&mut trig, 0x10), (0x08, 0), "released: re-armed");
+        // Re-arming the same effect every frame must not clear the latch mid-pull.
+        let _ = byte(&mut trig, 0xFF);
+        trig.observe(&fb.hidout);
+        assert_eq!(
+            byte(&mut trig, 0x60),
+            (0x28, 0),
+            "re-sent effect keeps the shot"
+        );
+    }
+
+    /// No effect armed, or a mode the firmware does not report on, leaves both bytes zero.
+    #[test]
+    fn only_the_official_modes_move_the_status_nibble() {
+        let mut r = [0u8; DS_INPUT_REPORT_LEN];
+        serialize_state(&mut r, &DsState::neutral(), 0, 0);
+        DsTriggers::default().stamp(&mut r, 0xFF, 0xFF);
+        assert_eq!((r[42], r[43]), (0, 0), "nothing armed");
+
+        let mut trig = DsTriggers::default();
+        trig.observe(&[HidOutput::Trigger {
+            pad: 0,
+            which: 0,
+            effect: vec![0x02, 0x20, 0xFF, 0x00, 0, 0, 0, 0, 0, 0, 0], // Simple_Weapon
+        }]);
+        trig.stamp(&mut r, 0xFF, 0);
+        assert_eq!(r[43], 0, "simple modes never move it");
     }
 
     /// Valid-flags gate: rumble-only must not emit hidout; LED-only must not surface rumble.
