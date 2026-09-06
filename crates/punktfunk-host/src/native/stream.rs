@@ -527,6 +527,19 @@ fn paced_submit(
 }
 
 /// Pace already-sealed wires. Shared with the streamed-AU path ([`handle_chunk`]).
+/// Record that the encoder now runs at the rate derived for `fec`, and lift the FEC cap.
+///
+/// The cap and `last_fec` are one fact — the FEC level the live encoder's rate was derived
+/// for — so both move together or the cap outlives the refusal that set it and pins FEC low
+/// for the session. Every site that re-derives the rate goes through here.
+fn fec_rate_derived_at(last_fec: &mut u8, ceiling: &AtomicU8, fec: u8) {
+    *last_fec = fec;
+    ceiling.store(FEC_UNCAPPED, Ordering::Relaxed);
+}
+
+/// No cap: every FEC percent the control task can ask for fits the budget.
+const FEC_UNCAPPED: u8 = 100;
+
 fn pace_sealed(
     session: &mut Session,
     wires: Vec<Vec<u8>>,
@@ -1173,6 +1186,10 @@ pub(super) struct SessionContext {
     pub(super) retarget_tx: tokio::sync::mpsc::UnboundedSender<u32>,
     pub(super) gap_tx: tokio::sync::mpsc::UnboundedSender<u32>,
     pub(super) fec_target: Arc<AtomicU8>,
+    /// Highest FEC percent the live encoder's rate leaves room for inside the wire
+    /// budget. The control task clamps its adaptive target to this. Only a backend
+    /// that refuses an in-place retarget ever pins it below 100.
+    pub(super) fec_ceiling: Arc<AtomicU8>,
     pub(super) conn: super::link::SessionLink,
     pub(super) timing_conn: Option<super::link::SessionLink>,
     pub(super) phase: Arc<PhaseCtl>,
@@ -1359,6 +1376,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
         retarget_tx,
         gap_tx,
         fec_target,
+        fec_ceiling,
         conn,
         timing_conn,
         phase,
@@ -2171,23 +2189,30 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
             if fec_now != last_fec {
                 let prev = enc_derive(last_fec).enc_kbps(bitrate_kbps);
                 let want = enc_derive(fec_now).enc_kbps(bitrate_kbps);
-                last_fec = fec_now;
-                if want != prev {
-                    if enc.reconfigure_bitrate(want as u64 * 1000) {
-                        tracing::debug!(
-                            fec_pct = fec_now,
-                            encoder_kbps = want,
-                            budget_kbps = bitrate_kbps,
-                            "adaptive FEC moved — encoder rate re-derived within the wire budget"
-                        );
-                    } else if !fec_retarget_warned {
+                if want == prev || enc.reconfigure_bitrate(want as u64 * 1000) {
+                    fec_rate_derived_at(&mut last_fec, &fec_ceiling, fec_now);
+                    tracing::debug!(
+                        fec_pct = fec_now,
+                        encoder_kbps = want,
+                        budget_kbps = bitrate_kbps,
+                        "adaptive FEC moved — encoder rate re-derived within the wire budget"
+                    );
+                } else {
+                    // The encoder stays at the rate derived for `last_fec`, which is by
+                    // definition the highest FEC that fits the budget at that rate. Anything
+                    // above it would put the overhead on top of the budget — more bytes into a
+                    // link that is already dropping them. Cap the control task there instead;
+                    // an ABR rebuild re-derives both and lifts the cap.
+                    fec_ceiling.store(last_fec, Ordering::Relaxed);
+                    if !fec_retarget_warned {
                         fec_retarget_warned = true;
                         tracing::warn!(
                             fec_pct = fec_now,
-                            encoder_kbps = want,
+                            capped_fec_pct = last_fec,
+                            encoder_kbps = prev,
                             budget_kbps = bitrate_kbps,
-                            "encoder cannot retarget in place — the FEC overhead rides on top of \
-                             the wire budget until an ABR step rebuilds it"
+                            "encoder cannot retarget in place — capping adaptive FEC at what its \
+                             rate affords rather than overrunning the wire budget"
                         );
                     }
                 }
@@ -2210,7 +2235,8 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
             }
         }
         if let Some(new_kbps) = want_kbps.filter(|&k| k != bitrate_kbps) {
-            let ed = enc_derive(fec_target.load(Ordering::Relaxed));
+            let ed_fec = fec_target.load(Ordering::Relaxed);
+            let ed = enc_derive(ed_fec);
             if enc.reconfigure_bitrate(ed.enc_kbps(new_kbps) as u64 * 1000) {
                 let applied_kbps = enc
                     .applied_bitrate_bps()
@@ -2265,6 +2291,9 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                         }
                         bitrate_kbps = applied_kbps;
                         live_bitrate.store(applied_kbps, Ordering::Relaxed);
+                        // Opened at `ed_fec`'s derived rate, so any FEC cap an earlier refused
+                        // retarget left behind is stale.
+                        fec_rate_derived_at(&mut last_fec, &fec_ceiling, ed_fec);
                         clear_inflight(&mut inflight, &mut au_seq, &mut wire_frame_open);
                         last_au_at = std::time::Instant::now();
                         encoder_resets = 0;
@@ -4189,6 +4218,23 @@ fn source_advanced(
 
 #[cfg(test)]
 mod tests {
+
+    /// A refused in-place retarget caps FEC at what the encoder's rate affords; every path
+    /// that re-derives that rate must lift the cap, or the session keeps the floor forever.
+    #[test]
+    fn re_deriving_the_encoder_rate_lifts_the_fec_cap() {
+        let ceiling = AtomicU8::new(FEC_UNCAPPED);
+        let mut last_fec = 1u8;
+
+        // The encoder refused: it still runs at the rate derived for 1 %, so 1 % is the cap.
+        ceiling.store(last_fec, Ordering::Relaxed);
+        assert_eq!(ceiling.load(Ordering::Relaxed), 1);
+
+        // An ABR rebuild re-derives at the live 12 %; the cap goes with it.
+        fec_rate_derived_at(&mut last_fec, &ceiling, 12);
+        assert_eq!(last_fec, 12);
+        assert_eq!(ceiling.load(Ordering::Relaxed), FEC_UNCAPPED);
+    }
     use super::*;
 
     /// The eviction-recovery liveness gate must demand SOURCE progress, not a changed wall-clock
