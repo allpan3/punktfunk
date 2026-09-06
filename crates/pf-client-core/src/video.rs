@@ -832,6 +832,16 @@ pub(crate) fn resolve_decoder_pref(env: Option<&str>, pref: &str) -> String {
         .map_or_else(|| pref.to_string(), str::to_string)
 }
 
+/// The ladder's whole vocabulary: the auto family, the CPU pin, and the three
+/// rung pins. [`Decoder::new`] reads anything else as `auto` — every gate below
+/// it matches by name, so an unknown one would skip rungs silently.
+pub(crate) fn known_decoder_pref(choice: &str) -> bool {
+    matches!(
+        choice,
+        "" | "auto" | "hardware" | "software" | "native-vulkan" | "native-vaapi" | "native-d3d11va"
+    )
+}
+
 /// `quic` codecs this build can decode. Advertised so the host never emits
 /// one we cannot. Constants, not probes: asked before a device exists.
 /// Device facts are [`decodable_codecs_for`].
@@ -1068,6 +1078,17 @@ impl Decoder {
                  same hardware path"
             );
         }
+        // A name the ladder does not know is a typo, and every gate below matches by
+        // name: left alone it would skip the Vulkan rung in silence.
+        let choice = if known_decoder_pref(&choice) {
+            choice
+        } else {
+            tracing::warn!(
+                pref = choice,
+                "decoder preference not recognised — decoding as `auto`"
+            );
+            "auto".to_string()
+        };
         #[cfg(windows)]
         let (d3d11_import, adapter_luid, d3d11_hdr10) = (
             vk.is_some_and(|v| v.d3d11_import),
@@ -2432,5 +2453,31 @@ mod tests {
             CODEC_HEVC,
             "HEVC is the ONE advertised codec with no CPU rung (last_rung_verdict owns it)"
         );
+    }
+
+    /// The rung pins and the auto family are the vocabulary; anything else is a
+    /// typo the ladder must not read as a silent "skip the Vulkan rung".
+    #[test]
+    fn the_ladders_vocabulary_is_the_auto_family_plus_the_four_pins() {
+        for known in [
+            "",
+            "auto",
+            "hardware",
+            "software",
+            "native-vulkan",
+            "native-vaapi",
+            "native-d3d11va",
+        ] {
+            assert!(known_decoder_pref(known), "known {known:?}");
+            // Every known name survives migration, so the check runs after it.
+            assert_eq!(migrate_decoder_pref(known), known);
+        }
+        for typo in ["native-vulcan", "vaapi2", "hw", "Auto", " auto"] {
+            assert!(!known_decoder_pref(typo), "typo {typo:?}");
+        }
+        #[cfg(target_os = "linux")]
+        assert!(known_decoder_pref(crate::video_vaapi_native::DECODER_PIN));
+        #[cfg(windows)]
+        assert!(known_decoder_pref(crate::video_d3d11_native::DECODER_PIN));
     }
 }
