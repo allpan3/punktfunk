@@ -367,6 +367,10 @@ fn picture_info(
     lf_std.loop_filter_sharpness = lf.loop_filter_sharpness;
     lf_std.loop_filter_ref_deltas = lf.loop_filter_ref_deltas;
     lf_std.loop_filter_mode_deltas = lf.loop_filter_mode_deltas;
+    // Which entries THIS frame rewrote. Hardware that carries its own delta
+    // state applies only these; a zero mask leaves the previous frame's.
+    lf_std.update_ref_delta = lf.update_ref_delta;
+    lf_std.update_mode_delta = lf.update_mode_delta;
     let loop_filter = Box::new(lf_std);
 
     // Secondary strengths are the coded two-bit values, not the spec fixup
@@ -898,6 +902,30 @@ mod tests {
     /// spell chroma as named fields, so copying "the levels" as a pair is
     /// the natural mistake and nothing else in this file would notice.
     /// Frame 0 of this vector is `[1, 7, 8, 12]` — the four bytes
+    /// The two `u8` masks say which reference and mode deltas THIS frame
+    /// rewrote. Hardware carrying its own delta state applies only those, so a
+    /// mask stuck at zero leaves the previous frame's deltas in place. This
+    /// vector codes no delta update, so the values are authored here.
+    #[test]
+    fn the_loop_filter_delta_update_masks_reach_the_std_struct() {
+        let mut planner = Av1Planner::new();
+        let mut slots = SlotMap::new(NUM_REF_SLOTS);
+        let packet = IvfIterator::new(AV1_25FPS).next().expect("a key frame");
+        let mut plan = planner.plan_au(packet).expect("plans").remove(0);
+
+        let mut header = (*plan.header).clone();
+        header.loop_filter_params.loop_filter_delta_update = true;
+        header.loop_filter_params.update_ref_delta = 0b1010_0101;
+        header.loop_filter_params.update_mode_delta = 0b10;
+        plan.header = std::rc::Rc::new(header);
+
+        let vk = convert(&plan, &mut slots);
+        // SAFETY: `pLoopFilter` points at the boxed block `vk.pic` owns.
+        let sent = unsafe { *vk.pic.std().pLoopFilter };
+        assert_eq!(sent.update_ref_delta, 0b1010_0101);
+        assert_eq!(sent.update_mode_delta, 0b10);
+    }
+
     /// libavcodec's Vulkan hwaccel sends for that frame.
     #[test]
     fn the_chroma_deblocking_levels_are_the_last_two_of_four() {
@@ -924,6 +952,9 @@ mod tests {
                 assert_eq!(sent.loop_filter_sharpness, lf.loop_filter_sharpness);
                 assert_eq!(sent.loop_filter_ref_deltas, lf.loop_filter_ref_deltas);
                 assert_eq!(sent.loop_filter_mode_deltas, lf.loop_filter_mode_deltas);
+                // Which entries this frame rewrote, not just their values.
+                assert_eq!(sent.update_ref_delta, lf.update_ref_delta);
+                assert_eq!(sent.update_mode_delta, lf.update_mode_delta);
                 if lf.loop_filter_level[2] != 0 || lf.loop_filter_level[3] != 0 {
                     with_chroma_lf += 1;
                 }
