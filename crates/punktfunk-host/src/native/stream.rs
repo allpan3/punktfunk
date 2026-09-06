@@ -1883,6 +1883,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
     let mut cur_depth: usize = 1;
     let mut behind_score: u32 = 0;
     let mut last_fec = fec_target.load(Ordering::Relaxed);
+    let mut fec_retarget_warned = false;
     let mut depth_frames: u64 = 0;
     // EMA of real-frame arrivals. Negotiated refresh is the wrong deadline when the game is slower.
     let mut src_period_ns: Option<u64> = None;
@@ -1956,7 +1957,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                             &stop,
                             8,
                             None,
-                            au_seq,
+                            next_au_seq(au_seq, wire_frame_open),
                         )?;
                         Ok((new_vd, pipe))
                     })();
@@ -1988,7 +1989,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                         vd = new_vd;
                         compositor = sw.compositor;
                         next = std::time::Instant::now();
-                        inflight.clear();
+                        clear_inflight(&mut inflight, &mut au_seq, &mut wire_frame_open);
                         last_au_at = std::time::Instant::now();
                         encoder_resets = 0;
                         tracing::info!(
@@ -2022,8 +2023,8 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                 bitrate_kbps
             };
             #[cfg(target_os = "windows")]
-            let fast_done = plan.capture == crate::session_plan::CaptureBackend::IddPush
-                && try_inplace_resize(
+            let resized = if plan.capture == crate::session_plan::CaptureBackend::IddPush {
+                try_inplace_resize(
                     &mut vd,
                     &mut capturer,
                     &mut enc,
@@ -2037,12 +2038,15 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                     &quit,
                     resize_trace.as_ref(),
                     false,
-                    au_seq,
-                );
+                    next_au_seq(au_seq, wire_frame_open),
+                )
+            } else {
+                InplaceResize::FullRebuild
+            };
             #[cfg(not(target_os = "windows"))]
-            let fast_done = false;
+            let resized = InplaceResize::FullRebuild;
             let mut built_bitrate = mode_bitrate;
-            let rebuilt = fast_done
+            let rebuilt = resized == InplaceResize::Done
                 || match build_pipeline(
                     &mut vd,
                     new_mode,
@@ -2055,7 +2059,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                     cur_display_gen,
                     None,
                     Some(resize_trace.as_ref()),
-                    au_seq,
+                    next_au_seq(au_seq, wire_frame_open),
                 ) {
                     Ok(next_pipe) => {
                         let old_display_gen = cur_display_gen;
@@ -2075,6 +2079,12 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                         true
                     }
                     Err(e) => {
+                        if resized == InplaceResize::Displaced {
+                            return Err(e).context(
+                                "the in-place resize retired the live encoder and the full \
+                                 rebuild failed — ending the session for a clean reconnect",
+                            );
+                        }
                         tracing::warn!(error = %format!("{e:#}"), ?new_mode,
                             "mode-switch rebuild failed — staying on the current mode");
                         let _ = reconfig_result_tx.send(Reconfigured {
@@ -2105,7 +2115,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                         mode: actual,
                     });
                 }
-                inflight.clear();
+                clear_inflight(&mut inflight, &mut au_seq, &mut wire_frame_open);
                 last_au_at = std::time::Instant::now();
                 encoder_resets = 0;
                 last_forced_idr = Some(std::time::Instant::now());
@@ -2138,10 +2148,11 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                     &quit,
                     trace.as_ref(),
                     true,
-                    au_seq,
-                ) {
+                    next_au_seq(au_seq, wire_frame_open),
+                ) == InplaceResize::Done
+                {
                     enc_src = (frame.format, frame.width, frame.height);
-                    inflight.clear();
+                    clear_inflight(&mut inflight, &mut au_seq, &mut wire_frame_open);
                     last_au_at = std::time::Instant::now();
                     encoder_resets = 0;
                     last_forced_idr = Some(std::time::Instant::now());
@@ -2161,13 +2172,24 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                 let prev = enc_derive(last_fec).enc_kbps(bitrate_kbps);
                 let want = enc_derive(fec_now).enc_kbps(bitrate_kbps);
                 last_fec = fec_now;
-                if want != prev && enc.reconfigure_bitrate(want as u64 * 1000) {
-                    tracing::debug!(
-                        fec_pct = fec_now,
-                        encoder_kbps = want,
-                        budget_kbps = bitrate_kbps,
-                        "adaptive FEC moved — encoder rate re-derived within the wire budget"
-                    );
+                if want != prev {
+                    if enc.reconfigure_bitrate(want as u64 * 1000) {
+                        tracing::debug!(
+                            fec_pct = fec_now,
+                            encoder_kbps = want,
+                            budget_kbps = bitrate_kbps,
+                            "adaptive FEC moved — encoder rate re-derived within the wire budget"
+                        );
+                    } else if !fec_retarget_warned {
+                        fec_retarget_warned = true;
+                        tracing::warn!(
+                            fec_pct = fec_now,
+                            encoder_kbps = want,
+                            budget_kbps = bitrate_kbps,
+                            "encoder cannot retarget in place — the FEC overhead rides on top of \
+                             the wire budget until an ABR step rebuilds it"
+                        );
+                    }
                 }
             }
         }
@@ -2221,7 +2243,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                     hz,
                     ed.enc_kbps(new_kbps) as u64 * 1000,
                     bit_depth,
-                    au_seq,
+                    next_au_seq(au_seq, wire_frame_open),
                 ) {
                     Ok(new_enc) => {
                         let applied_kbps = new_enc
@@ -2243,7 +2265,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                         }
                         bitrate_kbps = applied_kbps;
                         live_bitrate.store(applied_kbps, Ordering::Relaxed);
-                        inflight.clear();
+                        clear_inflight(&mut inflight, &mut au_seq, &mut wire_frame_open);
                         last_au_at = std::time::Instant::now();
                         encoder_resets = 0;
                         last_forced_idr = Some(std::time::Instant::now());
@@ -2264,14 +2286,14 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
             }
         }
         let mut want_kf = false;
-        // Staged recovery closed on real source frames (WP14): the client held the last image
-        // through the hole, so the next AU is an IDR, owed in-flight records are invalid, and
-        // the measured local outage is announced so the straddling window is not scored as
-        // congestion.
         if health_published_at.elapsed() >= std::time::Duration::from_millis(500) {
             health_published_at = std::time::Instant::now();
             *capture_health.lock().unwrap_or_else(|e| e.into_inner()) = capturer.health();
         }
+        // A recovered outage owes an IDR: the client held the last image through the hole and
+        // every in-flight record is stale. Do not stamp `last_forced_idr` here — the cooldown
+        // branch below reads it and would coalesce away the request it exists to fire. The
+        // measured outage is announced so the straddling window is not scored as congestion.
         if let Some(outage) = capturer.take_recovered_outage() {
             let outage_ms = outage.as_millis().min(u32::MAX as u128) as u32;
             tracing::info!(
@@ -2279,8 +2301,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                 "capture recovered from a source stall — forcing an IDR, announcing the gap"
             );
             want_kf = true;
-            inflight.clear();
-            last_forced_idr = Some(std::time::Instant::now());
+            clear_inflight(&mut inflight, &mut au_seq, &mut wire_frame_open);
             announce_pipeline_gap(&gap_tx, outage_ms);
         }
         while keyframe.try_recv().is_ok() {
@@ -2310,9 +2331,12 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
         let mut rfi_declined = false;
         if !want_kf {
             if let Some((first, last)) = rfi_range {
-                let width = last.wrapping_sub(first);
-                if width > punktfunk_core::packet::RFI_MAX_RANGE {
-                    tracing::debug!(first, last, width, "RFI range too wide — keyframe instead");
+                // Inclusive, as the client counts it. `first > last` is a range that wrapped
+                // past `u32::MAX`: no encoder holds it, and `invalidate_ref_frames` takes the
+                // pair in order.
+                let count = last.wrapping_sub(first).wrapping_add(1);
+                if count > punktfunk_core::packet::RFI_MAX_RANGE || first > last {
+                    tracing::debug!(first, last, count, "RFI range unusable — keyframe instead");
                     want_kf = true;
                 } else if enc.caps().supports_rfi
                     && enc.invalidate_ref_frames(first as i64, last as i64)
@@ -2463,7 +2487,13 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
         // A recovery rung the capturer's ladder chose but this loop must run (the encoder is
         // ours). Its outcome goes straight back; a reset forfeited every in-flight AU.
         if let Some(stage) = capturer.take_pending_stage() {
-            let outcome = run_loop_stage(stage, &mut enc, &mut inflight);
+            let outcome = run_loop_stage(
+                stage,
+                &mut enc,
+                &mut inflight,
+                &mut au_seq,
+                &mut wire_frame_open,
+            );
             capturer.stage_done(stage, outcome);
             last_au_at = std::time::Instant::now();
         }
@@ -2675,7 +2705,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                         &stop,
                         1,
                         None,
-                        au_seq,
+                        next_au_seq(au_seq, wire_frame_open),
                     ) {
                         Ok(p) => break p,
                         Err(e2) => {
@@ -2712,7 +2742,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                 enc.request_keyframe();
                 last_forced_idr = Some(std::time::Instant::now());
                 next = std::time::Instant::now();
-                inflight.clear();
+                clear_inflight(&mut inflight, &mut au_seq, &mut wire_frame_open);
                 last_au_at = std::time::Instant::now();
                 encoder_resets = 0;
                 tracing::info!(
@@ -2879,7 +2909,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                 actual.refresh_hz,
                 src_kbps as u64 * 1000,
                 bit_depth,
-                au_seq,
+                next_au_seq(au_seq, wire_frame_open),
             )
             .with_context(|| {
                 format!(
@@ -2916,7 +2946,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
             enc = new_enc;
             enc_src = (frame.format, frame.width, frame.height);
             adopt_built_bitrate(&mut bitrate_kbps, src_kbps, &live_bitrate, &retarget_tx);
-            inflight.clear();
+            clear_inflight(&mut inflight, &mut au_seq, &mut wire_frame_open);
             last_au_at = std::time::Instant::now();
             encoder_resets = 0;
             last_forced_idr = Some(std::time::Instant::now());
@@ -2981,7 +3011,12 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
             }
             encoder_resets += 1;
             if encoder_resets > MAX_ENCODER_RESETS
-                || !reset_stalled_encoder(&mut enc, &mut inflight)
+                || !reset_stalled_encoder(
+                    &mut enc,
+                    &mut inflight,
+                    &mut au_seq,
+                    &mut wire_frame_open,
+                )
             {
                 tracing::error!(
                     error = %format!("{e:#}"),
@@ -3088,14 +3123,14 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                     let last = c.last;
                     let (cap_ns, sub_ns, deadline) = *inflight.front().expect("inflight non-empty");
                     let wait_total_us = t_wait.elapsed().as_micros() as u32;
-                    let encode_us = (now_ns().saturating_sub(sub_ns) / 1000) as u32;
-                    // The driver stamps each AU with its own present time; the tick's clock
-                    // would give every AU of a burst the same one.
-                    let capture_ns = if owed.is_some() && c.pts_ns > 0 {
-                        c.pts_ns
-                    } else {
-                        cap_ns
-                    };
+                    // The driver stamps each AU with its own present time; the tick's clock would
+                    // give every AU of a burst the same one. `sub_ns` is when this loop asked for
+                    // an AU the driver had already encoded, so an owed AU measures from that
+                    // present time or ABR reads drain jitter as an encode knee.
+                    let owed_pts = owed.is_some() && c.pts_ns > 0;
+                    let capture_ns = if owed_pts { c.pts_ns } else { cap_ns };
+                    let encode_from = if owed_pts { c.pts_ns } else { sub_ns };
+                    let encode_us = (now_ns().saturating_sub(encode_from) / 1000) as u32;
                     let msg = ChunkMsg {
                         data: c.data,
                         first: c.first,
@@ -3190,13 +3225,12 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                     resend_meta = false;
                 }
             }
-            let encode_us = (now_ns().saturating_sub(sub_ns) / 1000) as u32;
-            // As in the chunked arm: the driver's per-AU present time over the tick's clock.
-            let capture_ns = if owed.is_some() && au.pts_ns > 0 {
-                au.pts_ns
-            } else {
-                cap_ns
-            };
+            // As in the chunked arm: the driver's per-AU present time over the tick's clock,
+            // for the capture stamp and for the encode time ABR reads.
+            let owed_pts = owed.is_some() && au.pts_ns > 0;
+            let capture_ns = if owed_pts { au.pts_ns } else { cap_ns };
+            let encode_from = if owed_pts { au.pts_ns } else { sub_ns };
+            let encode_us = (now_ns().saturating_sub(encode_from) / 1000) as u32;
             let msg = FrameMsg {
                 data: au.data,
                 capture_ns,
@@ -3239,7 +3273,12 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
             };
             encoder_resets += 1;
             if encoder_resets > MAX_ENCODER_RESETS
-                || !reset_stalled_encoder(&mut enc, &mut inflight)
+                || !reset_stalled_encoder(
+                    &mut enc,
+                    &mut inflight,
+                    &mut au_seq,
+                    &mut wire_frame_open,
+                )
             {
                 return Err(poll_err.unwrap_or_else(|| anyhow!("{why}")))
                     .context("encoder stalled — in-place rebuild unavailable or exhausted");
@@ -3438,8 +3477,17 @@ type Pipeline = (
     u32,
 );
 
-/// Mode-set the live monitor, restore its presentation, swap only the encoder. `false` → full
-/// rebuild.
+/// What the caller must do next after `try_inplace_resize`. `Displaced`: re-opening the driver
+/// encoder already sent SET_ENCODE, which retired the live encoder's section, so the caller's full
+/// rebuild is no longer optional — keeping the old encoder keeps an orphan that only resets.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InplaceResize {
+    Done,
+    FullRebuild,
+    Displaced,
+}
+
+/// Mode-set the live monitor, restore its presentation, swap only the encoder.
 #[cfg(target_os = "windows")]
 #[allow(clippy::too_many_arguments)]
 fn try_inplace_resize(
@@ -3457,16 +3505,16 @@ fn try_inplace_resize(
     trace: &crate::bringup::Trace,
     recover_ring: bool,
     wire_seq_base: u32,
-) -> bool {
+) -> InplaceResize {
     let Some(cur_target) = capturer.capture_target_id() else {
-        return false;
+        return InplaceResize::FullRebuild;
     };
     let new_display_mode = display_mode_for(new_mode);
     let vout = match crate::vdisplay::registry::acquire(vd, new_display_mode, quit.clone(), None) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = %format!("{e:#}"), "in-place resize: acquire failed");
-            return false;
+            return InplaceResize::FullRebuild;
         }
     };
     trace.mark("display_resized");
@@ -3480,7 +3528,7 @@ fn try_inplace_resize(
         tracing::info!(
             "resize: monitor re-arrived (no in-place support) — running the full pipeline rebuild"
         );
-        return false;
+        return InplaceResize::FullRebuild;
     }
     let restored = if recover_ring {
         capturer.restart_presentation_in_place()
@@ -3488,7 +3536,7 @@ fn try_inplace_resize(
         capturer.resize_output(new_mode.width, new_mode.height)
     };
     if !restored {
-        return false;
+        return InplaceResize::FullRebuild;
     }
     trace.mark("presentation_restored");
     // The driver's pool is still built for the OLD geometry, so it refuses every composed frame
@@ -3509,11 +3557,18 @@ fn try_inplace_resize(
             Err(e) => {
                 tracing::warn!(error = %format!("{e:#}"),
                     "resize: re-opening the driver encoder at the new mode failed - full rebuild");
-                return false;
+                return InplaceResize::FullRebuild;
             }
         }
     } else {
         None
+    };
+    // SET_ENCODE retired the live encoder's section, so from here a failure leaves the caller
+    // holding an orphan: its rebuild must succeed.
+    let fallback = if pre_opened.is_some() {
+        InplaceResize::Displaced
+    } else {
+        InplaceResize::FullRebuild
     };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     // The driver-encode capturer reads the display's progress off the encoder, and these loops
@@ -3530,14 +3585,14 @@ fn try_inplace_resize(
                         "resize: no new-size frame within 3s of the in-place mode set — running \
                          the full pipeline rebuild"
                     );
-                    return false;
+                    return fallback;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
             Err(e) => {
                 tracing::warn!(error = %format!("{e:#}"),
                     "resize: capture failed after the in-place mode set — running the full rebuild");
-                return false;
+                return fallback;
             }
         }
     };
@@ -3559,14 +3614,14 @@ fn try_inplace_resize(
                             "eviction recovery: ring re-attached but only the stashed frame \
                              arrived — the OS is not presenting; failing the in-place recovery"
                         );
-                        return false;
+                        return fallback;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
                 Err(e) => {
                     tracing::warn!(error = %format!("{e:#}"),
                         "eviction recovery: capture failed while waiting for a live frame");
-                    return false;
+                    return fallback;
                 }
             }
         }
@@ -3589,7 +3644,7 @@ fn try_inplace_resize(
             Err(e) => {
                 tracing::warn!(error = %format!("{e:#}"),
                     "resize: encoder open failed after the in-place mode set - full rebuild");
-                return false;
+                return fallback;
             }
         },
     };
@@ -3597,7 +3652,7 @@ fn try_inplace_resize(
     *frame = new_frame;
     *interval = std::time::Duration::from_secs_f64(1.0 / effective_hz.max(1) as f64);
     trace.mark("encoder_open");
-    true
+    InplaceResize::Done
 }
 
 /// Display + pipeline built on the prep thread while Start RTT and hole-punch are in flight.
@@ -3891,15 +3946,37 @@ fn open_session_encoder(
     Ok(enc)
 }
 
+/// The wire index a rebuilt encoder must open at. `wire_frame_open` means `au_seq` still names
+/// the AU whose FIRST is on the wire and whose LAST never came, and a rebuild that re-used that
+/// index would hand the client's half-filled `frames[N]` a second AU it drops.
+fn next_au_seq(au_seq: u32, wire_frame_open: bool) -> u32 {
+    au_seq.wrapping_add(wire_frame_open as u32)
+}
+
+/// Forget the in-flight records a reset or rebuild invalidated, and the AU whose FIRST is on the
+/// wire with them: those records carried the `au_seq + inflight.len()` prediction past the open
+/// frame, so `au_seq` must step over it here or the next AU re-uses its index.
+fn clear_inflight(
+    inflight: &mut std::collections::VecDeque<(u64, u64, std::time::Instant)>,
+    au_seq: &mut u32,
+    wire_frame_open: &mut bool,
+) {
+    inflight.clear();
+    *au_seq = next_au_seq(*au_seq, *wire_frame_open);
+    *wire_frame_open = false;
+}
+
 /// Rebuild the encoder in place and drop owed in-flight AUs. `false` = no in-place reset.
 fn reset_stalled_encoder(
     enc: &mut Box<dyn crate::encode::Encoder>,
     inflight: &mut std::collections::VecDeque<(u64, u64, std::time::Instant)>,
+    au_seq: &mut u32,
+    wire_frame_open: &mut bool,
 ) -> bool {
     if !enc.reset() {
         return false;
     }
-    inflight.clear();
+    clear_inflight(inflight, au_seq, wire_frame_open);
     enc.request_keyframe();
     true
 }
@@ -3913,12 +3990,14 @@ fn run_loop_stage(
     stage: pf_frame::recovery::Stage,
     enc: &mut Box<dyn crate::encode::Encoder>,
     inflight: &mut std::collections::VecDeque<(u64, u64, std::time::Instant)>,
+    au_seq: &mut u32,
+    wire_frame_open: &mut bool,
 ) -> pf_frame::recovery::StageOutcome {
     use pf_frame::recovery::{Stage, StageOutcome, ENCODER_RESET_FIRST_AU};
     match stage {
         Stage::EncoderReset => {
             let t0 = std::time::Instant::now();
-            if !reset_stalled_encoder(enc, inflight) {
+            if !reset_stalled_encoder(enc, inflight, au_seq, wire_frame_open) {
                 return StageOutcome::Failed;
             }
             let first_au = enc.ready_aus(t0 + ENCODER_RESET_FIRST_AU).map(|n| n > 0);

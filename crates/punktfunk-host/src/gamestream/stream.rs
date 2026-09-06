@@ -1144,9 +1144,6 @@ fn stream_body(
     let mut next_frame = Instant::now();
     // Loop-local so a mid-stream rebuild cannot reopen the overshoot.
     let mut cap_credit = crate::send_pacing::CaptureCredit::new(Instant::now());
-    // Session-fixed; query once so encoders without NVENC RFI skip the always-false invalidate.
-    let mut supports_rfi = enc.caps().supports_rfi;
-
     // A delivered frame clears this; a permanently dead source ends the stream after the cap.
     const MAX_REBUILDS: u32 = 5;
     let mut rebuilds: u32 = 0;
@@ -1218,7 +1215,6 @@ fn stream_body(
                 .context("reopen encoder after rebuild")?;
                 enc.set_input_ring_depth(capturer.pipeline_depth().max(1));
                 enc_src = (frame.format, frame.width, frame.height);
-                supports_rfi = enc.caps().supports_rfi;
                 enc.request_keyframe();
                 last_keyframe = Some(Instant::now());
                 next_frame = Instant::now();
@@ -1254,7 +1250,6 @@ fn stream_body(
                     enc = e;
                     enc_src = (frame.format, frame.width, frame.height);
                     enc.set_input_ring_depth(capturer.pipeline_depth().max(1));
-                    supports_rfi = enc.caps().supports_rfi;
                     enc.request_keyframe();
                     last_keyframe = Some(Instant::now());
                     // Old encoder died with in-flight AUs; numbering restarts at `au_seq`.
@@ -1282,9 +1277,11 @@ fn stream_body(
         let mut want_keyframe = recover_after_drop;
         if let Some((first, last)) = rfi_range.lock().unwrap().take() {
             // Wider than RFI_MAX_RANGE is a phantom range — keyframe, never a force-reference.
+            // `caps()` is read here, not cached: a backend learns whether it has RFI when it
+            // opens its session, which for a lazily-opened one is after the first submit.
             let width = (last as u32).wrapping_sub(first as u32);
             if width > punktfunk_core::packet::RFI_MAX_RANGE
-                || !(supports_rfi && enc.invalidate_ref_frames(first, last))
+                || !(enc.caps().supports_rfi && enc.invalidate_ref_frames(first, last))
             {
                 want_keyframe = true;
             }
@@ -1320,6 +1317,15 @@ fn stream_body(
             None => enc.submit_indexed(&frame, au_seq.wrapping_add(enc_inflight)),
         };
         if let Err(e) = submitted {
+            if e.downcast_ref::<crate::encode::TerminalEncoderError>()
+                .is_some()
+            {
+                tracing::error!(
+                    error = %format!("{e:#}"),
+                    "encoder failed with a deterministic configuration error — ending the stream \
+                     without rebuild attempts (see the error for the remedy)");
+                return Err(e).context("encoder submit");
+            }
             encoder_resets += 1;
             if encoder_resets > MAX_ENCODER_RESETS || !enc.reset() {
                 tracing::error!(

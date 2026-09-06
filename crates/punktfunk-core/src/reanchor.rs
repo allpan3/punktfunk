@@ -26,9 +26,10 @@ use std::time::{Duration, Instant};
 pub const NO_OUTPUT_KEYFRAME_STREAK: u32 = 3;
 
 /// Longest the freeze waits for a re-anchor before [`ReanchorGate::poll`] re-asks. The deadline
-/// never presents the concealed picture: it re-asks and keeps holding. 500 ms is well above a
-/// recovery-IDR round-trip on a live link and short enough that a stalled host still recovers.
-pub const REANCHOR_FREEZE_MAX: Duration = Duration::from_millis(500);
+/// never presents the concealed picture: it re-asks and keeps holding. 800 ms clears the host's
+/// 750 ms forced-IDR cooldown, so a re-ask arrives as an IDR instead of being coalesced away and
+/// waiting a second period; it is still well above a recovery-IDR round-trip on a live link.
+pub const REANCHOR_FREEZE_MAX: Duration = Duration::from_millis(800);
 
 /// Intra-refresh [`USER_FLAG_RECOVERY_POINT`]s since the latest loss before the freeze lifts
 /// without an IDR. Two, not one: the first wave boundary after a loss is only half-healed

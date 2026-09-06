@@ -89,6 +89,41 @@ fn rejects_inconsistent_block_geometry_without_panicking() {
     assert_eq!(stats.snapshot().packets_dropped, 1);
 }
 
+/// A host that resets mid-AU must not re-use the index: `frames[N]` is still open on the
+/// abandoned prefix, so the recovery AU's own geometry is refused and its picture is lost.
+#[test]
+fn a_reused_frame_index_with_new_geometry_is_dropped() {
+    let mut r = Reassembler::new(limits());
+    let coder = coder_for(FecScheme::Gf8);
+    let stats = StatsCounters::default();
+
+    // AU 7 opens with the first of four data shards; an encoder reset abandons the rest.
+    let mut open = base_header();
+    open.frame_index = 7;
+    open.data_shards = 4;
+    open.frame_bytes = 64;
+    assert!(r
+        .push(&packet(open), coder.as_ref(), &stats)
+        .unwrap()
+        .is_none());
+
+    // The recovery IDR re-uses index 7, inside the loss window, with its own shard count.
+    for shard_index in 0..2 {
+        let mut idr = base_header();
+        idr.frame_index = 7;
+        idr.data_shards = 2;
+        idr.frame_bytes = 32;
+        idr.shard_index = shard_index;
+        assert!(
+            r.push(&packet(idr), coder.as_ref(), &stats)
+                .unwrap()
+                .is_none(),
+            "the IDR must not be spliced onto the abandoned prefix"
+        );
+    }
+    assert_eq!(stats.snapshot().packets_dropped, 2);
+}
+
 /// Loss window is capture-pts, not frame count: 33 ms late at 120 fps is late, not lost.
 #[test]
 fn incomplete_frames_age_out_by_capture_time_not_frame_count() {

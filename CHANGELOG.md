@@ -329,6 +329,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **A recovered capture stall sends its keyframe.** The host stamped the forced-IDR cooldown as
+  it noticed the stall had ended, so the keyframe it asked for a few lines later was coalesced
+  away and the picture resumed on references the client no longer holds. Nothing to do; update
+  the host.
 - **An Android Steam Controller 2 over Bluetooth writes to the right GATT characteristics.**
   Valve routes each output report id to its own characteristic at `id + 0x35` and every feature
   command to `100F6C34`, id byte stripped in both cases, where the link had written every frame
