@@ -774,10 +774,13 @@ impl AmfEncoder {
         let mut ltr_active = false;
         if let Some(ltr) = p.ltr.as_ref().filter(|_| self.ltr_wanted()) {
             // LTR needs >1 ref frames and is mutually exclusive with intra-refresh.
+            // The reference budget covers the LTR slots *and* the short-term chain: at
+            // exactly `NUM_LTR_SLOTS` both marks leave no short-term slot, so P frames
+            // reference an LTR and compression collapses. QSV budgets four for two slots.
             let ref_ok = set_prop(
                 comp,
                 ltr.max_num_ref_frames,
-                AmfVariant::from_i64(NUM_LTR_SLOTS as i64),
+                AmfVariant::from_i64(NUM_LTR_SLOTS as i64 + 2),
                 false,
             )?;
             let ltr_ok = set_prop(
