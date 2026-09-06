@@ -1773,8 +1773,11 @@ impl Parser {
             spatial_id: Default::default(),
         };
 
-        let obu_reserved_1bit = r.0.read_bit()?;
-        assert!(!obu_reserved_1bit); // Must be set to zero as per spec.
+        // 5.3.2 requires zero. A one is a damaged or foreign stream, which the
+        // caller refuses; asserting would take the decode thread with it.
+        if r.0.read_bit()? {
+            return Err("obu_reserved_1bit is set".into());
+        }
 
         if header.extension_flag {
             header.temporal_id = r.0.read_bits::<u32>(3)?;
@@ -1827,8 +1830,11 @@ impl Parser {
         // Both "low-overhead" and Annex B are now at the same point, i.e.: a
         // open_bitstream_unit() follows.
         let header = Self::parse_obu_header(&mut reader)?;
-        if matches!(self.stream_format, StreamFormat::LowOverhead) {
-            assert!(header.has_size_field);
+        // 5.2: a low-overhead stream has no framing but the size field, so an OBU
+        // without one is unparseable. It is damaged input, not a bug here — the
+        // caller refuses the AU; an assert would take the decode thread with it.
+        if matches!(self.stream_format, StreamFormat::LowOverhead) && !header.has_size_field {
+            return Err("low-overhead OBU without obu_has_size_field".into());
         }
 
         let obu_size: usize = if header.has_size_field {
@@ -1852,7 +1858,11 @@ impl Parser {
             annexb_state.frame_unit_consumed += u32::try_from(obu_size).unwrap();
         }
 
-        assert!(reader.0.position() % 8 == 0);
+        // The header parse is byte-aligned by construction; a damaged extension
+        // flag can still leave the reader mid-byte. Refuse rather than truncate.
+        if reader.0.position() % 8 != 0 {
+            return Err("OBU header did not end on a byte boundary".into());
+        }
         let start_offset: usize = (reader.0.position() / 8).try_into().unwrap();
 
         // `obu_size` was read off the wire as a leb128 and is bounded only by `u32::MAX`; nothing
@@ -3874,6 +3884,12 @@ impl Parser {
         let mut sz: u64 = r.0.num_bits_left() as u64 / 8;
 
         let num_tiles = self.tile_rows * self.tile_cols;
+        // A damaged tile-info OBU can leave either dimension zero, and the
+        // single-tile arm below then underflows on `num_tiles - 1`. There is no
+        // frame to decode without a tile.
+        if num_tiles == 0 {
+            return Err("tile group with no tiles".into());
+        }
         let start_bit_pos = r.0.position();
 
         if num_tiles > 1 {

@@ -35,3 +35,25 @@ jobs:
         env:
           BENCH_MODE: ${{ inputs.mode || '1920x1080x120' }}
         run: bash scripts/bench/gpu-stream.sh "$BENCH_MODE" 12
+
+  # The ~100 `#[ignore]`d hardware tests across the encode and decode crates. The PR lane runs
+  # these crates on GPU-less containers, so `--ignored` is the only way they ever execute, and
+  # until this job existed that meant "when a human remembered". Red here is a real failure, not
+  # a flake to wave through: this runner is the only place the GPU paths are exercised at all.
+  hardware-tests:
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Encode backends (NVENC, Vulkan Video, PyroWave)
+        run: cargo test -p pf-encode --features nvenc,vulkan-encode,pyrowave -- --ignored
+      - name: Vulkan decode
+        run: cargo test -p pf-vkdecode -- --ignored
+      - name: Client decode rungs
+        run: cargo test -p pf-client-core --features desktop -- --ignored
+      # Cheap next to the GPU legs, and the nightly is where a mutation soak belongs: the PR
+      # lane runs 3 000 rounds to stay under a second.
+      - name: Damaged-stream soak
+        env:
+          PF_DAMAGE_ROUNDS: "500000"
+        run: cargo test -p pf-bitstream --release --test damaged_streams -- --nocapture
