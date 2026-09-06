@@ -43,6 +43,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **`RichInput::PadStatus` carries the forwarded pad's battery**, so the DualSense, DualShock 4
+  and Switch Pro codecs stamp a real level, charge state and cable into the byte each family
+  keeps for it rather than inventing one. Send it with `punktfunk_connection_send_pad_status`
+  (C) or `NativeBridge.nativeSendPadStatus` (Android) on slot open and every ~15 s; a host that
+  predates the kind drops the datagram.
 - **`GameEntry.stats` carries a title's play stats.** Every library entry a host has launched
   gains `last_played_unix_ms`, `play_time_ms`, `last_run_ms` and `launch_count`, kept in
   `library-stats.json` beside the hide list and absent until the first launch. A client that
@@ -333,6 +338,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **A virtual DualSense with no battery sample claims wired and full, like its siblings.** It
+  reported "discharging, 100 %" where the DualShock 4 and Switch Pro codecs report a wired, full
+  pad, so a host shell drew a draining battery for one family of virtual pad and not the others.
+  Nothing to do.
 - **The desktop client renders the Xbox pad's trigger motors.** The v3 rumble tail has carried
   `left_trigger` / `right_trigger` into `RumbleCommand` all along and the SDL renderer dropped
   them at the last call, so impulse triggers were silent in every desktop session. Nothing to

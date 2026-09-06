@@ -13,7 +13,9 @@
 //! (20 LSB/°·s, 10000 LSB/g); the report is raw Pro units (14.247 LSB/°·s, 4096 LSB/g)
 //! via the factory-calibration identity. Evidence: this module's tests and hid-nintendo.c.
 
+use super::pad_power::PadPower;
 use punktfunk_core::input::gamepad as gs;
+use punktfunk_core::quic::RichInput;
 
 pub const SWITCH_VENDOR: u32 = 0x057E; // Nintendo Co., Ltd
 pub const SWITCH_PRODUCT: u32 = 0x2009; // Pro Controller
@@ -50,8 +52,10 @@ pub const SWITCH_REPORT_LEN: usize = 64;
 pub const STICK_CENTER: u16 = 2048;
 pub const STICK_RANGE: u16 = 1400;
 
-/// Report byte 2: full + charging + wired (`0x91`). Suppresses low-battery warnings.
+/// Report byte 2 with no client sample: full + charging + wired. [`PadPower::switch_byte`]
+/// produces it; kept as the name the tests and the driver notes use.
 pub const BAT_CON_FULL_WIRED: u8 = 0x91;
+
 /// Report byte 12. Zero here stops the driver's rumble queue (`joycon_ctlr_read_handler`).
 pub const VIBRATOR_READY: u8 = 0x70;
 
@@ -88,6 +92,9 @@ pub struct SwitchState {
     /// Raw gyro (~14.247 LSB/°·s) and accel (4096 LSB/g), driver axis order x/y/z.
     pub gyro: [i16; 3],
     pub accel: [i16; 3],
+    /// The client pad's own battery, stamped into report byte 2. Default is wired-and-full
+    /// — see [`PadPower`].
+    pub power: PadPower,
 }
 
 impl SwitchState {
@@ -101,6 +108,7 @@ impl SwitchState {
             ry: STICK_CENTER,
             gyro: [0; 3],
             accel: [0, 0, 4096],
+            power: PadPower::default(),
         }
     }
 
@@ -188,11 +196,33 @@ impl SwitchState {
         changed
     }
 
-    /// Motion only — this pad has no touchpad (`PadProto::clear_rich`).
+    /// Motion and power — this pad has no touchpad (`PadProto::clear_rich`). A pad that
+    /// takes this slot during replug grace must not inherit the last one's battery.
     pub fn clear_rich(&mut self) {
         let fresh = SwitchState::neutral();
         self.gyro = fresh.gyro;
         self.accel = fresh.accel;
+        self.power = fresh.power;
+    }
+
+    /// Carry every rich-plane field out of `prev`. `from_gamepad` builds a state from one
+    /// button frame and knows nothing about motion or power; `merge_frame` calls this.
+    pub fn carry_rich_from(&mut self, prev: &SwitchState) {
+        self.gyro = prev.gyro;
+        self.accel = prev.accel;
+        self.power = prev.power;
+    }
+
+    /// One rich event into this state. A Pro Controller has no touchpad, so only motion and
+    /// the pad's power land here.
+    pub fn apply_rich(&mut self, rich: RichInput) {
+        match rich {
+            RichInput::Motion { gyro, accel, .. } => self.apply_motion(gyro, accel),
+            RichInput::PadStatus { battery, flags, .. } => {
+                self.power = PadPower::from_wire(battery, flags)
+            }
+            _ => {}
+        }
     }
 
     /// DualSense-convention sample → raw IMU. No axis flip: the Pro path does not negate.
@@ -224,7 +254,8 @@ pub fn pack12(a: u16, b: u16) -> [u8; 3] {
 fn write_header(r: &mut [u8; SWITCH_REPORT_LEN], id: u8, st: &SwitchState, timer: u8) {
     r[0] = id;
     r[1] = timer;
-    r[2] = BAT_CON_FULL_WIRED;
+    r[2] = st.power.switch_byte();
+
     r[3] = (st.buttons & 0xFF) as u8;
     r[4] = ((st.buttons >> 8) & 0xFF) as u8;
     r[5] = ((st.buttons >> 16) & 0xFF) as u8;
@@ -482,6 +513,28 @@ mod tests {
         assert_eq!(&r[19..21], &0x1122u16.to_le_bytes());
         assert_eq!(&r[13..25], &r[25..37]);
         assert_eq!(&r[13..25], &r[37..49]);
+    }
+
+    /// The client pad's battery reaches report byte 2, and survives the button frames that
+    /// rebuild the rest of the state.
+    #[test]
+    fn pad_status_reaches_the_battery_byte() {
+        let mut st = SwitchState::neutral();
+        st.apply_rich(RichInput::PadStatus {
+            pad: 0,
+            battery: 45,
+            flags: 0,
+        });
+        assert_eq!(
+            serialize_report_0x30(&st, 0)[2],
+            0x40,
+            "level 2 of 4, on battery"
+        );
+        let mut next = SwitchState::from_gamepad(0, 0, 0, 0, 0, 0, 0);
+        next.carry_rich_from(&st);
+        assert_eq!(serialize_report_0x30(&next, 0)[2], 0x40);
+        st.clear_rich();
+        assert_eq!(serialize_report_0x30(&st, 0)[2], BAT_CON_FULL_WIRED);
     }
 
     /// ≥ 49 bytes, ack at 13, echoed id at 14 (the only byte the driver matches).

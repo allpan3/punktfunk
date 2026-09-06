@@ -916,6 +916,16 @@
 // datagram satisfies v1, v2, and v3 readers.
 #define PUNKTFUNK_RUMBLE_V3_LEN 14
 
+// [`RichInput::PadStatus`] `battery`: no reading. A wired pad with no pack, and every
+// client/platform that does not surface a level.
+#define PUNKTFUNK_PAD_BATTERY_UNKNOWN 255
+
+// [`RichInput::PadStatus`] `flags`: the pack is taking charge.
+#define PUNKTFUNK_PAD_STATUS_CHARGING 1
+
+// [`RichInput::PadStatus`] `flags`: the pad is on a cable or a dock.
+#define PUNKTFUNK_PAD_STATUS_WIRED 2
+
 // Longest raw HID report on [`RichInput::HidReport`] / [`HidOutput::HidRaw`].
 // Valve interrupt/feature reports are 64 bytes.
 #define PUNKTFUNK_HID_REPORT_MAX 64
@@ -2615,6 +2625,22 @@ PunktfunkStatus punktfunk_connection_send_rich_input(PunktfunkConnection *c,
 // `struct_size` bytes.
 PunktfunkStatus punktfunk_connection_send_rich_input2(PunktfunkConnection *c,
                                                       const PunktfunkRichInputEx *rich);
+#endif
+
+#if defined(PUNKTFUNK_FEATURE_QUIC)
+// Send the forwarded pad's power state (`[0xCC][0x06]`). `battery` is 0..=100 or
+// `PUNKTFUNK_PAD_BATTERY_UNKNOWN`; `flags` is `PUNKTFUNK_PAD_STATUS_CHARGING` |
+// `PUNKTFUNK_PAD_STATUS_WIRED`. `pad` masks to 16.
+//
+// The host's virtual pad carries a battery byte it cannot otherwise know; send on change
+// and every ~15 s, since the datagram is lossy and the host holds the last value.
+//
+// # Safety
+// `c` is a valid connection handle.
+PunktfunkStatus punktfunk_connection_send_pad_status(PunktfunkConnection *c,
+                                                     uint8_t pad,
+                                                     uint8_t battery,
+                                                     uint8_t flags);
 #endif
 
 #if defined(PUNKTFUNK_FEATURE_QUIC)

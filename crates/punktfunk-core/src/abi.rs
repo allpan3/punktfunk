@@ -3872,6 +3872,39 @@ fn hid_report_rich_input(pad: u8, report: &[u8]) -> crate::quic::RichInput {
     }
 }
 
+/// Send the forwarded pad's power state (`[0xCC][0x06]`). `battery` is 0..=100 or
+/// `PUNKTFUNK_PAD_BATTERY_UNKNOWN`; `flags` is `PUNKTFUNK_PAD_STATUS_CHARGING` |
+/// `PUNKTFUNK_PAD_STATUS_WIRED`. `pad` masks to 16.
+///
+/// The host's virtual pad carries a battery byte it cannot otherwise know; send on change
+/// and every ~15 s, since the datagram is lossy and the host holds the last value.
+///
+/// # Safety
+/// `c` is a valid connection handle.
+#[cfg(feature = "quic")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn punktfunk_connection_send_pad_status(
+    c: *mut PunktfunkConnection,
+    pad: u8,
+    battery: u8,
+    flags: u8,
+) -> PunktfunkStatus {
+    guard(|| {
+        // SAFETY: caller handle or null; `as_ref` never dereferences null.
+        let Some(c) = (unsafe { c.as_ref() }) else {
+            return PunktfunkStatus::NullPointer;
+        };
+        match c.inner.send_rich_input(crate::quic::RichInput::PadStatus {
+            pad: pad & 0xF,
+            battery,
+            flags,
+        }) {
+            Ok(()) => PunktfunkStatus::Ok,
+            Err(e) => e.status(),
+        }
+    })
+}
+
 /// Send one raw HID input report (SC2 as-is, `[0xCC][0x04]`). `len` clamps to
 /// `HID_REPORT_MAX`; `pad` masks to 16. Lossy snapshots; empty is `InvalidArg`.
 ///

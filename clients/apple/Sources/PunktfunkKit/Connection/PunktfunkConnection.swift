@@ -1785,6 +1785,24 @@ public final class PunktfunkConnection {
         _ = punktfunk_connection_send_rich_input(h, &rich)
     }
 
+    /// Send the forwarded pad's power state (`[0xCC][0x06]`). `battery` is 0...100, or nil
+    /// where the platform reports none. The host's virtual pad has a battery byte in every
+    /// input report and no other source for it, so a game or the host's shell otherwise
+    /// reads a controller that is always full. Send on change and every ~15 s — the datagram
+    /// is lossy and the host holds the last value.
+    public func sendPadStatus(pad: UInt8, battery: UInt8?, charging: Bool, wired: Bool) {
+        abiLock.lock()
+        defer { abiLock.unlock() }
+        // Pad state rides the GAMEPAD grant, like every other controller send.
+        guard let h = handle, !closeRequested, granted(Self.grantGamepad, handle: h)
+        else { return }
+        var flags: UInt8 = 0
+        if charging { flags |= UInt8(PUNKTFUNK_PAD_STATUS_CHARGING) }
+        if wired { flags |= UInt8(PUNKTFUNK_PAD_STATUS_WIRED) }
+        let level = battery.map { min($0, 100) } ?? UInt8(PUNKTFUNK_PAD_BATTERY_UNKNOWN)
+        _ = punktfunk_connection_send_pad_status(h, pad, level, flags)
+    }
+
     /// Send one raw HID input report from a client-captured controller — the as-is Steam
     /// Controller 2 passthrough's up direction (`[0xCC][0x04]` on the wire; ABI v27,
     /// `punktfunk_connection_send_hid_report`). `data` is the report id-first, exactly as the

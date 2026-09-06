@@ -577,6 +577,10 @@ pub mod pad_gate;
 /// nowhere.
 #[path = "inject/pad_pool.rs"]
 pub mod pad_pool;
+/// The client pad's battery and power state, packed per family. Not cfg-gated (same reason
+/// as `switch_proto`): pure byte-packing, so the mapping tests run on any host.
+#[path = "inject/proto/pad_power.rs"]
+pub mod pad_power;
 /// Virtual-pad slot table + create lifecycle ([`pad_slots::PadSlots`]): `Vec<Option<Pad>>`,
 /// `active_mask` unplug sweep, gate-checked create.
 ///

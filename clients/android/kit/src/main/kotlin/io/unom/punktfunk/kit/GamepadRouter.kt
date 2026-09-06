@@ -296,6 +296,45 @@ class GamepadRouter(
         override fun onInputDeviceChanged(deviceId: Int) {}
     }
 
+    /**
+     * Re-send every forwarded pad's power state. Nothing reports a battery changing, and the
+     * host's virtual pad has a battery byte in every input report with no other source for it —
+     * so without this a game reads a controller that is always full. Re-sent rather than
+     * deduped: the datagram is lossy and the host holds the last value.
+     */
+    private val padStatusPoll = object : Runnable {
+        override fun run() {
+            for ((id, slot) in slots) sendPadStatus(id, slot)
+            mainHandler.postDelayed(this, PAD_STATUS_MS)
+        }
+    }
+
+    /**
+     * One slot's battery onto the wire. Synthetic slots ([ExternalPad], negative ids) have no
+     * [InputDevice] to ask; their capture links own their own reports. Pre-31 has no per-device
+     * battery API at all, so those pads keep the host's default (wired and full).
+     */
+    private fun sendPadStatus(deviceId: Int, slot: Slot) {
+        if (!forwarding || deviceId < 0 || android.os.Build.VERSION.SDK_INT < 31) return
+        val b = InputDevice.getDevice(deviceId)?.batteryState ?: return
+        var battery = NativeBridge.PAD_BATTERY_UNKNOWN
+        var flags = 0
+        if (b.isPresent && b.capacity >= 0f) {
+            battery = (b.capacity * 100f).toInt().coerceIn(0, 100)
+            if (b.status == android.os.BatteryManager.BATTERY_STATUS_CHARGING) {
+                flags = flags or NativeBridge.PAD_STATUS_CHARGING or NativeBridge.PAD_STATUS_WIRED
+            }
+            if (b.status == android.os.BatteryManager.BATTERY_STATUS_FULL) {
+                flags = flags or NativeBridge.PAD_STATUS_WIRED
+            }
+        } else {
+            // No pack: a wired pad. Anything else would draw an empty battery on a pad that
+            // cannot have one.
+            flags = NativeBridge.PAD_STATUS_WIRED
+        }
+        NativeBridge.nativeSendPadStatus(handle, slot.index, battery, flags)
+    }
+
     init {
         inputManager?.registerInputDeviceListener(listener, mainHandler)
         // Open a slot for every controller already connected when the session starts — the pads that
@@ -303,6 +342,7 @@ class GamepadRouter(
         for (id in InputDevice.getDeviceIds()) {
             InputDevice.getDevice(id)?.let { if (isForwardable(it)) openSlot(it) }
         }
+        mainHandler.postDelayed(padStatusPoll, PAD_STATUS_MS)
     }
 
     /**
@@ -742,6 +782,7 @@ class GamepadRouter(
      */
     fun release() {
         inputManager?.unregisterInputDeviceListener(listener)
+        mainHandler.removeCallbacks(padStatusPoll)
         disarmExit() // drop any pending exit-chord timer so it can't fire after teardown
         // Snapshot the ids first — closeSlot mutates the map.
         for (id in slots.keys.toList()) closeSlot(id)
@@ -793,6 +834,7 @@ class GamepadRouter(
             hasMuteButton = map.buttons == Gamepad.PadButtons.GENERIC_SONY,
         )
         slots[dev.id] = slot
+        sendPadStatus(dev.id, slot)
         // After the table holds the slot, so a listener that sends on this device the moment it is
         // told ([PadSensors]) finds an index to send on rather than dropping its first samples.
         onSlotOpened?.invoke(dev.id)
@@ -941,5 +983,11 @@ class GamepadRouter(
          * this much, so the pair can't coalesce into no press at all.
          */
         const val TAP_PRESS_MS = 50L
+
+        /**
+         * pf-client-core's `BATTERY_POLL`: how often each forwarded pad's power state goes out.
+         * Coarser than a percent move, and the send is one idempotent report write host-side.
+         */
+        const val PAD_STATUS_MS = 15_000L
     }
 }

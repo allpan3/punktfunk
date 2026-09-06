@@ -9,6 +9,7 @@
 //! firmware 64). A USB backend rejects a longer reply as a malicious URB and drops the device.
 //! Tests pin sizes, field offsets, paddle bits, and valid-flag gating.
 
+use super::pad_power::PadPower;
 use punktfunk_core::input::gamepad as gs;
 use punktfunk_core::quic::{HidOutput, RichInput};
 
@@ -191,6 +192,9 @@ pub struct DsState {
     /// one DualSense click bit. Lives outside `buttons`: `from_gamepad` rebuilds those every
     /// frame, so managers must persist this with `touch`/`gyro`/`accel`.
     pub touch_click: [bool; 2],
+    /// The client pad's own battery, stamped into the report by both DualSense and
+    /// DualShock 4 serializers. Default is wired-and-full — see [`PadPower`].
+    pub power: PadPower,
 }
 
 impl DsState {
@@ -216,14 +220,28 @@ impl DsState {
         changed
     }
 
-    /// Reset touch, pad-click, and motion; leave buttons/sticks/triggers. `PadProto::clear_rich`:
-    /// a pad that takes this slot during replug grace must not inherit the last one's contacts.
+    /// Reset touch, pad-click, motion, and power; leave buttons/sticks/triggers.
+    /// `PadProto::clear_rich`: a pad that takes this slot during replug grace must not
+    /// inherit the last one's contacts, and must not inherit its battery either.
     pub fn clear_rich(&mut self) {
         let fresh = DsState::neutral();
         self.touch = fresh.touch;
         self.touch_click = fresh.touch_click;
         self.gyro = fresh.gyro;
         self.accel = fresh.accel;
+        self.power = fresh.power;
+    }
+
+    /// Carry every field that arrives on the rich plane out of `prev`. `from_gamepad` builds
+    /// a state from one button frame and knows nothing about touch, motion or power, so each
+    /// backend's `merge_frame` calls this — one place, so a new rich field cannot be
+    /// forgotten in one backend out of six.
+    pub fn carry_rich_from(&mut self, prev: &DsState) {
+        self.touch = prev.touch;
+        self.touch_click = prev.touch_click;
+        self.gyro = prev.gyro;
+        self.accel = prev.accel;
+        self.power = prev.power;
     }
 
     /// GameStream/XInput frame → DualSense fields. Invert Y in i16 (XInput `+y` is up, DualSense
@@ -384,6 +402,9 @@ impl DsState {
                 };
                 self.touch_click[slot] = click;
             }
+            RichInput::PadStatus { battery, flags, .. } => {
+                self.power = PadPower::from_wire(battery, flags)
+            }
             // Raw as-is passthrough reports belong to the Triton backend, never a DS state.
             RichInput::HidReport { .. } => {}
         }
@@ -424,9 +445,7 @@ pub fn serialize_state(r: &mut [u8; DS_INPUT_REPORT_LEN], st: &DsState, seq: u8,
     r[28..32].copy_from_slice(&ts.to_le_bytes()); // sensor_timestamp (struct off 27)
     pack_touch(&mut r[33..37], &st.touch[0]); // touch point 1 (struct off 32)
     pack_touch(&mut r[37..41], &st.touch[1]); // touch point 2
-                                              // Battery at struct off 52 → r[53]: low nibble = capacity (×10+5 %), high = charge state
-                                              // (0 = discharging). 0x0A = discharging/full (100 %). Zero reads as ~5 % and SteamOS warns.
-    r[53] = 0x0A;
+    r[53] = st.power.ds5_byte(); // battery, struct off 52
 }
 
 fn pack_touch(dst: &mut [u8], t: &Touch) {
@@ -790,7 +809,42 @@ mod tests {
         assert_eq!(r[35], 0x61); // x_hi nibble 0x1 | (y & 0xF) << 4 (y=0x356 → 0x6 << 4)
         assert_eq!(r[36], 0x35); // y >> 4
         assert_eq!(r[37] & 0x80, 0x80); // touch point 2 inactive
-        assert_eq!(r[53], 0x0A); // discharging + full (100 %), not the ~5 % zero reads as
+
+        // Battery, struct off 52. No client sample = wired and full (status 2), the same
+        // claim the DualShock 4 and Switch codecs make. Status 0 drew a "discharging"
+        // battery icon on one family of virtual pad and not the others.
+        assert_eq!(r[53], 0x2A);
+    }
+
+    /// The client pad's battery reaches the report, survives the button frames that rebuild
+    /// the rest of the state, and is dropped when another controller takes the slot.
+    #[test]
+    fn pad_status_reaches_the_battery_byte() {
+        let mut st = DsState::neutral();
+        st.apply_rich(
+            RichInput::PadStatus {
+                pad: 0,
+                battery: 45,
+                flags: 0,
+            },
+            DS_TOUCH_W,
+            DS_TOUCH_H,
+        );
+        let byte = |st: &DsState| {
+            let mut r = [0u8; DS_INPUT_REPORT_LEN];
+            serialize_state(&mut r, st, 0, 0);
+            r[53]
+        };
+        assert_eq!(byte(&st), 0x04, "discharging, 45 %");
+        let mut next = DsState::from_gamepad(0, 0, 0, 0, 0, 0, 0);
+        next.carry_rich_from(&st);
+        assert_eq!(
+            byte(&next),
+            0x04,
+            "a button frame must not reset the battery"
+        );
+        st.clear_rich();
+        assert_eq!(byte(&st), 0x2A, "reclaimed slot: back to wired and full");
     }
 
     /// Centre encodes as `DsState::neutral` on both axes. `255 - v` after quantise puts Y at

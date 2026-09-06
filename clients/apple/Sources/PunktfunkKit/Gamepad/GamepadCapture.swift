@@ -146,6 +146,11 @@ public final class GamepadCapture {
     /// the host's per-pad input fold.
     private static let tapPress: TimeInterval = 0.05
     private var chordTimer: Timer?
+    /// Pad-status re-send, matching pf-client-core's `BATTERY_POLL`: coarser than a percent
+    /// move, and each send is one idempotent report write host-side.
+    private static let padStatusPeriod: TimeInterval = 15
+    private var padStatusTimer: Timer?
+
     /// Fired ON MAIN once the escape chord has been held `disconnectHold` — the session owner
     /// disconnects. On tvOS this (plus the Siri Remote's hold-Back) is the ONLY way out of a
     /// stream with a controller: B/Menu presses are deliberately swallowed during a session so
@@ -247,6 +252,17 @@ public final class GamepadCapture {
         forwardedSub = manager.$forwarded.sink { [weak self] list in
             MainActor.assumeIsolated { self?.reconcile(list) }
         }
+        // Nothing reports a battery changing, and the level is exactly what a long session
+        // drains. Open slots only — the loop is empty until one opens.
+        let status = Timer(timeInterval: Self.padStatusPeriod, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                for slot in self.slots { self.sendPadStatus(slot) }
+            }
+        }
+        RunLoop.main.add(status, forMode: .common)
+        padStatusTimer = status
+
         #if os(macOS)
         let resign = NSApplication.willResignActiveNotification
         let activate = NSApplication.didBecomeActiveNotification
@@ -284,6 +300,8 @@ public final class GamepadCapture {
         #if os(iOS)
         deviceGyro?.stop()
         #endif
+        padStatusTimer?.invalidate()
+        padStatusTimer = nil
         closeAllSlots()
         forwardedSub = nil
         observers.forEach { NotificationCenter.default.removeObserver($0) }
@@ -385,6 +403,7 @@ public final class GamepadCapture {
         wire?.send(.gamepadArrival(pref: slot.pref.rawValue, pad: slot.pad))
         wire?.send(.gamepadAxis(GamepadWire.axisLSX, value: 0, pad: slot.pad))
         sync(slot, ext)
+        sendPadStatus(slot)
 
         if let tp = Self.touchpad(ext) {
             tp.primary.valueChangedHandler = { [weak self, weak slot] _, x, y in
@@ -865,6 +884,22 @@ public final class GamepadCapture {
         let wants = !suspended && pad0 != nil && pad0!.controller.motion?.hasRotationRate != true
         if wants { gyro.start() } else { gyro.stop() }
         #endif
+    }
+
+    /// One slot's battery and power state. The host's virtual pad has a battery byte in every
+    /// input report and no other source for it, so a game or the host's shell otherwise reads
+    /// a controller that is always full. GameController exposes no cable state: charging and
+    /// fully-charged both mean one is attached.
+    private func sendPadStatus(_ slot: Slot) {
+        guard let wire else { return }
+        let battery = slot.controller.battery
+        let level = battery?.batteryLevel ?? -1
+        let charging = battery?.batteryState == .charging
+        wire.sendPadStatus(
+            pad: UInt8(truncatingIfNeeded: slot.pad),
+            battery: level >= 0 ? UInt8(min(100, max(0, (level * 100).rounded()))) : nil,
+            charging: charging,
+            wired: charging || battery?.batteryState == .full)
     }
 
     /// Arm the disconnect timer when ANY forwarded pad holds the full escape chord, disarm the

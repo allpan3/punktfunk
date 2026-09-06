@@ -295,8 +295,9 @@ impl SteamState {
                     self.rpad_y = flip_y(y);
                 }
             }
-            // HidReport is Triton passthrough, not Deck/SC state.
-            RichInput::HidReport { .. } => {}
+            // HidReport is Triton passthrough, not Deck/SC state. The Deck's state report
+            // has no battery field — the kernel polls a separate status report for it.
+            RichInput::HidReport { .. } | RichInput::PadStatus { .. } => {}
         }
     }
 }

@@ -665,6 +665,23 @@ object NativeBridge {
      */
     external fun nativeSendPadTouch(handle: Long, pad: Int, finger: Int, active: Boolean, x: Int, y: Int)
 
+    /** [nativeSendPadStatus] battery: no reading (a pad with no pack, or an OS that hides it). */
+    const val PAD_BATTERY_UNKNOWN = 0xFF
+
+    /** [nativeSendPadStatus] flags: the pack is taking charge. */
+    const val PAD_STATUS_CHARGING = 0x01
+
+    /** [nativeSendPadStatus] flags: the pad is on a cable or a dock. */
+    const val PAD_STATUS_WIRED = 0x02
+
+    /**
+     * The forwarded pad's power state (`RichInput::PadStatus`). [battery] is 0..100 or
+     * [PAD_BATTERY_UNKNOWN]; [flags] is [PAD_STATUS_CHARGING] or [PAD_STATUS_WIRED]. The host's
+     * virtual pad has a battery byte in every input report and no other source for it. Send on
+     * open and every ~15 s — the datagram is lossy and the host holds the last value.
+     */
+    external fun nativeSendPadStatus(handle: Long, pad: Int, battery: Int, flags: Int)
+
     /**
      * One motion-sensor sample from a client-captured controller (`RichInput::Motion`): gyro
      * pitch/yaw/roll + accel, each a raw signed-16 value in the pad's own units — the host passes

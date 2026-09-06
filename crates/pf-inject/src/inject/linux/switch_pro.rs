@@ -248,16 +248,13 @@ impl PadProto for SwitchProProto {
             f.left_trigger,
             f.right_trigger,
         );
-        s.gyro = prev.gyro;
-        s.accel = prev.accel;
+        s.carry_rich_from(prev);
         s
     }
 
-    /// IMU samples only; a Pro Controller has no touchpad.
+    /// IMU samples and the client pad's battery; a Pro Controller has no touchpad.
     fn apply_rich(&self, st: &mut SwitchState, rich: RichInput) {
-        if let RichInput::Motion { gyro, accel, .. } = rich {
-            st.apply_motion(gyro, accel);
-        }
+        st.apply_rich(rich);
     }
 
     fn neutralize_gyro(&self, st: &mut SwitchState) -> bool {

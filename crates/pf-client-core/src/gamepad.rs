@@ -72,6 +72,23 @@ fn battery_of(pad: &sdl3::gamepad::Gamepad) -> Option<PadBattery> {
     })
 }
 
+/// The forwarded pad's power state for [`RichInput::PadStatus`]. SDL reports charge without
+/// a cable state on most drivers, so charging implies the cable; `Wired` covers a pad with
+/// no pack at all, which reads as no battery.
+fn pad_status_of(pad: &sdl3::gamepad::Gamepad) -> (u8, u8) {
+    use punktfunk_core::quic::{PAD_BATTERY_UNKNOWN, PAD_STATUS_CHARGING, PAD_STATUS_WIRED};
+    let power = battery_of(pad);
+    let charging = power.is_some_and(|b| b.charging);
+    let wired = charging
+        || matches!(
+            pad.connection_state(),
+            Ok(sdl3::joystick::ConnectionState::Wired)
+        );
+    let flags =
+        if charging { PAD_STATUS_CHARGING } else { 0 } | if wired { PAD_STATUS_WIRED } else { 0 };
+    (power.map_or(PAD_BATTERY_UNKNOWN, |b| b.percent), flags)
+}
+
 /// Valve HIDAPI on/off. The Deck driver sends `ID_CLEAR_DIGITAL_MAPPINGS` +
 /// `TRACKPAD_NONE` at *enumeration* and feeds the lizard-mode watchdog, so the
 /// trackpad-mouse dies while the driver merely runs. Enable only in-session (paddles,
@@ -394,6 +411,7 @@ impl GamepadPump {
         self.worker.gesture_poll();
         self.worker.maybe_fire_disconnect();
         self.worker.menu_poll();
+        self.worker.pad_status_poll();
         self.worker.render_feedback();
     }
 
@@ -654,6 +672,9 @@ struct Slot {
     /// [`Worker::issue_rumble`] runs at the rumble rate and SDL fails the call on a pad
     /// without them.
     trigger_rumble: bool,
+    /// Last [`RichInput::PadStatus`] send. `None` sends on the next tick, so a fresh slot
+    /// does not stream a whole [`BATTERY_POLL`] on the host's invented battery.
+    status_at: Option<Instant>,
 }
 
 impl Slot {
@@ -683,6 +704,7 @@ impl Slot {
             audio_caps: 0,
             rumble_suppressed_logged: false,
             trigger_rumble: false,
+            status_at: None,
         }
     }
 
@@ -1539,6 +1561,33 @@ impl Worker {
         }
     }
 
+    /// Battery and power state of every forwarded pad, on [`BATTERY_POLL`]. The host's
+    /// virtual pad has a battery byte in every input report and no source for it, so
+    /// without this it invents one and a game or SteamOS never warns on a draining
+    /// controller. Re-sent rather than deduped: the datagram is lossy and a re-send is one
+    /// idempotent report write.
+    fn pad_status_poll(&mut self) {
+        let Some(c) = self.attached.clone() else {
+            return;
+        };
+        let now = Instant::now();
+        for slot in &mut self.slots {
+            if slot
+                .status_at
+                .is_some_and(|t| now.duration_since(t) < BATTERY_POLL)
+            {
+                continue;
+            }
+            slot.status_at = Some(now);
+            let (battery, flags) = pad_status_of(&slot.pad);
+            let _ = c.send_rich_input(RichInput::PadStatus {
+                pad: slot.index,
+                battery,
+                flags,
+            });
+        }
+    }
+
     /// False when the app side is gone and the worker should exit.
     fn drain_ctl(&mut self, ctl: &Receiver<Ctl>) -> bool {
         loop {
@@ -1953,6 +2002,12 @@ impl Worker {
             }
             Ok(()) => tracing::trace!(pad = slot.index, low, high, "rumble: rendered"),
         }
+        if !slot.trigger_rumble {
+            return;
+        }
+        if let Err(e) = slot.pad.set_rumble_triggers(lt, rt, dur_ms) {
+            tracing::warn!(pad = slot.index, lt, rt, error = %e, "rumble: SDL trigger rumble failed")
+        }
     }
 
     /// Single consumer of rumble + HID output. Engine commands are already effective;
@@ -2145,6 +2200,7 @@ fn run(
 
         w.menu_poll();
         w.battery_poll();
+        w.pad_status_poll();
         w.render_feedback();
     }
 }

@@ -263,6 +263,15 @@ pub(super) const RICH_HID_REPORT: u8 = 0x04;
 /// returns `None` here so a pre-pen host drops it as unknown-kind. Listed so 0xCC
 /// kind bytes stay unique.
 pub(super) const RICH_PEN: u8 = 0x05;
+pub(super) const RICH_PAD_STATUS: u8 = 0x06;
+
+/// [`RichInput::PadStatus`] `battery`: no reading. A wired pad with no pack, and every
+/// client/platform that does not surface a level.
+pub const PAD_BATTERY_UNKNOWN: u8 = 0xFF;
+/// [`RichInput::PadStatus`] `flags`: the pack is taking charge.
+pub const PAD_STATUS_CHARGING: u8 = 0x01;
+/// [`RichInput::PadStatus`] `flags`: the pad is on a cable or a dock.
+pub const PAD_STATUS_WIRED: u8 = 0x02;
 
 /// Longest raw HID report on [`RichInput::HidReport`] / [`HidOutput::HidRaw`].
 /// Valve interrupt/feature reports are 64 bytes.
@@ -304,8 +313,19 @@ pub enum RichInput {
         y: i16,
         pressure: u16,
     },
+    /// What the physical pad reports about its own power. Every virtual pad has a battery
+    /// byte in its input report and no source for it: without this the host invents one,
+    /// and the families disagree — a DualSense claims 100 % on battery while a DualShock 4
+    /// claims wired and full. Send on change and every ~15 s; the datagram is lossy and the
+    /// host holds the last value.
+    ///
+    /// `battery` is 0..=100 or [`PAD_BATTERY_UNKNOWN`]; `flags` is
+    /// [`PAD_STATUS_CHARGING`] | [`PAD_STATUS_WIRED`]. Unknown flag bits are reserved:
+    /// decode keeps them, consumers mask.
+    PadStatus { pad: u8, battery: u8, flags: u8 },
     /// Raw HID input report, forwarded verbatim for as-is passthrough
     /// ([`GamepadPref::SteamController2`](crate::config::GamepadPref)).
+
     /// `data[..len]` is the interrupt/GATT payload, report-id first. Fixed-size
     /// body keeps the type `Copy` at the controller's report rate; a lost datagram
     /// heals on the next snapshot.
@@ -324,6 +344,7 @@ impl RichInput {
             RichInput::Touchpad { pad, .. }
             | RichInput::Motion { pad, .. }
             | RichInput::TouchpadEx { pad, .. }
+            | RichInput::PadStatus { pad, .. }
             | RichInput::HidReport { pad, .. } => *pad,
         }
     }
@@ -337,6 +358,7 @@ impl RichInput {
             RichInput::Touchpad { pad, .. }
             | RichInput::Motion { pad, .. }
             | RichInput::TouchpadEx { pad, .. }
+            | RichInput::PadStatus { pad, .. }
             | RichInput::HidReport { pad, .. } => *pad = slot,
         }
     }
@@ -377,6 +399,11 @@ impl RichInput {
                 out.extend_from_slice(&y.to_le_bytes());
                 out.extend_from_slice(&pressure.to_le_bytes());
             }
+            RichInput::PadStatus {
+                pad,
+                battery,
+                flags,
+            } => out.extend_from_slice(&[RICH_PAD_STATUS, pad, battery, flags]),
             RichInput::HidReport { pad, len, ref data } => {
                 let len = (len as usize).min(HID_REPORT_MAX);
                 out.extend_from_slice(&[RICH_HID_REPORT, pad, len as u8]);
@@ -415,6 +442,11 @@ impl RichInput {
                 x: i16::from_le_bytes([b[6], b[7]]),
                 y: i16::from_le_bytes([b[8], b[9]]),
                 pressure: u16::from_le_bytes([b[10], b[11]]),
+            }),
+            RICH_PAD_STATUS if b.len() >= 5 => Some(RichInput::PadStatus {
+                pad: b[2],
+                battery: b[3],
+                flags: b[4],
             }),
             RICH_HID_REPORT if b.len() >= 4 => {
                 // `len` is clamped to the fixed body and to the buffer; a torn datagram
@@ -1424,11 +1456,17 @@ mod tests {
                 y: 30000,
                 pressure: 4000,
             },
+            RichInput::PadStatus {
+                pad: 4,
+                battery: 65,
+                flags: PAD_STATUS_CHARGING | PAD_STATUS_WIRED,
+            },
         ] {
             let d = ev.encode();
             assert_eq!(d[0], RICH_INPUT_MAGIC);
             assert_eq!(RichInput::decode(&d), Some(ev));
         }
+
         let mut data = [0u8; HID_REPORT_MAX];
         data[0] = 0x42; // ID_TRITON_CONTROLLER_STATE
         for (i, b) in data.iter_mut().enumerate().take(46).skip(1) {

@@ -581,10 +581,7 @@ impl PadProto for DsWinProto {
             f.left_trigger,
             f.right_trigger,
         );
-        s.touch = prev.touch;
-        s.gyro = prev.gyro;
-        s.accel = prev.accel;
-        s.touch_click = prev.touch_click;
+        s.carry_rich_from(prev);
         s
     }
 

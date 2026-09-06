@@ -109,9 +109,8 @@ pub fn serialize_state(r: &mut [u8; DS4_INPUT_REPORT_LEN], st: &DsState, counter
     for (i, v) in st.accel.iter().enumerate() {
         r[19 + i * 2..21 + i * 2].copy_from_slice(&v.to_le_bytes()); // accel (struct off 18)
     }
-    // status[0] (struct off 29 → r[30]): bit4 cable, low nibble battery. Wired + full
-    // (0x1B) so the kernel never warns "low battery" on a virtual pad.
-    r[30] = 0x10 | 0x0B;
+    r[30] = st.power.ds4_byte(); // status[0] (struct off 29): cable bit + capacity
+
     r[33] = 1; // one touch frame; a real DS4 always sends one
     r[34] = ts as u8;
     pack_touch(&mut r[35..39], &st.touch[0]);

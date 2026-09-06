@@ -494,6 +494,29 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeSendPadTouc
     });
 }
 
+/// `NativeBridge.nativeSendPadStatus(handle, pad, battery, flags)` — the forwarded pad's power
+/// state (`RichInput::PadStatus`, 0xCC). `battery` is 0..=100 or `PAD_BATTERY_UNKNOWN`; `flags`
+/// is `PAD_STATUS_CHARGING | PAD_STATUS_WIRED`. The host's virtual pad has a battery byte in
+/// every input report and no other source for it. Sent on open and every ~15 s.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeSendPadStatus(
+    _env: EnvUnowned,
+    _this: JObject,
+    handle: jlong,
+    pad: jint,
+    battery: jint,
+    flags: jint,
+) {
+    let Some(h) = get_session(handle) else {
+        return;
+    };
+    let _ = h.client.send_rich_input(RichInput::PadStatus {
+        pad: (pad as u32 & 0xF) as u8,
+        battery: (battery as u32 & 0xFF) as u8,
+        flags: (flags as u32 & 0xFF) as u8,
+    });
+}
+
 /// `NativeBridge.nativeSendPadMotion(handle, pad, gp, gy, gr, ax, ay, az)` — one motion sample
 /// from a client-captured controller (`RichInput::Motion`, 0xCC): gyro pitch/yaw/roll + accel,
 /// raw signed-16 values in the pad's own units, passed straight into the host's virtual
