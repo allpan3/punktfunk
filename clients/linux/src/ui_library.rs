@@ -498,7 +498,13 @@ fn desktop_entry() -> GameEntry {
         id: DESKTOP_ID.into(),
         store: String::new(),
         title: "Desktop".into(),
-        ..Default::default()
+        art: Default::default(),
+        platform: None,
+        developer: None,
+        release_year: None,
+        genres: Vec::new(),
+        role: None,
+        icon: None,
     }
 }
 
