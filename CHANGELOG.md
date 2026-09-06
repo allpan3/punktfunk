@@ -453,6 +453,9 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   the Polaris/Vega driver branch (frozen at 1.4.31) never reaches, so RX 400/500 and Vega hosts
   failed every session. Nothing to do; such a host now encodes on the core path and the newer
   optional properties degrade individually.
+- **`Encoder::poll_chunk` waits the PyroWave encode fence.** `submit` only queues the work, so
+  the Linux backend handed every streamed access unit out a loop tick late and answered `None`
+  with a frame still in flight. Nothing to do.
 
 ### Security
 

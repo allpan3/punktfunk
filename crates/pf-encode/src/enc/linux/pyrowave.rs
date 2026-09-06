@@ -18,8 +18,8 @@
 // Every unsafe block in this module carries a `// SAFETY:` proof (parent module enforces it).
 
 use super::vk_util::{
-    color_range, import_failure_feeds_latch, import_rgb_dmabuf, make_host_buffer, make_plain_image,
-    normalize_cpu_rgb, pixel_to_vk,
+    color_range, copy_cursor_rows, import_failure_feeds_latch, import_rgb_dmabuf, make_host_buffer,
+    make_plain_image, normalize_cpu_rgb, pixel_to_vk,
 };
 use crate::{EncodedFrame, Encoder, EncoderCaps};
 use anyhow::{bail, Context, Result};
@@ -1206,7 +1206,8 @@ impl PyroWaveEncoder {
 
     /// Bring the cursor image up to date and return `[origin_x, origin_y, size_w, size_h]`
     /// (size 0 ⇒ CSC skips the blend). Upload only when `serial` changed. Per-slot:
-    /// a shared image races the previous frame's sampled read.
+    /// a shared image races the previous frame's sampled read. A bitmap wider than
+    /// `CURSOR_MAX` is cropped row by row; its rows are wider than the staging pitch.
     unsafe fn prep_cursor(
         &mut self,
         slot: usize,
@@ -1239,11 +1240,7 @@ impl PyroWaveEncoder {
                     let bytes = (cw as usize) * (ch as usize) * 4;
                     let ptr =
                         dev.map_memory(stage_mem, 0, bytes as u64, vk::MemoryMapFlags::empty())?;
-                    std::ptr::copy_nonoverlapping(
-                        c.rgba.as_ptr(),
-                        ptr as *mut u8,
-                        bytes.min(c.rgba.len()),
-                    );
+                    copy_cursor_rows(ptr as *mut u8, &c.rgba, c.w, cw, ch);
                     dev.unmap_memory(stage_mem);
                     let old = if ready {
                         vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
@@ -1346,6 +1343,12 @@ impl PyroWaveEncoder {
                     return Err(e);
                 }
             };
+        // FIFO eviction. Up to `max_inflight - 1` submitted frames may still execute against a
+        // cached image, so destroying an evicted import is a GPU-side use-after-free unless we
+        // idle first. Guarded on the length test so the steady state pays nothing.
+        if self.import_cache.len() >= IMPORT_CACHE_CAP {
+            let _ = self.device.device_wait_idle();
+        }
         while self.import_cache.len() >= IMPORT_CACHE_CAP {
             let (_, _, oi, om, ov) = self.import_cache.remove(0);
             self.device.destroy_image_view(ov, None);
@@ -1494,7 +1497,7 @@ impl PyroWaveEncoder {
                     // 24-bpp Rgb/Bgr expands 3→4 first (`normalize_cpu_rgb`).
                     let mut scratch = std::mem::take(&mut self.cpu_expand);
                     let (norm_fmt, norm_bytes) =
-                        normalize_cpu_rgb(frame.format, bytes, &mut scratch, false);
+                        normalize_cpu_rgb(frame.format, bytes, &mut scratch, None);
                     let fmt = pixel_to_vk(norm_fmt).context("unsupported CPU pixel format");
                     let view = match fmt {
                         Ok(f) => self.ensure_cpu_rgb(slot, f, norm_bytes),
@@ -1749,8 +1752,22 @@ impl PyroWaveEncoder {
             pw::pyrowave_encoder_compute_num_packets(self.pw_encs[fr.slot], boundary, &mut n),
             "compute_num_packets",
         )?;
-        if n == 0 || (fr.wire_chunk.is_none() && n != 1) {
-            bail!("pyrowave: unexpected packet count {n} at boundary {boundary}");
+        // `packetize` discards its `size` and writes `8 + Σ block bytes` into
+        // `self.bitstream`; the only in-C check is a debug assert. Counting at boundary
+        // `cap` returns 1 exactly when that sum fits. A chunked boundary is a shard and
+        // says nothing about the total, so ask again before handing the pointer over.
+        let mut whole = n;
+        if fr.wire_chunk.is_some() {
+            pw_check(
+                pw::pyrowave_encoder_compute_num_packets(self.pw_encs[fr.slot], cap, &mut whole),
+                "compute_num_packets",
+            )?;
+        }
+        if n == 0 || whole != 1 {
+            bail!(
+                "pyrowave: {n} packets at boundary {boundary}, {whole} at the {cap}-byte \
+                 bitstream cap — refusing an unbounded packetize"
+            );
         }
         let mut packets = vec![pw::pyrowave_packet { offset: 0, size: 0 }; n];
         let mut out_n: usize = 0;
@@ -1864,10 +1881,17 @@ impl Encoder for PyroWaveEncoder {
             }
             self.chunker = None;
         }
+        // `submit` only queues, so the AU it recorded is still behind a fence. Without this
+        // wait every AU is handed out a tick late and this call returns `None` with one in
+        // flight. Same wait as `poll`.
+        if self.pending.is_empty() && !self.inflight.is_empty() {
+            // SAFETY: single-threaded encoder, waiting its own fence and reading its own
+            // bitstream; failure leaves the entry in flight for `reset()` to re-wait.
+            unsafe { self.wait_and_packetize()? };
+        }
         let Some(f) = self.pending.pop_front() else {
             return Ok(None);
         };
-        // No wait: `submit` already ran the encode, so an AU in `pending` is complete.
         match crate::pyrowave_wire::stream_chunk_step(self.wire_chunk) {
             Some(step) => Ok(self
                 .chunker
@@ -1955,8 +1979,11 @@ impl Encoder for PyroWaveEncoder {
     }
 
     fn set_wire_chunking(&mut self, shard_payload: usize) {
-        // Below one block header + payload word is meaningless.
-        if shard_payload >= 64 {
+        // Below one block header + payload word the boundary is meaningless. Above the
+        // ceiling `build_au` truncates a window's `used` to 16 bits and the client walks
+        // garbage.
+        let max = u16::MAX as usize + crate::pyrowave_wire::WINDOW_PREFIX;
+        if (64..=max).contains(&shard_payload) {
             self.wire_chunk = Some(shard_payload);
             tracing::info!(
                 shard_payload,

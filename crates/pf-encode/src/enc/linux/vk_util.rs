@@ -73,9 +73,10 @@ pub(crate) fn pixel_to_vk(fmt: PixelFormat) -> Option<vk::Format> {
 /// Expand packed 24-bpp CPU RGB into `scratch` (caller-owned, reused) as 4-bpp
 /// with pad 0xFF: no 24-bpp VkFormat is reliably sampleable.
 ///
-/// `bgra_target = false` keeps channel order (CSC views match). `true` forces
-/// B,G,R,X because VUID-vkCmdEncodeVideoKHR-pEncodeInfo-08207 requires the
-/// encode source to match the session `pictureFormat` (`B8G8R8A8_UNORM`).
+/// `target` is the channel order the consumer needs. `None` keeps the source's
+/// (CSC views follow it). `Some` forces it, because
+/// VUID-vkCmdEncodeVideoKHR-pEncodeInfo-08207 requires the encode source to
+/// match the session `pictureFormat`, which is fixed for the session's life.
 ///
 /// Payloads are tightly packed (`FramePayload::Cpu`); a truncated source
 /// yields a truncated output — upload paths bound-check the bytes.
@@ -83,7 +84,7 @@ pub(crate) fn normalize_cpu_rgb<'a>(
     fmt: PixelFormat,
     bytes: &'a [u8],
     scratch: &'a mut Vec<u8>,
-    bgra_target: bool,
+    target: Option<PixelFormat>,
 ) -> (PixelFormat, &'a [u8]) {
     let (bpp, r, g, b) = match fmt {
         PixelFormat::Rgb => (3usize, 0usize, 1usize, 2usize),
@@ -92,24 +93,46 @@ pub(crate) fn normalize_cpu_rgb<'a>(
         PixelFormat::Bgrx | PixelFormat::Bgra => (4, 2, 1, 0),
         _ => return (fmt, bytes),
     };
-    if bpp == 4 && (!bgra_target || b == 0) {
-        return (fmt, bytes); // 4-bpp already in session order: borrow
+    let src_b_first = b == 0;
+    let b_first = target.map_or(src_b_first, |t| {
+        matches!(t, PixelFormat::Bgr | PixelFormat::Bgrx | PixelFormat::Bgra)
+    });
+    if bpp == 4 && b_first == src_b_first {
+        return (fmt, bytes); // 4-bpp already in the wanted order: borrow
     }
     let px = bytes.len() / bpp;
     scratch.clear();
     scratch.resize(px * 4, 0xFF);
-    let (dr, dg, db) = if bgra_target { (2, 1, 0) } else { (r, g, b) };
+    let (dr, dg, db) = if b_first { (2, 1, 0) } else { (0, 1, 2) };
     for (dst, src) in scratch.chunks_exact_mut(4).zip(bytes.chunks_exact(bpp)) {
         dst[dr] = src[r];
         dst[dg] = src[g];
         dst[db] = src[b];
     }
-    let out_fmt = if bgra_target || b == 0 {
+    let out_fmt = if b_first {
         PixelFormat::Bgrx
     } else {
         PixelFormat::Rgbx
     };
     (out_fmt, scratch.as_slice())
+}
+
+/// Copy the top-left `cw`×`ch` of an RGBA cursor bitmap into a `cw`-wide staging map.
+///
+/// Source rows are `src_w` pixels; a flat copy of the first `cw*ch*4` bytes reads
+/// them at the destination pitch and shears every pointer wider than the cap. A
+/// short source stops the copy at the last whole row.
+///
+/// # Safety
+/// `dst` is writable for `cw * ch * 4` bytes and does not overlap `src`.
+pub(crate) unsafe fn copy_cursor_rows(dst: *mut u8, src: &[u8], src_w: u32, cw: u32, ch: u32) {
+    let (src_pitch, dst_pitch) = (src_w as usize * 4, cw as usize * 4);
+    for y in 0..ch as usize {
+        let Some(row) = src.get(y * src_pitch..y * src_pitch + dst_pitch) else {
+            return;
+        };
+        std::ptr::copy_nonoverlapping(row.as_ptr(), dst.add(y * dst_pitch), dst_pitch);
+    }
 }
 
 pub(crate) unsafe fn make_view(
@@ -426,23 +449,23 @@ mod tests {
     #[test]
     fn normalize_cpu_rgb_expands_24bpp_and_borrows_4bpp() {
         let mut scratch = Vec::new();
-        let (f, b) = normalize_cpu_rgb(PixelFormat::Rgb, &[1, 2, 3, 4, 5, 6], &mut scratch, false);
+        let (f, b) = normalize_cpu_rgb(PixelFormat::Rgb, &[1, 2, 3, 4, 5, 6], &mut scratch, None);
         assert_eq!(f, PixelFormat::Rgbx);
         assert_eq!(b, &[1, 2, 3, 0xFF, 4, 5, 6, 0xFF]);
 
         let mut scratch = Vec::new();
-        let (f, b) = normalize_cpu_rgb(PixelFormat::Bgr, &[9, 8, 7], &mut scratch, false);
+        let (f, b) = normalize_cpu_rgb(PixelFormat::Bgr, &[9, 8, 7], &mut scratch, None);
         assert_eq!(f, PixelFormat::Bgrx);
         assert_eq!(b, &[9, 8, 7, 0xFF]);
 
         // 5 bytes = one pixel + a 2-byte remainder that must be dropped.
         let mut scratch = Vec::new();
-        let (_, b) = normalize_cpu_rgb(PixelFormat::Rgb, &[1, 2, 3, 4, 5], &mut scratch, false);
+        let (_, b) = normalize_cpu_rgb(PixelFormat::Rgb, &[1, 2, 3, 4, 5], &mut scratch, None);
         assert_eq!(b, &[1, 2, 3, 0xFF]);
 
         let src = [10u8, 20, 30, 40];
         let mut scratch = Vec::new();
-        let (f, b) = normalize_cpu_rgb(PixelFormat::Bgrx, &src, &mut scratch, false);
+        let (f, b) = normalize_cpu_rgb(PixelFormat::Bgrx, &src, &mut scratch, None);
         assert_eq!(f, PixelFormat::Bgrx);
         assert!(std::ptr::eq(b.as_ptr(), src.as_ptr()));
         assert!(scratch.is_empty());
@@ -460,26 +483,102 @@ mod tests {
     #[test]
     fn normalize_cpu_rgb_forces_bgra_for_the_encode_source() {
         let mut scratch = Vec::new();
-        let (f, b) = normalize_cpu_rgb(PixelFormat::Rgb, &[1, 2, 3], &mut scratch, true);
+        let (f, b) = normalize_cpu_rgb(
+            PixelFormat::Rgb,
+            &[1, 2, 3],
+            &mut scratch,
+            Some(PixelFormat::Bgrx),
+        );
         assert_eq!(f, PixelFormat::Bgrx);
         assert_eq!(b, &[3, 2, 1, 0xFF]);
 
         let mut scratch = Vec::new();
-        let (f, b) = normalize_cpu_rgb(PixelFormat::Bgr, &[9, 8, 7], &mut scratch, true);
+        let (f, b) = normalize_cpu_rgb(
+            PixelFormat::Bgr,
+            &[9, 8, 7],
+            &mut scratch,
+            Some(PixelFormat::Bgrx),
+        );
         assert_eq!(f, PixelFormat::Bgrx);
         assert_eq!(b, &[9, 8, 7, 0xFF]);
 
         // R-first 4-bpp: swap; source alpha replaced by the 0xFF pad.
         let mut scratch = Vec::new();
-        let (f, b) = normalize_cpu_rgb(PixelFormat::Rgbx, &[1, 2, 3, 4], &mut scratch, true);
+        let (f, b) = normalize_cpu_rgb(
+            PixelFormat::Rgbx,
+            &[1, 2, 3, 4],
+            &mut scratch,
+            Some(PixelFormat::Bgrx),
+        );
         assert_eq!(f, PixelFormat::Bgrx);
         assert_eq!(b, &[3, 2, 1, 0xFF]);
 
         let src = [10u8, 20, 30, 40];
         let mut scratch = Vec::new();
-        let (f, b) = normalize_cpu_rgb(PixelFormat::Bgra, &src, &mut scratch, true);
+        let (f, b) = normalize_cpu_rgb(
+            PixelFormat::Bgra,
+            &src,
+            &mut scratch,
+            Some(PixelFormat::Bgrx),
+        );
         assert_eq!(f, PixelFormat::Bgra);
         assert!(std::ptr::eq(b.as_ptr(), src.as_ptr()));
         assert!(scratch.is_empty());
+    }
+
+    /// An R8G8B8A8 session picture format wants R first; forcing BGRA there swaps
+    /// red and blue and breaks VUID-vkCmdEncodeVideoKHR-pEncodeInfo-08207.
+    #[test]
+    fn normalize_cpu_rgb_forces_the_r_first_encode_source_too() {
+        let mut scratch = Vec::new();
+        let (f, b) = normalize_cpu_rgb(
+            PixelFormat::Bgr,
+            &[9, 8, 7],
+            &mut scratch,
+            Some(PixelFormat::Rgbx),
+        );
+        assert_eq!(f, PixelFormat::Rgbx);
+        assert_eq!(b, &[7, 8, 9, 0xFF]);
+
+        let mut scratch = Vec::new();
+        let (f, b) = normalize_cpu_rgb(
+            PixelFormat::Bgrx,
+            &[1, 2, 3, 4],
+            &mut scratch,
+            Some(PixelFormat::Rgbx),
+        );
+        assert_eq!(f, PixelFormat::Rgbx);
+        assert_eq!(b, &[3, 2, 1, 0xFF]);
+
+        let src = [1u8, 2, 3, 4];
+        let mut scratch = Vec::new();
+        let (f, b) = normalize_cpu_rgb(
+            PixelFormat::Rgba,
+            &src,
+            &mut scratch,
+            Some(PixelFormat::Rgbx),
+        );
+        assert_eq!(f, PixelFormat::Rgba);
+        assert!(std::ptr::eq(b.as_ptr(), src.as_ptr()));
+    }
+
+    /// A cursor wider than the 256-px blend texture is cropped, never resampled at
+    /// the destination pitch — that reads row N+1's left edge as row N's right edge.
+    #[test]
+    fn copy_cursor_rows_crops_instead_of_shearing() {
+        // 3 px wide, 2 rows; destination keeps the left 2 px.
+        let src: Vec<u8> = (0u8..24).collect();
+        let mut dst = [0xEEu8; 16];
+        // SAFETY: `dst` holds 2*2*4 bytes and is disjoint from `src`.
+        unsafe { copy_cursor_rows(dst.as_mut_ptr(), &src, 3, 2, 2) };
+        assert_eq!(dst[..8], src[..8]);
+        assert_eq!(dst[8..], src[12..20]);
+
+        // Short source: the truncated row is skipped, not read past.
+        let mut dst = [0xEEu8; 16];
+        // SAFETY: same buffer sizing; `src` is deliberately one row short.
+        unsafe { copy_cursor_rows(dst.as_mut_ptr(), &src[..12], 3, 2, 2) };
+        assert_eq!(dst[..8], src[..8]);
+        assert_eq!(dst[8..], [0xEE; 8]);
     }
 }

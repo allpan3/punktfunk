@@ -543,6 +543,31 @@ impl RemotePyroWave {
         Ok(self.inline.as_mut().expect("just opened"))
     }
 
+    /// Send a control message and read its `Ack`. `None` means the link is gone: it is
+    /// dropped on any error or wrong reply, because `request` has already written and a
+    /// late `Ack` left in the socket would be read as the next `Frame`'s reply.
+    fn request_ack(&mut self, msg: &ToWorker, what: &str) -> Option<bool> {
+        let link = self.link.as_mut()?;
+        match link.request(msg, &[]) {
+            Ok(FromWorker::Ack { ok }) => Some(ok),
+            Ok(other) => {
+                tracing::warn!(?other, what, "pyrowave: unexpected encode worker reply");
+                self.link = None;
+                None
+            }
+            Err(e) => {
+                tracing::warn!(
+                    worker = %self.worker_path.display(),
+                    error = %format!("{e:#}"),
+                    what,
+                    "pyrowave: the encode worker did not answer — dropping the link"
+                );
+                self.link = None;
+                None
+            }
+        }
+    }
+
     fn poll_whole(&mut self) -> Result<Option<EncodedFrame>> {
         if let Some(f) = self.pending.pop_front() {
             return Ok(Some(f));
@@ -681,26 +706,12 @@ impl Encoder for RemotePyroWave {
         // cursor first so the next `poll_chunk` cannot splice a dead AU's tail onto a fresh one.
         self.chunker = None;
         self.pending.clear();
-        if let Some(link) = self.link.as_mut() {
-            // A Reset message, not a respawn: the expensive thing is the priority-elevated
-            // device. A respawn would re-run the global-priority ladder and could land on a
-            // different class than this session was measured at. A wedged worker times this
-            // out and falls through to the one-respawn rung below.
-            match link.request(&ToWorker::Reset, &[]) {
-                Ok(FromWorker::Ack { ok }) => return ok,
-                Ok(other) => {
-                    tracing::warn!(?other, "pyrowave: unexpected encode worker reply to Reset");
-                    self.link = None;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        worker = %self.worker_path.display(),
-                        error = %format!("{e:#}"),
-                        "pyrowave: the encode worker died mid-session — rebuilding the encoder"
-                    );
-                    self.link = None;
-                }
-            }
+        // A Reset message, not a respawn: the expensive thing is the priority-elevated
+        // device. A respawn would re-run the global-priority ladder and could land on a
+        // different class than this session was measured at. A wedged worker times this
+        // out and falls through to the one-respawn rung below.
+        if let Some(ok) = self.request_ack(&ToWorker::Reset, "Reset") {
+            return ok;
         }
         if self.link.is_none() && self.inline.is_none() && !self.respawn_used {
             self.respawn_used = true;
@@ -752,22 +763,10 @@ impl Encoder for RemotePyroWave {
         // Kept regardless of which half is live: a later fallback opens at the rate ABR settled
         // on, not the session start rate.
         self.bitrate_bps = bps;
-        if let Some(link) = self.link.as_mut() {
-            match link.request(&ToWorker::Reconfigure { bitrate_bps: bps }, &[]) {
-                Ok(FromWorker::Ack { ok }) => return ok,
-                Ok(other) => {
-                    tracing::warn!(
-                        ?other,
-                        "pyrowave: unexpected encode worker reply to Reconfigure"
-                    )
-                }
-                Err(e) => tracing::warn!(
-                    error = %format!("{e:#}"),
-                    "pyrowave: the encode worker did not accept a bitrate retarget"
-                ),
-            }
+        if self.link.is_some() {
+            let msg = ToWorker::Reconfigure { bitrate_bps: bps };
             // Report failure and let ABR use its rebuild path, which lands on `reset`.
-            return false;
+            return self.request_ack(&msg, "Reconfigure").unwrap_or(false);
         }
         match self.inline.as_mut() {
             Some(e) => e.reconfigure_bitrate(bps),
@@ -783,21 +782,18 @@ impl Encoder for RemotePyroWave {
     }
 
     fn set_wire_chunking(&mut self, shard_payload: usize) {
-        // Same sanity floor as the in-process impl, applied here so mirrored state and the
+        // Same bounds as the in-process impl, applied here so mirrored state and the
         // worker's cannot disagree about whether chunking is on.
-        if shard_payload < 64 {
+        let max = u16::MAX as usize + crate::pyrowave_wire::WINDOW_PREFIX;
+        if !(64..=max).contains(&shard_payload) {
             return;
         }
         self.wire_chunk = Some(shard_payload);
-        if let Some(link) = self.link.as_mut() {
+        if self.link.is_some() {
             // Must cross: it changes the packetize boundary and the rate budget (AU bytes).
             // Only the streamed-AU cut stays host-side.
-            if let Err(e) = link.request(&ToWorker::SetWireChunking { shard_payload }, &[]) {
-                tracing::warn!(
-                    error = %format!("{e:#}"),
-                    "pyrowave: the encode worker did not accept the datagram-aligned boundary"
-                );
-            }
+            let msg = ToWorker::SetWireChunking { shard_payload };
+            let _ = self.request_ack(&msg, "SetWireChunking");
             // Not the in-process sentence: the worker emits that one itself, and two identical
             // lines from two processes read as a bug. This is the host-ring copy.
             tracing::info!(

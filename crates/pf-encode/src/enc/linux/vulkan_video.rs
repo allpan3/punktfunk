@@ -16,8 +16,8 @@
 #![allow(clippy::too_many_arguments)]
 
 use super::vk_util::{
-    color_range, find_mem, import_failure_feeds_latch, make_host_buffer, make_plain_image,
-    make_view, normalize_cpu_rgb, pixel_to_vk,
+    color_range, copy_cursor_rows, find_mem, import_failure_feeds_latch, make_host_buffer,
+    make_plain_image, make_view, normalize_cpu_rgb, pixel_to_vk,
 };
 use crate::{Codec, EncodedFrame, Encoder, EncoderCaps};
 use anyhow::{bail, Context, Result};
@@ -142,6 +142,9 @@ struct RgbDirect {
     /// `srcPictureResource.codedExtent`; see [`VulkanVideoEncoder::native_nv12`]).
     /// Session/SPS/DPB stay app-aligned.
     true_extent: bool,
+    /// Session `pictureFormat` (the captured RGB order). A CPU upload must land in this
+    /// order or VUID-vkCmdEncodeVideoKHR-pEncodeInfo-08207 refuses the encode source.
+    picture_fmt: vk::Format,
 }
 
 /// Stack storage for a complete rgb-chained video profile. Post-open image creation (dmabuf
@@ -358,6 +361,29 @@ unsafe fn depth_supported(
     }
     (vq_inst.fp().get_physical_device_video_capabilities_khr)(pd, &profile, &mut caps)
         == vk::Result::SUCCESS
+}
+
+/// Make the encode's bitstream writes available to `read_slot`'s host read.
+///
+/// A fence signal's second access scope is empty, and HOST_COHERENT only drops the
+/// invalidate — neither makes device writes available to the host domain (spec 7.9).
+/// Record outside the video coding scope, after `cmd_end_video_coding_khr`.
+unsafe fn cmd_bitstream_to_host(dev: &ash::Device, cmd: vk::CommandBuffer, bs_buf: vk::Buffer) {
+    dev.cmd_pipeline_barrier2(
+        cmd,
+        &vk::DependencyInfo::default().buffer_memory_barriers(&[
+            vk::BufferMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::VIDEO_ENCODE_KHR)
+                .src_access_mask(vk::AccessFlags2::VIDEO_ENCODE_WRITE_KHR)
+                .dst_stage_mask(vk::PipelineStageFlags2::HOST)
+                .dst_access_mask(vk::AccessFlags2::HOST_READ)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .buffer(bs_buf)
+                .offset(0)
+                .size(vk::WHOLE_SIZE),
+        ]),
+    );
 }
 
 fn codec_op_for(av1: bool) -> vk::VideoCodecOperationFlagsKHR {
@@ -822,6 +848,7 @@ impl VulkanVideoEncoder {
                     y_offset: *y,
                     padded: !aligned && !true_extent,
                     true_extent,
+                    picture_fmt: src_rgb_fmt,
                 })
             }
             _ => None,
@@ -1458,7 +1485,8 @@ impl VulkanVideoEncoder {
 
     /// Refresh slot `slot`'s cursor image and return `[origin_x, origin_y, size_w, size_h]`
     /// (size 0 ⇒ CSC skips the blend). Upload only when `serial` changed. First use always
-    /// transitions to SHADER_READ_ONLY so binding 3 is a valid layout with no cursor.
+    /// transitions to SHADER_READ_ONLY so binding 3 is a valid layout with no cursor. A
+    /// bitmap wider than `CURSOR_MAX` is cropped row by row; its rows outrun the pitch.
     unsafe fn prep_cursor(
         &mut self,
         slot: usize,
@@ -1491,11 +1519,7 @@ impl VulkanVideoEncoder {
                     let bytes = (cw as usize) * (ch as usize) * 4;
                     let ptr =
                         dev.map_memory(stage_mem, 0, bytes as u64, vk::MemoryMapFlags::empty())?;
-                    std::ptr::copy_nonoverlapping(
-                        c.rgba.as_ptr(),
-                        ptr as *mut u8,
-                        bytes.min(c.rgba.len()),
-                    );
+                    copy_cursor_rows(ptr as *mut u8, &c.rgba, c.w, cw, ch);
                     dev.unmap_memory(stage_mem);
                     let old = if ready {
                         vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
@@ -2029,7 +2053,7 @@ impl VulkanVideoEncoder {
                     // 4-bpp index math on the raw bytes.
                     let mut scratch = std::mem::take(&mut self.cpu_expand);
                     let (norm_fmt, norm_bytes) =
-                        normalize_cpu_rgb(frame.format, bytes, &mut scratch, false);
+                        normalize_cpu_rgb(frame.format, bytes, &mut scratch, None);
                     let fmt = pixel_to_vk(norm_fmt).context("unsupported CPU pixel format");
                     let view = match fmt {
                         Ok(f) => {
@@ -2604,13 +2628,17 @@ impl VulkanVideoEncoder {
                 (pad_img, pad_view, SrcAcquire::CscGeneral, true)
             }
             FramePayload::Cpu(bytes) => {
-                // Expand 24-bpp 3→4 before 4-bpp staging math. BGRA-forced: session
-                // `pictureFormat` is B8G8R8A8; an R-first source violates
-                // VUID-vkCmdEncodeVideoKHR-pEncodeInfo-08207. `begin_command_buffer` is after
-                // the fallible steps, so no reset-on-error wrap.
+                // Expand 24-bpp 3→4 before 4-bpp staging math, in the session's own channel
+                // order: `pictureFormat` follows the captured format, and a source that
+                // differs violates VUID-vkCmdEncodeVideoKHR-pEncodeInfo-08207.
+                // `begin_command_buffer` is after the fallible steps, so no reset-on-error wrap.
+                let want = match self.rgb.as_ref().map(|r| r.picture_fmt) {
+                    Some(vk::Format::R8G8B8A8_UNORM) => PixelFormat::Rgbx,
+                    _ => PixelFormat::Bgrx,
+                };
                 let mut scratch = std::mem::take(&mut self.cpu_expand);
                 let (norm_fmt, norm_bytes) =
-                    normalize_cpu_rgb(frame.format, bytes, &mut scratch, true);
+                    normalize_cpu_rgb(frame.format, bytes, &mut scratch, Some(want));
                 let fmt = pixel_to_vk(norm_fmt).context("unsupported CPU pixel format");
                 let view = match fmt {
                     Ok(f) => self.ensure_cpu_rgb(slot, f, norm_bytes, frame.width, frame.height),
@@ -3065,6 +3093,7 @@ impl VulkanVideoEncoder {
         (self.venc_dev.fp().cmd_encode_video_khr)(cmd, &enc);
         dev.cmd_end_query(cmd, query_pool, 0);
         (self.vq_dev.fp().cmd_end_video_coding_khr)(cmd, &vk::VideoEndCodingInfoKHR::default());
+        cmd_bitstream_to_host(dev, cmd, bs_buf);
         dev.end_command_buffer(cmd)?;
         Ok(())
     }
@@ -3354,6 +3383,7 @@ impl VulkanVideoEncoder {
         (self.venc_dev.fp().cmd_encode_video_khr)(cmd, &enc);
         dev.cmd_end_query(cmd, query_pool, 0);
         (self.vq_dev.fp().cmd_end_video_coding_khr)(cmd, &vk::VideoEndCodingInfoKHR::default());
+        cmd_bitstream_to_host(dev, cmd, bs_buf);
         dev.end_command_buffer(cmd)?;
         Ok(())
     }
