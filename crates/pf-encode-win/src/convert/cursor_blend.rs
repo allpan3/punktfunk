@@ -11,7 +11,9 @@
 
 use super::{compile_shader, HDR_VS};
 use anyhow::{bail, Context, Result};
-use windows::core::s;
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
+use windows::core::{s, Interface};
 use windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11BlendState, ID3D11Buffer, ID3D11PixelShader, ID3D11SamplerState, ID3D11VertexShader,
@@ -55,6 +57,9 @@ pub struct CursorBlendPass {
     cbuf_scale: Option<f32>,
     /// Uploaded shape, keyed by overlay serial; dims are host pixels.
     shape: Option<(u64, ID3D11ShaderResourceView, u32, u32)>,
+    /// Render-target views by target address. The cloned texture pins that address, so a
+    /// freed slot can never hand its key to a different texture. Bounded by the slot ring.
+    rtvs: HashMap<isize, (ID3D11RenderTargetView, ID3D11Texture2D)>,
 }
 
 impl CursorBlendPass {
@@ -113,6 +118,7 @@ impl CursorBlendPass {
                 cbuf: cbuf.context("cursor blend cbuf")?,
                 cbuf_scale: None,
                 shape: None,
+                rtvs: HashMap::new(),
             })
         }
     }
@@ -196,11 +202,18 @@ impl CursorBlendPass {
                     self.cbuf_scale = Some(linear_scale);
                 }
             }
-            let mut rtv: Option<ID3D11RenderTargetView> = None;
-            device
-                .CreateRenderTargetView(dst, None, Some(&mut rtv))
-                .context("CreateRenderTargetView(cursor blend scratch)")?;
-            let rtv = rtv.context("null cursor blend rtv")?;
+            let rtv = match self.rtvs.entry(dst.as_raw() as isize) {
+                Entry::Occupied(e) => e.get().0.clone(),
+                Entry::Vacant(e) => {
+                    let mut rtv: Option<ID3D11RenderTargetView> = None;
+                    device
+                        .CreateRenderTargetView(dst, None, Some(&mut rtv))
+                        .context("CreateRenderTargetView(cursor blend scratch)")?;
+                    let rtv = rtv.context("null cursor blend rtv")?;
+                    e.insert((rtv.clone(), dst.clone()));
+                    rtv
+                }
+            };
 
             ctx.OMSetRenderTargets(Some(&[Some(rtv)]), None);
             ctx.OMSetBlendState(&self.blend, None, 0xffff_ffff);

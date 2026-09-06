@@ -24,7 +24,7 @@ use std::ptr;
 use windows::core::{w, Interface, PCWSTR};
 use windows::Win32::Foundation::{HMODULE, LUID};
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D, D3D11_BIND_RENDER_TARGET,
+    ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_BIND_RENDER_TARGET,
     D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
@@ -1465,11 +1465,18 @@ impl Encoder for AmfEncoder {
         // `CreateSurfaceFromDX11Native` wraps without owning (null observer); the surface moves
         // into `OwnedData`. AMF AddRefs what it keeps, so our release does not free a buffer in flight.
         unsafe {
-            let src: ID3D11Resource = frame.texture.cast().context("texture -> resource")?;
-            let dst: ID3D11Resource = inner.ring[slot].cast().context("ring -> resource")?;
-            inner
-                .dctx
-                .CopySubresourceRegion(&dst, 0, 0, 0, 0, &src, 0, None);
+            // `&ID3D11Texture2D` is already an `ID3D11Resource` param (windows-rs `CanInto`,
+            // no QueryInterface), so the copy costs no COM round-trip per frame.
+            inner.dctx.CopySubresourceRegion(
+                &inner.ring[slot],
+                0,
+                0,
+                0,
+                0,
+                &frame.texture,
+                0,
+                None,
+            );
 
             let mut surf: *mut sys::AmfData = ptr::null_mut();
             amf_ok(
@@ -1568,6 +1575,9 @@ impl Encoder for AmfEncoder {
                         );
                         // The host booked a recovery on this frame; make the next one real.
                         self.force_kf = true;
+                        // This AU references whatever the encoder picked. Shipping the anchor tag
+                        // would lift the client's freeze on a frame that may predict from the loss.
+                        recovery_anchor = false;
                     }
                 }
             }
@@ -1649,6 +1659,11 @@ impl Encoder for AmfEncoder {
             if plan.tainted & (1 << slot) != 0 {
                 *marked = None;
             }
+        }
+        if plan.tainted != 0 {
+            // Aim the next mark at a swept slot. Round-robin would land on the anchor the plan
+            // just picked and overwrite the only pre-loss reference the client can still use.
+            self.next_ltr_slot = plan.tainted.trailing_zeros() as usize;
         }
         match plan.anchor {
             Some((slot, ltr_frame)) => {

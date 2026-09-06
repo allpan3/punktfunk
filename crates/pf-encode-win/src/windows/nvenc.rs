@@ -515,9 +515,12 @@ pub struct NvencD3d11Encoder {
     /// Chunked poll armed (`slices ≥ 2` ∧ sub-frame ∧ sync retrieve). Async retrieve owns the
     /// bitstream; a doNotWait sampler here would race it.
     subframe_chunks: bool,
-    /// Finish-lock prefix check saw sub-frame publish bytes the finished AU disowns.
-    /// Later opens on this encoder resolve sub-frame off. Never cleared: a fresh encoder retests.
+    /// This driver's early slice publishes are unusable: the finish-lock prefix check caught
+    /// bytes the AU disowns, or [`SUBFRAME_IDLE_LIMIT`] AUs published nothing at all. Later
+    /// opens on this encoder resolve sub-frame off. Never cleared: a fresh encoder retests.
     subframe_broken: bool,
+    /// Consecutive AUs whose chunk budget expired without one early slice. Reset by any chunk.
+    subframe_idle_aus: u32,
     chunk: Option<ChunkState>,
     session_async: bool,
     /// Last invalidated ref range. Dedupes the client's resends of the same loss event.
@@ -546,6 +549,11 @@ unsafe impl Send for NvencD3d11Encoder {}
 /// doNotWait sample cadence. Slice completions land ~0.5–1 ms apart; 50 µs stays under one
 /// slice time without hammering the driver.
 const CHUNK_SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_micros(50);
+
+/// Consecutive AUs that may expire the chunk budget with no early slice before sub-frame is
+/// declared dead on this driver. Each such AU costs a 2-frame sampling spin, so the verdict has
+/// to be cheap; a driver that does publish shows a slice on the first AU or two.
+const SUBFRAME_IDLE_LIMIT: u32 = 8;
 
 /// Chunked readback of the front in-flight AU. `Some` from the first emitted chunk until `last`;
 /// [`Encoder::poll`] refuses while it exists (a whole-AU poll would re-emit the shipped prefix).
@@ -664,6 +672,7 @@ impl NvencD3d11Encoder {
             max_slices: max_slices.max(1),
             subframe_chunks: false,
             subframe_broken: false,
+            subframe_idle_aus: 0,
             chunk: None,
             session_async: false,
             last_rfi_range: None,
@@ -927,9 +936,11 @@ impl NvencD3d11Encoder {
     }
 
     /// Move the live session to `mode` without an IDR. `nvEncReconfigureEncoder` accepts a
-    /// changed `splitEncodeMode` with `resetEncoder=0` and emits no keyframe.
+    /// changed `splitEncodeMode` with `resetEncoder=0` and emits no keyframe. Restore every
+    /// field if the driver refuses, so the encoder's idea of the session stays truthful.
     fn apply_split_mode(&mut self, mode: u32) -> bool {
-        let (prev_mode, prev_sub) = (self.split_mode, self.subframe_on);
+        let (prev_mode, prev_sub, prev_chunks) =
+            (self.split_mode, self.subframe_on, self.subframe_chunks);
         let (mode, subframe) = resolve_split_subframe(
             self.codec,
             mode,
@@ -938,6 +949,9 @@ impl NvencD3d11Encoder {
         );
         self.split_mode = mode;
         self.subframe_on = subframe;
+        // `reconfigure_bitrate` does not recompute this latch; a stale true makes
+        // `poll_chunk` busy-poll while `numSlices` never advances.
+        self.subframe_chunks = self.slices >= 2 && subframe && self.async_rt.is_none();
         if self.reconfigure_bitrate(self.bitrate_bps) {
             true
         } else {
@@ -948,6 +962,7 @@ impl NvencD3d11Encoder {
             );
             self.split_mode = prev_mode;
             self.subframe_on = prev_sub;
+            self.subframe_chunks = prev_chunks;
             false
         }
     }
@@ -1492,6 +1507,13 @@ impl Encoder for NvencD3d11Encoder {
             };
             self.absorb_done(done)?;
         }
+        // Sync retrieve is depth-1: the pump polls after every submit, so `pending` never
+        // reaches the pool. Deeper would hand `slot` a bitstream still being encoded.
+        debug_assert!(
+            self.async_rt.is_some() || self.pending.len() < POOL,
+            "NVENC sync submit with {} AUs in flight (pool {POOL})",
+            self.pending.len()
+        );
         let slot = self.next % POOL;
         self.next += 1;
         // SAFETY: NVENC calls go through the loaded `EncodeApi` table against `self.encoder`
@@ -1568,31 +1590,31 @@ impl Encoder for NvencD3d11Encoder {
                 ..Default::default()
             };
 
-            // In-band HDR10 SEI on every IDR: ST.2086 mastering + CEA-861.3 CLL.
-            // HEVC/H.264 carry SEI; AV1 uses metadata OBUs. Scratch outlives `encode_picture`.
+            // In-band HDR10 SEI on every IDR: ST.2086 mastering + CEA-861.3 CLL. Only an IDR
+            // carries them, so a P frame builds neither. HEVC/H.264 carry SEI; AV1 uses
+            // metadata OBUs. Scratch outlives `encode_picture`.
             let is_idr = flags != 0 || opening;
-            let mastering_sei = self
-                .hdr_meta
-                .map(|m| pf_frame::hdr::hevc_mastering_display_sei(&m));
-            let cll_sei = self
-                .hdr_meta
-                .map(|m| pf_frame::hdr::hevc_content_light_level_sei(&m));
+            let (mastering_sei, cll_sei) = match self.hdr_meta.filter(|_| is_idr && self.hdr) {
+                Some(m) => (
+                    Some(pf_frame::hdr::hevc_mastering_display_sei(&m)),
+                    Some(pf_frame::hdr::hevc_content_light_level_sei(&m)),
+                ),
+                None => (None, None),
+            };
             let mut sei: Vec<nv::NV_ENC_SEI_PAYLOAD> = Vec::new();
-            if is_idr && self.hdr {
-                if let Some(p) = mastering_sei.as_ref() {
-                    sei.push(nv::NV_ENC_SEI_PAYLOAD {
-                        payloadSize: p.len() as u32,
-                        payloadType: pf_frame::hdr::SEI_TYPE_MASTERING_DISPLAY_COLOUR_VOLUME,
-                        payload: p.as_ptr() as *mut u8,
-                    });
-                }
-                if let Some(p) = cll_sei.as_ref() {
-                    sei.push(nv::NV_ENC_SEI_PAYLOAD {
-                        payloadSize: p.len() as u32,
-                        payloadType: pf_frame::hdr::SEI_TYPE_CONTENT_LIGHT_LEVEL_INFO,
-                        payload: p.as_ptr() as *mut u8,
-                    });
-                }
+            if let Some(p) = mastering_sei.as_ref() {
+                sei.push(nv::NV_ENC_SEI_PAYLOAD {
+                    payloadSize: p.len() as u32,
+                    payloadType: pf_frame::hdr::SEI_TYPE_MASTERING_DISPLAY_COLOUR_VOLUME,
+                    payload: p.as_ptr() as *mut u8,
+                });
+            }
+            if let Some(p) = cll_sei.as_ref() {
+                sei.push(nv::NV_ENC_SEI_PAYLOAD {
+                    payloadSize: p.len() as u32,
+                    payloadType: pf_frame::hdr::SEI_TYPE_CONTENT_LIGHT_LEVEL_INFO,
+                    payload: p.as_ptr() as *mut u8,
+                });
             }
             if !sei.is_empty() {
                 // Union write: pointers/len are read during encode_picture (scratch outlives it).
@@ -1858,6 +1880,7 @@ impl Encoder for NvencD3d11Encoder {
                         cs.opened = true;
                         cs.emitted = bytes;
                         cs.slices_out = n;
+                        self.subframe_idle_aus = 0;
                         return Ok(Some(AuChunk {
                             data,
                             pts_ns,
@@ -1873,6 +1896,21 @@ impl Encoder for NvencD3d11Encoder {
                 // LOCK_BUSY = not ready. The finishing blocking lock owns real failures.
             }
             if t0.elapsed() > budget {
+                // Nothing published inside two frame intervals. A driver that never does turns
+                // every AU into this spin, so count the run and give up on sub-frame at the limit.
+                if self.chunk.is_none() {
+                    self.subframe_idle_aus += 1;
+                    if self.subframe_idle_aus >= SUBFRAME_IDLE_LIMIT {
+                        self.subframe_broken = true;
+                        self.subframe_chunks = false;
+                        tracing::info!(
+                            aus = self.subframe_idle_aus,
+                            slices = self.slices,
+                            "NVENC sub-frame readback published no intermediate slice — polling \
+                             whole AUs from here and disarming sub-frame for later opens"
+                        );
+                    }
+                }
                 break;
             }
             std::thread::sleep(CHUNK_SAMPLE_INTERVAL);
@@ -1941,6 +1979,15 @@ impl Encoder for NvencD3d11Encoder {
                     actual = keyframe,
                     "NVENC chunked poll: picture type diverged from the submit-time prediction"
                 );
+            }
+            // A sub-frame session finishes here, never in `poll`; without this feed the
+            // arbiter never measures the incumbent arm.
+            let encode_us = self
+                .last_submit_at
+                .take()
+                .map(|t| t.elapsed().as_micros() as u64);
+            if let Some(us) = encode_us {
+                self.feed_split_arbiter(us);
             }
             Ok(Some(AuChunk {
                 data,

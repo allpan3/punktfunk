@@ -23,7 +23,7 @@ use windows::core::Interface;
 use windows::Win32::Foundation::LUID;
 use windows::Win32::Graphics::Direct3D11::ID3D11Device;
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11DeviceContext, ID3D11Multithread, ID3D11Resource, ID3D11Texture2D, D3D11_TEXTURE2D_DESC,
+    ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D, D3D11_TEXTURE2D_DESC,
 };
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 
@@ -1067,11 +1067,11 @@ impl Encoder for QsvEncoder {
                         );
                     }
                 }
-                let src: ID3D11Resource = frame.texture.cast().context("texture -> resource")?;
-                let dst_res: ID3D11Resource = dst.cast().context("qsv texture -> resource")?;
+                // `&ID3D11Texture2D` is already an `ID3D11Resource` param (windows-rs
+                // `CanInto`, no QueryInterface), so the copy costs no COM round-trip per frame.
                 inner
                     .dctx
-                    .CopySubresourceRegion(&dst_res, 0, 0, 0, 0, &src, 0, None);
+                    .CopySubresourceRegion(dst, 0, 0, 0, 0, &frame.texture, 0, None);
                 // mfxExtRefListCtrl keys on FrameOrder; `submit_indexed` keeps that = wire index.
                 (*surf).Data.FrameOrder = cur_idx as u32;
                 (*surf).Data.TimeStamp = captured.pts_ns.wrapping_mul(9) / 100_000; // 90 kHz
@@ -1237,6 +1237,11 @@ impl Encoder for QsvEncoder {
             if plan.tainted & (1 << slot) != 0 {
                 *tainted = true;
             }
+        }
+        if plan.tainted != 0 {
+            // Aim the next mark at a swept slot. Round-robin would land on the anchor the plan
+            // just picked and overwrite the only pre-loss reference the client can still use.
+            self.next_ltr_slot = plan.tainted.trailing_zeros() as usize;
         }
         match plan.anchor {
             Some((slot, ltr_frame)) => {

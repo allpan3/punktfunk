@@ -329,6 +329,14 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **NVENC split arbitration reaches a verdict on a streamed Windows session.** `apply_split_mode`
+  now recomputes the chunked-poll latch, and `poll_chunk` feeds the arbiter the encode cost a
+  sub-frame session never reported through `poll`. Nothing to do; `PUNKTFUNK_NVENC_SPLIT_ARBITRATE`
+  stays opt-in.
+- **A rejected AMF LTR force no longer ships a recovery anchor.** `recovery_anchor` was set when
+  the force was queued and shipped even when the driver refused `ForceLTRReferenceBitfield`,
+  tagging an AU that may still predict from the loss as the clean re-anchor. Nothing to do; a
+  rejected force already forces an IDR on the next frame.
 - **An Android Steam Controller 2 over Bluetooth writes to the right GATT characteristics.**
   Valve routes each output report id to its own characteristic at `id + 0x35` and every feature
   command to `100F6C34`, id byte stripped in both cases, where the link had written every frame

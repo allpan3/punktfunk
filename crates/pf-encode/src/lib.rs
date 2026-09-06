@@ -176,6 +176,11 @@ pub fn host_wire_caps() -> u8 {
     base | pyro
 }
 
+/// Lowest rate any backend is opened or retargeted at. No H.26x backend clamps a zero:
+/// AMF's rebuild fails its required `TargetBitrate` and NVENC's ceiling bisect lands at
+/// 10 Mbps. Under the host's own 500 kbps ABR floor, so a live session never meets it.
+const MIN_BITRATE_BPS: u64 = 500_000;
+
 /// Open a hardware encoder for `format` and mode. NVENC on NVIDIA, VAAPI on
 /// AMD/Intel. `cuda` is GPU frames (`AV_PIX_FMT_CUDA`) from the NVIDIA
 /// zero-copy path; otherwise packed RGB/BGR CPU frames. The caller derives
@@ -198,6 +203,7 @@ pub fn open_video(
     // multi-slice AUs); 32 = no client limit. `PUNKTFUNK_NVENC_SLICES` overrides.
     max_slices: u32,
 ) -> Result<Box<dyn Encoder>> {
+    let bitrate_bps = bitrate_bps.max(MIN_BITRATE_BPS);
     let (inner, backend) = open_video_backend(
         codec,
         format,
@@ -318,8 +324,9 @@ impl Encoder for TrackedEncoder {
     fn reset(&mut self) -> bool {
         self.inner.reset()
     }
+    /// The one bitrate floor for every backend: [`MIN_BITRATE_BPS`], matching [`open_video`].
     fn reconfigure_bitrate(&mut self, bps: u64) -> bool {
-        self.inner.reconfigure_bitrate(bps)
+        self.inner.reconfigure_bitrate(bps.max(MIN_BITRATE_BPS))
     }
     fn applied_bitrate_bps(&self) -> Option<u64> {
         self.inner.applied_bitrate_bps()

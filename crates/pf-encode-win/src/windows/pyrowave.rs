@@ -681,8 +681,9 @@ impl Encoder for PyroWaveEncoder {
     }
 
     fn set_wire_chunking(&mut self, shard_payload: usize) {
-        // Below one block header + payload word the boundary is meaningless.
-        if shard_payload >= 64 {
+        // Below one block header + payload word the boundary is meaningless; above
+        // `MAX_WIRE_CHUNK` the window's u16 length truncates.
+        if (64..=pyrowave_wire::MAX_WIRE_CHUNK).contains(&shard_payload) {
             self.wire_chunk = Some(shard_payload);
             tracing::info!(
                 shard_payload,

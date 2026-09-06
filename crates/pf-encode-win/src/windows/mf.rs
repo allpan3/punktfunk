@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use windows::core::{Interface, GUID};
 use windows::Win32::Foundation::{LUID, S_OK};
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Resource, ID3D11Texture2D,
+    ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
     D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC,
     D3D11_USAGE_DEFAULT,
 };
@@ -399,6 +399,9 @@ struct Inner {
     need_input: u32,
     pending: VecDeque<PendingMeta>,
     ready: VecDeque<EncodedFrame>,
+    /// Failure of the post-`ProcessInput` pump. That pump consumed the MFT's event, so nothing
+    /// re-raises it; the next `poll` returns it and the reset ladder takes over.
+    pump_err: Option<anyhow::Error>,
     /// VPS/SPS/PPS from the first IDR that carried them, prepended to any later IDR that
     /// does not. Empty until such an IDR is seen.
     param_sets: Vec<u8>,
@@ -826,6 +829,7 @@ impl MfEncoder {
             need_input: 0,
             pending: VecDeque::new(),
             ready: VecDeque::new(),
+            pump_err: None,
             param_sets: Vec::new(),
             headers_warned: false,
             frames_submitted: 0,
@@ -879,11 +883,18 @@ impl Encoder for MfEncoder {
         // and sample are owned wrappers the MFT AddRefs for as long as it reads them, and
         // `ProcessInput` is only reached with a `METransformNeedInput` credit in hand.
         let submitted = unsafe {
-            let src: ID3D11Resource = frame.texture.cast().context("texture -> resource")?;
-            let dst: ID3D11Resource = inner.ring[slot].cast().context("ring -> resource")?;
-            inner
-                .dctx
-                .CopySubresourceRegion(&dst, 0, 0, 0, 0, &src, 0, None);
+            // `&ID3D11Texture2D` is already an `ID3D11Resource` param (windows-rs `CanInto`,
+            // no QueryInterface), so the copy costs no COM round-trip per frame.
+            inner.dctx.CopySubresourceRegion(
+                &inner.ring[slot],
+                0,
+                0,
+                0,
+                0,
+                &frame.texture,
+                0,
+                None,
+            );
             let buffer =
                 MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, &inner.ring[slot], 0, false)
                     .context("MFCreateDXGISurfaceBuffer")?;
@@ -922,10 +933,11 @@ impl Encoder for MfEncoder {
         });
         // Collect whatever the MFT already finished; `poll` then has no wait to do. The MFT
         // owns the frame from here, so a failure must not report the submit as failed: the
-        // driver would drop its in-flight entry and mis-stamp every later AU. `poll` raises
-        // the same error on its next call.
+        // driver would drop its in-flight entry and mis-stamp every later AU. The pump ate
+        // the event that carried the failure, so stash it — `poll` is where it surfaces.
         if let Err(e) = pump(inner, codec) {
             tracing::debug!(error = %e, "MF event pump failed after the frame was accepted");
+            inner.pump_err.get_or_insert(e);
         }
         Ok(())
     }
@@ -949,6 +961,7 @@ impl Encoder for MfEncoder {
     }
 
     /// Wait up to `min(3/4 frame interval, 12 ms)` for the oldest AU. Expiry is `Ok(None)`.
+    /// A pump failure `submit` swallowed is raised here first — its event is already spent.
     fn poll(&mut self) -> Result<Option<EncodedFrame>> {
         let codec = self.codec;
         let budget = Duration::from_millis(u64::from((750 / self.fps.max(1)).clamp(1, 12)));
@@ -956,6 +969,9 @@ impl Encoder for MfEncoder {
             let Some(inner) = self.inner.as_mut() else {
                 return Ok(None);
             };
+            if let Some(e) = inner.pump_err.take() {
+                return Err(e);
+            }
             let deadline = Instant::now() + budget;
             loop {
                 pump(inner, codec)?;

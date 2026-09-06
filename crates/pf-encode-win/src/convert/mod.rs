@@ -9,6 +9,7 @@ mod cursor_blend;
 pub use cursor_blend::CursorBlendPass;
 
 use anyhow::{bail, Context, Result};
+use std::collections::hash_map::Entry;
 use std::ffi::c_void;
 use windows::core::{s, Interface, PCSTR};
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
@@ -728,6 +729,24 @@ pub struct VideoConverter {
     vctx: ID3D11VideoContext1,
     enumr: ID3D11VideoProcessorEnumerator,
     vp: ID3D11VideoProcessor,
+    /// Processor views by texture address, made once per texture instead of once per frame.
+    /// `Mutex` because [`Self::convert`] takes `&self` and callers hold this across threads.
+    views: std::sync::Mutex<ProcessorViews>,
+}
+
+/// The IddCx driver holds a converter behind a shared reference; keep the auto traits the
+/// cache could silently take away (that crate builds only on Windows).
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<VideoConverter>();
+};
+
+/// Cached input/output views. Each entry clones its texture so the address it is keyed on
+/// cannot be freed and handed to a different texture. Bounded by the caller's slot ring.
+#[derive(Default)]
+struct ProcessorViews {
+    input: std::collections::HashMap<isize, (ID3D11VideoProcessorInputView, ID3D11Texture2D)>,
+    output: std::collections::HashMap<isize, (ID3D11VideoProcessorOutputView, ID3D11Texture2D)>,
 }
 
 impl VideoConverter {
@@ -791,57 +810,89 @@ impl VideoConverter {
                 vctx,
                 enumr,
                 vp,
+                views: std::sync::Mutex::new(ProcessorViews::default()),
             })
         }
     }
 
     /// `input` (BGRA, or scRGB FP16 if built with `scrgb_input`) → `output`
-    /// (NV12, BT.709 studio — never P010). Views are per call so the input
-    /// texture can vary frame to frame.
+    /// (NV12, BT.709 studio — never P010). Both views are cached per texture: the caller
+    /// rotates a small ring, so the driver allocates one view per slot, not one per frame.
     pub fn convert(&self, input: &ID3D11Texture2D, output: &ID3D11Texture2D) -> Result<()> {
         // SAFETY: both view creations are `?`-checked calls on `self.vdev` with fully-initialized
-        // stack descriptors and live out-params. `stream.pInputSurface` is a `ManuallyDrop` of the
-        // input view just created: `VideoProcessorBlt` only BORROWS it (a COM in-param never transfers
-        // ownership), and the explicit `into_inner` drop below releases that reference exactly once on
-        // both the success and the failure path. `slice::from_ref(&stream)` borrows the live local.
+        // stack descriptors and live out-params. `stream.pInputSurface` is a `ManuallyDrop` of a
+        // CLONE of the cached input view: `VideoProcessorBlt` only BORROWS it (a COM in-param never
+        // transfers ownership), and the explicit `into_inner` drop below releases that clone exactly
+        // once on both the success and the failure path — the cache keeps its own reference.
+        // `slice::from_ref(&stream)` borrows the live local.
         unsafe {
-            let in_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
-                FourCC: 0,
-                ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
-                Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
-                    Texture2D: D3D11_TEX2D_VPIV {
-                        MipSlice: 0,
-                        ArraySlice: 0,
-                    },
-                },
+            let (in_key, out_key) = (input.as_raw() as isize, output.as_raw() as isize);
+            let mut views = self
+                .views
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let in_view = match views.input.entry(in_key) {
+                Entry::Occupied(e) => e.get().0.clone(),
+                Entry::Vacant(e) => {
+                    let in_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
+                        FourCC: 0,
+                        ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
+                        Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
+                            Texture2D: D3D11_TEX2D_VPIV {
+                                MipSlice: 0,
+                                ArraySlice: 0,
+                            },
+                        },
+                    };
+                    let mut view: Option<ID3D11VideoProcessorInputView> = None;
+                    self.vdev
+                        .CreateVideoProcessorInputView(
+                            input,
+                            &self.enumr,
+                            &in_desc,
+                            Some(&mut view),
+                        )
+                        .context("CreateVideoProcessorInputView")?;
+                    let view = view.context("null input view")?;
+                    e.insert((view.clone(), input.clone()));
+                    view
+                }
             };
-            let mut in_view: Option<ID3D11VideoProcessorInputView> = None;
-            self.vdev
-                .CreateVideoProcessorInputView(input, &self.enumr, &in_desc, Some(&mut in_view))
-                .context("CreateVideoProcessorInputView")?;
-
-            let out_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
-                ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
-                Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 {
-                    Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 },
-                },
+            let out_view = match views.output.entry(out_key) {
+                Entry::Occupied(e) => e.get().0.clone(),
+                Entry::Vacant(e) => {
+                    let out_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
+                        ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
+                        Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 {
+                            Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 },
+                        },
+                    };
+                    let mut view: Option<ID3D11VideoProcessorOutputView> = None;
+                    self.vdev
+                        .CreateVideoProcessorOutputView(
+                            output,
+                            &self.enumr,
+                            &out_desc,
+                            Some(&mut view),
+                        )
+                        .context("CreateVideoProcessorOutputView")?;
+                    let view = view.context("null output view")?;
+                    e.insert((view.clone(), output.clone()));
+                    view
+                }
             };
-            let mut out_view: Option<ID3D11VideoProcessorOutputView> = None;
-            self.vdev
-                .CreateVideoProcessorOutputView(output, &self.enumr, &out_desc, Some(&mut out_view))
-                .context("CreateVideoProcessorOutputView")?;
-            let out_view = out_view.context("null output view")?;
+            drop(views);
 
             let stream = D3D11_VIDEO_PROCESSOR_STREAM {
                 Enable: true.into(),
-                pInputSurface: std::mem::ManuallyDrop::new(in_view),
+                pInputSurface: std::mem::ManuallyDrop::new(Some(in_view)),
                 ..Default::default()
             };
             let blt =
                 self.vctx
                     .VideoProcessorBlt(&self.vp, &out_view, 0, std::slice::from_ref(&stream));
-            // Blt only borrows the input view; `ManuallyDrop` suppressed Drop.
-            // Release once on both paths — skipping this leaked one view per frame.
+            // Blt only borrows the input view; `ManuallyDrop` suppressed Drop. Release our
+            // clone once on both paths — skipping this leaked one reference per frame.
             drop(std::mem::ManuallyDrop::into_inner(stream.pInputSurface));
             blt.context("VideoProcessorBlt")
         }

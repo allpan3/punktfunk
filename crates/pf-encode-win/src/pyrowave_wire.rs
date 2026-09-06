@@ -11,6 +11,9 @@
 //! both backends emit it from here. See `design/pyrowave-codec-plan.md`.
 
 pub const WINDOW_PREFIX: usize = 4;
+/// Largest shard payload [`build_au`] can frame: the window prefix stores `used` as a `u16`,
+/// so a wider window would truncate the length and hand the client a short read.
+pub const MAX_WIRE_CHUNK: usize = u16::MAX as usize + WINDOW_PREFIX;
 const WIN_PACKED: u16 = 0;
 const WIN_FRAG_FIRST: u16 = 1;
 const WIN_FRAG_CONT: u16 = 2;
@@ -146,6 +149,10 @@ pub fn build_au(
         let (off, size) = packets[0];
         return bitstream[off..off + size].to_vec();
     };
+    debug_assert!(
+        chunk <= MAX_WIRE_CHUNK,
+        "wire chunk {chunk} truncates the u16 length"
+    );
     let payload_max = chunk - WINDOW_PREFIX;
     let mut au: Vec<u8> = Vec::with_capacity((packets.len() + 1) * chunk);
     let mut open: Option<(usize, usize)> = None;
