@@ -1194,7 +1194,11 @@ impl Decoder {
         if choice == crate::video_vaapi_native::DECODER_PIN {
             match native_vaapi_codec(wire) {
                 Some(codec) => {
-                    match crate::video_vaapi_native::NativeVaapiDecoder::new(codec, stream) {
+                    match crate::video_vaapi_native::NativeVaapiDecoder::new(
+                        codec,
+                        stream,
+                        vk.map(|v| v.vendor_id),
+                    ) {
                         Ok(d) => {
                             tracing::info!(
                                 codec = codec_name,
@@ -1260,7 +1264,11 @@ impl Decoder {
         #[cfg(target_os = "linux")]
         let vaapi_rung = |choice: &str| -> Result<Option<Backend>> {
             if let Some(codec) = native_vaapi_codec(wire) {
-                match crate::video_vaapi_native::NativeVaapiDecoder::new(codec, stream) {
+                match crate::video_vaapi_native::NativeVaapiDecoder::new(
+                    codec,
+                    stream,
+                    vk.map(|v| v.vendor_id),
+                ) {
                     Ok(d) => {
                         tracing::info!(
                             codec = codec_name,
@@ -1637,6 +1645,7 @@ impl Decoder {
                             match crate::video_vaapi_native::NativeVaapiDecoder::new(
                                 codec,
                                 self.stream,
+                                self.vk.as_ref().map(|v| v.vendor_id),
                             ) {
                                 Ok(d) => {
                                     tracing::warn!(error = %e, fails = self.vaapi_fails,

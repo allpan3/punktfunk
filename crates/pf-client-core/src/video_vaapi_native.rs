@@ -269,11 +269,21 @@ struct Display {
 // `&mut NativeVaapiDecoder`, and that is the serialisation.
 unsafe impl Send for Display {}
 
+/// PCI vendor of a `/dev/dri/renderD*` node, in Vulkan's `vendorID` units, or
+/// `None` for a node with no PCI parent (a virtio or platform GPU). Sysfs, so a
+/// caller can rank nodes before libva loads a driver for any of them.
+fn node_vendor_id(node: &std::path::Path) -> Option<u32> {
+    let name = node.file_name()?.to_str()?;
+    let text = std::fs::read_to_string(format!("/sys/class/drm/{name}/device/vendor")).ok()?;
+    u32::from_str_radix(text.trim().trim_start_matches("0x"), 16).ok()
+}
+
 impl Display {
-    /// `PUNKTFUNK_VAAPI_DEVICE` pins a node; otherwise name order, first that
-    /// initialises wins. That GPU need not be the presenter's — a dmabuf across
-    /// GPUs fails or copies — so the pin is the escape hatch.
-    fn open(va: Libva) -> Result<Display> {
+    /// `PUNKTFUNK_VAAPI_DEVICE` pins a node; otherwise nodes whose PCI vendor is the
+    /// presenter's come first, then name order, and the first that initialises wins.
+    /// A dmabuf across GPUs fails or copies, so on a hybrid box the order is the
+    /// whole difference; the pin stays the escape hatch.
+    fn open(va: Libva, want_vendor: Option<u32>) -> Result<Display> {
         if let Some(pin) = std::env::var_os("PUNKTFUNK_VAAPI_DEVICE") {
             let path = pin.to_string_lossy().into_owned();
             let (display, node, version) = Display::probe(&va, &path)
@@ -297,6 +307,10 @@ impl Display {
             })
             .collect();
         nodes.sort();
+        // Stable partition, so name order still decides inside each group.
+        if let Some(want) = want_vendor {
+            nodes.sort_by_key(|p| node_vendor_id(p) != Some(want));
+        }
         let mut tried: Vec<String> = Vec::new();
         for node in &nodes {
             let path = node.to_string_lossy().into_owned();
@@ -798,13 +812,18 @@ impl NativeVaapiDecoder {
     /// Probe [`StreamFormat`] and the display here. A first-AU refusal is a decode
     /// error, burns the demotion streak, and skips the ladder's fall-through, so the
     /// entrypoint the session needs is asked for before the ladder has moved on.
-    pub(crate) fn new(codec: pf_vaadec::Codec, stream: StreamFormat) -> Result<NativeVaapiDecoder> {
+    /// `presenter_vendor` ranks the render nodes ([`Display::open`]).
+    pub(crate) fn new(
+        codec: pf_vaadec::Codec,
+        stream: StreamFormat,
+        presenter_vendor: Option<u32>,
+    ) -> Result<NativeVaapiDecoder> {
         let depth = stream.bit_depth;
         let profile = pf_vaadec::profile_for(codec, stream.chroma_format_idc, depth)
             .map_err(|e| anyhow!("{e}"))
             .context("the negotiated stream shape has no VAAPI decode profile")?;
         let va = Libva::load().context("libva")?;
-        let display = Display::open(va)?;
+        let display = Display::open(va, presenter_vendor)?;
         display.require_entrypoint(profile.value)?;
         let planner = match codec {
             pf_vaadec::Codec::H264 => Planner::H264(Box::new(pf_vaadec::H264Planner::new())),
@@ -2324,6 +2343,7 @@ mod tests {
                 chroma_format_idc: 3,
                 bit_depth: 8,
             },
+            None,
         )
         .err()
         .expect("4:4:4 H.264 has no VAAPI profile in this rung's envelope");
@@ -2438,8 +2458,9 @@ mod tests {
             "the vendored AV1 vector is 250 temporal units"
         );
 
-        let mut decoder = NativeVaapiDecoder::new(pf_vaadec::Codec::Av1, StreamFormat::SDR_420_8)
-            .expect("this box is supposed to have a VAAPI AV1 decode entry point");
+        let mut decoder =
+            NativeVaapiDecoder::new(pf_vaadec::Codec::Av1, StreamFormat::SDR_420_8, None)
+                .expect("this box is supposed to have a VAAPI AV1 decode entry point");
         eprintln!("VAAPI AV1 rung constructed: {}", decoder.name());
 
         let mut delivered = 0usize;
@@ -2885,7 +2906,7 @@ mod tests {
         aus: &[&[u8]],
         label: &str,
     ) -> (usize, FirstFrame) {
-        let mut decoder = NativeVaapiDecoder::new(codec, stream).unwrap_or_else(|e| {
+        let mut decoder = NativeVaapiDecoder::new(codec, stream, None).unwrap_or_else(|e| {
             panic!(
                 "{label}: this box is supposed to have a VAAPI {label} decode entry point: {e:#}"
             )
@@ -4016,7 +4037,7 @@ mod parity {
             goldens.len()
         );
 
-        let mut decoder = NativeVaapiDecoder::new(codec, stream)
+        let mut decoder = NativeVaapiDecoder::new(codec, stream, None)
             .unwrap_or_else(|e| panic!("{label}: this box must host this profile — {e:#}"));
         let mut readback = Readback::new(&decoder.display);
         let dump_tag = std::env::var("PF_VAAPI_DUMP").ok();
@@ -4062,8 +4083,9 @@ mod parity {
         assert_eq!(order.display.len(), goldens.len());
         assert_eq!(order.display.len(), shown_count);
 
-        let mut decoder = NativeVaapiDecoder::new(pf_vaadec::Codec::Av1, StreamFormat::SDR_420_8)
-            .unwrap_or_else(|e| panic!("{label}: this box must host AV1 Profile 0 — {e:#}"));
+        let mut decoder =
+            NativeVaapiDecoder::new(pf_vaadec::Codec::Av1, StreamFormat::SDR_420_8, None)
+                .unwrap_or_else(|e| panic!("{label}: this box must host AV1 Profile 0 — {e:#}"));
         let mut readback = Readback::new(&decoder.display);
         let dump_tag = std::env::var("PF_VAAPI_DUMP").ok();
 
@@ -4240,8 +4262,9 @@ mod parity {
     #[ignore = "needs a machine with a libva runtime and an H.264 VLD entry point"]
     fn probe_this_machines_readback_routes() {
         let aus = split_h264_aus(H264_25FPS);
-        let mut decoder = NativeVaapiDecoder::new(pf_vaadec::Codec::H264, StreamFormat::SDR_420_8)
-            .expect("this box is supposed to have a VAAPI H.264 decode entry point");
+        let mut decoder =
+            NativeVaapiDecoder::new(pf_vaadec::Codec::H264, StreamFormat::SDR_420_8, None)
+                .expect("this box is supposed to have a VAAPI H.264 decode entry point");
         let mut frame = None;
         for (index, au) in aus.iter().enumerate() {
             frame = decoder
@@ -4300,8 +4323,9 @@ mod parity {
     fn the_readback_reads_real_pixels_and_the_comparison_can_fail() {
         let aus = split_h264_aus(H264_25FPS);
         let goldens = golden_hashes(GOLDENS_H264);
-        let mut decoder = NativeVaapiDecoder::new(pf_vaadec::Codec::H264, StreamFormat::SDR_420_8)
-            .expect("this box is supposed to have a VAAPI H.264 decode entry point");
+        let mut decoder =
+            NativeVaapiDecoder::new(pf_vaadec::Codec::H264, StreamFormat::SDR_420_8, None)
+                .expect("this box is supposed to have a VAAPI H.264 decode entry point");
         let mut readback = Readback::new(&decoder.display);
 
         let mut frames: Vec<Vec<u8>> = Vec::new();
