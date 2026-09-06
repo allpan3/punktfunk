@@ -702,6 +702,26 @@ impl VkH264Decoder {
         result
     }
 
+    /// Queue the pictures `outputs` names that are already decoded, building
+    /// their frames from the pool that holds them. Only outputs: `removed`
+    /// waits for the submit, which may still bind those slots.
+    fn settle_outputs_from_live_pool(&mut self, outputs: &[PicId]) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        let (ready, _) = settle_dpb_ids(&mut self.pending, outputs, &[]);
+        for entry in ready {
+            let frame = build_frame(
+                &mut state.pool,
+                state.dpb.is_none(),
+                state.image_extent,
+                &entry,
+                self.generation,
+            );
+            self.ready.push_back(frame);
+        }
+    }
+
     /// Submit one already-planned AU. Split so [`Self::decode_inner`] can latch
     /// recovery on any failure past that line without a flag on every exit.
     /// `au` is the buffer `plan`'s slice ranges index; `recovery` and
@@ -713,6 +733,11 @@ impl VkH264Decoder {
         recovery: crate::recovery::RecoveryMark,
         decode_order: u64,
     ) -> Result<Option<DecodedVkFrame>, VkDecodeError> {
+        // Pictures this plan outputs were decoded into the pool `ensure_state`
+        // may retire. A renegotiation IDR outputs the whole DPB, so settle from
+        // the live pool first; the frames then hold it into the graveyard.
+        // The AU's own picture is not pending yet — it settles after the submit.
+        self.settle_outputs_from_live_pool(&plan.dpb.outputs);
         self.ensure_state(plan)?;
         let sps_id = plan.sps.seq_parameter_set_id;
 
@@ -1314,19 +1339,16 @@ impl VkH264Decoder {
     /// generation, so releases cannot alias. Session/ring/ops die here after
     /// [`Self::drain_gpu`]; [`DecodedVkFrame`] borrows pool resources only,
     /// and `poll_status` generation-gates before touching the new query pool.
+    /// Undelivered `ready` frames stay queued and keep the retired pool alive.
     fn rebuild_state(&mut self, plan: &AuPlan) -> Result<(), VkDecodeError> {
         self.drain_gpu()?;
         if let Some(state) = self.state.take() {
             debug!("rebuilding decode session (stream renegotiation)");
             // SessionState has no Drop: session/dpb/ring/ops die here (decode
             // drained; presenter never references them). The picture pool may
-            // outlive: drop undelivered holds, free pending, graveyard if the
-            // consumer still holds delivered images.
+            // outlive: `ready` keeps its holds, pending frees, and the pool is
+            // graveyarded if anything still holds an image.
             let SessionState { mut pool, .. } = state;
-            for frame in self.ready.drain(..) {
-                let picture = &mut pool.pictures[frame.picture as usize];
-                picture.held = picture.held.saturating_sub(1);
-            }
             for (_, entry) in std::mem::take(&mut self.pending) {
                 pool.pictures[entry.image].pending = false;
             }
