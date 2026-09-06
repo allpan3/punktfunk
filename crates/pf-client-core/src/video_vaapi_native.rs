@@ -447,6 +447,30 @@ impl Display {
     }
 }
 
+/// Does this machine have a VAAPI HEVC decode entrypoint?
+///
+/// Answered once per process: opening a display costs a `/dev/dri` walk and a
+/// `vaInitialize`, and the codec advertisement asks on every Hello. The answer
+/// cannot change without a driver reload, which ends the process anyway.
+///
+/// `false` also covers "no libva and no DRM node at all" — the clean refusal the
+/// decode ladder already falls through.
+pub fn hevc_decodable(presenter_vendor: Option<u32>) -> bool {
+    static PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PROBE.get_or_init(|| {
+        let ok = Libva::load()
+            .and_then(|va| Display::open(va, presenter_vendor))
+            .and_then(|d| d.require_entrypoint(pf_vaadec::config::VA_PROFILE_HEVC_MAIN as c_int));
+        match ok {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::debug!(error = %format!("{e:#}"), "no VAAPI HEVC decode on this machine");
+                false
+            }
+        }
+    })
+}
+
 impl Drop for Display {
     fn drop(&mut self) {
         // SAFETY: `self.display` was initialised in `open_node` and nothing else
