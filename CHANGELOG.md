@@ -47,6 +47,9 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **`virtual stream complete` carries the driver's source counters.** `source_seq`, `published`
+  and `dropped` sit next to `sent`, so a Windows host log says whether a stream under its refresh
+  rate was starved by the desktop or lost frames in the encode pool. Nothing to configure.
 - **`NativeBridge.nativeConnect` takes a `tenBitSdr` flag.** The Android JNI entry point gained a
   `Boolean` after `hdrEnabled`, splitting `VIDEO_CAP_10BIT` from `VIDEO_CAP_HDR` so the client can
   ask for Main10 under SDR. Rebuild the kit against the matching native library; an unchanged
@@ -349,6 +352,13 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **A display that re-lights itself mid-stream is parked for the session.** A standby TV on a
+  Windows host re-lit 35–100 s after every exclusive isolate and each eviction cost the stream a
+  0.2–1.8 s rebuild, so after the first re-assert the host PnP-disables that panel — journaled,
+  re-enabled at teardown. Nothing to do; `PUNKTFUNK_STANDBY_SINK_KEEP` still opts out.
+- **A game's own display mode survives a topology re-assert.** The session kept the client's
+  original mode after the encoder had followed a mid-session mode change, so the next re-assert
+  or rebuild set the display back to it. Nothing to do.
 - **AV1 tile starts reach the decoder in superblocks.** `pMiColStarts`/`pMiRowStarts` carried 4x4
   units, so a client whose Vulkan driver reads those arrays instead of recomputing them — AMD on
   Windows — painted everything below the first tile row green on the multi-tile AV1 a host emits
