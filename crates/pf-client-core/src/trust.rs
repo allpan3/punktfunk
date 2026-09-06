@@ -985,6 +985,11 @@ pub struct Settings {
     #[serde(default = "default_true")]
     pub gamepad_forwarding: bool,
     /// `vid:pid:name` (`PadInfo::key`) forwarded as pad 0; empty = most recently connected.
+    ///
+    /// Per device, and NOT the same value as Apple's `gamepadID`, which is
+    /// `vendorName|productCategory`: GameController exposes no vid/pid, and iOS and tvOS have no
+    /// IOKit to get one from. The two grammars cannot be exchanged — do not "unify" them by
+    /// copying a value across.
     pub forward_pad: String,
     /// Guide / QAM while streaming: `"auto"` (default), `"forward"`, or `"local"`.
     /// Auto forwards everywhere except Gaming Mode, where the local Steam UI also
@@ -1057,6 +1062,9 @@ pub struct Settings {
     pub hdr_enabled: bool,
     /// Advertise 10-bit without HDR (`VIDEO_CAP_10BIT`): SDR desktop at Main10.
     /// Subsumed by `hdr_enabled`. `default` so older stores load off.
+    ///
+    /// Desktop only. Android welds the two bits together at one site — it sends 10-bit with HDR
+    /// or nothing — so there is nothing there for this to gate until that split.
     #[serde(default)]
     pub ten_bit_sdr: bool,
     /// `"latency"` (default) or `"smooth"`. Unknown reads as latency so a future
@@ -1075,6 +1083,10 @@ pub struct Settings {
     pub vsync: bool,
     /// Let a VRR display follow the stream cadence when fullscreen. Inert on
     /// fixed-refresh (measured from on-glass timestamps). Default on.
+    ///
+    /// Desktop only, and deliberately absent on Android: that client pins a fixed display mode
+    /// and declares its surface FIXED_SOURCE, because OEM refresh governors ignore the advisory
+    /// hint. A setting there would have to fight that, not merely gate it.
     #[serde(default = "default_true")]
     pub allow_vrr: bool,
     /// Legacy on/off for the stats overlay — kept in sync with `stats_verbosity`
