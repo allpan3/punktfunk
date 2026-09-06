@@ -373,7 +373,9 @@ impl CpuPlanarFrame {
         }
     }
 
-    /// Copy strided I420 into one tightly-packed allocation.
+    /// Copy strided I420 into one tightly-packed allocation. The rows are appended,
+    /// never written over a zero fill: the three planes tile the buffer exactly, so
+    /// the fill was ~3 MB of memset per 1080p frame that nothing read.
     ///
     /// Refuses rather than truncates: a short plane is a geometry disagreement,
     /// and reading the rows that are there would paint uninitialized memory.
@@ -390,9 +392,8 @@ impl CpuPlanarFrame {
         let (cw, ch) = Self::chroma_dims(width, height);
         let dims = [(width, height), (cw, ch), (cw, ch)];
         let total: usize = dims.iter().map(|(w, h)| *w as usize * *h as usize).sum();
-        let mut data = vec![0u8; total];
+        let mut data: Vec<u8> = Vec::with_capacity(total);
         let mut offsets = [0usize; 3];
-        let mut at = 0usize;
         for i in 0..3 {
             let (w, h) = (dims[i].0 as usize, dims[i].1 as usize);
             anyhow::ensure!(
@@ -406,13 +407,13 @@ impl CpuPlanarFrame {
                 planes[i].len(),
                 strides[i]
             );
-            offsets[i] = at;
+            offsets[i] = data.len();
             for row in 0..h {
                 let src = row * strides[i];
-                data[at..at + w].copy_from_slice(&planes[i][src..src + w]);
-                at += w;
+                data.extend_from_slice(&planes[i][src..src + w]);
             }
         }
+        debug_assert_eq!(data.len(), total, "the three planes tile the buffer");
         Ok(CpuPlanarFrame {
             width,
             height,
