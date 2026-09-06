@@ -27,6 +27,8 @@ pub struct HidoutDedup {
     /// Last-forwarded adaptive-trigger effect per side: `[0]` = L2, `[1]` = R2.
     trigger: [Option<Vec<u8>>; 2],
     audio_ctl: Option<(u8, [u8; 6])>,
+    /// Last-forwarded mic light + capsule mute, with the valid bits that carried them.
+    mic: Option<(u8, u8, u8)>,
     haptics_select_logged: bool,
     last_sent: Option<Instant>,
 }
@@ -64,6 +66,14 @@ impl HidoutDedup {
         }
         if let Some(bits) = self.player_leds {
             out.push(HidOutput::PlayerLeds { pad, bits });
+        }
+        if let Some((valid, mode, mute)) = self.mic {
+            out.push(HidOutput::MicLed {
+                pad,
+                valid,
+                mode,
+                mute,
+            });
         }
         for (which, effect) in self.trigger.iter().enumerate() {
             if let Some(effect) = effect {
@@ -103,6 +113,17 @@ impl HidoutDedup {
                     false
                 } else {
                     self.trigger[slot] = Some(effect.clone());
+                    true
+                }
+            }
+            HidOutput::MicLed {
+                valid, mode, mute, ..
+            } => {
+                let v = Some((*valid, *mode, *mute));
+                if self.mic == v {
+                    false
+                } else {
+                    self.mic = v;
                     true
                 }
             }

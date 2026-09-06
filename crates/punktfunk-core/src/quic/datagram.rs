@@ -475,6 +475,12 @@ const HIDOUT_TRIGGER: u8 = 0x03;
 const HIDOUT_TRACKPAD_HAPTIC: u8 = 0x04;
 const HIDOUT_HID_RAW: u8 = 0x05;
 const HIDOUT_AUDIO_CTL: u8 = 0x06;
+const HIDOUT_MIC_LED: u8 = 0x07;
+
+/// [`HidOutput::MicLed`] `valid`: `mode` is meant (`valid_flag1` bit 0).
+pub const MIC_LED_MODE_VALID: u8 = 0x01;
+/// [`HidOutput::MicLed`] `valid`: `mute` is meant (`valid_flag1` bit 1, power-save byte).
+pub const MIC_LED_MUTE_VALID: u8 = 0x02;
 
 /// [`HidOutput::HidRaw`] `kind`: interrupt-OUT / GATT write (`write` / `SDL_hid_write`).
 pub const HID_RAW_OUTPUT: u8 = 0;
@@ -521,6 +527,17 @@ pub enum HidOutput {
         kind: u8,
         data: Vec<u8>,
     },
+    /// DS5 mic light and mic mute: output report `0x02` bytes 9 (`ucMicLightMode`: 0 off,
+    /// 1 on, 2 pulse) and 10 (power-save flags, bit 4 = mute the capsule). A game mirrors
+    /// its own mute state onto the pad's light, and the pad in the player's hands is the
+    /// one with the light. `valid` is [`MIC_LED_MODE_VALID`] | [`MIC_LED_MUTE_VALID`]: a
+    /// byte whose bit is clear was not written and must not be replayed.
+    MicLed {
+        pad: u8,
+        valid: u8,
+        mode: u8,
+        mute: u8,
+    },
     /// DS5 output-report `0x02` audio-control region (samples ride [`PAD_AUDIO_MAGIC`]).
     /// `raw` is bytes 5..=10 (volumes + routing). `flags`: bit0 = haptics-select
     /// (`valid_flag0` bit1), bits1..4 = `valid_flag0` bits 4..7. Wire:
@@ -541,6 +558,7 @@ impl HidOutput {
             | HidOutput::PlayerLeds { pad, .. }
             | HidOutput::Trigger { pad, .. }
             | HidOutput::TrackpadHaptic { pad, .. }
+            | HidOutput::MicLed { pad, .. }
             | HidOutput::HidRaw { pad, .. } => u16::from(*pad),
             HidOutput::AudioCtl { pad, .. } => *pad,
         }
@@ -581,6 +599,14 @@ impl HidOutput {
                 period,
                 count,
             },
+            HidOutput::MicLed {
+                valid, mode, mute, ..
+            } => HidOutput::MicLed {
+                pad: narrow,
+                valid,
+                mode,
+                mute,
+            },
             HidOutput::HidRaw { kind, data, .. } => HidOutput::HidRaw {
                 pad: narrow,
                 kind,
@@ -615,6 +641,12 @@ impl HidOutput {
                 out.extend_from_slice(&period.to_le_bytes());
                 out.extend_from_slice(&count.to_le_bytes());
             }
+            HidOutput::MicLed {
+                pad,
+                valid,
+                mode,
+                mute,
+            } => out.extend_from_slice(&[HIDOUT_MIC_LED, *pad, *valid, *mode, *mute]),
             HidOutput::HidRaw { pad, kind, data } => {
                 out.extend_from_slice(&[HIDOUT_HID_RAW, *pad, *kind]);
                 out.extend_from_slice(&data[..data.len().min(HID_REPORT_MAX)]);
@@ -658,6 +690,12 @@ impl HidOutput {
                 amplitude: u16::from_le_bytes([b[4], b[5]]),
                 period: u16::from_le_bytes([b[6], b[7]]),
                 count: u16::from_le_bytes([b[8], b[9]]),
+            }),
+            HIDOUT_MIC_LED if b.len() >= 6 => Some(HidOutput::MicLed {
+                pad: b[2],
+                valid: b[3],
+                mode: b[4],
+                mute: b[5],
             }),
             HIDOUT_HID_RAW if b.len() >= 5 => Some(HidOutput::HidRaw {
                 pad: b[2],
@@ -1543,6 +1581,12 @@ mod tests {
                 pad: 1,
                 flags: 0b0_0101,
                 raw: [0x50, 0x60, 0x70, 0x05, 0x00, 0x00],
+            },
+            HidOutput::MicLed {
+                pad: 3,
+                valid: MIC_LED_MODE_VALID | MIC_LED_MUTE_VALID,
+                mode: 2,
+                mute: 0x10,
             },
         ];
         for ev in &cases {

@@ -943,6 +943,10 @@ pub const PUNKTFUNK_HIDOUT_AUDIO_CTL: u8 = 5;
 /// Raw hidraw report to replay (`HidRaw`). `hid_kind` + `raw`/`raw_len` valid.
 /// Only `PUNKTFUNK_GAMEPAD_STEAMCONTROLLER2` emits these; others drop.
 pub const PUNKTFUNK_HIDOUT_HID_RAW: u8 = 6;
+/// DualSense mic light and capsule mute (`MicLed`). `which` carries the valid bits
+/// (`PUNKTFUNK_MIC_LED_MODE_VALID` / `_MUTE_VALID`), `effect[0]` the light mode
+/// (0 off, 1 on, 2 pulse) and `effect[1]` the power-save byte; `effect_len = 2`.
+pub const PUNKTFUNK_HIDOUT_MIC_LED: u8 = 7;
 /// Capacity of `PunktfunkHidOutput::effect` (DualSense trigger parameter block).
 pub const PUNKTFUNK_HID_EFFECT_MAX: u8 = 11;
 
@@ -1042,6 +1046,19 @@ impl PunktfunkHidOutput {
                 let n = data.len().min(out.raw.len());
                 out.raw[..n].copy_from_slice(&data[..n]);
                 out.raw_len = n as u8;
+            }
+            HidOutput::MicLed {
+                pad,
+                valid,
+                mode,
+                mute,
+            } => {
+                out.kind = PUNKTFUNK_HIDOUT_MIC_LED;
+                out.pad = *pad;
+                out.which = *valid;
+                out.effect[0] = *mode;
+                out.effect[1] = *mute;
+                out.effect_len = 2;
             }
             HidOutput::AudioCtl { pad, flags, raw } => {
                 // Same pack as TrackpadHaptic. `pad as u8` is lossless: decode rejects ≥ MAX_PADS.

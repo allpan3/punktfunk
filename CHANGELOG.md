@@ -43,6 +43,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **`HidOutput::MicLed` (`0xCD`/`0x07`) carries the DualSense mic light and capsule mute.** A
+  game mirrors its own mute state onto the pad's light and the host dropped both bytes, so the
+  light on the controller in the player's hands kept whatever the client last set. A desktop
+  client replays it as `PUNKTFUNK_HIDOUT_MIC_LED`; Android and Apple drop the kind, as they
+  already drop `AudioCtl`.
 - **`RichInput::PadStatus` carries the forwarded pad's battery**, so the DualSense, DualShock 4
   and Switch Pro codecs stamp a real level, charge state and cable into the byte each family
   keeps for it rather than inventing one. Send it with `punktfunk_connection_send_pad_status`

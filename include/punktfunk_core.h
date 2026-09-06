@@ -55,6 +55,11 @@
 // Only `PUNKTFUNK_GAMEPAD_STEAMCONTROLLER2` emits these; others drop.
 #define PUNKTFUNK_HIDOUT_HID_RAW 6
 
+// DualSense mic light and capsule mute (`MicLed`). `which` carries the valid bits
+// (`PUNKTFUNK_MIC_LED_MODE_VALID` / `_MUTE_VALID`), `effect[0]` the light mode
+// (0 off, 1 on, 2 pulse) and `effect[1]` the power-save byte; `effect_len = 2`.
+#define PUNKTFUNK_HIDOUT_MIC_LED 7
+
 // Capacity of `PunktfunkHidOutput::effect` (DualSense trigger parameter block).
 #define PUNKTFUNK_HID_EFFECT_MAX 11
 
@@ -933,6 +938,12 @@
 // Longest [`HidOutput::Trigger`] `effect`: DualSense mode byte plus ten parameters.
 // Encode and decode both clamp here — the only variable-length HID-output variant.
 #define PUNKTFUNK_TRIGGER_EFFECT_MAX 11
+
+// [`HidOutput::MicLed`] `valid`: `mode` is meant (`valid_flag1` bit 0).
+#define PUNKTFUNK_MIC_LED_MODE_VALID 1
+
+// [`HidOutput::MicLed`] `valid`: `mute` is meant (`valid_flag1` bit 1, power-save byte).
+#define PUNKTFUNK_MIC_LED_MUTE_VALID 2
 
 // [`HidOutput::HidRaw`] `kind`: interrupt-OUT / GATT write (`write` / `SDL_hid_write`).
 #define PUNKTFUNK_HID_RAW_OUTPUT 0

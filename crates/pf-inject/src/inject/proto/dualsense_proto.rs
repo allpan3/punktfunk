@@ -507,8 +507,13 @@ pub struct DsFeedback {
 pub mod out_report {
     /// `valid_flag0`: BIT0 compat vibration, BIT1 haptics select, BIT2 R2, BIT3 L2.
     pub const VALID_FLAG0: usize = 1;
-    /// `valid_flag1`: BIT2 lightbar, BIT4 player indicators.
+    /// `valid_flag1`: BIT0 mic light, BIT1 power save (mic mute), BIT2 lightbar,
+    /// BIT4 player indicators.
     pub const VALID_FLAG1: usize = 2;
+    /// `ucMicLightMode`: 0 off, 1 on, 2 pulse.
+    pub const MIC_LIGHT: usize = 9;
+    /// Power-save flags; BIT4 mutes the microphone capsule.
+    pub const AUDIO_MUTE: usize = 10;
     /// High-frequency (small / right) motor.
     pub const MOTOR_RIGHT: usize = 3;
     /// Low-frequency (big / left) motor.
@@ -573,6 +578,18 @@ pub fn parse_ds_output(pad: u8, data: &[u8], fb: &mut DsFeedback) {
                 effect: data[o::LEFT_TRIGGER..o::LEFT_TRIGGER + o::TRIGGER_LEN].to_vec(),
             });
         }
+    }
+    // The mic light and the capsule's own mute. A game mirrors its mute state onto the pad's
+    // light and SDL writes "off" at open, so the physical pad otherwise keeps whatever the
+    // client last set. Both bytes also ride the audio region below, which only a pad-audio
+    // client applies — this kind is what reaches an ordinary DualSense.
+    if flag1 & 0x03 != 0 {
+        fb.hidout.push(HidOutput::MicLed {
+            pad,
+            valid: flag1 & 0x03,
+            mode: data[o::MIC_LIGHT],
+            mute: data[o::AUDIO_MUTE],
+        });
     }
     // Audio region bytes 5..=10. Flags: bit0 = haptics-select (flag0 BIT1, also set on every
     // SDL rumble — so it alone must not emit), bits1..4 = flag0 bits 4..7. Emit if an
@@ -800,6 +817,54 @@ mod tests {
         let mut fb = DsFeedback::default();
         parse_ds_output(0, &data, &mut fb);
         assert_eq!(fb.rumble, Some((0, 0)));
+    }
+
+    /// A game turning the mic light off writes only zeros, so the light has to ride its own
+    /// valid bit rather than "some byte in the region is set" — that is the whole reason this
+    /// is a kind and not a fold of the audio region.
+    #[test]
+    fn the_mic_light_is_forwarded_off_as_well_as_on() {
+        let mut data = vec![0u8; 48];
+        data[0] = 0x02;
+        data[2] = 0x01; // valid_flag1: mic-light control only
+        let mut fb = DsFeedback::default();
+        parse_ds_output(0, &data, &mut fb);
+        assert_eq!(
+            fb.hidout,
+            vec![HidOutput::MicLed {
+                pad: 0,
+                valid: 0x01,
+                mode: 0,
+                mute: 0
+            }],
+            "light off, mute byte not claimed"
+        );
+
+        // Pulse plus a muted capsule, both claimed.
+        let mut data = vec![0u8; 48];
+        data[0] = 0x02;
+        data[2] = 0x03;
+        data[9] = 2;
+        data[10] = 0x10;
+        let mut fb = DsFeedback::default();
+        parse_ds_output(0, &data, &mut fb);
+        assert!(fb.hidout.contains(&HidOutput::MicLed {
+            pad: 0,
+            valid: 0x03,
+            mode: 2,
+            mute: 0x10
+        }));
+
+        // No mic bits, no mic event.
+        let mut data = vec![0u8; 48];
+        data[0] = 0x02;
+        data[2] = 0x04; // lightbar only
+        let mut fb = DsFeedback::default();
+        parse_ds_output(0, &data, &mut fb);
+        assert!(!fb
+            .hidout
+            .iter()
+            .any(|h| matches!(h, HidOutput::MicLed { .. })));
     }
 
     /// Sensor/touch bytes match `struct dualsense_input_report` (gyro 15, accel 21, timestamp

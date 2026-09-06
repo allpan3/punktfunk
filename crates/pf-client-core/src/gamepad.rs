@@ -570,6 +570,10 @@ impl Ds5Feedback {
     const AUDIO: usize = 5 - Self::REPORT_ID_LEN;
     const RIGHT_TRIGGER: usize = 11 - Self::REPORT_ID_LEN;
     const LEFT_TRIGGER: usize = 22 - Self::REPORT_ID_LEN;
+    /// `ucMicLightMode`: USB report byte 9.
+    const MIC_LIGHT: usize = 9 - Self::REPORT_ID_LEN;
+    /// Power-save flags (bit 4 mutes the capsule): USB report byte 10.
+    const AUDIO_MUTE: usize = 10 - Self::REPORT_ID_LEN;
     const PAD_LIGHTS: usize = 44 - Self::REPORT_ID_LEN;
     const LED_RGB: usize = 45 - Self::REPORT_ID_LEN;
     /// Mode byte plus 10 parameters — same width as `PUNKTFUNK_HID_EFFECT_MAX`.
@@ -622,6 +626,16 @@ impl Ds5Feedback {
         p[0] = 0x20 | 0x80;
         p[Self::AUDIO + 1] = volume;
         p[Self::AUDIO + 3] = path;
+        p
+    }
+
+    /// Fold [`HidOutput::MicLed`]. `valid` is the game's own `valid_flag1` bits 0/1, so a
+    /// byte it did not write is not replayed — the pad keeps that half of its state.
+    fn mic_packet(valid: u8, mode: u8, mute: u8) -> [u8; 47] {
+        let mut p = [0u8; 47];
+        p[1] = valid & 0x03;
+        p[Self::MIC_LIGHT] = mode;
+        p[Self::AUDIO_MUTE] = mute;
         p
     }
 
@@ -2068,8 +2082,16 @@ impl Worker {
                         .pad
                         .send_effect(&Ds5Feedback::audio_ctl_packet(flags, &raw));
                 }
+                HidOutput::MicLed {
+                    valid, mode, mute, ..
+                } if is_ds => {
+                    let _ = slot
+                        .pad
+                        .send_effect(&Ds5Feedback::mic_packet(valid, mode, mute));
+                }
                 HidOutput::Trigger { .. }
                 | HidOutput::TrackpadHaptic { .. }
+                | HidOutput::MicLed { .. }
                 | HidOutput::HidRaw { .. }
                 | HidOutput::AudioCtl { .. } => {}
             }
@@ -2099,6 +2121,7 @@ fn hidout_pad(h: &HidOutput) -> u8 {
         | HidOutput::PlayerLeds { pad, .. }
         | HidOutput::Trigger { pad, .. }
         | HidOutput::TrackpadHaptic { pad, .. }
+        | HidOutput::MicLed { pad, .. }
         | HidOutput::HidRaw { pad, .. } => *pad,
         // AudioCtl's pad is the plane's only u16; decode already rejects ≥ MAX_PADS.
         HidOutput::AudioCtl { pad, .. } => *pad as u8,
@@ -2526,6 +2549,8 @@ mod ds5_feedback_tests {
         for (usb, payload) in [
             (11usize, Ds5Feedback::RIGHT_TRIGGER),
             (22, Ds5Feedback::LEFT_TRIGGER),
+            (9, Ds5Feedback::MIC_LIGHT),
+            (10, Ds5Feedback::AUDIO_MUTE),
             (44, Ds5Feedback::PAD_LIGHTS),
             (45, Ds5Feedback::LED_RGB),
         ] {

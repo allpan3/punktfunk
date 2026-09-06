@@ -183,9 +183,10 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeNextHidout(
                     out[3..n].copy_from_slice(&data);
                     n
                 }
-                HidOutput::AudioCtl { .. } => {
-                    // DS5 pad-audio routing/volumes — no Android replay path yet (the 0xD1 sample
-                    // plane isn't rendered here either); drop it like TrackpadHaptic.
+                HidOutput::AudioCtl { .. } | HidOutput::MicLed { .. } => {
+                    // DS5 pad-audio routing/volumes and the mic light — no Android replay path
+                    // yet (the raw output sink reaches only a USB-captured Sony pad, not an
+                    // InputDevice); drop them like TrackpadHaptic.
                     return Ok(-1);
                 }
             };
