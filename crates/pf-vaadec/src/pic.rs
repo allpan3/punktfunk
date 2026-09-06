@@ -161,6 +161,27 @@ pub(crate) fn start_code_len(bytes: &[u8]) -> Option<usize> {
     }
 }
 
+/// 8.5.6 frame zig-zag scan: coded index → raster index, 4x4 and 8x8.
+const ZIGZAG_4X4: [usize; 16] = [0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15];
+const ZIGZAG_8X8: [usize; 64] = [
+    0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20,
+    13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59,
+    52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
+];
+
+/// One scaling list from the parser's coded order into libva's raster order.
+///
+/// 7.3.2.1.1.1 transmits the list along the zig-zag scan and the parser stores
+/// it that way; `VAIQMatrixBufferH264` is raster. Flat lists are identical in
+/// both, which is why a wrong order is invisible on a `Flat_16` host.
+fn raster_from_zigzag<const N: usize>(coded: [u8; N], scan: [usize; N]) -> [u8; N] {
+    let mut out = [0u8; N];
+    for (value, raster) in coded.into_iter().zip(scan) {
+        out[raster] = value;
+    }
+    out
+}
+
 fn va_ref(rp: &RefPic, surface: u32) -> VaPictureH264 {
     VaPictureH264 {
         picture_id: surface,
@@ -394,9 +415,9 @@ pub fn plan_to_va(
         frame_mbs_only_flag: sps.frame_mbs_only_flag,
         mb_adaptive_frame_field_flag: sps.mb_adaptive_frame_field_flag,
         direct_8x8_inference_flag: sps.direct_8x8_inference_flag,
-        // A.3.3.2 is a level constraint, not a picture flag. Drivers are
-        // validated against libavcodec's VAAPI path, which leaves this 0.
-        min_luma_bi_pred_size8x8: false,
+        // A.3.3.2: from level 3.1 an 8x8 luma block is the smallest that may be
+        // bi-predicted. libavcodec's VAAPI path writes the same test.
+        min_luma_bi_pred_size8x8: pic.level_idc as u8 >= 31,
         log2_max_frame_num_minus4: sps.log2_max_frame_num_minus4,
         pic_order_cnt_type: sps.pic_order_cnt_type,
         log2_max_pic_order_cnt_lsb_minus4: sps.log2_max_pic_order_cnt_lsb_minus4,
@@ -439,9 +460,14 @@ pub fn plan_to_va(
 
     // Effective lists: the parser already applied Table 7-2. No SPS/PPS merge here.
     let iq_matrix = VaIqMatrixBufferH264 {
-        scaling_list4x4: pps.scaling_lists_4x4,
+        scaling_list4x4: pps
+            .scaling_lists_4x4
+            .map(|list| raster_from_zigzag(list, ZIGZAG_4X4)),
         // libva carries the two 8x8 lists a 4:2:0 stream uses. The parser keeps six.
-        scaling_list8x8: [pps.scaling_lists_8x8[0], pps.scaling_lists_8x8[1]],
+        scaling_list8x8: [
+            raster_from_zigzag(pps.scaling_lists_8x8[0], ZIGZAG_8X8),
+            raster_from_zigzag(pps.scaling_lists_8x8[1], ZIGZAG_8X8),
+        ],
         va_reserved: [0; 4],
     };
 
@@ -841,6 +867,35 @@ mod tests {
         assert_eq!(start_code_len(&[0x65, 0x88]), None);
         assert_eq!(start_code_len(&[0, 0, 2, 1]), None);
         assert_eq!(start_code_len(&[0, 0]), None);
+    }
+
+    /// Table 7-3/7-4 defaults are transmitted along the zig-zag scan and are
+    /// symmetric matrices once rastered, so an unpermuted list is asymmetric.
+    #[test]
+    fn a_default_scaling_list_rasters_into_a_symmetric_matrix() {
+        // `Default_4x4_Intra`, coded order.
+        let coded = [
+            6, 13, 13, 20, 20, 20, 28, 28, 28, 28, 32, 32, 32, 37, 37, 42u8,
+        ];
+        assert_eq!(
+            raster_from_zigzag(coded, ZIGZAG_4X4),
+            [6, 13, 20, 28, 13, 20, 28, 32, 20, 28, 32, 37, 28, 32, 37, 42]
+        );
+
+        // `Default_8x8_Intra`, coded order.
+        let coded = [
+            6, 10, 10, 13, 11, 13, 16, 16, 16, 16, 18, 18, 18, 18, 18, 23, 23, 23, 23, 23, 23, 25,
+            25, 25, 25, 25, 25, 25, 27, 27, 27, 27, 27, 27, 27, 27, 29, 29, 29, 29, 29, 29, 29, 31,
+            31, 31, 31, 31, 31, 33, 33, 33, 33, 33, 36, 36, 36, 36, 38, 38, 38, 40, 40, 42u8,
+        ];
+        let raster = raster_from_zigzag(coded, ZIGZAG_8X8);
+        for row in 0..8 {
+            for col in 0..8 {
+                assert_eq!(raster[row * 8 + col], raster[col * 8 + row], "{row},{col}");
+            }
+        }
+        assert_eq!(raster[1], 10, "the second raster entry is the second coded");
+        assert_eq!(raster[8], 10, "and its transpose");
     }
 
     #[test]
