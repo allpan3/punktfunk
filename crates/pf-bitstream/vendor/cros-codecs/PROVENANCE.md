@@ -273,5 +273,14 @@ in the future."
     ascending-POC order test, which pins the no-VUI stream's behaviour as unchanged).
     **Report upstream — not yet filed.**
 
+17. `src/codec/av1/parser.rs` — `LoopFilterParams` gains `update_ref_delta` and
+    `update_mode_delta`, the two `u8` masks `parse_loop_filter_parameters` reads as
+    locals. Vulkan's `StdVideoAV1LoopFilter` carries both fields beside the resolved
+    delta arrays, and hardware that keeps its own loop-filter delta state applies only
+    the entries the mask names — with the mask always zero it keeps the previous
+    frame's deltas. The masks are cleared at the top of the parse because
+    `loop_filter_params` may arrive carrying a reference frame's deltas. Consumed by
+    `pf-vkdecode`'s `pic_av1.rs`. **Not filed upstream.**
+
 Re-sync procedure: fetch the AOSP tree, re-apply this trim, diff `codec/` +
 `bitstream_utils.rs` (expect near-zero conflicts), update the commit pin above.

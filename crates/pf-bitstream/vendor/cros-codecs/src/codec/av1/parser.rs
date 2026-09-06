@@ -1069,10 +1069,16 @@ pub struct LoopFilterParams {
     /// reference frame. If this syntax element is not present, it maintains
     /// its previous value.
     pub loop_filter_ref_deltas: [i8; TOTAL_REFS_PER_FRAME],
+    /// Deviation 17: bit `i` is this frame's `update_ref_delta[i]`. Upstream
+    /// reads the flag as a local; hardware that keeps its own delta state
+    /// needs the mask to know which entries this frame rewrote.
+    pub update_ref_delta: u8,
     /// Contains the adjustment needed for the filter level based on the chosen
     /// mode. If this syntax element is not present in the, it maintains its
     /// previous value.
     pub loop_filter_mode_deltas: [i8; 2],
+    /// Deviation 17: bit `i` is this frame's `update_mode_delta[i]`.
+    pub update_mode_delta: u8,
     /// Specifies whether loop filter delta values are present.
     pub delta_lf_present: bool,
     /// Specifies the left shift which should be applied to decoded loop filter
@@ -2625,6 +2631,10 @@ impl Parser {
         num_planes: u32,
     ) -> Result<(), String> {
         let lf = &mut fh.loop_filter_params;
+        // Deviation 17: the masks describe this frame only, and `lf` may carry a
+        // reference frame's deltas in.
+        lf.update_ref_delta = 0;
+        lf.update_mode_delta = 0;
         if fh.coded_lossless || fh.allow_intrabc {
             lf.loop_filter_level[0] = 0;
             lf.loop_filter_level[1] = 0;
@@ -2650,6 +2660,8 @@ impl Parser {
                 for i in 0..TOTAL_REFS_PER_FRAME {
                     let update_ref_delta = r.0.read_bit()?;
                     if update_ref_delta {
+                        // Deviation 17: keep the flag, not just its effect.
+                        lf.update_ref_delta |= 1 << i;
                         lf.loop_filter_ref_deltas[i] = r.read_su(7)? as i8;
                     }
                 }
@@ -2657,6 +2669,7 @@ impl Parser {
                 for i in 0..2 {
                     let update_mode_delta = r.0.read_bit()?;
                     if update_mode_delta {
+                        lf.update_mode_delta |= 1 << i;
                         lf.loop_filter_mode_deltas[i] = r.read_su(7)? as i8;
                     }
                 }
