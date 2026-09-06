@@ -1166,6 +1166,11 @@ pub unsafe fn apply_low_latency_config(cfg: &mut nv::NV_ENC_CONFIG, c: LowLatenc
                 vui.colourPrimaries = prim;
                 vui.transferCharacteristics = trc;
                 vui.colourMatrix = mat;
+                // E.2.1: without the restriction a decoder infers
+                // `max_num_reorder_frames = MaxDpbFrames` and holds a whole DPB
+                // before it shows anything. NVENC writes 0 here (`frameIntervalP
+                // = 1`, no B-frames); HEVC states its depth in the SPS instead.
+                vui.bitstreamRestrictionFlag = 1;
             }
             Codec::Av1 => {
                 // SAFETY: AV1 session (matched on `c.codec`), so `av1Config` is the active arm;
