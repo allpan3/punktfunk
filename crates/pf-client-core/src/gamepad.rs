@@ -12,7 +12,7 @@
 
 use crate::menu_nav::{ring_sector, MenuNav, MenuSample};
 pub use crate::menu_nav::{MenuDir, MenuEvent, MenuPulse, PadBattery, PadInfo};
-use punktfunk_core::client::{ActuatorQuirks, NativeClient};
+use punktfunk_core::client::{ActuatorQuirks, NativeClient, RumbleCommand};
 use punktfunk_core::config::GamepadPref;
 use punktfunk_core::input::{gamepad as wire, InputEvent, InputKind};
 use punktfunk_core::quic::{HidOutput, RichInput};
@@ -650,6 +650,10 @@ struct Slot {
     /// bit0 = haptics, bit1 = speaker. Nonzero only for tier-A; bit0 also suppresses wire rumble.
     audio_caps: u8,
     rumble_suppressed_logged: bool,
+    /// This pad has trigger motors (Xbox One/Series impulse triggers). Read once at open:
+    /// [`Worker::issue_rumble`] runs at the rumble rate and SDL fails the call on a pad
+    /// without them.
+    trigger_rumble: bool,
 }
 
 impl Slot {
@@ -678,6 +682,7 @@ impl Slot {
             gesture: SelectGesture::default(),
             audio_caps: 0,
             rumble_suppressed_logged: false,
+            trigger_rumble: false,
         }
     }
 
@@ -1010,6 +1015,9 @@ impl Worker {
                 let mut slot = Slot::new(id, index, pref, declared, pad);
                 Self::set_slot_sensors(&mut slot, true);
                 slot.audio_caps = self.pad_audio_caps_for(id, &slot.pad);
+                // SAFETY: `has_rumble_triggers` only reads the open pad's SDL properties;
+                // the `unsafe` is the binding's, not a real precondition.
+                slot.trigger_rumble = unsafe { slot.pad.has_rumble_triggers() };
                 // Kind before any input so the host builds a matching virtual device. Core
                 // re-sends against datagram loss; an older host ignores it.
                 if let Some(c) = &self.attached {
@@ -1118,6 +1126,9 @@ impl Worker {
     fn close_slot_at(&mut self, i: usize) {
         // Silence before the handle drops; do not depend on SDL at close. Errors if already gone.
         let _ = self.slots[i].pad.set_rumble(0, 0, 100);
+        if self.slots[i].trigger_rumble {
+            let _ = self.slots[i].pad.set_rumble_triggers(0, 0, 100);
+        }
         Self::reset_slot_feedback(&mut self.slots[i]);
         if let Some(c) = self.attached.clone() {
             Self::flush_slot(&c, &mut self.slots[i]);
@@ -1920,14 +1931,21 @@ impl Worker {
         }
     }
 
-    /// Apply one engine command verbatim. `backstop_ms` is the SDL duration — a hardware
-    /// net under a stalled worker; the engine emits explicit zeros at every policy stop.
-    fn issue_rumble(slot: &mut Slot, low: u16, high: u16, backstop_ms: u32) {
-        let dur_ms: u32 = if (low, high) == (0, 0) {
+    /// Apply one engine command verbatim, all four motors. `backstop_ms` is the SDL duration
+    /// — a hardware net under a stalled worker; the engine emits explicit zeros at every
+    /// policy stop.
+    ///
+    /// Triggers ride the same duration and the same stop. A trigger-only command is live, so
+    /// the silence test reads all four levels: gating on the handles alone would cut a
+    /// trigger effect to the 100 ms stop pulse.
+    fn issue_rumble(slot: &mut Slot, cmd: &RumbleCommand) {
+        let (low, high) = (cmd.low, cmd.high);
+        let (lt, rt) = (cmd.left_trigger, cmd.right_trigger);
+        let dur_ms: u32 = if (low, high, lt, rt) == (0, 0, 0, 0) {
             100
         } else {
             // No local floor: actuator floors live in `ActuatorQuirks::min_pulse_ms`.
-            backstop_ms
+            cmd.backstop_ms
         };
         match slot.pad.set_rumble(low, high, dur_ms) {
             Err(e) => {
@@ -1956,7 +1974,7 @@ impl Worker {
                     }
                     continue;
                 }
-                Self::issue_rumble(slot, cmd.low, cmd.high, cmd.backstop_ms);
+                Self::issue_rumble(slot, &cmd);
             }
         }
         while let Ok(hid) = connector.next_hidout(Duration::ZERO) {

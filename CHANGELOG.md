@@ -333,6 +333,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **The desktop client renders the Xbox pad's trigger motors.** The v3 rumble tail has carried
+  `left_trigger` / `right_trigger` into `RumbleCommand` all along and the SDL renderer dropped
+  them at the last call, so impulse triggers were silent in every desktop session. Nothing to
+  do — a pad without trigger motors is untouched.
 - **An Android Steam Controller 2 over Bluetooth writes to the right GATT characteristics.**
   Valve routes each output report id to its own characteristic at `id + 0x35` and every feature
   command to `100F6C34`, id byte stripped in both cases, where the link had written every frame
