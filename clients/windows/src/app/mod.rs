@@ -62,6 +62,7 @@ use crate::trust::{KnownHosts, Settings};
 use hosts::HostsProps;
 use pf_client_core::discovery::{self, DiscoveredHost, DiscoveryEvent};
 use pf_client_core::gamepad::GamepadService;
+use pf_client_core::start;
 use punktfunk_core::client::NativeClient;
 use speed::{SpeedProps, SpeedState};
 use std::collections::HashMap;

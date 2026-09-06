@@ -648,9 +648,10 @@ impl relm4::factory::FactoryComponent for HostCard {
                     // never resolves. Unchecked is not "not the default": a lone paired host
                     // is the default with nothing written.
                     if k.paired {
-                        let named = trust::Settings::load().default_host.as_deref()
-                            == k.id.as_deref()
-                            && k.id.is_some();
+                        // ponytail: one settings read per card build, not per frame — cards are
+                        // rebuilt on store changes only. Hoist if the list ever grows large.
+                        let named = k.id.is_some()
+                            && Settings::load().default_host.as_deref() == k.id.as_deref();
                         manage.append(
                             Some(if named {
                                 "Default host \u{2713}"
