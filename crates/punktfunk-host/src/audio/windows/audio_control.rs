@@ -191,14 +191,26 @@ fn pad_render_ids(renders: &[Endpoint]) -> Vec<String> {
 /// assignment. `park_defaults` is true only from desktop-audio capture open: that parks
 /// playback on the loopback sink and recording on the virtual mic. The idle mic pump
 /// passes false — it must neither silence speakers nor steal the default microphone.
+/// Set once a wait has timed out: minting succeeded but MMDevice never listed the result, so
+/// every later pass would pay the ceiling for endpoints that are not coming. True inside a seat,
+/// where minting lands a machine-wide devnode the remote session cannot enumerate at all.
+static MINTED_NEVER_LISTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Render and capture endpoints, once everything already minted is enumerable. MMDevice publishes
 /// a minted endpoint a few tens of milliseconds after the devnode lands, so an immediate
 /// enumeration can miss the endpoints this process just created and plan as if the box had none.
 /// Waits only for ids [`minted_ids`](super::minted::minted_ids) reports, so a box that mints
-/// nothing pays one enumeration.
+/// nothing — or one where they never show, see [`MINTED_NEVER_LISTED`] — pays one enumeration.
 fn enumerate_including_minted() -> (Vec<Endpoint>, Vec<Endpoint>) {
+    use std::sync::atomic::Ordering;
     // 500 ms ceiling: measured appearance is ~12 ms, and the caller is on the session-open path.
-    for attempt in 0..10 {
+    let attempts = if MINTED_NEVER_LISTED.load(Ordering::Relaxed) {
+        1
+    } else {
+        10
+    };
+    for attempt in 0..attempts {
         let renders = list_endpoints(Direction::Render);
         let captures = list_endpoints(Direction::Capture);
         let minted = super::minted::minted_ids();
@@ -215,11 +227,17 @@ fn enumerate_including_minted() -> (Vec<Endpoint>, Vec<Endpoint>) {
             }
             return (renders, captures);
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        if attempt + 1 < attempts {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
-    tracing::warn!(
-        "a minted audio endpoint never appeared in the device enumeration — planning without it"
-    );
+    if !MINTED_NEVER_LISTED.swap(true, Ordering::Relaxed) {
+        tracing::info!(
+            "a minted audio endpoint never appeared in this session's device enumeration — \
+             planning without it, and not waiting for it again (a seat's remote session cannot \
+             enumerate the machine-wide devnode minting creates)"
+        );
+    }
     (
         list_endpoints(Direction::Render),
         list_endpoints(Direction::Capture),
