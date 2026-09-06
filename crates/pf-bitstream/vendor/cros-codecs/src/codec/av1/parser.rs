@@ -2031,8 +2031,16 @@ impl Parser {
     }
 
     fn parse_temporal_delimiter_obu(&mut self) -> Result<(), String> {
-        self.seen_frame_header = false;
+        self.reset_frame_header_state();
         Ok(())
+    }
+
+    /// 5.6: `SeenFrameHeader` is temporal-unit state, cleared by the unit's
+    /// temporal delimiter. A caller that knows the unit boundary can clear it
+    /// here, so a unit whose delimiter is missing cannot replay the previous
+    /// unit's header.
+    pub fn reset_frame_header_state(&mut self) {
+        self.seen_frame_header = false;
     }
 
     fn parse_sequence_header_obu(&mut self, obu: &Obu) -> Result<Rc<SequenceHeaderObu>, String> {

@@ -273,5 +273,35 @@ in the future."
     ascending-POC order test, which pins the no-VUI stream's behaviour as unchanged).
     **Report upstream — not yet filed.**
 
+17. `src/codec/h265/parser.rs` — `Slice::replace_header` no longer preserves the
+    dependent segment's `num_pic_total_curr`. The field is `NumPicTotalCurr` (7-57),
+    derived per picture from the RPS and coded only in an independent segment header,
+    so upstream's preserve-list left every dependent segment at 0. `pf-bitstream` sizes
+    the temporal reference list from it, and a `list_entry_lX` the independent header
+    coded then indexed past the end: the dependent segment lost its whole
+    `RefPicList0` to `MissingReference` and decoded from a substitute. Regression test:
+    `a_dependent_segment_resolves_the_list_the_independent_header_modified`.
+    **Report upstream — not yet filed.**
+
+18. `src/codec/h265/dpb.rs` — `find_lowest_poc_for_bumping` returns the entry it
+    picked, not the first entry sharing that POC. Upstream finds the lowest POC among
+    the pictures needed for output, then re-finds a position by POC alone. Two entries
+    can hold one POC after a loss; if the first is already output and still a
+    reference, `bump` clears a flag that is already clear and removes nothing, so the
+    caller's "still needed for output" condition never falls and C.5.2.3 spins on the
+    decode thread. `H265Planner::bump_as_needed` caps its loop at the DPB length as a
+    belt. Regression test: `duplicate_pocs_in_the_dpb_do_not_wedge_the_bumping_loop`.
+    **Report upstream — not yet filed.**
+
+19. `src/codec/av1/parser.rs` — new `pub fn reset_frame_header_state()`, which
+    `parse_temporal_delimiter_obu` now calls. `SeenFrameHeader` (5.6) is temporal-unit
+    state and upstream clears it only from a temporal delimiter, the last tile group,
+    or a `show_existing_frame`. A frame header that fails to parse leaves it set —
+    `parse_frame_header_obu` raises it before parsing — and the next unit without a
+    delimiter is then answered with the previous unit's header. `Av1Planner::plan_au`
+    plans exactly one temporal unit, so it clears the flag on entry. Regression test:
+    `a_unit_behind_a_broken_frame_header_plans_its_own_header`.
+    **Report upstream — not yet filed.**
+
 Re-sync procedure: fetch the AOSP tree, re-apply this trim, diff `codec/` +
 `bitstream_utils.rs` (expect near-zero conflicts), update the commit pin above.

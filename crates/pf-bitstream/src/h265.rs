@@ -591,10 +591,15 @@ impl H265Planner {
                             }
                         }
                     }
-                    if !slice.header.dependent_slice_segment_flag {
+                    let cur = current.as_mut().expect("a picture was begun above");
+                    // 7.4.7.1: the copy exists to complete a dependent segment's
+                    // header. A PPS that forbids them never asks for it, so the
+                    // whole header is not cloned per slice on a single-segment stream.
+                    if !slice.header.dependent_slice_segment_flag
+                        && cur.first_slice_pps.dependent_slice_segments_enabled_flag
+                    {
                         self.last_independent_header = Some(slice.header.clone());
                     }
-                    let cur = current.as_mut().expect("a picture was begun above");
                     slices.push(self.plan_slice(cur, slice, range, &mut warnings)?);
                 }
                 other => trace!("skipping NAL unit type {other:?}"),
@@ -604,7 +609,7 @@ impl H265Planner {
         if !saw_nalu {
             return Err(PlanError::Parse("no NAL units in access unit".into()));
         }
-        let cur = current
+        let mut cur = current
             .ok_or_else(|| PlanError::Parse("access unit contains no coded picture".into()))?;
 
         // Ask over the slice lists, not the RPS/DPB snapshot: 8.3.2 retains
@@ -618,9 +623,9 @@ impl H265Planner {
                 .map(|r| r.id),
         ) && !warnings.iter().any(PlanWarning::is_integrity);
         let picture = Self::picture_plan(&cur, recovery_point, references_clean);
-        let rps = cur.rps_plan.clone();
-        let dpb_refs = cur.dpb_refs.clone();
-        // Cloned before finish_picture consumes `cur`.
+        let rps = mem::take(&mut cur.rps_plan);
+        let dpb_refs = mem::take(&mut cur.dpb_refs);
+        // Taken before finish_picture consumes `cur`; it reads neither.
         let pps = Rc::clone(&cur.first_slice_pps);
         let sps = Rc::clone(&pps.sps);
         let stored = self.finish_picture(cur)?;
@@ -764,7 +769,10 @@ impl H265Planner {
     /// Queue pictures C.5.2 declares ready. `additional` selects C.5.2.3 (after
     /// decode) over C.5.2.2 (before) — upstream's `BumpingType`.
     fn bump_as_needed(&mut self, sps: &Sps, additional: bool) {
-        loop {
+        // One bump clears one picture's output flag, so the DPB's own length
+        // bounds the loop. A bump that clears nothing would spin the decode
+        // thread; the cap is what makes that a stall of one AU, not a hang.
+        for _ in 0..self.dpb.len() {
             let needs = if additional {
                 self.dpb.needs_additional_bumping(sps)
             } else {
@@ -1814,6 +1822,10 @@ mod tests {
     }
 
     fn synth_pps(dependent_slice_segments: bool) -> Vec<u8> {
+        synth_pps_opts(dependent_slice_segments, false)
+    }
+
+    fn synth_pps_opts(dependent_slice_segments: bool, lists_modification: bool) -> Vec<u8> {
         let mut s = BitSink::new();
         s.ue(0); // pps_pic_parameter_set_id
         s.ue(0); // pps_seq_parameter_set_id
@@ -1839,7 +1851,7 @@ mod tests {
         s.bit(0); // pps_loop_filter_across_slices_enabled_flag
         s.bit(0); // deblocking_filter_control_present_flag
         s.bit(0); // pps_scaling_list_data_present_flag
-        s.bit(0); // lists_modification_present_flag
+        s.bit(u32::from(lists_modification)); // lists_modification_present_flag
         s.ue(0); // log2_parallel_merge_level_minus2
         s.bit(0); // slice_segment_header_extension_present_flag
         s.bit(0); // pps_extension_present_flag
@@ -1871,6 +1883,10 @@ mod tests {
         num_ref_idx_l0: u32,
         num_ref_idx_l1: u32,
         no_output_of_prior_pics: bool,
+        /// `list_entry_l0` per active index, written when the PPS sets
+        /// `lists_modification_present_flag` and NumPicTotalCurr exceeds 1.
+        list_entry_l0: Vec<u32>,
+        pps_lists_modification: bool,
     }
 
     impl Default for SliceOpts {
@@ -1889,6 +1905,8 @@ mod tests {
                 num_ref_idx_l0: 1,
                 num_ref_idx_l1: 1,
                 no_output_of_prior_pics: false,
+                list_entry_l0: Vec::new(),
+                pps_lists_modification: false,
             }
         }
     }
@@ -1946,6 +1964,23 @@ mod tests {
                 s.ue(o.num_ref_idx_l0 - 1);
                 if o.slice_type == 0 {
                     s.ue(o.num_ref_idx_l1 - 1);
+                }
+                // ref_pic_lists_modification(): NumPicTotalCurr (7-57) is the
+                // count of used_by_curr entries; the parser reads it back the
+                // same way, so `list_entry_l0` is coded in its bit width.
+                if o.pps_lists_modification {
+                    let num_pic_total_curr = o.neg.iter().filter(|e| e.1).count()
+                        + o.pos.iter().filter(|e| e.1).count()
+                        + o.lt.iter().filter(|e| e.1).count();
+                    if num_pic_total_curr > 1 {
+                        s.bit(u32::from(!o.list_entry_l0.is_empty()));
+                        let bits = (num_pic_total_curr as f64).log2().ceil() as usize;
+                        for entry in &o.list_entry_l0 {
+                            s.bits(bits, *entry);
+                        }
+                    }
+                }
+                if o.slice_type == 0 {
                     s.bit(0); // mvd_l1_zero_flag
                 }
                 s.ue(0); // five_minus_max_num_merge_cand
@@ -2685,6 +2720,87 @@ mod tests {
             dependent.type_.is_i(),
             "the dependent header inherited the independent slice's type"
         );
+    }
+
+    /// 7.4.7.1: `NumPicTotalCurr` is inherited, not re-derived. A dependent
+    /// segment carries none of its own, so a `list_entry_lX` the independent
+    /// header coded fell outside the temporal list and left the segment a hole.
+    #[test]
+    fn a_dependent_segment_resolves_the_list_the_independent_header_modified() {
+        let sps = SpsOpts {
+            width: 128,
+            ..Default::default()
+        };
+        let mut au0 = synth_sps(&sps);
+        au0.extend(synth_pps_opts(true, true));
+        au0.extend(idr_slice());
+        let mut planner = H265Planner::new();
+        let idr_id = planner.plan_au(&au0).unwrap().dpb.stored.unwrap();
+        planner.plan_au(&trail_p(1, &[(0, true)], 1)).unwrap();
+
+        // Two current references (POC 1 then POC 0); the list names the second.
+        let mut au = synth_slice(&SliceOpts {
+            poc_lsb: 2,
+            neg: vec![(0, true), (0, true)],
+            num_ref_idx_l0: 1,
+            pps_lists_modification: true,
+            list_entry_l0: vec![1],
+            pps_dependent_enabled: true,
+            ..Default::default()
+        });
+        au.extend(synth_slice(&SliceOpts {
+            segment: Some((1, 1, true)),
+            pps_dependent_enabled: true,
+            ..Default::default()
+        }));
+
+        let plan = planner.plan_au(&au).unwrap();
+        assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+        assert_eq!(plan.slices.len(), 2);
+        assert_eq!(plan.slices[0].ref_list0[0].id, idr_id);
+        assert_eq!(
+            plan.slices[0].ref_list0, plan.slices[1].ref_list0,
+            "both segments decode the same picture from the same list"
+        );
+    }
+
+    /// A loss can leave two DPB entries at one POC. Bumping keyed on POC alone
+    /// returned the first of them — already output and still a reference — so
+    /// the output count never fell and the planner spun.
+    #[test]
+    fn duplicate_pocs_in_the_dpb_do_not_wedge_the_bumping_loop() {
+        let sps = SpsOpts {
+            long_term: true,
+            ..Default::default()
+        };
+        let mut planner = H265Planner::new();
+        let mut au0 = param_sets(&sps);
+        au0.extend(idr_slice());
+        planner.plan_au(&au0).unwrap();
+        let p1 = planner
+            .plan_au(&synth_slice(&SliceOpts {
+                poc_lsb: 1,
+                neg: vec![(0, true)],
+                sps_long_term: true,
+                num_ref_idx_l0: 1,
+                ..Default::default()
+            }))
+            .unwrap();
+        assert_eq!(p1.picture.pic_order_cnt, 1);
+
+        // Same POC lsb again, naming the picture at POC 1 as a long-term
+        // reference so it stays resident after it was output.
+        let p2 = planner
+            .plan_au(&synth_slice(&SliceOpts {
+                poc_lsb: 1,
+                lt: vec![(1, true, None)],
+                sps_long_term: true,
+                num_ref_idx_l0: 1,
+                ..Default::default()
+            }))
+            .unwrap();
+        assert_eq!(p2.picture.pic_order_cnt, 1);
+        assert_eq!(p2.dpb.outputs, vec![p2.dpb.stored.unwrap()]);
     }
 
     #[test]

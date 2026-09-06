@@ -1805,7 +1805,9 @@ pub struct Slice<'a> {
 
 impl<'a> Slice<'a> {
     /// Sets the header for dependent slices by copying from an independent
-    /// slice.
+    /// slice. Only the segment's own syntax survives; `NumPicTotalCurr` (7-57)
+    /// is derived per picture and is never coded in a dependent segment, so it
+    /// is inherited like the rest.
     pub fn replace_header(&mut self, header: SliceHeader) -> Result<(), String> {
         if !self.header.dependent_slice_segment_flag {
             Err("Replacing the slice header is only possible for dependent slices".into())
@@ -1818,7 +1820,6 @@ impl<'a> Slice<'a> {
 
             let offset_len_minus1 = self.header.offset_len_minus1;
             let entry_point_offset_minus1 = self.header.entry_point_offset_minus1;
-            let num_pic_total_curr = self.header.num_pic_total_curr;
             let header_bit_size = self.header.header_bit_size;
             let n_emulation_prevention_bytes = self.header.n_emulation_prevention_bytes;
             let curr_rps_idx = self.header.curr_rps_idx;
@@ -1833,7 +1834,6 @@ impl<'a> Slice<'a> {
             self.header.segment_address = segment_address;
             self.header.offset_len_minus1 = offset_len_minus1;
             self.header.entry_point_offset_minus1 = entry_point_offset_minus1;
-            self.header.num_pic_total_curr = num_pic_total_curr;
             self.header.header_bit_size = header_bit_size;
             self.header.n_emulation_prevention_bytes = n_emulation_prevention_bytes;
             self.header.curr_rps_idx = curr_rps_idx;

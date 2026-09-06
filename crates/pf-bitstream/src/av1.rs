@@ -334,6 +334,10 @@ impl Av1Planner {
         let mut plans: Vec<AuPlan> = Vec::new();
         let mut pending: Option<(FrameHeaderObu, Vec<TilePlan>)> = None;
         let mut consumed = 0usize;
+        // 5.6: one call is one temporal unit, and `SeenFrameHeader` is that
+        // unit's state. Left set by a broken header, it makes the next unit
+        // replay the last good one when no temporal delimiter clears it.
+        self.parser.reset_frame_header_state();
 
         while consumed < au.len() {
             let action = match self.parser.read_obu(&au[consumed..]) {
@@ -1088,6 +1092,32 @@ mod tests {
         eprintln!(
             "frames {frames} · frames needing the fixup {needing_fixup} · strengths \
              corrected {strengths}"
+        );
+    }
+
+    /// 5.6: `SeenFrameHeader` belongs to the temporal unit. A frame header that
+    /// fails to parse leaves the parser's copy behind, and the next unit then
+    /// plans that stale header as its own instead of the one it carries.
+    #[test]
+    fn a_unit_behind_a_broken_frame_header_plans_its_own_header() {
+        let units: Vec<&[u8]> = IvfIterator::new(AV1_25FPS).take(4).collect();
+        // The lone Frame OBU retyped as a bare OBU_FRAME_HEADER: the header
+        // parses, its trailing bits do not, exactly as a cut unit reads.
+        let mut broken = units[2].to_vec();
+        assert_eq!(broken[2] & 0x78, 6 << 3, "the third byte is the Frame OBU");
+        broken[2] = (broken[2] & !0x78) | (3 << 3);
+        // Unit 3 without its temporal delimiter: nothing else clears the flag.
+        let no_delimiter = units[3][2..].to_vec();
+
+        let mut planner = Av1Planner::new();
+        planner.plan_au(units[0]).unwrap();
+        planner.plan_au(units[1]).unwrap();
+        assert!(planner.plan_au(&broken).is_err());
+
+        let plans = planner.plan_au(&no_delimiter).unwrap();
+        assert_eq!(
+            plans[0].picture.order_hint, 3,
+            "the unit must plan the header it carries, not the last good one"
         );
     }
 

@@ -142,17 +142,19 @@ impl<T: Clone> Dpb<T> {
     }
 
     /// Find the lowest POC in the DPB that can be bumped.
+    ///
+    /// Keyed by position, not by POC: two entries can share a POC after a loss,
+    /// and re-finding by POC alone returns the first of them even when it was
+    /// already output. `bump` then clears a flag that is already clear, so the
+    /// caller's "still needed for output" condition never falls.
     fn find_lowest_poc_for_bumping(&self) -> Option<DpbEntry<T>> {
-        let lowest = self
-            .pictures()
-            .filter(|pic| pic.needed_for_output)
-            .min_by_key(|pic| pic.pic_order_cnt_val)?;
-
         let position = self
             .entries
             .iter()
-            .position(|handle| handle.0.borrow().pic_order_cnt_val == lowest.pic_order_cnt_val)
-            .unwrap();
+            .enumerate()
+            .filter(|(_, handle)| handle.0.borrow().needed_for_output)
+            .min_by_key(|(_, handle)| handle.0.borrow().pic_order_cnt_val)
+            .map(|(position, _)| position)?;
 
         Some(self.entries[position].clone())
     }

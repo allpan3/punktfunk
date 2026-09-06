@@ -468,7 +468,19 @@ impl H264Planner {
                     }
                     let slice = match self.parser.parse_slice_header(nalu) {
                         Ok(slice) => slice,
-                        Err(err) => return Err(Self::slice_parse_error(err)),
+                        Err(err) => {
+                            // A continuation that fails to parse is a mid-AU cut:
+                            // keep the slices already planned rather than losing
+                            // the whole picture. H.265 does the same at its own
+                            // slice-header call.
+                            if current.is_some() {
+                                warnings.push(PlanWarning::TruncatedAu {
+                                    offset: range.start,
+                                });
+                                break;
+                            }
+                            return Err(Self::slice_parse_error(err));
+                        }
                     };
                     match &current {
                         None => {
@@ -485,12 +497,17 @@ impl H264Planner {
                             ));
                         }
                         Some(cur) => {
-                            // Continuation slice must share frame_num and IDR-ness
-                            // with the first (7.4.3). A foreign slice and everything
-                            // after it are dropped as [`PlanWarning::TruncatedAu`].
+                            // 7.4.1.2.4: a continuation shares frame_num, IDR-ness,
+                            // POC lsb and PPS id with the first slice. Any of them
+                            // differing starts another picture; drop the foreign
+                            // slice and the tail as [`PlanWarning::TruncatedAu`].
                             if u32::from(slice.header.frame_num) != cur.pic.frame_num
                                 || slice.nalu.header.idr_pic_flag
                                     != matches!(cur.pic.is_idr, IsIdr::Yes { .. })
+                                || i32::from(slice.header.pic_order_cnt_lsb)
+                                    != cur.pic.pic_order_cnt_lsb
+                                || slice.header.pic_parameter_set_id
+                                    != cur.first_slice_pps.pic_parameter_set_id
                             {
                                 warnings.push(PlanWarning::TruncatedAu {
                                     offset: range.start,
@@ -512,7 +529,7 @@ impl H264Planner {
         if !saw_nalu {
             return Err(PlanError::Parse("no NAL units in access unit".into()));
         }
-        let cur = current
+        let mut cur = current
             .ok_or_else(|| PlanError::Parse("access unit contains no coded picture".into()))?;
 
         // Slice reference lists, not the DPB snapshot: a resident unreferenced
@@ -528,10 +545,10 @@ impl H264Planner {
         // Before `finish_picture`: MMCO 5 rewrites stored POC after this, but
         // backends submit the 8.2.1 values.
         let picture = Self::picture_plan(&cur, recovery_point, references_clean);
-        // Clone before `finish_picture` consumes `cur`.
+        // Taken before `finish_picture` consumes `cur`; it reads neither.
         let pps = Rc::clone(&cur.first_slice_pps);
         let sps = Rc::clone(&pps.sps);
-        let dpb_refs = cur.dpb_refs.clone();
+        let dpb_refs = mem::take(&mut cur.dpb_refs);
         let stored = self.finish_picture(cur, &mut warnings)?;
 
         // Delta against the last reported live set, not this call's start: a
@@ -607,6 +624,15 @@ impl H264Planner {
         if dpb_limit(sps) > MAINSTREAM_MAX_DPB_SLOTS {
             return Err(PlanError::OutsideEnvelope(
                 "DPB deeper than 16 frames (max_dec_frame_buffering)",
+            ));
+        }
+        // E.2.1 requires `max_dec_frame_buffering >= max_num_ref_frames`, and
+        // the VUI override drops the parser's `max_num_ref_frames` floor. Below
+        // it the DPB cannot hold the references the stream marks: `store_picture`
+        // fails on every picture and the planner never advances.
+        if dpb_limit(sps) < usize::from(sps.max_num_ref_frames) {
+            return Err(PlanError::OutsideEnvelope(
+                "max_dec_frame_buffering below max_num_ref_frames",
             ));
         }
         Ok(())
@@ -732,17 +758,15 @@ impl H264Planner {
                         (abs_frame_num - 1) / sps.num_ref_frames_in_pic_order_cnt_cycle as u32;
                     let frame_num_in_pic_order_cnt_cycle =
                         (abs_frame_num - 1) % sps.num_ref_frames_in_pic_order_cnt_cycle as u32;
-                    expected_pic_order_cnt =
-                        pic_order_cnt_cycle_cnt as i32 * sps.expected_delta_per_pic_order_cnt_cycle;
+                    expected_pic_order_cnt = (pic_order_cnt_cycle_cnt as i32)
+                        .saturating_mul(sps.expected_delta_per_pic_order_cnt_cycle);
 
-                    assert!(frame_num_in_pic_order_cnt_cycle < 255);
-
-                    // Upstream sums the full cycle; 8.2.1.2 sums
-                    // `frame_num_in_pic_order_cnt_cycle + 1` entries. Ported as-is:
-                    // hosts emit pic_order_cnt_type 0 only.
-                    let cycle = usize::from(sps.num_ref_frames_in_pic_order_cnt_cycle);
-                    for offset in &sps.offset_for_ref_frame[..cycle] {
-                        expected_pic_order_cnt += offset;
+                    // 8.2.1.2 sums the first `frame_num_in_pic_order_cnt_cycle + 1`
+                    // entries, not the whole cycle. Saturating: each entry is an
+                    // unbounded se(v).
+                    let taken = frame_num_in_pic_order_cnt_cycle as usize + 1;
+                    for offset in &sps.offset_for_ref_frame[..taken] {
+                        expected_pic_order_cnt = expected_pic_order_cnt.saturating_add(*offset);
                     }
                 }
 
@@ -1168,64 +1192,60 @@ impl H264Planner {
     /// previous existing entry (else the first). Compacting would shift every
     /// later `ref_idx`. An all-placeholder list collapses to empty (caller warns).
     fn to_ref_pics(list: &[&DpbEntry<PicId>], warnings: &mut Vec<PlanWarning>) -> Vec<RefPic> {
-        // Slot carries frame_num too: a long-term substitute is relabelled short-term.
-        let mut slots: Vec<Option<(RefPic, u16)>> = Vec::with_capacity(list.len());
+        let mut out: Vec<RefPic> = Vec::with_capacity(list.len());
+        // Holes before the first existing entry: no predecessor yet, so they are
+        // counted here and filled from `out[0]` once the pass ends.
+        let mut leading_holes = 0usize;
+        let mut prev_substitute: Option<RefPic> = None;
+        let mut first_substitute: Option<RefPic> = None;
         for entry in list {
             let pic = entry.pic.borrow();
-            match entry.reference {
-                Some(id) => {
-                    let is_long_term = matches!(pic.reference(), Reference::LongTerm);
-                    let frame_num_or_lt_idx = if is_long_term {
-                        // `long_term_frame_idx` is ue(v); spec bounds it via
-                        // max_long_term_frame_idx, the parser does not. Saturate, do not truncate.
-                        u16::try_from(pic.long_term_frame_idx).unwrap_or(u16::MAX)
-                    } else {
-                        pic.frame_num as u16
-                    };
-                    slots.push(Some((
-                        RefPic {
-                            id,
-                            top_field_order_cnt: pic.top_field_order_cnt,
-                            bottom_field_order_cnt: pic.bottom_field_order_cnt,
-                            is_long_term,
-                            frame_num_or_lt_idx,
-                        },
-                        pic.frame_num as u16,
-                    )));
+            let Some(id) = entry.reference else {
+                let warning = PlanWarning::MissingReference {
+                    context: "non-existing picture (frame_num gap placeholder) in list",
+                    detail: format!("frame_num {}", pic.frame_num),
+                };
+                // One per placeholder for the picture, not one per slice naming it.
+                if !warnings.contains(&warning) {
+                    warnings.push(warning);
                 }
-                None => {
-                    warnings.push(PlanWarning::MissingReference {
-                        context: "non-existing picture (frame_num gap placeholder) in list",
-                        detail: format!("frame_num {}", pic.frame_num),
-                    });
-                    slots.push(None);
+                match prev_substitute {
+                    Some(substitute) => out.push(substitute),
+                    None => leading_holes += 1,
                 }
-            }
+                continue;
+            };
+            let is_long_term = matches!(pic.reference(), Reference::LongTerm);
+            let real = RefPic {
+                id,
+                top_field_order_cnt: pic.top_field_order_cnt,
+                bottom_field_order_cnt: pic.bottom_field_order_cnt,
+                is_long_term,
+                frame_num_or_lt_idx: if is_long_term {
+                    // `long_term_frame_idx` is ue(v); spec bounds it via
+                    // max_long_term_frame_idx, the parser does not. Saturate, do not truncate.
+                    u16::try_from(pic.long_term_frame_idx).unwrap_or(u16::MAX)
+                } else {
+                    pic.frame_num as u16
+                },
+            };
+            out.push(real);
+            // Placeholders are short-term (8.2.5.2), so a substitute is relabelled
+            // short-term with its own frame_num.
+            let substitute = RefPic {
+                is_long_term: false,
+                frame_num_or_lt_idx: pic.frame_num as u16,
+                ..real
+            };
+            prev_substitute = Some(substitute);
+            first_substitute.get_or_insert(substitute);
         }
 
-        let first_existing = slots.iter().flatten().next().copied();
-        let mut out = Vec::with_capacity(slots.len());
-        let mut prev_existing: Option<(RefPic, u16)> = None;
-        for slot in &slots {
-            match slot {
-                Some(real) => {
-                    prev_existing = Some(*real);
-                    out.push(real.0);
-                }
-                None => {
-                    // Keep the index. Placeholders are short-term (8.2.5.2); label
-                    // the substitute short-term with its own frame_num.
-                    if let Some((substitute, frame_num)) = prev_existing.or(first_existing) {
-                        out.push(RefPic {
-                            id: substitute.id,
-                            top_field_order_cnt: substitute.top_field_order_cnt,
-                            bottom_field_order_cnt: substitute.bottom_field_order_cnt,
-                            is_long_term: false,
-                            frame_num_or_lt_idx: frame_num,
-                        });
-                    }
-                }
-            }
+        // Append then rotate: the leading holes take the first existing entry.
+        // No existing entry at all leaves the list empty; the caller warns.
+        if let (true, Some(first)) = (leading_holes > 0, first_substitute) {
+            out.resize(out.len() + leading_holes, first);
+            out.rotate_right(leading_holes);
         }
         out
     }
@@ -1410,6 +1430,11 @@ impl H264Planner {
                 pps_id: hdr.pic_parameter_set_id,
             },
         )?);
+
+        // Gate at every activation, not only when NegotiationInfo changes: the
+        // parser table keeps a rejected SPS, and NegotiationInfo omits
+        // `separate_colour_plane_flag`, so a PPS-only rebind could activate one.
+        Self::check_envelope(&pps.sps)?;
 
         self.renegotiate_if_needed(&pps.sps, warnings)?;
 
@@ -2476,6 +2501,90 @@ mod tests {
         );
     }
 
+    /// E.2.1 requires the VUI buffering to cover `max_num_ref_frames`. Below it
+    /// the DPB cannot hold the references the stream marks and `store_picture`
+    /// fails on every picture, so the SPS is refused instead.
+    #[test]
+    fn a_dpb_shallower_than_the_reference_count_is_rejected_at_the_sps() {
+        let sps = Sps {
+            profile_idc: Profile::Main as u8,
+            level_idc: Level::L4,
+            frame_mbs_only_flag: true,
+            direct_8x8_inference_flag: true,
+            max_num_ref_frames: 3,
+            vui_parameters_present_flag: true,
+            vui_parameters: VuiParams {
+                bitstream_restriction_flag: true,
+                max_dec_frame_buffering: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut au = Vec::new();
+        Synthesizer::<'_, Sps, _>::synthesize(3, &sps, &mut au, true).unwrap();
+
+        let err = H264Planner::new().plan_au(&au).unwrap_err();
+        assert!(
+            matches!(err, PlanError::OutsideEnvelope(what) if what.contains("max_num_ref_frames")),
+            "{err:?}"
+        );
+    }
+
+    /// The parser table keeps a rejected SPS, and `NegotiationInfo` carries no
+    /// `max_num_ref_frames`: two SPS can differ only in the field the envelope
+    /// refuses. Without a gate at activation the rebind livelocks the DPB.
+    #[test]
+    fn a_rejected_sps_cannot_be_activated_through_a_pps_only_rebind() {
+        // Same geometry, same `dpb_limit`: NegotiationInfo cannot tell them apart.
+        let three_deep = |seq_parameter_set_id, max_num_ref_frames| Sps {
+            seq_parameter_set_id,
+            profile_idc: Profile::Main as u8,
+            level_idc: Level::L4,
+            frame_mbs_only_flag: true,
+            direct_8x8_inference_flag: true,
+            max_num_ref_frames,
+            pic_width_in_mbs_minus1: 3,
+            pic_height_in_map_units_minus1: 3,
+            vui_parameters_present_flag: true,
+            vui_parameters: VuiParams {
+                bitstream_restriction_flag: true,
+                max_dec_frame_buffering: 3,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let good = Rc::new(three_deep(0, 1));
+        let hostile = Rc::new(three_deep(1, 4));
+        let pps0 = PpsBuilder::new(Rc::clone(&good))
+            .pic_parameter_set_id(0)
+            .pic_init_qp(26)
+            .build();
+        let pps1 = PpsBuilder::new(Rc::clone(&hostile))
+            .pic_parameter_set_id(1)
+            .pic_init_qp(26)
+            .build();
+
+        let mut planner = H264Planner::new();
+        let mut au0 = param_set_au(&good, &pps0);
+        au0.extend(write_idr_slice());
+        planner.plan_au(&au0).unwrap();
+
+        let mut hostile_au = Vec::new();
+        Synthesizer::<'_, Sps, _>::synthesize(3, &hostile, &mut hostile_au, true).unwrap();
+        assert!(matches!(
+            planner.plan_au(&hostile_au),
+            Err(PlanError::OutsideEnvelope(_))
+        ));
+
+        let mut rebind = Vec::new();
+        Synthesizer::<'_, Pps, _>::synthesize(3, &pps1, &mut rebind, true).unwrap();
+        rebind.extend(write_idr_slice_at(0, 1));
+        assert!(
+            matches!(planner.plan_au(&rebind), Err(PlanError::OutsideEnvelope(_))),
+            "the rebind must not activate the rejected SPS"
+        );
+    }
+
     /// SPS at `width`×`height` and `level`. `declared` None uses A.3.1; Some sets
     /// VUI `max_dec_frame_buffering`.
     fn sps_at(width: u32, height: u32, level: Level, declared: Option<u32>) -> Sps {
@@ -2852,6 +2961,46 @@ mod tests {
             .any(|w| matches!(w, PlanWarning::TruncatedAu { .. })));
     }
 
+    /// A cut inside a continuation slice must cost the tail, not the picture:
+    /// the slices already planned still decode. H.265 degrades the same way.
+    #[test]
+    fn a_continuation_slice_that_fails_to_parse_degrades_to_a_warning() {
+        let (sps, pps) = authored_sps_pps();
+        let mut au = param_set_au(&sps, &pps);
+        au.extend(write_idr_slice());
+        // PPS 1 was never sent, so the header cannot be parsed at all.
+        au.extend(write_p_slice_at(8, 1, 0, 0, 1, 1, None));
+
+        let plan = H264Planner::new().plan_au(&au).unwrap();
+        assert!(plan.picture.is_idr);
+        assert_eq!(plan.slices.len(), 1);
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|w| matches!(w, PlanWarning::TruncatedAu { .. })));
+        assert!(!plan.picture.references_clean);
+    }
+
+    /// 7.4.1.2.4 also names `pic_order_cnt_lsb`: a slice sharing `frame_num`
+    /// with the first but coding another POC belongs to another picture.
+    #[test]
+    fn a_continuation_slice_with_another_poc_lsb_is_dropped() {
+        let (sps, pps) = authored_sps_pps();
+        let mut au0 = param_set_au(&sps, &pps);
+        au0.extend(write_idr_slice());
+        let mut planner = H264Planner::new();
+        planner.plan_au(&au0).unwrap();
+
+        let mut au = write_p_slice(1, 2, 1, 1, None);
+        au.extend(write_p_slice_at(8, 0, 1, 5, 1, 1, None));
+        let plan = planner.plan_au(&au).unwrap();
+        assert_eq!(plan.slices.len(), 1);
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|w| matches!(w, PlanWarning::TruncatedAu { .. })));
+    }
+
     #[test]
     fn outputs_queued_during_a_failed_au_surface_in_the_next_successful_plan() {
         let (sps, pps) = authored_sps_pps();
@@ -2861,13 +3010,13 @@ mod tests {
         let mut planner = H264Planner::new();
         let id0 = planner.plan_au(&au0).unwrap().dpb.stored.unwrap();
 
-        // Errors after IDR begin already drained the DPB (id0 queued):
-        // continuation slice names PPS 1, which was never sent.
+        // Errors after IDR begin already drained the DPB (id0 queued): a second
+        // `first_mb_in_slice == 0` is a mis-split, refused mid-AU.
         let mut bad_au = write_idr_slice();
-        bad_au.extend(write_p_slice_at(8, 1, 0, 0, 1, 1, None));
+        bad_au.extend(write_idr_slice());
         assert!(matches!(
             planner.plan_au(&bad_au),
-            Err(PlanError::NoActiveParamSet { pps_id: 1 })
+            Err(PlanError::OutsideEnvelope(_))
         ));
 
         let plan = planner.plan_au(&write_idr_slice()).unwrap();
@@ -2978,12 +3127,15 @@ mod tests {
         Synthesizer::<'_, Pps, _>::synthesize(3, &pps0, &mut au, true).unwrap();
         Synthesizer::<'_, Pps, _>::synthesize(3, &pps1, &mut au, true).unwrap();
         au.extend(write_idr_slice_at(0, 0));
-        // Continuation slice may legally name another PPS.
+        // 7.4.1.2.4: a differing pic_parameter_set_id is another picture. The
+        // slice and the tail are dropped rather than marked against this one.
         au.extend(write_idr_slice_at(8, 1));
 
         let plan = H264Planner::new().plan_au(&au).unwrap();
-        assert!(picture_warnings(&plan).is_empty());
-        assert_eq!(plan.slices.len(), 2);
+        assert_eq!(plan.slices.len(), 1);
+        assert!(picture_warnings(&plan)
+            .iter()
+            .any(|w| matches!(w, PlanWarning::TruncatedAu { .. })));
         // Picture parameters come from the first slice's PPS (uncropped SPS 0).
         assert_eq!(
             plan.picture.display_crop,
