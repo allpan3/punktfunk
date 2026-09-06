@@ -321,6 +321,7 @@ pub fn open_driver_encoder(
         hdr_meta: params.hdr_meta,
         wire_chunk: params.wire_chunk_bytes as usize,
         wire_chunk_warned: false,
+        bitrate_unanswered: false,
         last_wire_seq: 0,
         last_source_seq: 0,
         last_arrival: None,
@@ -345,6 +346,10 @@ pub struct EncoderProxy {
     /// Decided at `SET_ENCODE`; a later `set_wire_chunking` that differs is logged once.
     wire_chunk: usize,
     wire_chunk_warned: bool,
+    /// Set once a bitrate change times out: this driver predates the applied-rate word and
+    /// will never answer, so later changes skip the wait instead of stalling the encode loop
+    /// for [`EncoderProxy::BITRATE_WAIT`] on every ABR step.
+    bitrate_unanswered: bool,
     /// The last taken chunk's `wire_seq` / `source_seq`: AU progress, the supervisor's second
     /// ground-truth clock (`progress`).
     last_wire_seq: u32,
@@ -621,8 +626,9 @@ impl Encoder for EncoderProxy {
 
     /// The IOCTL only queues the op, so wait for the encode thread's answer in the header:
     /// `false` is a backend that declined in place, which sends the loop to its rebuild. A
-    /// driver that predates the word never answers, and the timeout keeps the old contract —
-    /// assume applied — rather than rebuilding the encoder on every step.
+    /// driver that predates the word never answers; the first timeout keeps the old contract
+    /// (assume applied) and latches, so the wait is paid once per session and not on every
+    /// ABR step — this runs on the encode loop.
     fn reconfigure_bitrate(&mut self, bps: u64) -> bool {
         let kbps = (bps / 1000).min(u64::from(u32::MAX)) as u32;
         let before = au::applied_bitrate_seq(self.snapshot().applied_bitrate);
@@ -633,6 +639,10 @@ impl Encoder for EncoderProxy {
             0,
         ) {
             return false;
+        }
+        if self.bitrate_unanswered {
+            self.applied_bps = u64::from(kbps) * 1000;
+            return true;
         }
         let deadline = Instant::now() + Self::BITRATE_WAIT;
         loop {
@@ -647,6 +657,12 @@ impl Encoder for EncoderProxy {
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
+                self.bitrate_unanswered = true;
+                tracing::info!(
+                    target_id = self.target_id,
+                    "driver encode: this driver does not report the applied bitrate — assuming \
+                     every change lands, and no longer waiting for an answer"
+                );
                 self.applied_bps = u64::from(kbps) * 1000;
                 return true;
             }
