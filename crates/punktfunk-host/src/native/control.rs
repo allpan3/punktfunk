@@ -41,6 +41,10 @@ pub(super) struct Task {
     /// `u32::MAX` is the pre-seed: an old client never sent a `DeliveryReport`.
     pub(super) client_packets_received: Arc<AtomicU32>,
     pub(super) fec_target_ctl: Arc<AtomicU8>,
+    /// Encode loop's cap: the highest FEC the live encoder's rate affords inside the wire
+    /// budget. Binds the attack, not the decay — a backend that cannot retarget in place
+    /// would otherwise put the added overhead on top of the budget.
+    pub(super) fec_ceiling: Arc<AtomicU8>,
     /// Encode loop drains at its own cadence (`design/phase-locked-capture.md`).
     pub(super) phase_ctl: Arc<super::stream::PhaseCtl>,
     pub(super) reconfig_tx: std::sync::mpsc::Sender<punktfunk_core::Mode>,
@@ -88,6 +92,7 @@ pub(super) async fn run(task: Task) {
         cadence_behind_score,
         client_packets_received,
         fec_target_ctl,
+        fec_ceiling,
         phase_ctl,
         reconfig_tx,
         keyframe_tx,
@@ -218,7 +223,8 @@ pub(super) async fn run(task: Task) {
                         let floor = fec_floor.on_report(rep.loss_ppm);
                         let target = adapt_fec(rep.loss_ppm)
                             .max(prev.saturating_sub(1))
-                            .max(floor);
+                            .max(floor)
+                            .min(fec_ceiling.load(Ordering::Relaxed));
                         fec_target_ctl.store(target, Ordering::Relaxed);
                         if prev != target {
                             tracing::debug!(

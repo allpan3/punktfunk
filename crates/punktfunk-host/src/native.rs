@@ -1527,6 +1527,10 @@ pub(crate) async fn run_admitted(
     let adaptive_fec = fec_static_override().is_none();
     let fec_target = Arc::new(AtomicU8::new(welcome.fec.fec_percent));
     let fec_target_ctl = fec_target.clone();
+    // Encode loop pins this below 100 only when the encoder refuses an in-place retarget;
+    // the control task then cannot raise FEC past what that rate affords in the budget.
+    let fec_ceiling = Arc::new(AtomicU8::new(100));
+    let fec_ceiling_ctl = fec_ceiling.clone();
     // PhaseReports from the control task; encode loop drains. Inert until a vsync-aware client.
     let phase_ctl = Arc::new(stream::PhaseCtl::new());
     let phase_ctl_control = phase_ctl.clone();
@@ -1570,6 +1574,7 @@ pub(crate) async fn run_admitted(
         cadence_behind_score: cadence_behind_score.clone(),
         client_packets_received: client_packets_received_ctl,
         fec_target_ctl,
+        fec_ceiling: fec_ceiling_ctl,
         phase_ctl: phase_ctl_control,
         reconfig_tx,
         keyframe_tx,
@@ -2186,6 +2191,7 @@ pub(crate) async fn run_admitted(
                         retarget_tx,
                         gap_tx,
                         fec_target: fec_target_dp,
+                        fec_ceiling,
                         phase: phase_ctl,
                         conn: conn_stream,
                         timing_conn,
