@@ -139,6 +139,11 @@ confirmation open as usual, but the host refuses the change and the entry stays 
 Whatever the surface, the client sends only an **id**. The host looks it up in its own library and
 runs what it already knows about the title, so a client can never hand the host a command to run.
 
+Every library leads with a **Desktop** tile that streams the host itself and launches nothing — so
+a host with no plugins installed is still one press from its desk, and getting there is not a trip
+back through the host's menu. It reads **Resume <title>** when the host already has a game up,
+which is also the only way back into one the host started on its own.
+
 - **Native clients** — a **paired** host's card offers **Browse library…** (**Browse Library…** on
   Apple) with nothing to switch on first; pairing is the only condition. Pick a title and the stream
   starts with the host launching it. The Apple and Android apps

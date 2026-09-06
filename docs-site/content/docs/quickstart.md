@@ -73,6 +73,9 @@ Select the host, start streaming. The host creates a display at your device's ex
 refresh rate; mouse, keyboard and controllers flow back. On a desktop client the stream takes your
 mouse and keyboard — **Ctrl+Alt+Shift+Q** (⌃⌥⇧Q on a Mac) hands them back.
 
+Now that one host is paired, the next launch opens on its games rather than the host list —
+[Start in](/docs/client-settings#behavior) changes that, including straight into the stream.
+
 ## Now that it works
 
 - Launch installed games straight into the stream — [Game library](/docs/game-library) (install the

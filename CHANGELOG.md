@@ -43,6 +43,14 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **`start_in` and `default_host` are cross-client settings keys.** The client settings record
+  gained where a bare launch opens (`"hosts"`, `"library"`, `"stream"`; unknown reads as library)
+  and which saved-host id it opens on. Resolve them through `pf_client_core::start`, never by
+  reading either alone: with one paired host the default is derived and `default_host` is empty.
+  The Swift and Kotlin ports are held to it by `clients/shared/start-screen-vectors.json`.
+- **`HostRow.id` on the Android console bridge JSON.** The console's host row carries the store
+  record's id, which is what its "Make default host" row points at. `serde(default)`, so a bridge
+  that does not send it still parses — but that bridge's rows cannot offer the row.
 - **`GameEntry.stats` carries a title's play stats.** Every library entry a host has launched
   gains `last_played_unix_ms`, `play_time_ms`, `last_run_ms` and `launch_count`, kept in
   `library-stats.json` beside the hide list and absent until the first launch. A client that

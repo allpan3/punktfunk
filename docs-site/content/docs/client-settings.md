@@ -267,6 +267,14 @@ screen), a Steam Deck (real sticks) or the desktop clients (a keyboard).
 
 ## Behavior
 
+**Start in** — *default: Library.* Where the app opens. **Library** lands on your default host's
+games, **Stream** goes on to its desktop, and **Host list** is the old first screen. Back leaves
+either landing on the host list, so a wrong guess costs one press. With one paired host saved, that
+host is the default and there is nothing to set; with several, use **Make default host** on a
+host's card or ▲ menu, and until you do, every value opens the host list. Naming one explicitly
+also matters later: pairing a second host drops a derived default, and keeps an explicit one.
+Every client, plus `punktfunk default-host` for a box you only reach over ssh.
+
 **Auto-wake on connect** — *default: on.* Connecting to a saved host that looks offline sends
 Wake-on-LAN and waits — only for a host whose MAC this client has learned. Turn it off for hosts
 reached over a VPN, where the wake only adds delay. Linux, Windows, Apple, Android and the console
