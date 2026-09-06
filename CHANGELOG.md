@@ -329,6 +329,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **A presenter-forced software demotion reconnects instead of ending the session.** An HEVC
+  stream whose presenter cannot display hardware frames has no CPU rung to demote to, and that
+  refusal ended the session with an error string where every other rung-exhaustion site
+  reconnects without the codec. Nothing to do beyond the update.
 - **An Android Steam Controller 2 over Bluetooth writes to the right GATT characteristics.**
   Valve routes each output report id to its own characteristic at `id + 0x35` and every feature
   command to `100F6C34`, id byte stripped in both cases, where the link had written every frame

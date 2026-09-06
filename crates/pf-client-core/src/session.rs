@@ -1360,10 +1360,22 @@ fn pump(
                 }
                 // Presenter: hardware frames cannot be displayed. Demote here, on the
                 // decoder's thread. Decode succeeds in that state, so error-streak
-                // demotion never fires.
+                // demotion never fires. HEVC has no CPU rung, so the rebuild can hand
+                // back the same refusal the decode arm above reconnects on.
                 if force_software.swap(false, Ordering::Relaxed) {
                     if let Err(e) = decoder.force_software() {
-                        break Some(format!("software decoder rebuild: {e}"));
+                        match e.downcast_ref::<crate::video::NoSoftwareRung>() {
+                            Some(nr) => {
+                                codec_fallback = Some(codec_fallback_event(
+                                    connector.codec,
+                                    advertised_codecs,
+                                    nr.loss(),
+                                    &e.to_string(),
+                                ));
+                                break None;
+                            }
+                            None => break Some(format!("software decoder rebuild: {e}")),
+                        }
                     }
                 }
                 // Infinite GOP has no periodic keyframe, so a rebuilt/erroring decoder
