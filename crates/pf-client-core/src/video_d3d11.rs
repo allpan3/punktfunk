@@ -48,9 +48,12 @@ use windows::Win32::dxgi::{
 use windows::Win32::windef::RECT;
 use windows::Win32::winnt::HANDLE;
 
-/// Six slots: the pump holds 2 decoded frames and the presenter has one in flight, so 3 are
-/// outstanding. Double that leaves margin without meaningful VRAM cost.
-const RING_SLOTS: usize = 6;
+/// Nine frames can be outstanding downstream under the deepest smoothing setting
+/// (2 in the pump's frame channel, 1 in the wake forwarder's hand, 2 in the
+/// presenter's wake channel, 3 in the smoothing store, 1 parked until the next
+/// present's fence), and one slot is being written. Fewer and the round-robin
+/// blits over a queued frame's picture.
+const RING_SLOTS: usize = 10;
 
 /// Decode-side keyed-mutex acquire budget, milliseconds. The presenter holds a slot for one
 /// submit; a multi-second wait means the render thread died — error (and demote) rather than
