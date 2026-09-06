@@ -443,6 +443,10 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   the Polaris/Vega driver branch (frozen at 1.4.31) never reaches, so RX 400/500 and Vega hosts
   failed every session. Nothing to do; such a host now encodes on the core path and the newer
   optional properties degrade individually.
+- **`EncoderCaps` answers before the first frame on Linux NVENC.** The direct-SDK backend
+  probed reference-frame invalidation and brought up the cursor blend only when the first
+  submitted frame built a session, so anything reading `caps()` at open saw `supports_rfi`
+  false and `blends_cursor` true whether or not either held. Nothing to do beyond the update.
 
 ### Security
 

@@ -257,6 +257,16 @@ impl NvencEncoder {
                 codec.nvenc_name()
             );
         }
+        // HDR here means a P010 frames context, and `submit_cuda` would copy packed 2:10:10:10
+        // words straight into its Y plane. Only the direct-SDK backend registers ARGB10
+        // ([`crate::linux_hdr_cuda_ok`]).
+        if cuda && want_hdr10 {
+            bail!(
+                "libav {} cannot encode HDR10 from CUDA frames — build with `--features nvenc` \
+                 and leave PUNKTFUNK_NVENC_DIRECT unset",
+                codec.nvenc_name()
+            );
+        }
         // HEVC Range Extensions. `hevc_nvenc` emits 4:4:4 only from a YUV444 *input* — RGB always
         // subsamples to 4:2:0. Input is either the worker's planar-YUV444 CUDA frames or CPU
         // swscale RGB→YUV444P. Both feed `profile=rext`; range follows `PUNKTFUNK_444_FULLRANGE`.
@@ -388,35 +398,28 @@ impl NvencEncoder {
             opts.set("profile", "main10");
         }
 
-        // Split-frame encode. Policy is [`resolve_split_mode`] (same as the direct-SDK backends).
-        // Only FORCED widths are set: libav's `split_encode_mode` is its own vocabulary, and our
-        // `DISABLE` is NVENC enum `15` — passing it through would fail the open. Unset = driver auto.
+        // Split-frame encode. Policy is [`resolve_split_mode`] (the direct-SDK selector, which
+        // reads `PUNKTFUNK_SPLIT_ENCODE` itself), translated by [`libav_split_mode`] — the env
+        // string is NVENC's vocabulary, not libav's, and the two disagree on `0` and `auto`.
         // `engines = 0` = unprobed; [`max_forced_split_mode`] maps unknown to 2-way.
         let pix_rate = width as u64 * height as u64 * fps as u64;
-        let split = std::env::var("PUNKTFUNK_SPLIT_ENCODE").ok();
-        match split.as_deref() {
-            // Operator override: H.264 has no split AVOption — setting it fails the open.
-            Some(mode) if matches!(codec, Codec::H265 | Codec::Av1) => {
-                opts.set("split_encode_mode", mode)
+        if matches!(codec, Codec::H265 | Codec::Av1) {
+            let resolved = super::resolve_split_mode(codec, bit_depth, pix_rate, 0);
+            if let Some(token) = super::libav_split_mode(resolved) {
+                opts.set("split_encode_mode", token);
+                tracing::info!(
+                    pix_rate,
+                    bit_depth,
+                    split_encode_mode = token,
+                    "NVENC (libav): split-encode mode selected (shared selector)"
+                );
             }
-            Some(_) => tracing::warn!(
+        } else if std::env::var_os("PUNKTFUNK_SPLIT_ENCODE").is_some() {
+            tracing::warn!(
                 codec = codec.nvenc_name(),
                 "PUNKTFUNK_SPLIT_ENCODE ignored — split encoding is not applicable to H.264 \
                  (nvEncodeAPI.h)"
-            ),
-            None if matches!(codec, Codec::H265 | Codec::Av1) => {
-                let resolved = super::resolve_split_mode(codec, bit_depth, pix_rate, 0);
-                if let Some(n) = super::forced_split_width(resolved) {
-                    opts.set("split_encode_mode", &n.to_string());
-                    tracing::info!(
-                        pix_rate,
-                        bit_depth,
-                        split_encode_mode = n,
-                        "NVENC (libav): forcing split encode (shared selector)"
-                    );
-                }
-            }
-            None => {}
+            );
         }
 
         // NVENC init failure can take the host down: `ff_cuda_check` hands `av_log` an

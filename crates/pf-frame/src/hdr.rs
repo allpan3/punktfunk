@@ -122,7 +122,46 @@ pub fn hevc_mastering_display_sei(m: &HdrMeta) -> [u8; 24] {
     b
 }
 
+/// `metadata_hdr_mdcv` payload: 24 bytes, big-endian, G/B/R like ST.2086 but in
+/// AV1's own fixed point (spec 6.7.4) — chromaticity 0.16, `luminance_max` 24.8,
+/// `luminance_min` 18.14. Pass the bytes to NVENC's AV1 `obuPayloadArray` with
+/// `payloadType` = [`AV1_METADATA_TYPE_HDR_MDCV`]; the driver wraps the OBU.
+pub fn av1_mastering_display_metadata(m: &HdrMeta) -> [u8; 24] {
+    // 1/50000 → 1/65536, 0.0001 cd/m² → 1/256 and 1/16384. Saturating: a
+    // chromaticity above 1.0 is malformed input, not a reason to panic.
+    let xy = |v: u16| ((v as u64 * 65536 + 25_000) / 50_000).min(u16::MAX as u64) as u16;
+    let lum = |v: u32, den: u64| ((v as u64 * den + 5_000) / 10_000).min(u32::MAX as u64) as u32;
+    let mut b = [0u8; 24];
+    let mut o = 0;
+    let mut put16 = |v: u16| {
+        b[o..o + 2].copy_from_slice(&v.to_be_bytes());
+        o += 2;
+    };
+    for p in m.display_primaries.iter() {
+        put16(xy(p[0]));
+        put16(xy(p[1]));
+    }
+    put16(xy(m.white_point[0]));
+    put16(xy(m.white_point[1]));
+    let mut put32 = |v: u32| {
+        b[o..o + 4].copy_from_slice(&v.to_be_bytes());
+        o += 4;
+    };
+    put32(lum(m.max_display_mastering_luminance, 256));
+    put32(lum(m.min_display_mastering_luminance, 16_384));
+    debug_assert_eq!(o, 24);
+    b
+}
+
+/// AV1 `metadata_type` for `metadata_hdr_cll` (spec 6.7.1). Its payload is the
+/// same two big-endian nits fields as [`hevc_content_light_level_sei`].
+pub const AV1_METADATA_TYPE_HDR_CLL: u32 = 1;
+/// AV1 `metadata_type` for `metadata_hdr_mdcv` — payload
+/// [`av1_mastering_display_metadata`].
+pub const AV1_METADATA_TYPE_HDR_MDCV: u32 = 2;
+
 /// `content_light_level_info` SEI payload: 4 bytes, big-endian, MaxCLL then MaxFALL.
+/// Byte-identical to AV1's `metadata_hdr_cll` — both are nits.
 pub fn hevc_content_light_level_sei(m: &HdrMeta) -> [u8; 4] {
     let mut b = [0u8; 4];
     b[0..2].copy_from_slice(&m.max_cll.to_be_bytes());
@@ -169,6 +208,19 @@ mod tests {
         assert_eq!(&p[12..14], &15635u16.to_be_bytes());
         assert_eq!(&p[16..20], &10_000_000u32.to_be_bytes());
         assert_eq!(&p[20..24], &1u32.to_be_bytes());
+    }
+
+    #[test]
+    fn av1_mdcv_rescales_out_of_the_sei_units() {
+        let m = generic_hdr10();
+        let p = av1_mastering_display_metadata(&m);
+        // green.x 8500/50000 = 0.17 → 0.16 fixed = 11141.
+        assert_eq!(&p[0..2], &11141u16.to_be_bytes());
+        // white.x 15635/50000 = 0.3127 → 20493.
+        assert_eq!(&p[12..14], &20493u16.to_be_bytes());
+        // 1000 cd/m² in 24.8 = 256000; 0.0001 cd/m² in 18.14 rounds to 2.
+        assert_eq!(&p[16..20], &256_000u32.to_be_bytes());
+        assert_eq!(&p[20..24], &2u32.to_be_bytes());
     }
 
     #[test]

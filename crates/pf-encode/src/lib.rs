@@ -139,9 +139,11 @@ pub fn host_wire_caps() -> u8 {
                 }
             }
             // Driver GUID list, like the VAAPI arm. Fail-open: `None` leaves
-            // the historical superset, so this can only narrow.
+            // the historical superset, so this can only narrow. Only when the
+            // direct backend will serve the session: two NVENC clients in one
+            // process wedge later opens (`NV_ENC_ERR_INVALID_VERSION`).
             #[cfg(feature = "nvenc")]
-            if backend == LinuxBackend::Nvenc {
+            if backend == LinuxBackend::Nvenc && nvenc_direct_enabled() {
                 if let Some(m) = codec_support_wire_mask(nvenc_codec_support()) {
                     break 'base m & pref_ceiling;
                 }

@@ -512,20 +512,23 @@ pub fn max_forced_split_mode(engines: u32) -> u32 {
 }
 
 /// N of an N-way forced split, or `None` for modes that do not name a width
-/// (`DISABLE`, `AUTO`, `AUTO_FORCED` — the last forces a split but lets the
-/// driver choose how wide).
+/// `NV_ENC_SPLIT_ENCODE_MODE` → the token libav's `split_encode_mode` AVOption
+/// names it by, or `None` for AUTO (libav's own default — leave it unset).
 ///
-/// For callers that can only say "split this many ways": the libav path,
-/// whose `split_encode_mode` AVOption is libavcodec's enum, not NVENC's
-/// (`DISABLE` is `15`, meaningless there).
+/// The vocabularies are not the same alphabet. libav's is `disabled` / `auto` /
+/// `forced` / `2` / `3` (`libavcodec/nvenc_hevc.c`), and a bare number there is
+/// parsed as an int, so our `PUNKTFUNK_SPLIT_ENCODE=0` would set NVENC's AUTO
+/// and `disable` would fail the open. The option exists on HEVC and AV1 only.
 // Linux-only: sole caller is the libav NVENC path (`enc/linux/mod.rs`).
 // `codec.rs` compiles everywhere; without this cfg it is `dead_code` on
 // Windows (item lint, not a module one).
 #[cfg(target_os = "linux")]
-pub fn forced_split_width(mode: u32) -> Option<u32> {
+pub fn libav_split_mode(mode: u32) -> Option<&'static str> {
     match mode {
-        m if m == SPLIT_TWO_FORCED => Some(2),
-        m if m == SPLIT_THREE_FORCED => Some(3),
+        m if m == SPLIT_DISABLE => Some("disabled"),
+        m if m == SPLIT_AUTO_FORCED => Some("forced"),
+        m if m == SPLIT_TWO_FORCED => Some("2"),
+        m if m == SPLIT_THREE_FORCED => Some("3"),
         _ => None,
     }
 }

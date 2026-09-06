@@ -572,6 +572,11 @@ impl SlotSurface {
 /// apart; 50 µs stays under one slice without hammering the driver.
 const CHUNK_SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_micros(50);
 
+/// Sampled AUs whose prefix must match the finished AU before [`ChunkState::shadow`] retires.
+/// 120 ≈ 2 s at 60 fps: a driver that publishes bytes ahead of the flush does it on the first
+/// multi-slice AU, not after two seconds of agreement.
+const SUBFRAME_TRUST_AUS: u32 = 120;
+
 /// Chunked-readback progress for the front in-flight AU. [`Encoder::poll`] refuses while this
 /// exists — a whole-AU poll would re-emit the already-shipped prefix.
 struct ChunkState {
@@ -596,6 +601,30 @@ impl ChunkState {
             shadow: Vec::new(),
         }
     }
+}
+
+/// What `nvEncGetEncodeCaps` answers for one `(CUcontext, codec)`. Independent of session
+/// dimensions, so the whole set is cacheable; `query_caps` still applies it per session.
+#[derive(Clone, Copy)]
+struct NvCaps {
+    width_max: i32,
+    height_max: i32,
+    yuv444: bool,
+    rfi: bool,
+    custom_vbv: bool,
+    subframe: bool,
+    /// Log-only: dynamic slice mode is never armed here.
+    dyn_slice: bool,
+    engines: u32,
+}
+
+/// Probed caps per `(CUcontext, codec)`. The probe opens and destroys a session; a rebuild
+/// must not pay for that again, and caps do not move under a live driver.
+fn caps_cache() -> &'static std::sync::Mutex<std::collections::HashMap<(u64, Codec), NvCaps>> {
+    static C: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<(u64, Codec), NvCaps>>,
+    > = std::sync::OnceLock::new();
+    C.get_or_init(Default::default)
 }
 
 pub struct NvencCudaEncoder {
@@ -713,6 +742,13 @@ pub struct NvencCudaEncoder {
     arbiter: Option<SplitArbiter>,
     /// In-progress chunked readback of the front AU. See [`ChunkState`].
     chunk: Option<ChunkState>,
+    /// `NV_ENC_LOCK_BITSTREAM::sliceOffsets` scratch. The SDK sizes it to the frame in
+    /// macroblocks, not to `slices` — a shorter buffer is a driver write past the end.
+    /// Sized at `init_session`; empty until then.
+    slice_offsets: Vec<u32>,
+    /// Chunked AUs whose sampled prefix matched the finished AU. Past
+    /// [`SUBFRAME_TRUST_AUS`] the shadow copy and its compare retire. Reset per session.
+    subframe_clean_aus: u32,
 }
 
 // SAFETY: `encoder`, `cu_ctx`, and the raw NVENC pointers in `bitstreams`/`ring`/`pending` are
@@ -742,7 +778,7 @@ impl NvencCudaEncoder {
         // Fail here, not as an opaque session error on the first frame.
         try_api().map_err(|e| anyhow!("NVENC (Linux direct) unavailable: {e}"))?;
 
-        Ok(Self {
+        let mut enc = Self {
             encoder: ptr::null_mut(),
             cu_ctx: ptr::null_mut(),
             codec,
@@ -798,7 +834,50 @@ impl NvencCudaEncoder {
             subframe_opened_with: false,
             arbiter: None,
             chunk: None,
-        })
+            slice_offsets: Vec::new(),
+            subframe_clean_aus: 0,
+        };
+        // Negotiation reads `caps()` before any frame has built a session, and a `false`
+        // `supports_rfi` there costs the whole session its recovery anchors. Best effort: a
+        // real fault surfaces at the first submit, with the one-shot diagnosis.
+        if let Err(e) = enc.probe_at_open() {
+            tracing::debug!(
+                error = %format!("{e:#}"),
+                "NVENC (Linux direct): open-time capability probe failed — caps stay \
+                 conservative until the first frame"
+            );
+        }
+        Ok(enc)
+    }
+
+    /// Bind the shared CUDA context and answer [`Encoder::caps`] before the first frame.
+    /// The caps probe is cached ([`caps_cache`]) and the blend bring-up is one-shot, so
+    /// `init_session` repeats neither.
+    fn probe_at_open(&mut self) -> Result<()> {
+        self.cu_ctx = cuda::context().context("shared CUDA context (Linux direct NVENC)")?;
+        cuda::make_current().context("cuCtxSetCurrent (encoder open)")?;
+        self.try_cursor_blend();
+        // SAFETY: `try_api()` passed above, so `api()` is live. `cu_ctx` is the shared context;
+        // `probe_caps` opens and destroys its own session and touches no live encoder.
+        unsafe { self.query_caps() }
+    }
+
+    /// One-shot Vulkan slot-blend bring-up. `vk_blend` left `None` means the ring is plain
+    /// CUDA and this session cannot composite `CapturedFrame::cursor` — [`Encoder::caps`]
+    /// reports that. No-op unless the session negotiated a composited pointer.
+    fn try_cursor_blend(&mut self) {
+        if self.cursor_tried || !self.blend_wanted {
+            return;
+        }
+        self.cursor_tried = true;
+        match VkSlotBlend::new() {
+            Ok(v) => self.vk_blend = Some(v),
+            Err(e) => tracing::warn!(
+                error = %format!("{e:#}"),
+                "NVENC (Linux): Vulkan slot-blend bring-up failed — plain CUDA input surfaces, \
+                 cursor compositing unavailable"
+            ),
+        }
     }
 
     /// Engage pipelined retrieve when `pending` is empty: rebuild *without* the IO-stream
@@ -880,7 +959,9 @@ impl NvencCudaEncoder {
         }
         self.stream_ordered = false;
         // Half-chunked AU dies with the in-flight frame (forfeit); next session re-latches.
+        // The next session's driver branch must earn the shadow's retirement again.
         self.subframe_chunks = false;
+        self.subframe_clean_aus = 0;
         self.chunk = None;
         self.ring.clear(); // CUDA InputSurfaces; Vk slots freed just below
         if let Some(vk) = &mut self.vk_blend {
@@ -913,9 +994,9 @@ impl NvencCudaEncoder {
         }
     }
 
-    /// Probe caps on a throwaway session before configure so an out-of-range mode fails
-    /// clearly, not as `InvalidParam`.
-    unsafe fn query_caps(&mut self) -> Result<()> {
+    /// Probe caps on a throwaway session. Dimension-independent, so [`caps_cache`] can keep
+    /// the answer for the process.
+    unsafe fn probe_caps(&self) -> Result<NvCaps> {
         let mut params = nv::NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS {
             version: nv::NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER,
             deviceType: nv::NV_ENC_DEVICE_TYPE::NV_ENC_DEVICE_TYPE_CUDA,
@@ -937,25 +1018,46 @@ impl NvencCudaEncoder {
         }
         // Handshake succeeded: later `NV_ENC_ERR_INVALID_VERSION` is not header/driver skew.
         nvenc_status::note_session_opened();
-        let wmax = self.get_cap(enc, nv::NV_ENC_CAPS::NV_ENC_CAPS_WIDTH_MAX);
-        let hmax = self.get_cap(enc, nv::NV_ENC_CAPS::NV_ENC_CAPS_HEIGHT_MAX);
-        let yuv444 = self.get_cap(enc, nv::NV_ENC_CAPS::NV_ENC_CAPS_SUPPORT_YUV444_ENCODE);
-        let rfi = self.get_cap(
-            enc,
-            nv::NV_ENC_CAPS::NV_ENC_CAPS_SUPPORT_REF_PIC_INVALIDATION,
-        );
-        let custom_vbv = self.get_cap(
-            enc,
-            nv::NV_ENC_CAPS::NV_ENC_CAPS_SUPPORT_CUSTOM_VBV_BUF_SIZE,
-        );
-        // Sub-frame / dynamic-slice: stored on `subframe_cap`; `dyn_slice` is log-only.
-        let subframe = self.get_cap(enc, nv::NV_ENC_CAPS::NV_ENC_CAPS_SUPPORT_SUBFRAME_READBACK);
-        let dyn_slice = self.get_cap(enc, nv::NV_ENC_CAPS::NV_ENC_CAPS_SUPPORT_DYNAMIC_SLICE_MODE);
-        // Split ceiling. Probe it: the driver accepts a wider split and silently encodes
-        // narrower (`max_forced_split_mode`).
-        let engines = self.get_cap(enc, nv::NV_ENC_CAPS::NV_ENC_CAPS_NUM_ENCODER_ENGINES);
+        let caps = NvCaps {
+            width_max: self.get_cap(enc, nv::NV_ENC_CAPS::NV_ENC_CAPS_WIDTH_MAX),
+            height_max: self.get_cap(enc, nv::NV_ENC_CAPS::NV_ENC_CAPS_HEIGHT_MAX),
+            yuv444: self.get_cap(enc, nv::NV_ENC_CAPS::NV_ENC_CAPS_SUPPORT_YUV444_ENCODE) != 0,
+            rfi: self.get_cap(
+                enc,
+                nv::NV_ENC_CAPS::NV_ENC_CAPS_SUPPORT_REF_PIC_INVALIDATION,
+            ) != 0,
+            custom_vbv: self.get_cap(
+                enc,
+                nv::NV_ENC_CAPS::NV_ENC_CAPS_SUPPORT_CUSTOM_VBV_BUF_SIZE,
+            ) != 0,
+            subframe: self.get_cap(enc, nv::NV_ENC_CAPS::NV_ENC_CAPS_SUPPORT_SUBFRAME_READBACK)
+                != 0,
+            dyn_slice: self.get_cap(enc, nv::NV_ENC_CAPS::NV_ENC_CAPS_SUPPORT_DYNAMIC_SLICE_MODE)
+                != 0,
+            // Split ceiling. Probe it: the driver accepts a wider split and silently encodes
+            // narrower (`max_forced_split_mode`).
+            engines: self
+                .get_cap(enc, nv::NV_ENC_CAPS::NV_ENC_CAPS_NUM_ENCODER_ENGINES)
+                .max(0) as u32,
+        };
         let _ = (api().destroy_encoder)(enc);
+        Ok(caps)
+    }
 
+    /// Apply this GPU's caps to the session before configure, so an out-of-range mode fails
+    /// clearly and not as `InvalidParam`. Run from `open` and from every rebuild; the probe
+    /// itself is cached, the resolution below is not.
+    unsafe fn query_caps(&mut self) -> Result<()> {
+        let key = (self.cu_ctx as u64, self.codec);
+        let caps = match caps_cache().lock().unwrap().get(&key).copied() {
+            Some(c) => c,
+            None => {
+                let c = self.probe_caps()?;
+                caps_cache().lock().unwrap().insert(key, c);
+                c
+            }
+        };
+        let (wmax, hmax) = (caps.width_max, caps.height_max);
         if wmax > 0 && hmax > 0 && (self.width as i32 > wmax || self.height as i32 > hmax) {
             bail!(
                 "this GPU's NVENC max encode size for {:?} is {wmax}x{hmax}; client requested \
@@ -965,15 +1067,15 @@ impl NvencCudaEncoder {
                 self.height
             );
         }
-        self.yuv444_supported = yuv444 != 0;
+        self.yuv444_supported = caps.yuv444;
         if self.chroma_444 && !self.yuv444_supported {
             tracing::warn!("NVENC (Linux): this GPU can't 4:4:4 encode — falling back to 4:2:0");
             self.chroma_444 = false;
         }
-        self.rfi_supported = rfi != 0;
-        self.custom_vbv = custom_vbv != 0;
-        self.subframe_cap = subframe != 0;
-        self.encoder_engines = engines.max(0) as u32;
+        self.rfi_supported = caps.rfi;
+        self.custom_vbv = caps.custom_vbv;
+        self.subframe_cap = caps.subframe;
+        self.encoder_engines = caps.engines;
         // Resolve slices + sub-frame here, before open, so config/init/chunked-poll agree.
         // Clamp to `max_slices`: a client that never asked for multi-slice can wedge on
         // several slice NALs. Caps gate the sub-frame default. Env knobs still override.
@@ -986,8 +1088,8 @@ impl NvencCudaEncoder {
             rfi = self.rfi_supported,
             custom_vbv = self.custom_vbv,
             yuv444 = self.yuv444_supported,
-            subframe_readback = subframe != 0,
-            dynamic_slice = dyn_slice != 0,
+            subframe_readback = caps.subframe,
+            dynamic_slice = caps.dyn_slice,
             slices = self.slices,
             max_slices = self.max_slices,
             max = %format!("{wmax}x{hmax}"),
@@ -1250,18 +1352,33 @@ impl NvencCudaEncoder {
                 // must not steer the search — that would cache a bogus ceiling.
                 Err(e) if !nvenc_status::is_param_rejection(&e) => return Err(e),
                 Err(_) => {
-                    // Above the codec ceiling — binary-search the max accepted.
+                    // Above the codec ceiling. Resolve the arm at the floor FIRST: the target
+                    // rejected both arms, so searching the split one can end with no session
+                    // and cache its floor under the no-split key.
+                    let no_split = nv::NV_ENC_SPLIT_ENCODE_MODE::NV_ENC_SPLIT_DISABLE_MODE as u32;
+                    let mut best = match self.try_open_session(FLOOR_BPS, used_split) {
+                        Ok(e) => e,
+                        Err(e) if used_split == no_split => {
+                            return Err(e.context(
+                                "NVENC initialize_encoder rejected even at the floor bitrate",
+                            ))
+                        }
+                        Err(_) => {
+                            let e = self.try_open_session(FLOOR_BPS, no_split).context(
+                                "NVENC initialize_encoder rejected even at the floor bitrate",
+                            )?;
+                            used_split = no_split;
+                            e
+                        }
+                    };
+                    let mut best_bps = FLOOR_BPS;
                     let mut lo = FLOOR_BPS;
                     let mut hi = target_bps;
-                    let mut best: *mut c_void = ptr::null_mut();
-                    let mut best_bps = 0u64;
                     while hi > lo + CLAMP_TOL_BPS {
                         let mid = lo + (hi - lo) / 2;
                         match self.try_open_session(mid, used_split) {
                             Ok(e) => {
-                                if !best.is_null() {
-                                    let _ = (api().destroy_encoder)(best);
-                                }
+                                let _ = (api().destroy_encoder)(best);
                                 best = e;
                                 best_bps = mid;
                                 lo = mid;
@@ -1269,40 +1386,31 @@ impl NvencCudaEncoder {
                             Err(e) if nvenc_status::is_param_rejection(&e) => hi = mid,
                             Err(e) => {
                                 // Transient mid-search: do not shrink the window.
-                                if !best.is_null() {
-                                    let _ = (api().destroy_encoder)(best);
-                                }
+                                let _ = (api().destroy_encoder)(best);
                                 return Err(e);
                             }
                         }
-                    }
-                    if best.is_null() {
-                        let no_split =
-                            nv::NV_ENC_SPLIT_ENCODE_MODE::NV_ENC_SPLIT_DISABLE_MODE as u32;
-                        best = match self.try_open_session(FLOOR_BPS, used_split) {
-                            Ok(e) => e,
-                            Err(_) => {
-                                let e = self.try_open_session(FLOOR_BPS, no_split).context(
-                                    "NVENC initialize_encoder rejected even at the floor bitrate",
-                                )?;
-                                used_split = no_split;
-                                e
-                            }
-                        };
-                        best_bps = FLOOR_BPS;
                     }
                     tracing::warn!(
                         requested_mbps = requested_bps / 1_000_000,
                         clamped_mbps = best_bps / 1_000_000,
                         "NVENC (Linux): requested bitrate above the GPU codec-level ceiling — clamped"
                     );
-                    store_ceiling(self.ceiling_key(used_split), best_bps);
+                    // The floor is the fallback, not a measurement — caching it would pin every
+                    // later session on this config to 10 Mbps.
+                    if best_bps > FLOOR_BPS {
+                        store_ceiling(self.ceiling_key(used_split), best_bps);
+                    }
                     self.bitrate_bps = best_bps;
                     best
                 }
             };
             self.encoder = enc;
             self.split_mode = used_split;
+            // "Array size must be equal to size of frame in MBs" (nvEncodeAPI.h) — the driver
+            // writes offsets before the slice count is final, so `slices` is not the bound.
+            let mbs = self.width.div_ceil(16) as usize * self.height.div_ceil(16) as usize;
+            self.slice_offsets = vec![0u32; mbs];
 
             for _ in 0..POOL {
                 let mut cb = nv::NV_ENC_CREATE_BITSTREAM_BUFFER {
@@ -1317,17 +1425,8 @@ impl NvencCudaEncoder {
 
             // Ring: register once, map per submit. Prefer Vulkan-imported slots so the cursor
             // blend writes the bytes NVENC encodes; any failure falls back to pitched CUDA.
-            if !self.cursor_tried && self.blend_wanted {
-                self.cursor_tried = true;
-                match VkSlotBlend::new() {
-                    Ok(v) => self.vk_blend = Some(v),
-                    Err(e) => tracing::warn!(
-                        error = %format!("{e:#}"),
-                        "NVENC (Linux): Vulkan slot-blend bring-up failed — plain CUDA input \
-                         surfaces, cursor compositing unavailable"
-                    ),
-                }
-            }
+            // Normally already done in `open`; this covers an encoder built without it.
+            self.try_cursor_blend();
             let slot_fmt = slot_fmt_of(self.buffer_fmt);
             // Full Vulkan ring, else full CUDA. Never mixed (flickering cursor) or short.
             'ring: for use_vk in [self.vk_blend.is_some(), false] {
@@ -1712,6 +1811,17 @@ impl Encoder for NvencCudaEncoder {
             // Depth + HDR follow the input, not negotiation — keeps the label and bitstream
             // in step when capture disagrees.
             let ten_bit_in = is_ten_bit_input(new_fmt);
+            // H.264 has no 10-bit NVENC encode mode. Left to `init_session` it reads as a
+            // bitrate cap and burns the whole ceiling search on every reset.
+            if ten_bit_in && !self.codec.supports_10bit() {
+                return Err(
+                    anyhow::Error::new(super::TerminalEncoderError).context(format!(
+                    "NVENC (Linux direct): {:?} cannot encode 10-bit, but the capture delivered \
+                     {:?} — renegotiate 8-bit or a 10-bit codec",
+                    self.codec, captured.format
+                )),
+                );
+            }
             if self.bit_depth >= 10 && !ten_bit_in {
                 tracing::warn!(
                     format = ?captured.format,
@@ -1879,27 +1989,43 @@ impl Encoder for NvencCudaEncoder {
                 ..Default::default()
             };
 
-            // HDR10 SEI on every IDR. HEVC/H.264 carry SEI; AV1 uses OBUs.
+            // HDR10 static metadata on every IDR. HEVC/H.264 take ST.2086/CEA-861.3 SEI; AV1
+            // takes the same volume in its own fixed point and `payloadType` is the
+            // `metadata_type` the driver wraps into an OBU (`obuPayloadArray`).
             let is_idr = flags != 0 || opening;
-            let mastering_sei = self
-                .hdr_meta
-                .map(|m| pf_frame::hdr::hevc_mastering_display_sei(&m));
-            let cll_sei = self
+            let av1 = self.codec == Codec::Av1;
+            let mastering = self.hdr_meta.map(|m| {
+                if av1 {
+                    pf_frame::hdr::av1_mastering_display_metadata(&m)
+                } else {
+                    pf_frame::hdr::hevc_mastering_display_sei(&m)
+                }
+            });
+            // `metadata_hdr_cll` and the SEI are the same two big-endian nits fields.
+            let cll = self
                 .hdr_meta
                 .map(|m| pf_frame::hdr::hevc_content_light_level_sei(&m));
             let mut sei: Vec<nv::NV_ENC_SEI_PAYLOAD> = Vec::new();
             if is_idr && self.hdr {
-                if let Some(p) = mastering_sei.as_ref() {
+                if let Some(p) = mastering.as_ref() {
                     sei.push(nv::NV_ENC_SEI_PAYLOAD {
                         payloadSize: p.len() as u32,
-                        payloadType: pf_frame::hdr::SEI_TYPE_MASTERING_DISPLAY_COLOUR_VOLUME,
+                        payloadType: if av1 {
+                            pf_frame::hdr::AV1_METADATA_TYPE_HDR_MDCV
+                        } else {
+                            pf_frame::hdr::SEI_TYPE_MASTERING_DISPLAY_COLOUR_VOLUME
+                        },
                         payload: p.as_ptr() as *mut u8,
                     });
                 }
-                if let Some(p) = cll_sei.as_ref() {
+                if let Some(p) = cll.as_ref() {
                     sei.push(nv::NV_ENC_SEI_PAYLOAD {
                         payloadSize: p.len() as u32,
-                        payloadType: pf_frame::hdr::SEI_TYPE_CONTENT_LIGHT_LEVEL_INFO,
+                        payloadType: if av1 {
+                            pf_frame::hdr::AV1_METADATA_TYPE_HDR_CLL
+                        } else {
+                            pf_frame::hdr::SEI_TYPE_CONTENT_LIGHT_LEVEL_INFO
+                        },
                         payload: p.as_ptr() as *mut u8,
                     });
                 }
@@ -1914,7 +2040,10 @@ impl Encoder for NvencCudaEncoder {
                         pic.codecPicParams.h264PicParams.seiPayloadArray = sei.as_mut_ptr();
                         pic.codecPicParams.h264PicParams.seiPayloadArrayCnt = sei.len() as u32;
                     }
-                    Codec::Av1 => {}
+                    Codec::Av1 => {
+                        pic.codecPicParams.av1PicParams.obuPayloadArray = sei.as_mut_ptr();
+                        pic.codecPicParams.av1PicParams.obuPayloadArrayCnt = sei.len() as u32;
+                    }
                     Codec::PyroWave => {
                         unreachable!("PyroWave never opens the direct-NVENC backend")
                     }
@@ -1999,7 +2128,9 @@ impl Encoder for NvencCudaEncoder {
 
     fn caps(&self) -> EncoderCaps {
         EncoderCaps {
-            blends_cursor: true,
+            // Both answered by `probe_at_open`, so negotiation reads them, not their defaults.
+            // Without the Vulkan slot blend the ring is plain CUDA and the pointer is dropped.
+            blends_cursor: self.vk_blend.is_some(),
             supports_rfi: self.rfi_supported,
             chroma_444: self.chroma_444,
             intra_refresh: false,
@@ -2140,19 +2271,22 @@ impl Encoder for NvencCudaEncoder {
         // ~2 frame intervals of doNotWait; then the blocking lock. Worst case = sync `poll`.
         let budget = std::time::Duration::from_micros(2_000_000 / self.fps.max(1) as u64);
         let t0 = std::time::Instant::now();
-        let mut offsets = [0u32; 32];
+        // Past `SUBFRAME_TRUST_AUS` matching AUs this driver branch publishes slices honestly;
+        // stop shadowing the prefix (a full copy plus a compare on every AU).
+        let verify = self.subframe_clean_aus < SUBFRAME_TRUST_AUS;
         loop {
             let emitted = self.chunk.as_ref().map_or(0, |c| c.emitted);
             let slices_out = self.chunk.as_ref().map_or(0, |c| c.slices_out);
             // SAFETY: `bs` is the front pending bitstream; session live; encode thread.
-            // `lock`/`offsets` outlive the sync doNotWait call. `reportSliceOffsets` armed;
-            // `numSlices` ≤ 32 (`resolve_slices` clamps 2..=32). Completed-slice bytes are
-            // valid until unlock; copy the emitted range first. Unlock every successful lock.
+            // `lock` outlives the sync doNotWait call and `offsets` points at
+            // `self.slice_offsets`, alive for this fn and sized to the frame in macroblocks
+            // (the SDK's bound). `reportSliceOffsets` armed. Completed-slice bytes are valid
+            // until unlock; copy the emitted range first. Unlock every successful lock.
             unsafe {
                 let mut lock = nv::NV_ENC_LOCK_BITSTREAM {
                     version: nv::NV_ENC_LOCK_BITSTREAM_VER,
                     outputBitstream: bs,
-                    sliceOffsets: offsets.as_mut_ptr(),
+                    sliceOffsets: self.slice_offsets.as_mut_ptr(),
                     ..Default::default()
                 };
                 lock.set_doNotWait(1);
@@ -2178,7 +2312,9 @@ impl Encoder for NvencCudaEncoder {
                             .nv_ok()
                             .map_err(|e| nvenc_status::call_err("unlock_bitstream (chunk)", e))?;
                         let cs = self.chunk.get_or_insert_with(ChunkState::new);
-                        cs.shadow.extend_from_slice(&data);
+                        if verify {
+                            cs.shadow.extend_from_slice(&data);
+                        }
                         let first = !cs.opened;
                         cs.opened = true;
                         cs.emitted = bytes;
@@ -2224,8 +2360,9 @@ impl Encoder for NvencCudaEncoder {
             // doNotWait bytes must be a prefix of the finished AU — otherwise the wire is
             // self-consistent and wrong. Latch sub-frame off and bail into stall-recovery
             // (rebuild without sub-frame, IDR). `emitted > total` first: the prefix slice
-            // would be ill-formed.
-            let diverged = cs.emitted > total || cs.shadow.as_slice() != &full[..cs.emitted];
+            // would be ill-formed. The byte compare retires once `verify` is false.
+            let diverged =
+                cs.emitted > total || (verify && cs.shadow.as_slice() != &full[..cs.emitted]);
             if diverged {
                 let _ = (api().unlock_bitstream)(self.encoder, bs);
                 if !map.is_null() {
@@ -2245,6 +2382,10 @@ impl Encoder for NvencCudaEncoder {
                     cs.emitted,
                     total
                 );
+            }
+            // Only an AU the sampler actually cut says anything about this driver branch.
+            if verify && cs.opened {
+                self.subframe_clean_aus += 1;
             }
             let data = full[cs.emitted..].to_vec();
             let keyframe = matches!(
@@ -2348,7 +2489,13 @@ impl Encoder for NvencCudaEncoder {
     }
 
     fn set_send_spread_us(&mut self, us: u32) {
+        // `init_session` arms the arbiter while the spread is still 0, so a sub-frame session
+        // cannot price the trade there and skips. The first real report is the second chance.
+        let first_report = self.send_spread_us == 0 && us != 0;
         self.send_spread_us = us;
+        if first_report && self.inited && self.arbiter.is_none() {
+            self.arm_split_arbiter();
+        }
     }
 
     fn applied_bitrate_bps(&self) -> Option<u64> {
@@ -4062,7 +4209,8 @@ mod tests {
         let bs = enc.pending.back().expect("in-flight entry").0;
         let t0 = std::time::Instant::now();
         let mut timeline: Vec<(u64, nv::NVENCSTATUS, u32, u32)> = Vec::new();
-        let mut offsets = [0u32; 32];
+        // Same bound as the encoder's own scratch: one entry per macroblock (nvEncodeAPI.h).
+        let mut offsets = vec![0u32; W.div_ceil(16) as usize * H.div_ceil(16) as usize];
         loop {
             let mut lock = nv::NV_ENC_LOCK_BITSTREAM {
                 version: nv::NV_ENC_LOCK_BITSTREAM_VER,
@@ -4072,7 +4220,8 @@ mod tests {
             };
             lock.set_doNotWait(1);
             // SAFETY: live session; `bs` is the just-submitted bitstream. Unlock a successful
-            // lock before the next iteration. `reportSliceOffsets` armed; ≤ 32 offsets.
+            // lock before the next iteration. `reportSliceOffsets` armed; `offsets` outlives
+            // the call and holds the SDK's one entry per macroblock.
             let (status, n, bytes) = unsafe {
                 let st = (api().lock_bitstream)(enc.encoder, &mut lock);
                 let ok = st == nv::NVENCSTATUS::NV_ENC_SUCCESS;
