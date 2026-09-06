@@ -215,6 +215,7 @@ pub fn derive_caps_h265(raw: &RawH265Caps, wanted: vk::Format) -> Result<DecodeC
         &raw.dpb_formats,
         &raw.output_formats,
         &raw.coincide_formats,
+        false,
     )?;
     Ok(arrangement.into_caps(
         raw.min_bitstream_buffer_offset_alignment,

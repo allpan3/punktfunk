@@ -260,6 +260,10 @@ pub enum CapsError {
     /// pool rebinds a fresh image per activation, which a fixed layer of one array
     /// cannot do. Demote rather than build a copy path.
     CoincideLayeredDpb,
+    /// AV1 film grain with COINCIDE only. Grain is applied to the output, so the
+    /// spec forbids a decode whose destination is its own setup reference, and
+    /// coincide has no other destination. Demote; never decode grain away.
+    FilmGrainCoincideOnly,
 }
 
 impl std::fmt::Display for CapsError {
@@ -313,6 +317,14 @@ impl std::fmt::Display for CapsError {
                      the picture-pool model needs per-slot images; demote this device"
                 )
             }
+            CapsError::FilmGrainCoincideOnly => {
+                write!(
+                    f,
+                    "this stream applies AV1 film grain and the device offers coincide \
+                     only — grain needs a decode destination separate from the setup \
+                     reference; demote this device"
+                )
+            }
         }
     }
 }
@@ -330,6 +342,7 @@ pub fn derive_caps(raw: &RawH264Caps) -> Result<DecodeCaps, CapsError> {
         &raw.dpb_formats,
         &raw.output_formats,
         &raw.coincide_formats,
+        false,
     )?;
     Ok(arrangement.into_caps(
         raw.min_bitstream_buffer_offset_alignment,
@@ -393,6 +406,10 @@ impl Arrangement {
 /// Decide the DPB arrangement and validate `wanted` against the format lists of
 /// the roles that arrangement creates. Shared by both codecs; H.265 derives
 /// `wanted` from SPS chroma and bit depth ([`crate::caps_h265::output_format_for`]).
+///
+/// `need_distinct` rules coincide out: AV1 film grain writes the grained picture
+/// to the decode destination and the ungrained one to the setup reference, so
+/// the two cannot be one image.
 pub(crate) fn derive_arrangement(
     capability_flags: vk::VideoCapabilityFlagsKHR,
     decode_flags: vk::VideoDecodeCapabilityFlagsKHR,
@@ -400,13 +417,19 @@ pub(crate) fn derive_arrangement(
     dpb_formats: &[VideoFormat],
     output_formats: &[VideoFormat],
     coincide_formats: &[VideoFormat],
+    need_distinct: bool,
 ) -> Result<Arrangement, CapsError> {
-    let coincide =
-        decode_flags.contains(vk::VideoDecodeCapabilityFlagsKHR::DPB_AND_OUTPUT_COINCIDE);
+    let coincide = decode_flags
+        .contains(vk::VideoDecodeCapabilityFlagsKHR::DPB_AND_OUTPUT_COINCIDE)
+        && !need_distinct;
     let distinct =
         decode_flags.contains(vk::VideoDecodeCapabilityFlagsKHR::DPB_AND_OUTPUT_DISTINCT);
     if !coincide && !distinct {
-        return Err(CapsError::NoDecodeMode);
+        return Err(if need_distinct {
+            CapsError::FilmGrainCoincideOnly
+        } else {
+            CapsError::NoDecodeMode
+        });
     }
 
     let layered_dpb =

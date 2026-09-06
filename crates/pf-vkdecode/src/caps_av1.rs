@@ -188,7 +188,15 @@ pub struct RawAv1Caps {
 /// Same refusals as H.265: no advertised entry for `wanted` yields
 /// [`CapsError::NoFormat`] with the mode named. Nothing is created — a
 /// pre-session demote, never a silent fallback that would lose bits.
-pub fn derive_caps_av1(raw: &RawAv1Caps, wanted: vk::Format) -> Result<DecodeCaps, CapsError> {
+///
+/// `film_grain` forces a distinct DPB: the grained picture goes to the decode
+/// destination, the ungrained one to the setup reference, and coincide has only
+/// one image for both.
+pub fn derive_caps_av1(
+    raw: &RawAv1Caps,
+    wanted: vk::Format,
+    film_grain: bool,
+) -> Result<DecodeCaps, CapsError> {
     let arrangement = derive_arrangement(
         raw.capability_flags,
         raw.decode_flags,
@@ -196,6 +204,7 @@ pub fn derive_caps_av1(raw: &RawAv1Caps, wanted: vk::Format) -> Result<DecodeCap
         &raw.dpb_formats,
         &raw.output_formats,
         &raw.coincide_formats,
+        film_grain,
     )?;
     Ok(arrangement.into_caps(
         raw.min_bitstream_buffer_offset_alignment,
@@ -496,7 +505,7 @@ mod tests {
     #[test]
     fn a_main_stream_derives_nv12_on_a_coincide_device() {
         let raw = coincide_device(vec![entry(NV12, COINCIDE_USAGE)]);
-        let caps = derive_caps_av1(&raw, NV12).unwrap();
+        let caps = derive_caps_av1(&raw, NV12, false).unwrap();
         assert!(caps.coincide);
         assert!(!caps.layered_dpb);
         assert_eq!(caps.output_format, NV12);
@@ -515,7 +524,7 @@ mod tests {
         // disagree (AV1 5.1 is 13, H.265 5.1 is 12, H.264 5.1 is 51). The tag
         // is what makes the decoder's numeric gate honest.
         let raw = coincide_device(vec![entry(NV12, COINCIDE_USAGE)]);
-        let caps = derive_caps_av1(&raw, NV12).unwrap();
+        let caps = derive_caps_av1(&raw, NV12, false).unwrap();
         assert_eq!(
             caps.max_level_idc,
             MaxLevelIdc::Av1(hh::StdVideoAV1Level_STD_VIDEO_AV1_LEVEL_5_1)
@@ -536,7 +545,7 @@ mod tests {
     fn a_ten_bit_stream_on_an_eight_bit_only_device_is_refused_before_any_session() {
         let raw = coincide_device(vec![entry(NV12, COINCIDE_USAGE)]);
         assert_eq!(
-            derive_caps_av1(&raw, P010).unwrap_err(),
+            derive_caps_av1(&raw, P010, false).unwrap_err(),
             CapsError::NoFormat {
                 mode: "coincide (DPB|DST|SAMPLED)",
                 wanted: P010
@@ -547,7 +556,7 @@ mod tests {
             entry(NV12, COINCIDE_USAGE),
             entry(P010, COINCIDE_USAGE),
         ]);
-        let caps = derive_caps_av1(&raw, P010).unwrap();
+        let caps = derive_caps_av1(&raw, P010, false).unwrap();
         assert_eq!(caps.output_format, P010);
         assert_eq!(
             caps.plane_view_formats,
@@ -555,6 +564,37 @@ mod tests {
                 vk::Format::R10X6_UNORM_PACK16,
                 vk::Format::R10X6G10X6_UNORM_2PACK16
             ]
+        );
+    }
+
+    /// Grain is applied to the decode destination and withheld from the setup
+    /// reference, so the two cannot be one image. Coincide-only devices are
+    /// demoted before a session exists; decoding the grain away is not offered.
+    #[test]
+    fn film_grain_takes_the_distinct_dpb_and_refuses_a_coincide_only_device() {
+        let coincide_only = coincide_device(vec![entry(NV12, COINCIDE_USAGE)]);
+        assert_eq!(
+            derive_caps_av1(&coincide_only, NV12, true).unwrap_err(),
+            CapsError::FilmGrainCoincideOnly
+        );
+        assert!(
+            derive_caps_av1(&coincide_only, NV12, false)
+                .unwrap()
+                .coincide,
+            "the same device still takes coincide for a grain-less stream"
+        );
+
+        let both = RawAv1Caps {
+            decode_flags: vk::VideoDecodeCapabilityFlagsKHR::DPB_AND_OUTPUT_COINCIDE
+                | vk::VideoDecodeCapabilityFlagsKHR::DPB_AND_OUTPUT_DISTINCT,
+            dpb_formats: vec![entry(NV12, DPB_USAGE)],
+            output_formats: vec![entry(NV12, OUTPUT_USAGE)],
+            ..coincide_device(vec![entry(NV12, COINCIDE_USAGE)])
+        };
+        assert!(derive_caps_av1(&both, NV12, false).unwrap().coincide);
+        assert!(
+            !derive_caps_av1(&both, NV12, true).unwrap().coincide,
+            "grain must take the distinct arrangement where both are offered"
         );
     }
 
@@ -575,7 +615,7 @@ mod tests {
             ..coincide_device(vec![])
         };
         assert_eq!(
-            derive_caps_av1(&raw, P010).unwrap_err(),
+            derive_caps_av1(&raw, P010, false).unwrap_err(),
             CapsError::NoFormat {
                 mode: "output (DST|SAMPLED)",
                 wanted: P010
@@ -588,7 +628,7 @@ mod tests {
             output_formats: vec![entry(P010, OUTPUT_USAGE)],
             ..raw
         };
-        let caps = derive_caps_av1(&raw, P010).unwrap();
+        let caps = derive_caps_av1(&raw, P010, false).unwrap();
         assert!(!caps.coincide);
         assert!(caps.layered_dpb);
         assert_eq!(caps.output_format, P010);
@@ -602,7 +642,7 @@ mod tests {
             vk::ImageUsageFlags::VIDEO_DECODE_DPB_KHR | vk::ImageUsageFlags::VIDEO_DECODE_DST_KHR,
         )]);
         assert_eq!(
-            derive_caps_av1(&raw, NV12).unwrap_err(),
+            derive_caps_av1(&raw, NV12, false).unwrap_err(),
             CapsError::UsageUnsupported {
                 mode: "coincide (DPB|DST|SAMPLED)",
                 format: NV12,
@@ -617,7 +657,7 @@ mod tests {
             ..Default::default()
         }]);
         assert_eq!(
-            derive_caps_av1(&raw, NV12).unwrap_err(),
+            derive_caps_av1(&raw, NV12, false).unwrap_err(),
             CapsError::NoMutableFormat {
                 mode: "coincide (DPB|DST|SAMPLED)",
                 format: NV12,
@@ -630,7 +670,7 @@ mod tests {
         let mut raw = coincide_device(vec![entry(NV12, COINCIDE_USAGE)]);
         raw.decode_flags = vk::VideoDecodeCapabilityFlagsKHR::empty();
         assert_eq!(
-            derive_caps_av1(&raw, NV12).unwrap_err(),
+            derive_caps_av1(&raw, NV12, false).unwrap_err(),
             CapsError::NoDecodeMode
         );
 
@@ -639,7 +679,7 @@ mod tests {
         let mut raw = coincide_device(vec![entry(NV12, COINCIDE_USAGE)]);
         raw.capability_flags = vk::VideoCapabilityFlagsKHR::empty();
         assert_eq!(
-            derive_caps_av1(&raw, NV12).unwrap_err(),
+            derive_caps_av1(&raw, NV12, false).unwrap_err(),
             CapsError::CoincideLayeredDpb
         );
     }
