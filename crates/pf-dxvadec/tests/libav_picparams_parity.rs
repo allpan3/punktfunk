@@ -15,6 +15,36 @@
 //! Repeat for HEVC (`test-25fps.h265`) and AV1 (`test-25fps.ivf.av1`). `PF_DXVA_DUMP`
 //! writes this harness's records. H.264 POC offset and HEVC tiles-disabled bit 10 are
 //! the only allowances; reject `Reserved16Bits == 0`.
+//!
+//! # The patch's contract
+//!
+//! FFmpeg emits none of these markers on its own and the patch is not in this repo, so
+//! the capture cannot be regenerated from the invocation above alone. The format is
+//! fixed by [`parse_capture`] below, and this is it — enough to rewrite the patch
+//! against any checkout. Print one line per item to stderr; the parser finds the marker
+//! anywhere in the line, so FFmpeg's own `[h264 @ 0x…]` prefix is fine.
+//!
+//! ```text
+//! PFPP  <codec> <au> <hex>                          the DXVA picture-parameters struct
+//! PFQM  <codec> <au> <hex>|absent                   the inverse-quantization matrix buffer
+//! PFBD  <codec> <au> <type> <size> <mbs> <offset>   one per buffer descriptor, in order
+//! PFCFG <codec> <au> <ConfigBitstreamRaw>           the decoder config's raw mode
+//! ```
+//!
+//! `<codec>` is `avcodec_get_name`: `h264`, `hevc`, `av1`. `<au>` counts from zero and
+//! is the *decoded picture*, not the temporal unit — the AV1 leg expects 274 for a
+//! 250-frame vector. `<hex>` is the struct's bytes, lower-case, no separators. `PFQM`
+//! is `absent` when the codec hands the driver no matrix buffer; AV1 emits neither
+//! `PFQM` nor `PFCFG`.
+//!
+//! The hook sites are `libavcodec/dxva2.c` (`ff_dxva2_commit_buffer` for `PFBD`,
+//! `ff_dxva2_common_end_frame` for `PFCFG`) and each codec's `fill_picture_parameters`
+//! / `fill_scaling_lists` in `dxva2_h264.c`, `dxva2_hevc.c`, `dxva2_av1.c`.
+//!
+//! A capture is a few hundred kB of text and does not change unless FFmpeg's mapping
+//! does. Committing the three of them is what would move this harness off the ignore
+//! list and into the PR lane, where a mapping regression would be caught by CI rather
+//! than by the next person who thinks to run it.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
