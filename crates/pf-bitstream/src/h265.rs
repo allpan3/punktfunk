@@ -146,8 +146,9 @@ pub struct RefPic {
 
 /// The three "current" 8.3.2 reference picture sets, resolved to stored pictures.
 ///
-/// Unresolvable entries are ABSENT (flagged [`PlanWarning::MissingReference`]).
-/// Per-slice lists conceal by substitution instead: `ref_idx` is positional.
+/// Positional: an unresolvable entry keeps its place, filled by the neighbour
+/// the per-slice lists substitute (flagged [`PlanWarning::MissingReference`]).
+/// A set with no resolvable entry at all is empty.
 #[derive(Debug, Clone, Default)]
 pub struct RpsPlan {
     /// `RefPicSetStCurrBefore`: short-term, POC below current, nearest first.
@@ -1302,8 +1303,15 @@ impl H265Planner {
     }
 
     fn rps_plan(&self) -> RpsPlan {
+        // Positional, like the slice lists: hardware rebuilds `RefPicListTemp0`
+        // by position, so compacting a DPB miss away shifts every later
+        // `ref_idx` and disagrees with `NumPicTotalCurr`.
         let convert = |set: &Vec<Option<DpbEntry<PicId>>>| -> Vec<RefPic> {
-            set.iter().flatten().map(Self::to_ref_pic).collect()
+            Self::substitute_in_place(
+                set.iter()
+                    .map(|entry| entry.as_ref().map(Self::to_ref_pic))
+                    .collect(),
+            )
         };
         RpsPlan {
             st_curr_before: convert(&self.rps.ref_pic_set_st_curr_before),
@@ -2280,8 +2288,10 @@ mod tests {
             vec![p1_id, p1_id, idr_id],
             "substitution must preserve list length and positions"
         );
-        // RPS omits the unresolvable entry rather than fabricating one.
-        assert_eq!(p3.rps.st_curr_before.len(), 2);
+        // The RPS set is positional too: hardware rebuilds `RefPicListTemp0`
+        // from it by position, so the hole takes the substitute, not a shift.
+        let rps: Vec<PicId> = p3.rps.st_curr_before.iter().map(|r| r.id).collect();
+        assert_eq!(rps, vec![p1_id, p1_id, idr_id]);
     }
 
     #[test]
