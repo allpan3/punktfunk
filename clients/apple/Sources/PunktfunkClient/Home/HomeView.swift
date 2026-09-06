@@ -44,7 +44,6 @@ struct HomeView: View {
     let wake: (StoredHost) -> Void
     /// Game-library browser (default ON; the Settings toggle opts out) — the host-card
     /// "Browse Library…" action.
-    @AppStorage(DefaultsKey.libraryEnabled) private var libraryEnabled = true
     /// The host being edited (name / address / port / Wake-on-LAN MAC) — drives the edit sheet.
     @State private var editTarget: StoredHost?
     /// The outcome of the last "Send Logs to Host" — drives its alert.
@@ -340,7 +339,7 @@ struct HomeView: View {
         // SAN — system trust is bypassed), so browsing an unpinned host lets a LAN MITM serve a
         // forged catalog and harvest the device's pairing identity. Pair first, exactly as the
         // stream path already refuses an unpinned connect. security-review 2026-08-15 finding 8.
-        let onBrowseLibrary: (() -> Void)? = (libraryEnabled && host.pinnedSHA256 != nil)
+        let onBrowseLibrary: (() -> Void)? = host.pinnedSHA256 != nil
             ? { libraryTarget = LibraryTarget(host: host, profile: selection) }
             : nil
         return HostCardView(

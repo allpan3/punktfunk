@@ -80,7 +80,6 @@ class ProfilesTest {
         // Device-scope settings are not in the overlay at all, so no profile can move them.
         assertEquals(base.gamepadUiEnabled, out.gamepadUiEnabled)
         assertEquals(base.gamepadUiMode, out.gamepadUiMode)
-        assertEquals(base.libraryEnabled, out.libraryEnabled)
         assertEquals(base.autoWakeEnabled, out.autoWakeEnabled)
         assertEquals(base.sc2Capture, out.sc2Capture)
     }

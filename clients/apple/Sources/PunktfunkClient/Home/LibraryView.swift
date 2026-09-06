@@ -7,8 +7,8 @@
 // titles, opening the screen wakes that host so it is warm by the time one is picked, and the
 // position in the grid survives the stream. Titles already running are marked and sorted first.
 //
-// Still gated behind `DefaultsKey.libraryEnabled` (default on) and, separately, on the host being
-// PAIRED — see `HomeView.hostCard` for why the pin is load-bearing rather than cosmetic.
+// Gated on the host being PAIRED — see `HomeView.hostCard` for why the pin is load-bearing
+// rather than cosmetic.
 
 import PunktfunkKit
 import SwiftUI

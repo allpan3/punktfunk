@@ -63,7 +63,6 @@ struct SettingsView: View {
     #endif
     @AppStorage(DefaultsKey.hdrEnabled) var hdrEnabled = true
     @AppStorage(DefaultsKey.enable444) var enable444 = false
-    @AppStorage(DefaultsKey.libraryEnabled) var libraryEnabled = true
     /// The gamepad library's arrangement and its collections-first switch — device preferences,
     /// stored as the cross-client `library_view` / `library_collections` values.
     @AppStorage(DefaultsKey.libraryView) var libraryViewRaw = LibraryArrangement.shelf.stored

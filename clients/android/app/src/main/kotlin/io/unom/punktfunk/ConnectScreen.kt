@@ -903,7 +903,6 @@ fun ConnectScreen(
         onHostAction = { kh, a -> hostAction(kh, a) },
         onCopyLink = { kh, pin -> copyLink(kh, pin) },
         onTogglePin = { kh, p -> togglePin(kh, p) },
-        libraryEnabled = settings.libraryEnabled,
         onBrowseLibrary = { kh, pin -> onOpenLibrary(kh, pin?.id) },
         defaultHost = settings.defaultHost,
         onMakeDefault = { kh, on -> setDefaultHost(kh, on) },

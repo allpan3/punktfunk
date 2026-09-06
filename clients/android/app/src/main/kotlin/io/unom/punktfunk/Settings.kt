@@ -151,12 +151,6 @@ data class Settings(
      */
     val gamepadUiMode: String = GAMEPAD_UI_WHEN_CONNECTED,
     /**
-     * Show the experimental game-library browser (the coverflow reached with Y from a saved host).
-     * Fetched from the host's management API over mTLS; needs a paired host. Mirrors the Apple
-     * client's `libraryEnabled`.
-     */
-    val libraryEnabled: Boolean = true,
-    /**
      * Which colour family the console (gamepad) UI's living backdrop drifts through — the
      * cross-client `ui_palette` key: `"violet"` (the brand default), then `"oled"`, `"nebula"`,
      * `"abyss"`, `"ember"`, `"moss"`, `"graphite"`, then the six pale fields. See
@@ -379,7 +373,6 @@ class SettingsStore(context: Context) {
         reduceUiResolution = prefs.getBoolean(K_REDUCE_UI_RES, false),
         gamepadUiMode = prefs.getString(K_GAMEPAD_UI_MODE, GAMEPAD_UI_WHEN_CONNECTED)
             ?: GAMEPAD_UI_WHEN_CONNECTED,
-        libraryEnabled = prefs.getBoolean(K_LIBRARY, true),
         uiPalette = prefs.getString(K_UI_PALETTE, "violet") ?: "violet",
         lowLatencyMode = prefs.getBoolean(K_LOW_LATENCY, true),
         presentPriority = prefs.getString(K_PRESENT_PRIORITY, "latency") ?: "latency",
@@ -427,7 +420,6 @@ class SettingsStore(context: Context) {
             .putBoolean(K_GAMEPAD_UI, s.gamepadUiEnabled)
             .putBoolean(K_REDUCE_UI_RES, s.reduceUiResolution)
             .putString(K_GAMEPAD_UI_MODE, s.gamepadUiMode)
-            .putBoolean(K_LIBRARY, s.libraryEnabled)
             .putString(K_UI_PALETTE, s.uiPalette)
             .putBoolean(K_LOW_LATENCY, s.lowLatencyMode)
             .putString(K_PRESENT_PRIORITY, s.presentPriority)
@@ -474,7 +466,8 @@ class SettingsStore(context: Context) {
         const val K_GAMEPAD_UI = "gamepad_ui_enabled"
         const val K_REDUCE_UI_RES = "reduce_ui_resolution"
         const val K_GAMEPAD_UI_MODE = "gamepad_ui_mode"
-        const val K_LIBRARY = "library_enabled"
+        // RETIRED: "library_enabled", the game-library switch. Pairing is the only gate now, on
+        // every client. A stored value is left where it is and never read again.
         const val K_UI_PALETTE = "ui_palette"
 
         /**

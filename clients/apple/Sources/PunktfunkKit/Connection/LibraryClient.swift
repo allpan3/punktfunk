@@ -1,7 +1,7 @@
 // Game library client. Fetches the host's unified game library from the management REST API
 // (`GET /api/v1/library`) — the same payload the web console's /library page renders — and what it
 // currently has running (`GET /api/v1/status`), so a title the player can return to can be marked
-// as such. Gated behind `DefaultsKey.libraryEnabled` in the UI.
+// as such. Offered for a PAIRED host only: the fetch authenticates with the pinned identity.
 //
 // The management API serves HTTPS on a port distinct from the punktfunk/1 data plane (default
 // 47990, also advertised in the host's mDNS `mgmt` TXT). A paired client is authorized for the

@@ -473,23 +473,17 @@ extension SettingsView {
         // profile scope rather than rendering an empty group.
         if !inProfileScope {
             Section("Library") {
-                described("Adds “Browse Library…” to paired hosts — launch their games "
-                    + "directly.") {
-                    Toggle("Show game library", isOn: $libraryEnabled)
-                }
-                if libraryEnabled {
-                    described("How the controller-optimized library arranges titles: Shelf is the "
-                        + "coverflow, Grid shows more at once.") {
-                        Picker("Library view", selection: $libraryViewRaw) {
-                            ForEach(LibraryArrangement.all, id: \.stored) { arrangement in
-                                Text(arrangement.label).tag(arrangement.stored)
-                            }
+                described("How the controller-optimized library arranges titles: Shelf is the "
+                    + "coverflow, Grid shows more at once.") {
+                    Picker("Library view", selection: $libraryViewRaw) {
+                        ForEach(LibraryArrangement.all, id: \.stored) { arrangement in
+                            Text(arrangement.label).tag(arrangement.stored)
                         }
                     }
-                    described("Opens a library on its platform groups first; a library with one "
-                        + "platform still opens on the shelf.") {
-                        Toggle("Start in collections", isOn: $libraryCollections)
-                    }
+                }
+                described("Opens a library on its platform groups first; a library with one "
+                    + "platform still opens on the shelf.") {
+                    Toggle("Start in collections", isOn: $libraryCollections)
                 }
                 described(startInFooter) {
                     Picker("Start in", selection: $startInRaw) {

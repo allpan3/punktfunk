@@ -601,12 +601,6 @@ private fun GeneralSettings(s: Settings, update: (Settings) -> Unit) {
     }
     DeviceScopeOnly {
         SettingsGroup("Library") {
-            ToggleRow(
-                title = "Game library",
-                subtitle = "Browse a paired host's games and launch one directly.",
-                checked = s.libraryEnabled,
-                onCheckedChange = { on -> update(s.copy(libraryEnabled = on)) },
-            )
             SettingDropdown(
                 label = "Start in",
                 options = START_IN_OPTIONS,

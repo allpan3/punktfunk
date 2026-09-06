@@ -121,7 +121,6 @@ struct GamepadHomeView: View {
     @ObservedObject private var nowPlaying = NowPlayingStore.shared
     /// Same gate the touch grid's "Browse Library…" context-menu item uses (default ON; the
     /// Settings "Game library" toggle opts out).
-    @AppStorage(DefaultsKey.libraryEnabled) private var libraryEnabled = true
     /// Auto-wake on connect (default ON) — when off, activating an offline host just dials (no wake),
     /// so the tile drops its "Wake & Connect" affordance for a plain "Connect".
     @AppStorage(DefaultsKey.autoWake) private var autoWakeEnabled = true
@@ -557,7 +556,7 @@ struct GamepadHomeView: View {
             glyph: buttonGlyph(\.buttonA, fallback: "a.circle"),
             text: action ?? connectVerb(for: selected),
             action: { tiles.first { $0.id == selection }?.activate() })]
-        if libraryEnabled, selected?.hasLibrary == true {
+        if selected?.hasLibrary == true {
             hints.append(.init(
                 glyph: buttonGlyph(\.buttonY, fallback: "y.circle"), text: "Library",
                 action: { openLibraryForSelected() }))
@@ -719,8 +718,11 @@ struct GamepadHomeView: View {
     }
 
     private func openLibraryForSelected() {
-        guard libraryEnabled, case .saved(let id, let profileID) = selection,
-              let host = store.hosts.first(where: { $0.id == id })
+        // Pairing is the whole gate: the fetch authenticates with the pinned identity, so an
+        // unpinned host could only ever be refused — and browsing one invites a forged catalog.
+        guard case .saved(let id, let profileID) = selection,
+              let host = store.hosts.first(where: { $0.id == id }),
+              host.pinnedSHA256 != nil
         else { return }
         libraryTarget = LibraryTarget(host: host, profile: ProfileSelection(profileID: profileID))
     }

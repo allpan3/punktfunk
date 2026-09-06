@@ -88,8 +88,6 @@ internal fun ConnectGrid(
     onHostAction: (KnownHost, HostActions.Action) -> Unit,
     onCopyLink: (KnownHost, StreamProfile?) -> Unit,
     onTogglePin: (KnownHost, StreamProfile) -> Unit,
-    /** The experimental game-library toggle — off hides "Browse library…" everywhere. */
-    libraryEnabled: Boolean,
     /**
      * Open this card's game library. The second argument is the shelf's pinned profile id, exactly
      * as [onConnect] takes the card's one-off: browsing IS this card's connect with a title picked
@@ -109,10 +107,10 @@ internal fun ConnectGrid(
     // lives in the Edit sheet instead.
     fun hostMenu(kh: KnownHost, pin: StreamProfile?): List<HostMenuItem> = buildList {
         // Browsing IS a connect-shaped action — this card's connect with a title picked first — so
-        // a PINNED card offers it too, and its shelf launches with that card's profile. Without it
-        // the touch home had no route to the library at all: the console shell reaches it with Y
-        // from a tile, and a finger has no Y.
-        if (libraryEnabled) {
+        // a PINNED card offers it too, and its shelf launches with that card's profile. Pairing is
+        // the whole gate: the fetch authenticates with the pinned identity, so an unpaired card
+        // could only ever be refused.
+        if (kh.paired) {
             add(HostMenuItem("Browse library…") { onBrowseLibrary(kh, pin) })
         }
         if (pin == null) {
