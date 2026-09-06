@@ -25,8 +25,8 @@ use windows::core::Interface;
 use windows::Win32::d3d11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
     ID3D11VideoContext1, ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
-    ID3D11VideoProcessorEnumerator1, ID3D11VideoProcessorOutputView, D3D11_BIND_RENDER_TARGET,
-    D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    ID3D11VideoProcessorEnumerator1, ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView,
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
     D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX,
     D3D11_RESOURCE_MISC_SHARED_NTHANDLE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
     D3D11_USAGE_DEFAULT, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
@@ -265,6 +265,14 @@ struct SharedRing {
     generation: u32,
     /// `true` = RGB10A2 PQ BT.2020 (colorspace only, both sides G2084). `false` = BGRA8 sRGB.
     pq_out: bool,
+    /// Decode pool the cached views describe, by texture pointer. A rebuilt pool
+    /// is a different pointer and empties the cache.
+    in_view_tex: isize,
+    /// Input views by DPB slice. A view is a descriptor over a fixed texture, so
+    /// one per slice outlives every frame that slice decodes.
+    in_views: std::collections::HashMap<u32, ID3D11VideoProcessorInputView>,
+    /// Layout already logged for this ring ([`log_layout_once`]).
+    logged: Option<LayoutKey>,
 }
 
 impl SharedRing {
@@ -389,6 +397,9 @@ impl SharedRing {
             next: 0,
             generation,
             pq_out,
+            in_view_tex: 0,
+            in_views: std::collections::HashMap::new(),
+            logged: None,
         })
     }
 }
@@ -510,29 +521,59 @@ impl HandoffRing {
         let ring = self.ring.as_mut().expect("ring built above");
         let slot_idx = ring.next;
         ring.next = (ring.next + 1) % ring.slots.len();
-        let slot = &ring.slots[slot_idx];
+        // Cloned out of the ring so the view cache and the log latch below can
+        // borrow it mutably. Two AddRefs against a per-frame driver call.
+        let vp = ring.vp.clone();
+        let out_view = ring.slots[slot_idx].out_view.clone();
+        let mutex = ring.slots[slot_idx].mutex.clone();
+        let handle = ring.slots[slot_idx].handle.0 as isize;
+        let generation = ring.generation;
+        let ring_pq_out = ring.pq_out;
 
-        // SAFETY: every call below is a COM call on a live interface — the video device and
-        // context AddRef'd above, the ring's processor/enumerator/views built by
-        // `SharedRing::build`, and the caller's `src` texture, whose liveness for the call is
-        // this method's contract. Out-params are local `Option`s checked before use; the
-        // `ManuallyDrop` refs the stream struct carries are balanced explicitly below.
+        // One input view per (decode pool, DPB slice): the pool is fixed for a
+        // session, so the per-frame view was a driver call for a descriptor that
+        // never changed. A rebuilt pool has a new pointer and starts empty.
+        let tex_key = src.as_raw() as isize;
+        if ring.in_view_tex != tex_key {
+            ring.in_views.clear();
+            ring.in_view_tex = tex_key;
+        }
+        let in_view = match ring.in_views.get(&array_slice).cloned() {
+            Some(view) => view,
+            None => {
+                // SAFETY: a COM call on the live video device, over the ring's own
+                // enumerator and the caller's `src` texture (live for the call by
+                // this method's contract); the descriptor and out-param are locals.
+                let view = unsafe {
+                    let mut iv_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
+                        FourCC: 0, // surface format speaks for itself
+                        ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
+                        // Anonymous.Texture2D zeroed (MipSlice 0); ArraySlice is this slice.
+                        ..Default::default()
+                    };
+                    iv_desc.Anonymous.Texture2D.ArraySlice = array_slice;
+                    let mut created = None;
+                    video_device
+                        .CreateVideoProcessorInputView(
+                            src,
+                            &ring.enumerator,
+                            &iv_desc,
+                            Some(&mut created),
+                        )
+                        .ok()
+                        .context("CreateVideoProcessorInputView")?;
+                    created.expect("input view created")
+                };
+                ring.in_views.insert(array_slice, view.clone());
+                view
+            }
+        };
+
+        // SAFETY: every call below is a COM call on a live interface — the video context
+        // AddRef'd above, and the processor, output view, keyed mutex and input view
+        // cloned out of the live ring. The `ManuallyDrop` refs the stream struct carries
+        // are balanced explicitly below.
         unsafe {
-            // Per-frame view over this DPB slice.
-            let mut iv_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
-                FourCC: 0, // surface format speaks for itself
-                ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
-                // Anonymous.Texture2D zeroed (MipSlice 0); ArraySlice is per-frame below.
-                ..Default::default()
-            };
-            iv_desc.Anonymous.Texture2D.ArraySlice = array_slice;
-            let mut in_view = None;
-            video_device
-                .CreateVideoProcessorInputView(src, &ring.enumerator, &iv_desc, Some(&mut in_view))
-                .ok()
-                .context("CreateVideoProcessorInputView")?;
-            let in_view = in_view.expect("input view created");
-
             // Per-frame CICP → DXGI (host flips PQ in-band). Matrix 5/6 is BT.601; mapping
             // it to P709 is a hue error (NVENC's RGB→YUV is BT.601). DXGI has no full-range
             // G2084 YCbCr enum, so PQ is studio regardless of range.
@@ -550,7 +591,7 @@ impl HandoffRing {
             // (Y=0,U=V=0) converts to green at the bottom and the picture is squashed.
             // Clamp to the real frame; dest stays the (frame-sized) slot.
             video_context1.VideoProcessorSetStreamSourceRect(
-                &ring.vp,
+                &vp,
                 0,
                 true,
                 Some(&RECT {
@@ -560,12 +601,12 @@ impl HandoffRing {
                     bottom: height as i32,
                 }),
             );
-            video_context1.VideoProcessorSetStreamColorSpace1(&ring.vp, 0, in_cs);
+            video_context1.VideoProcessorSetStreamColorSpace1(&vp, 0, in_cs);
             video_context1.VideoProcessorSetOutputColorSpace1(
-                &ring.vp,
+                &vp,
                 // HDR ring: PQ in, PQ out (YCbCr→RGB, no tone map). SDR ring: sRGB out
                 // (PQ is tone-mapped here).
-                if ring.pq_out {
+                if ring_pq_out {
                     DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
                 } else {
                     DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709
@@ -585,18 +626,16 @@ impl HandoffRing {
                 pInputSurfaceRight: std::mem::ManuallyDrop::new(None),
                 ppFutureSurfacesRight: ptr::null_mut(),
             };
-            let handle = slot.handle.0 as isize;
-            let generation = ring.generation;
             let mut streams = [stream];
-            slot.mutex
+            mutex
                 .AcquireSync(0, ACQUIRE_TIMEOUT_MS)
                 .ok()
                 .context("keyed-mutex acquire (decode side) timed out")?;
-            let blt = video_context1.VideoProcessorBlt(&ring.vp, &slot.out_view, 0, &streams);
+            let blt = video_context1.VideoProcessorBlt(&vp, &out_view, 0, &streams);
             // Balance the ManuallyDrop refs the stream struct carried BEFORE error-checking.
             std::mem::ManuallyDrop::drop(&mut streams[0].pInputSurface);
             std::mem::ManuallyDrop::drop(&mut streams[0].pInputSurfaceRight);
-            let release = slot.mutex.ReleaseSync(0);
+            let release = mutex.ReleaseSync(0);
             blt.ok().context("VideoProcessorBlt")?;
             release.ok().context("keyed-mutex release")?;
             // Flush now: the presenter's GPU acquire waits on this blit; an unflushed
@@ -606,6 +645,7 @@ impl HandoffRing {
             let mut src_desc = D3D11_TEXTURE2D_DESC::default();
             src.GetDesc(&mut src_desc);
             log_layout_once(
+                &mut ring.logged,
                 width,
                 height,
                 src_desc.Width,
@@ -618,7 +658,7 @@ impl HandoffRing {
                 width,
                 height,
                 // Slot contents after the blit, not the source signalling.
-                color: if ring.pq_out {
+                color: if ring_pq_out {
                     ColorDesc {
                         primaries: 9,
                         transfer: 16, // PQ / SMPTE ST.2084
@@ -633,7 +673,7 @@ impl HandoffRing {
                         full_range: true,
                     }
                 },
-                rgb10: ring.pq_out,
+                rgb10: ring_pq_out,
                 keyframe,
                 handle,
                 generation,
@@ -642,13 +682,17 @@ impl HandoffRing {
     }
 }
 
-/// One-time layout log of a decoded surface. `tex_*` is the DXVA-aligned pool
-/// (>= the frame); the gap is the padding the source rect excludes.
+/// Frame size, DXVA-aligned pool size, and PQ. `slice` stays out: it varies per
+/// frame and would log once per DPB slot.
+type LayoutKey = (u32, u32, u32, u32, bool);
+
+/// One layout log per ring. `tex_*` is the DXVA-aligned pool (>= the frame); the
+/// gap is the padding the source rect excludes.
 ///
-/// Keyed by decoder × (frame, pool, PQ) so a demotion or mid-stream `Reconfigure`
-/// logs the new shape. `slice` stays out of the key: it varies per frame and
-/// would log once per DPB slot.
+/// The latch lives on the ring, so a mid-stream `Reconfigure` logs the new shape
+/// and a demotion — which builds a new decoder — logs the new rung.
 fn log_layout_once(
+    latch: &mut Option<LayoutKey>,
     width: u32,
     height: u32,
     tex_w: u32,
@@ -657,28 +701,21 @@ fn log_layout_once(
     pq: bool,
     decoder: &str,
 ) {
-    use std::collections::HashSet;
-    use std::sync::{Mutex, OnceLock};
-    type LayoutKey = (String, u32, u32, u32, u32, bool);
-    static SEEN: OnceLock<Mutex<HashSet<LayoutKey>>> = OnceLock::new();
-    let seen = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
-    // Poison costs a log line, never a frame: ignore it and the worst case is a repeat.
-    let first = match seen.lock() {
-        Ok(mut seen) => seen.insert((decoder.to_owned(), width, height, tex_w, tex_h, pq)),
-        Err(_) => false,
-    };
-    if first {
-        tracing::info!(
-            width,
-            height,
-            tex_w,
-            tex_h,
-            slice = index,
-            pq,
-            decoder,
-            "D3D11VA first frame"
-        );
+    let key = (width, height, tex_w, tex_h, pq);
+    if *latch == Some(key) {
+        return;
     }
+    *latch = Some(key);
+    tracing::info!(
+        width,
+        height,
+        tex_w,
+        tex_h,
+        slice = index,
+        pq,
+        decoder,
+        "D3D11VA first frame"
+    );
 }
 
 /// This desktop's HDR volume (`IDXGIOutput6::GetDesc1`) for Hello `display_hdr`, so
