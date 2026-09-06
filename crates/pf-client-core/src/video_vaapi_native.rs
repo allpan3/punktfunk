@@ -795,15 +795,17 @@ pub(crate) struct NativeVaapiDecoder {
 }
 
 impl NativeVaapiDecoder {
-    /// Probe [`StreamFormat`] here. A first-AU refusal is a decode error, burns the
-    /// demotion streak, and skips the ladder's fall-through.
+    /// Probe [`StreamFormat`] and the display here. A first-AU refusal is a decode
+    /// error, burns the demotion streak, and skips the ladder's fall-through, so the
+    /// entrypoint the session needs is asked for before the ladder has moved on.
     pub(crate) fn new(codec: pf_vaadec::Codec, stream: StreamFormat) -> Result<NativeVaapiDecoder> {
         let depth = stream.bit_depth;
-        pf_vaadec::profile_for(codec, stream.chroma_format_idc, depth)
+        let profile = pf_vaadec::profile_for(codec, stream.chroma_format_idc, depth)
             .map_err(|e| anyhow!("{e}"))
             .context("the negotiated stream shape has no VAAPI decode profile")?;
         let va = Libva::load().context("libva")?;
         let display = Display::open(va)?;
+        display.require_entrypoint(profile.value)?;
         let planner = match codec {
             pf_vaadec::Codec::H264 => Planner::H264(Box::new(pf_vaadec::H264Planner::new())),
             pf_vaadec::Codec::H265 => Planner::H265(Box::new(pf_vaadec::H265Planner::new())),
