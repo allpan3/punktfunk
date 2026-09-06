@@ -55,6 +55,11 @@ use windows::Win32::winnt::HANDLE;
 /// blits over a queued frame's picture.
 const RING_SLOTS: usize = 10;
 
+/// New frames published before a superseded ring's NT handles close. A queued
+/// `D3d11Frame` carries only the raw handle and the presenter imports it inside
+/// `present`, so `RING_SLOTS` handovers displace every frame that names the old one.
+const RETIRE_HANDOVERS: u32 = RING_SLOTS as u32;
+
 /// Decode-side keyed-mutex acquire budget, milliseconds. The presenter holds a slot for one
 /// submit; a multi-second wait means the render thread died — error (and demote) rather than
 /// wedge the decode loop.
@@ -416,6 +421,9 @@ pub(crate) struct HandoffRing {
     /// `1` for the DXGI colour-space setters (Win10 1703+). Init fails to software without it.
     video_context1: ID3D11VideoContext1,
     ring: Option<SharedRing>,
+    /// Rings a resize or a PQ flip superseded, newest last. Their `Drop` closes the
+    /// NT handles queued frames still name, so they wait [`RETIRE_HANDOVERS`].
+    retired: Vec<(SharedRing, u32)>,
     /// Presenter can import RGB10A2 and has an HDR10 swapchain
     /// ([`crate::video::VulkanDecodeDevice::d3d11_hdr10`]). PQ then uses the pass-through ring.
     hdr10_out: bool,
@@ -440,6 +448,7 @@ impl HandoffRing {
             video_device,
             video_context1,
             ring: None,
+            retired: Vec::new(),
             hdr10_out,
         })
     }
@@ -451,7 +460,8 @@ impl HandoffRing {
 
     /// Blit one decoded surface into the next ring slot under its keyed mutex.
     /// The acquire also back-pressures if the presenter is still reading this slot
-    /// (only possible `RING_SLOTS` frames ahead of present).
+    /// (only possible `RING_SLOTS` frames ahead of present). A superseded ring is
+    /// retired here, never dropped under the frames that still name its handles.
     pub(crate) fn present(&mut self, source: HandoffSource<'_>) -> Result<D3d11Frame> {
         let HandoffSource {
             texture: src,
@@ -476,15 +486,27 @@ impl HandoffRing {
             .is_none_or(|r| r.width != width || r.height != height || r.pq_out != pq_out);
         if rebuild {
             let generation = self.ring.as_ref().map_or(0, |r| r.generation + 1);
-            self.ring = Some(SharedRing::build(
+            // Build first: a failure leaves the live ring streaming.
+            let fresh = SharedRing::build(
                 &self.device,
                 &video_device,
                 width,
                 height,
                 generation,
                 pq_out,
-            )?);
+            )?;
+            if let Some(old) = self.ring.replace(fresh) {
+                self.retired.push((old, 0));
+            }
         }
+        // Count this frame as a handover, then close what the pipeline can no
+        // longer be holding. `Drop` closes the slot handles.
+        for (_, handovers) in &mut self.retired {
+            *handovers += 1;
+        }
+        self.retired
+            .retain(|(_, handovers)| *handovers <= RETIRE_HANDOVERS);
+
         let ring = self.ring.as_mut().expect("ring built above");
         let slot_idx = ring.next;
         ring.next = (ring.next + 1) % ring.slots.len();
