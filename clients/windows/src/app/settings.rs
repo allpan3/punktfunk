@@ -1053,6 +1053,19 @@ pub(crate) fn settings_page(
         setting_toggle(ctx, scope, (rev, set_rev), s.gamepad_forwarding, |s, on| {
             s.gamepad_forwarding = on
         });
+    // The two DualSense pad-audio rows, GTK parity. The session binary this shell spawns has
+    // honoured both all along; only the rows were missing here. Global scope only, like GTK's:
+    // no override marker exists for either, so a profile-scope toggle would be discarded.
+    let pad_haptics_toggle = setting_toggle(ctx, scope, (rev, set_rev), s.pad_haptics, |s, on| {
+        s.pad_haptics = on
+    });
+    let pad_speaker_toggle = setting_toggle(
+        ctx,
+        scope,
+        (rev, set_rev),
+        pf_client_core::pad_audio::speaker_active(&s.pad_speaker),
+        |s, on| s.pad_speaker = if on { "pad".into() } else { "off".into() },
+    );
     let (pad_names, pad_i) = presets(GAMEPADS, |v| {
         GamepadPref::from_name(v) == GamepadPref::from_name(&s.gamepad)
     });
@@ -1581,6 +1594,22 @@ pub(crate) fn settings_page(
                          still goes through, slightly delayed. Automatic arms it only where \
                          the real button can't reach the host.",
                     )),
+                    (!profile_mode).then(|| {
+                        described_labeled(
+                            "Controller haptics",
+                            pad_haptics_toggle,
+                            "Play a DualSense's voice-coil haptics on the pad itself. Wired \
+                             pads only, and only while controllers are forwarded.",
+                        )
+                    }),
+                    (!profile_mode).then(|| {
+                        described_labeled(
+                            "Controller speaker",
+                            pad_speaker_toggle,
+                            "Play the audio a game sends to the pad's own speaker on the pad, \
+                             not through this PC.",
+                        )
+                    }),
                 ]
                 .into_iter()
                 .flatten()
