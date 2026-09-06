@@ -613,7 +613,8 @@ fn advertised_modes(requested: Mode) -> Vec<Mode> {
 }
 
 /// The seat placeholder's owner and session. Pid 0 is never a requestor, so the pair cannot
-/// collide with a host's, and it is what [`create_monitor`] departs when a host takes over.
+/// collide with a host's. It stays for the session's life: it holds the only display path the
+/// remoting stack commits, and a monitor arriving into an empty topology gets none of its own.
 pub const SEAT_PLACEHOLDER_OWNER: u32 = 0;
 pub const SEAT_PLACEHOLDER_SESSION: u64 = 0;
 
@@ -729,18 +730,6 @@ pub fn create_monitor(
     // before the arrival makes this entry findable by target.
     lock(&monitor.cursor).forward_on = registry::cursor_forward_desired(arrival.target_id);
     let _ = monitor.arrival.set(arrival);
-    // The seat placeholder is the remoting stack's display from adapter init, and it goes only
-    // once the host's monitor has ARRIVED. Departed any earlier the session holds no active path,
-    // and the OS commits none for a monitor arriving into an empty topology. Kept past this point
-    // it would take the swap chain back on a mid-stream re-arrival. Owner-scoped dedup above
-    // cannot reach it — its owner is not the host's.
-    if owner != SEAT_PLACEHOLDER_OWNER
-        && crate::adapter::is_seat_role()
-        && registry::find(|m| m.owner == SEAT_PLACEHOLDER_OWNER).is_some()
-    {
-        dbglog!("[pf-vd] seat placeholder departing — the host's monitor drives the seat now");
-        remove_monitor(SEAT_PLACEHOLDER_OWNER, SEAT_PLACEHOLDER_SESSION);
-    }
     Some((id, arrival.target_id, arrival.luid_low, arrival.luid_high))
 }
 
