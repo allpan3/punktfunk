@@ -177,15 +177,10 @@ pub fn headless_library(target: &str) -> glib::ExitCode {
     }
 }
 
-// -----------------------------------------------------------------------------------------
-// Headless host-store management — the shared known-hosts store (`client-known-hosts.json`)
-// is the SINGLE source of truth for every client on this device (the GTK shell, the Vulkan
-// session, and the Decky plugin, which shells out to these modes). Exposing add/edit/forget/
-// list/reset here lets the Decky Gaming-Mode UI mutate exactly the store the desktop client
-// reads, so a change in one surface shows up in the other. Reachability (`--list-hosts
-// --probe`, `--reachable`) answers "is this host online?" WITHOUT mDNS, so a host reached
-// over a routed network (Tailscale/VPN/another subnet) no longer reads as offline.
-// -----------------------------------------------------------------------------------------
+// `client-known-hosts.json` is the one host store every client on this device reads — the GTK
+// shell, the Vulkan session, and the Decky plugin, which shells out to these headless modes. So
+// `--set-host` and `--forget-host` mutate exactly that store, and an edit made in one surface
+// shows up in the others.
 
 /// Selector for `--set-host`/`--forget-host`: a 64-hex fingerprint pins one entry across IP
 /// changes; anything else is treated as `addr[:port]` (manual entries have no fingerprint).

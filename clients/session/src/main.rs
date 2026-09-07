@@ -13,12 +13,10 @@
 //! the first presented frame, `stats:` lines per 1 s window, one `{"error": …}` /
 //! `{"ended": …}` JSON line on the way out. Logs go to stderr. Exit codes: 0 clean end,
 //! 2 connect failed, 3 trust rejected / pairing required, 4 presenter init failed.
-// `deny`, not `forbid`: edition 2024 makes the std process-environment mutators unsafe
-// (WP20 — the env-mutation class made visible; named-API mentions here would count against
-// the unsafe-hygiene gate C baseline, which tracks this file's real call sites), and this
-// bin's three single-threaded-startup env writes carry documented SAFETY comments under
-// localized `#[allow(unsafe_code)]` (the pf-update idiom). A `forbid` cannot be overridden
-// at those sites and refuses the file.
+// `deny`, not `forbid`: edition 2024 makes this bin's startup env writes unsafe, and they
+// sit under localized `#[allow(unsafe_code)]` with SAFETY comments. `forbid` cannot be
+// overridden there and refuses the file. Do not name the env APIs here — the unsafe-hygiene
+// gate counts mentions against this file's baseline.
 #![deny(unsafe_code)]
 
 #[cfg(all(any(target_os = "linux", windows), feature = "ui"))]
@@ -386,12 +384,10 @@ mod session_main {
                  to (PyroWave carries 4:4:4 on any GPU, if the link can take it)."
             );
         }
-        // …and the HDR promise, same discipline: `VIDEO_CAP_HDR` invites a PQ stream, and
-        // a Windows box with no HDR10 swapchain whose video processor cannot tone-map
-        // PQ→sRGB shows that stream as garbage — the D3D11VA Blt accepts the colorspaces
-        // and renders green where the conversion is missing (Arc A370M field report,
-        // 2026-08-26). `ten_bit_sdr` is deliberately NOT gated on this: a 10-bit SDR
-        // stream is no tonemap, and every hardware rung decodes P010.
+        // Computed before the struct literal below moves `vulkan`. Advertising HDR invites a
+        // PQ stream, and a device with no HDR10 swapchain and no PQ→sRGB tone-map renders it
+        // green. `ten_bit_sdr` is not gated on this: 10-bit SDR needs no tone-map, and every
+        // hardware rung decodes P010.
         let hdr_enabled =
             settings.hdr_enabled && pf_client_core::video::hdr_presentable(vulkan.as_ref());
         if settings.hdr_enabled && !hdr_enabled {
@@ -432,33 +428,21 @@ mod session_main {
             // sets this, and it does so on a CLONE of these params — a Settings-level
             // "never use HEVC" would be `preferred_codec`, not this.
             exclude_codecs: 0,
-            // HDR off = don't advertise 10-bit/HDR at all; the host then never upgrades.
-            // MULTI_SLICE is decoder truth for THIS embedder: every desktop decode stack
-            // (Vulkan Video, D3D11VA, VAAPI, openh264/rav1d) handles AUs carrying several
-            // slice NALs, so the host may keep its multi-slice low-latency default (§7 LN1).
-            // The mobile/TV embedders must NOT copy this blindly — Amlogic MediaCodec wedges
-            // on multi-slice AUs (see `VIDEO_CAP_MULTI_SLICE`), so they advertise per-decoder.
-            // 4:4:4 is opt-in and off by default (Settings "Full chroma"): the bit says
-            // "upgrade me if you can" — the host still gates on its own policy, its capturer,
-            // HEVC, and a real GPU 4:4:4 encode probe, and answers the resolved chroma in the
-            // Welcome BEFORE we build a decoder. It is now ALSO gated on this device being
-            // able to decode 4:4:4 (`want_444`, computed above); the rule and its reasoning
-            // live in `video::video_caps_for`, which is where they get tested.
-            // The cost stays VISIBLE, not silent: the Detailed stats overlay prints the
-            // resolved chroma ("4:4:4→4:2:0" when the host declined) and the decode path
-            // frames actually took.
+            // Desktop decode truth: every stack here (Vulkan Video, D3D11VA, VAAPI,
+            // openh264/rav1d) takes multi-slice AUs, so MULTI_SLICE is unconditional —
+            // mobile/TV embedders advertise per-decoder instead (Amlogic wedges on it).
+            // HDR and 4:4:4 are requests only; the host answers the resolved chroma in the
+            // Welcome, before we build a decoder. Rules and tests: `video::video_caps_for`.
             video_caps: pf_client_core::video::video_caps_for(
                 hdr_enabled,
                 settings.ten_bit_sdr,
                 want_444,
             ),
-            // This panel's HDR colour volume → the host's virtual-display EDID, so host
-            // apps tone-map to the real glass. Windows reads it from DXGI (the
-            // `--window-pos` monitor; advanced-color outputs only) — gated on the HDR
-            // setting, since with 10-bit/HDR unadvertised above the volume is noise. No
-            // portable Wayland/X11 query exists yet, so Linux keeps the host's EDID
-            // defaults; `PUNKTFUNK_CLIENT_PEAK_NITS` (read in the session pump) pins one
-            // manually on either OS and wins over both.
+            // The panel's HDR volume reaches the host's virtual-display EDID so host apps
+            // tone-map to the real glass. Windows only: DXGI reads the `--window-pos`
+            // monitor (advanced-color outputs), gated on the HDR setting because an
+            // unadvertised 10-bit/HDR makes the volume noise. Linux has no portable query
+            // and keeps the host EDID; `PUNKTFUNK_CLIENT_PEAK_NITS` overrides both.
             #[cfg(windows)]
             display_hdr: hdr_enabled
                 .then(|| pf_client_core::video_d3d11::display_hdr_volume(window_pos()))
@@ -825,13 +809,10 @@ mod session_main {
                         .join("; "),
                 };
                 println!("       {:<24} {answer}", u.label);
-                // The second opinion, printed only where it differs from the video
-                // format query. Worded as "also asked" rather than "disagrees" on
-                // purpose: measured on both vendors this call answers "creatable" for
-                // combinations the video query rejects (NVIDIA included, for SAMPLED
-                // alone), so it does not honour the profile list and a difference here
-                // is NOT the driver contradicting itself. Printed anyway because the
-                // question gets re-asked by everyone who reads a refusal.
+                // The second opinion, printed only where it differs from the video format
+                // query. This call does not honour the profile list, so it answers
+                // "creatable" for combinations the video query rejects; a difference is
+                // not the driver contradicting itself.
                 let listed = u
                     .wanted_entry(p.wanted)
                     .is_some_and(|f| f.image_usage.contains(u.usage));
@@ -879,20 +860,10 @@ mod session_main {
         #[cfg(windows)]
         punktfunk_core::crash::install();
 
-        // Before ANY Vulkan call — and that includes the two probe flags below, which is the
-        // whole reason this sits at the top of `run` instead of beside the session setup it
-        // was written for. Make RADV expose its video-decode queue + extensions so the
-        // decoder's `auto` path prefers Vulkan Video over VAAPI (Steam Deck, and any gated
-        // RADV). Windows drivers (NVIDIA/AMD Adrenalin) expose theirs unconditionally.
-        //
-        // ⚠⚠ It USED to sit after the `--list-adapters` / `--probe-decode` / `--list-audio` /
-        // `--pair` early exits, which meant the triage tool answered a DIFFERENT question from
-        // the one the streaming path asks. Measured on a Steam Deck (2026-08-08, canary
-        // `e22af40f`), same binary, back to back: bare `--probe-decode` printed `vulkan video
-        // decode: no`, `driver decode ops: none (0x0)`, `no queue family advertises
-        // VIDEO_DECODE`; the same call with `RADV_PERFTEST=video_decode` in the environment
-        // printed `YES` and `H.264, H.265, AV1, VP9`. The tool exists to be believed, so any
-        // Deck triage that consulted it reached the opposite of the truth.
+        // Runs before ANY Vulkan call, including the probe flags below — hence the top of
+        // `run`, ahead of the early exits, so triage answers the same question the streaming
+        // path asks. Makes RADV expose its video-decode queue and extensions so the decoder's
+        // `auto` path prefers Vulkan Video over VAAPI. Windows drivers expose theirs already.
         #[cfg(target_os = "linux")]
         enable_radv_video_decode();
 
@@ -953,17 +924,11 @@ mod session_main {
         // (The RADV video-decode opt-in that used to live here now runs at the very top of
         // `run` — it has to precede the probe flags too, not just the session.)
 
-        // The Settings device picks → env, unless the user already forced one by hand:
-        // the GPU (the shells' pickers store the adapter's marketing name) for the
-        // presenter's device selection, and the audio endpoints (PipeWire node names /
-        // WASAPI endpoint ids) for the playback/mic streams. Before any Vulkan call,
-        // like the RADV knob (covers --connect and --browse).
-        //
-        // Spec mode takes them from the SPEC's settings — the spawner's resolve — which
-        // keeps the §5 zero-store-reads invariant and lets a profile overlay reach these
-        // fields if they ever become profileable. Parsed leniently here (the `--connect`
-        // flow re-reads the spec authoritatively and errors there); the compat path and
-        // `--browse` (which never carries a spec) still load the store.
+        // Settings device picks (adapter marketing name, PipeWire node names / WASAPI
+        // endpoint ids) → env unless the user already set the var, before any Vulkan
+        // call — covers `--connect` and `--browse`. With a spec the values come from the
+        // spec's settings, never the store (§5 zero-store-reads); lenient parsing is safe
+        // because `--connect` re-reads the spec authoritatively and errors there.
         {
             let s = arg_value("--resolved-spec")
                 .and_then(|p| {

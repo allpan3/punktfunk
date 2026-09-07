@@ -420,13 +420,10 @@ impl SimpleComponent for AppModel {
     fn update(&mut self, msg: AppMsg, sender: ComponentSender<Self>) {
         match msg {
             AppMsg::DeepLink(url) => self.open_deep_link(&url, &sender),
-            // The trust gate (the host is the policy authority — it advertises
-            // `pair=optional` only when it accepts unpaired clients):
-            //   1. PINNED RECONNECT — a stored fingerprint connects silently.
-            //   2. FINGERPRINT CHANGED — known address, different fp: the impostor
-            //      signal; force the PIN ceremony.
-            //   3a. NEW + pair=optional — offer TOFU alongside PIN.
-            //   3b. NEW otherwise — delegated approval (request access) or PIN.
+            // Trust gate, in order: a stored fingerprint connects silently; a known address
+            // under a new fingerprint is the impostor case and forces the PIN ceremony; an
+            // unknown host is offered TOFU alongside PIN only when it advertises
+            // `pair=optional`, else delegated approval or PIN.
             AppMsg::Connect(req) => {
                 if self.busy {
                     return;
@@ -486,17 +483,11 @@ impl SimpleComponent for AppModel {
             }
             AppMsg::WakeConnect(req) => {
                 if !self.busy {
-                    // DIAL FIRST — no mDNS advert does NOT mean unreachable: a host reached over
-                    // a routed network (Tailscale/VPN/another subnet) is mDNS-blind forever, and
-                    // gating the dial on presence bricked exactly those reconnects. Fire the magic
-                    // packet now (fire-and-forget — harmless if it's awake) so a genuinely-asleep
-                    // box is already booting while the dial times out, arm the wake-wait fallback
-                    // for THIS request, and connect immediately.
-                    //
-                    // Auto-wake OFF (the Settings toggle, for VPN hosts that look offline when
-                    // they aren't): no packet and no wake-and-wait fallback — the dial either
-                    // succeeds or fails with the normal error. The host-card menu's explicit
-                    // "Wake host" is deliberately not gated.
+                    // Never gate the dial on mDNS presence: a routed host (Tailscale/VPN) never
+                    // advertises. The magic packet goes first, fire-and-forget, so an asleep box
+                    // boots while the dial times out, and the fallback is armed for THIS request.
+                    // Auto-wake off means no packet and no wake-and-wait, just the normal dial
+                    // error; the host-card menu's explicit "Wake host" stays ungated.
                     if self.settings.borrow().auto_wake {
                         crate::wol::wake(&req.mac, req.addr.parse().ok());
                         self.wake_fallback = Some(req.clone());
@@ -740,11 +731,9 @@ impl SimpleComponent for AppModel {
                     return;
                 }
                 // The console owns the screen and the pads while it runs, so it takes `busy`
-                // like a stream does. `gio::Subprocess` is the GLib-native child: its
-                // `wait_check_async` lands the exit on this very main loop — no thread, no
-                // channel — and reports a non-zero exit as an error. That is also how a
-                // build without the session's `ui` feature (Nix) surfaces: the child prints
-                // "--browse needs the console UI" and exits non-zero, and we banner it.
+                // like a stream does. `wait_check_async` lands the exit on this main loop —
+                // no thread, no channel — and turns a non-zero exit into the error the
+                // banner shows, which is also how a session built without `ui` surfaces.
                 let mut argv = vec![
                     std::ffi::OsString::from(crate::spawn::session_binary()),
                     "--browse".into(),
@@ -1209,12 +1198,9 @@ fn clear_steam_sdl_device_filter() {
 }
 
 pub fn run() -> glib::ExitCode {
-    // The fmt layer as before, plus the in-process ring (`pf_client_core::logring`, DEBUG+ regardless
-    // of RUST_LOG) that "Send logs to host" uploads — the env filter scopes the stderr layer
-    // only, because the ring exists precisely for the diagnostics nobody enabled before the
-    // bug happened. The spawned session's own stderr joins the ring too (`orchestrate` pipes
-    // it through `logring::forward_child_stderr`), so a bundle from this shell carries the
-    // stream's trail, not just the launcher's.
+    // The env filter scopes the fmt layer only; the ring (`pf_client_core::logring`) keeps
+    // DEBUG+ regardless of RUST_LOG, because "Send logs to host" uploads it. The spawned
+    // session's stderr joins the ring too, so a bundle carries the stream's trail.
     {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;

@@ -554,18 +554,10 @@ impl relm4::factory::FactoryComponent for HostCard {
                 }
                 overlay.insert_action_group("card", Some(&actions));
 
-                // The card menu, kept short on purpose. It had grown to eleven entries and
-                // three submenus, at which point the useful ones (connect, library, speed) were
-                // buried in list management. Two rules thin it:
-                //
-                //   * anything that CONFIGURES the host lives in the edit sheet, not here —
-                //     the default profile and the pinned cards are properties of the record,
-                //     and the sheet is where you already go to change its name or address;
-                //   * what remains is grouped into sections, so a glance lands on the right
-                //     third of the menu instead of scanning eleven similar lines.
-                //
-                // What's left is: start something, look at something, take a link, manage the
-                // host itself.
+                // Keep this menu short: anything that CONFIGURES the host — the default profile,
+                // the pinned cards — belongs in the edit sheet, not here. What remains is
+                // grouped into sections: start something, view something, take a link, manage
+                // the host.
                 let menu = gio::Menu::new();
                 if let Some((pin_id, pin_name)) = pinned {
                     // A pinned card is a shortcut, not a second host: it starts a stream, hands
@@ -573,12 +565,9 @@ impl relm4::factory::FactoryComponent for HostCard {
                     // offering them here would blur what the card is.
                     let launch = gio::Menu::new();
                     launch.append(Some("Connect"), Some("card.connect"));
-                    // …and the same stream with a title picked first. The library is a way to
-                    // START this card, not a property of the host, so it belongs to a shortcut
-                    // as much as Connect does — and the card's request carries its profile, so
-                    // what launches from that grid is this card's profile, not the binding.
-                    // Paired only: the fetch authenticates as this device, so on a merely
-                    // trusted host it can only come back refused.
+                    // Browse library starts this card with its own profile, not the binding's,
+                    // so it belongs to a shortcut as much as Connect does. Paired only: the
+                    // fetch authenticates as this device, so a merely trusted host refuses it.
                     if k.paired {
                         launch.append(Some("Browse library\u{2026}"), Some("card.library"));
                     }
@@ -640,12 +629,10 @@ impl relm4::factory::FactoryComponent for HostCard {
                     if !online && !k.mac.is_empty() {
                         look.append(Some("Wake host"), Some("card.wake"));
                     }
-                    // …and the other half of that round trip: whatever this host last said it
-                    // lets this device do to it (sleep, restart, shut down). Nothing is decided
-                    // here — the list is empty unless the host answered and this device's
-                    // access carries the grant, so no row ever appears that the host would
-                    // refuse. Indexed actions rather than fixed labels: a later host can add
-                    // one and this menu renders it with no client release.
+                    // The host's power rows (sleep, restart, shut down), already filtered to
+                    // this device's grant: nothing is gated here, and an empty list means the
+                    // host never answered or granted nothing. Indexed to match the handlers
+                    // registered above, so a later host can add an action with no client release.
                     for (i, a) in host_actions.iter().enumerate() {
                         let label = if a.available {
                             a.label().to_string()

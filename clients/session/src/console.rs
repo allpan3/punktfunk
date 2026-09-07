@@ -157,19 +157,11 @@ pub fn run(target: Option<&str>) -> u8 {
     // `{"ready":true}` and restores on exit) — plain CLI/gamescope runs stay silent.
     let json_status = arg_flag("--json-status");
     let settings_at_start = trust::Settings::load();
-    // The console's window and its input models are built ONCE, from the global defaults, and
-    // live across every launch — so the presentation-tier fields below (touch and mouse model,
-    // shortcut inhibit, match-window, render scale) are latched here and a per-host profile
-    // cannot move them in this mode. Everything the HOST is told (mode, bitrate, codec, audio,
-    // pad) is re-resolved per launch and does honor the binding. Closing the rest of that gap
-    // means rebuilding the presenter's models per launch — profiles P4 territory, not P0.
-    //
-    // ⚠ The STATS TIER used to be latched here too, and that was a bug people hit: the console's
-    // own settings screen writes the tier to the file and redraws its row, so the choice looked
-    // taken while every stream kept the tier the process started on — "no matter what I select
-    // the overlay is stuck on Detailed", cured only by restarting the app. It now rides
-    // `SessionParams` per launch (`stats_verbosity`), so the value below only seeds the loop
-    // until the first stream. Anything else moved off this snapshot has to travel the same way.
+    // The console window and its input models are built once from the global defaults and live
+    // across launches, so the presentation-tier fields below (touch and mouse model, shortcut
+    // inhibit, match-window, render scale) latch here and no per-host profile can move them.
+    // What the host is told (mode, bitrate, codec, audio, pad) re-resolves per launch and honors
+    // the binding; anything else off this snapshot must ride `SessionParams` like the stats tier.
     let latched_mouse = settings_at_start.mouse_mode();
 
     // Request-access hand-off: the launch handler stamps this when it starts a delegated-approval
@@ -248,13 +240,10 @@ pub fn run(target: Option<&str>) -> u8 {
                     tracing::info!(%addr, %title, request_access,
                         launch = launch.as_deref().unwrap_or("desktop"),
                         "launching from the console");
-                    // Settings re-resolve per launch: the console's own settings screen may
-                    // have changed the defaults since the last stream, and the host may carry
-                    // a profile binding. Console (and therefore Decky, which spawns this
-                    // binary) honors bindings with no console-side work — the resolver is the
-                    // same one `--connect` goes through. A pinned card's connect arrives as a
-                    // one-off profile id; the resolver prefers it over the binding, and a
-                    // dangling id falls back to the defaults without blocking the connect.
+                    // Re-resolved per launch, not latched: the settings screen may have moved
+                    // the defaults since the last stream, and the host may carry a profile
+                    // binding. A pinned card's one-off profile id wins over that binding, and a
+                    // dangling id falls back to the defaults instead of blocking the connect.
                     let (settings, profile) = trust::effective_settings(
                         &addr,
                         port,
@@ -276,12 +265,9 @@ pub fn run(target: Option<&str>) -> u8 {
                         force_software,
                         vulkan,
                     );
-                    // …with ONE field that must follow the latched model rather than this
-                    // launch's: the cursor-channel advertisement says "this client draws the
-                    // host cursor itself", which is only true while the presenter is in desktop
-                    // mouse mode. A profile that flips `mouse_mode` here would make the host
-                    // stop compositing the pointer into a presenter that isn't drawing one —
-                    // a stream with no visible cursor at all.
+                    // cursor_forward tells the host the client draws the pointer, true only in
+                    // desktop mouse mode — so it follows the latched mode, not this launch's
+                    // profile. Otherwise the host composites no cursor and the stream shows none.
                     params.cursor_forward = latched_mouse == trust::MouseMode::Desktop;
                     if request_access {
                         // The host PARKS the connect until the operator approves — outlast its

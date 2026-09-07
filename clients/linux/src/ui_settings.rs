@@ -400,13 +400,14 @@ fn scope_group(
             "Colour \u{2014} tints this profile's chips on host cards",
             active.accent.as_deref(),
             {
-                let id = active.id.clone();
+                let (dialog, id) = (dialog.downgrade(), active.id.clone());
                 move |hex| {
                     let mut catalog = ProfilesFile::load();
                     if let Some(p) = catalog.profiles.iter_mut().find(|p| p.id == id) {
                         p.accent = (!hex.is_empty()).then(|| hex.clone());
-                        if let Err(e) = catalog.save() {
-                            tracing::warn!(error = %format!("{e:#}"), "saving the profile colour");
+                        let r = catalog.save();
+                        if let Some(d) = dialog.upgrade() {
+                            saved(&d, r);
                         }
                     }
                 }
@@ -1564,14 +1565,11 @@ pub fn show_scoped(
         &audio_format_labels,
     );
     {
-        // Stereo-only, and insensitive rather than hidden under surround: a lossless surround
-        // frame does not fit one QUIC datagram at the default MTU, so the host declines it
-        // outright (design/hi-res-audio.md §4.2). Greying it keeps the reason visible next to the
-        // channel row that caused it — a row that vanished would read as a missing feature.
-        //
-        // Insensitivity covers the whole row including a profile scope's per-row Reset, exactly
-        // as the mic-dependent rows above do: an audio_format override can only be reset while
-        // the channels row says Stereo.
+        // Lossless is stereo-only: a lossless surround frame does not fit one QUIC datagram at
+        // the default MTU and the host declines it (design/hi-res-audio.md §4.2). Greyed, not
+        // hidden, so the reason stays beside the channel row that caused it. Insensitivity also
+        // covers the row's per-profile Reset, so an audio_format override can only be reset
+        // while the channels row says Stereo.
         let w = audio_format_row.widget().clone();
         w.set_sensitive(surround_row.selected() == 0);
         surround_row.connect_changed(move |i| w.set_sensitive(i == 0));
@@ -1630,13 +1628,10 @@ pub fn show_scoped(
         "Microphone",
         "The input that feeds the host's virtual mic",
     );
-    // The device pick and the echo canceller only matter while the mic streams at all — both
-    // follow it. One handler each (the pickers are optional, the echo row never is), and the
-    // initial state is set here because the seed block further down fires these too.
-    //
-    // Insensitivity covers the whole row, including the per-row Reset a profile scope adds:
-    // an echo_cancel override can only be reset while the mic row is on. Turn it on, reset,
-    // turn it back off — the alternative is a control that looks live and isn't.
+    // The mic device picker and the echo canceller follow the mic switch; the seed's
+    // `set_active` fires the handler only when it changes the switch, so set the initial
+    // state here too. Desensitising the whole row disables the per-row Reset a profile scope
+    // adds, so an echo_cancel override can only be reset while the mic row is on.
     if let Some(r) = &micdev_row {
         let w = r.widget().clone();
         w.set_sensitive(mic_row.is_active());
@@ -1649,16 +1644,10 @@ pub fn show_scoped(
     }
 
     // ---- Controllers ----
-    // Controller forwarding: Automatic forwards EVERY real controller, each as its own pad
-    // (Steam's virtual pad skipped); pinning one restricts the session to that single
-    // controller (single-player). The pin is persisted by stable key (`Settings::forward_pad`),
-    // so it survives restarts — and disconnects: an offline pinned pad keeps its entry here
-    // instead of silently snapping back to Automatic.
-    // Off = this device's controllers are not sent at all, because they reach the host
-    // another way (USB passthrough such as VirtualHere, or a pad plugged into the host).
-    // It also stops the session OPENING the pad, which is what frees the device for a
-    // passthrough tool to bind — so the two rows below have nothing to act on while it is
-    // off, and are desensitised to say so.
+    // Automatic forwards every real controller as its own pad (Steam's virtual pad skipped);
+    // pinning one forces single-player. The pin persists by stable key (`Settings::forward_pad`),
+    // so an offline pinned pad keeps its entry here. Off sends nothing and never opens the pad,
+    // which frees it for USB passthrough — so the two rows below are desensitised.
     let pad_forward_row = adw::SwitchRow::builder()
         .title("Forward controllers")
         .subtitle(
@@ -1752,14 +1741,11 @@ pub fn show_scoped(
         "Hold Select alone for the host's guide button — a tap still goes through",
         GUIDE_GESTURE_LABELS,
     );
-    // Controller audio (the 0xD1 plane): a wired DualSense's own voice coils and its little
-    // built-in speaker, streamed from the host and rendered on the pad in your hands. Both are
-    // negotiated — they change nothing without a capable host AND a wired DualSense — so the
-    // rows say what they are for rather than promising an effect.
-    //
-    // Deliberately NOT profileable: which pad is in your hands is a property of this device,
-    // not of the host a profile is authored against (the forwarded-pad pin below sits out for
-    // the same reason).
+    // Controller audio (the 0xD1 plane): a wired DualSense's voice coils and its own speaker,
+    // streamed from the host. Both are negotiated — nothing happens without a capable host AND
+    // a wired DualSense — so the rows say what they are for, not what they will do.
+    // Global scope only, like the forwarded-pad pin: which pad is in your hands is a property
+    // of this device, not of the host a profile is authored against.
     let haptics_row = adw::SwitchRow::builder()
         .title("Controller haptics")
         .subtitle("Play a DualSense's voice-coil haptics on the pad itself — wired pads only")
@@ -1866,19 +1852,10 @@ pub fn show_scoped(
     }
 
     // ---- Override markers, per-row reset, and the touch that creates an override ----
-    // One pass per row, because the three are the same fact from different sides: the marker
-    // says "this profile changes this", the reset is the only way back (the override model
-    // never infers "not overridden" from a value comparison), and touching the control is what
-    // creates it. The marker appears ON TOUCH — a user who changes a row and sees no
-    // acknowledgement has no reason to believe it took.
-    //
-    // A reset acts IN PLACE: it clears the field, puts that one control back to the inherited
-    // value, and drops the marker. Rebuilding the dialog would be simpler, but it animates the
-    // whole surface for a one-row change and dumps the user back on the first page — a heavy,
-    // disorienting answer to "undo this row".
-    //
-    // Wired after the seed block on purpose: `set_selected`/`set_active` during setup must not
-    // look like the user touching anything, or opening a profile would override every row.
+    // One pass per row: the marker appears on touch, and reset acts in place — it clears the
+    // field, restores the inherited value and drops the marker, because the model never infers
+    // "not overridden" from a value comparison. Wired after the seed block: `set_selected` and
+    // `set_active` during setup must not read as a touch, or opening a profile overrides everything.
     if let Some(active) = &active {
         let o = &active.overrides;
         let profile_id = active.id.clone();
@@ -1894,10 +1871,11 @@ pub fn show_scoped(
          -> Option<Rc<dyn Fn()>> {
             let row = row.downcast_ref::<adw::ActionRow>()?.clone();
             let widgets: Rc<RefCell<Option<(gtk::Box, gtk::Button)>>> = Rc::default();
-            let (touched, id) = (touched.clone(), profile_id.clone());
+            let (dialog, touched, id) = (dialog.downgrade(), touched.clone(), profile_id.clone());
             let revert = Rc::new(revert_control);
             let build = {
-                let (widgets, row, touched, id, revert) = (
+                let (dialog, widgets, row, touched, id, revert) = (
+                    dialog.clone(),
                     widgets.clone(),
                     row.clone(),
                     touched.clone(),
@@ -1926,7 +1904,8 @@ pub fn show_scoped(
                     row.add_prefix(&dot);
                     row.add_prefix(&reset);
                     {
-                        let (widgets, row, touched, id, revert) = (
+                        let (dialog, widgets, row, touched, id, revert) = (
+                            dialog.clone(),
                             widgets.clone(),
                             row.clone(),
                             touched.clone(),
@@ -1941,8 +1920,9 @@ pub fn show_scoped(
                             let mut catalog = ProfilesFile::load();
                             if let Some(p) = catalog.profiles.iter_mut().find(|p| p.id == id) {
                                 p.overrides.clear(key);
-                                if let Err(e) = catalog.save() {
-                                    tracing::warn!(error = %format!("{e:#}"), "clearing an override");
+                                let r = catalog.save();
+                                if let Some(d) = dialog.upgrade() {
+                                    saved(&d, r);
                                 }
                             }
                             revert();
