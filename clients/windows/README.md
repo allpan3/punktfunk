@@ -1,108 +1,48 @@
 # punktfunk — Windows client
 
-The native **Windows** app for streaming a punktfunk host to your PC. A modern WinUI 3 app that
-discovers hosts on your network, pairs with a PIN, and streams at your display's own resolution and
-refresh rate — with hardware-accelerated video decode and HDR.
+The WinUI 3 shell: discover, pair, configure, launch. Pure Rust — the UI is WinUI 3 driven through
+[windows-reactor](https://github.com/microsoft/windows-rs), and it links `punktfunk-core` directly.
 
-It's **pure Rust**: the UI is WinUI 3 driven through [windows-reactor](https://github.com/microsoft/windows-rs)
-(a declarative, React-like framework), and it links the shared **`punktfunk-core`** directly to speak
-the fast **`punktfunk/1`** protocol.
+Decode, present and input are **not** here. They live in the spawned
+[`punktfunk-session`](../session/) binary; this crate is the shell around it. What a user can do
+with the app is [the docs site](https://docs.punktfunk.unom.io/docs/install-client)'s job.
 
-## Features
+Ships x64 and ARM64, three ways from one layout: a signed installer (the default — a per-user
+setup.exe whose stable install path Steam can launch, so the overlay and Big Picture work), a
+portable zip, and a signed MSIX kept for Microsoft Store compatibility. All three are built from
+[`packaging/`](packaging/).
 
-- **Hardware decode, GPU present** — Punktfunk's own decoders, no FFmpeg anywhere in the client:
-  **Vulkan Video** (`pf-vkdecode`) leads on NVIDIA and AMD, **D3D11VA** (`pf-dxvadec` driving
-  `ID3D11VideoDecoder`) leads on Intel, whichever isn't first is the fallback, and an
-  OpenH264/rav1d CPU rung is last. Either hardware rung hands its surface to the Vulkan presenter
-  without a CPU copy.
-- **HDR10** — advertise 10-bit/HDR, detect PQ in-band, and flip the swapchain to `R10G10B10A2` +
-  ST.2084 with HDR10 metadata.
-- **Your display's native mode** — the host builds a virtual display at exactly your WxH@Hz.
-- **Audio both ways** — WASAPI render + mic capture.
-- **Full controller support** — SDL3 gamepads with rumble, lightbar, and DualSense feedback.
-- **Your display's native mode, really** — "Native display" resolves the actual size + refresh of
-  the monitor the window is on at connect time.
-- **Find hosts automatically** — mDNS discovery lists hosts on your LAN, alongside saved and manual
-  entries. First connect does a one-time **SPAKE2 PIN pairing** (or TOFU on trusted LANs), then
-  reconnects on a pinned identity. Saved hosts carry per-host actions: a **network speed test**
-  (probe burst over the real data plane → recommended bitrate, applied in one tap) and **forget**.
-- **Polished shell** — host cards, settings (resolution / refresh / host compositor / decoder /
-  codec / bitrate / HDR / forwarded controller / gamepad type / system shortcuts / audio channels /
-  mic / stats-overlay level), the tiered stats overlay (Off / Compact / Normal / Detailed —
-  Ctrl+Alt+Shift+S cycles it live in the session window), and the full trust surface. Stream input uses Win32 low-level
-  hooks with Moonlight-style capture: Ctrl+Alt+Shift+Q releases the pointer, a click on the stream
-  re-captures it, and system shortcuts (Alt+Tab, Win, …) can act locally or forward to the host.
+## Build
 
-Builds and ships for both **x64** and **ARM64**, three ways from one layout: a signed **installer**
-(the default — a per-user setup.exe whose stable install path Steam can launch, so the Steam
-overlay and Big Picture work), a **portable zip**, and a signed **MSIX** (kept for Microsoft Store
-compatibility).
-
-## Get it
-
-Install the signed installer from the package registry — see
-**[docs.punktfunk.unom.io/docs/install-client](https://docs.punktfunk.unom.io/docs/install-client)**.
-A stock [Moonlight](https://moonlight-stream.org/) client also works over GameStream if you prefer.
-
-## Build from source
-
-Windows-only (the crate builds as a stub on other platforms so the workspace stays green). You need
-the MSVC toolchain and CMake (SDL3 builds from source) — nothing else: decode is native since M10,
-so there is no `FFMPEG_DIR` to point anywhere, and the Windows App SDK runtime bootstrap is staged
-next to the exe by `windows-reactor-setup` from this crate's own `build.rs`.
+Windows-only; the crate builds as a stub elsewhere so the workspace stays green. You need the MSVC
+toolchain and CMake (SDL3 builds from source) and nothing else — decode is native, so there is no
+`FFMPEG_DIR`, and the Windows App SDK runtime bootstrap is staged next to the exe by
+`windows-reactor-setup` from this crate's `build.rs`.
 
 ```sh
 cargo build -p punktfunk-client-windows --target x86_64-pc-windows-msvc
 
-# CLI paths for testing (no window):
-punktfunk-client --discover                                   # list hosts on the LAN
-punktfunk-client --headless --connect host[:port] [--pin HEX] # connect, count frames, print stats
+punktfunk-client --discover                                     # list hosts on the LAN
+punktfunk-client --headless --connect host[:port] [--pin HEX]   # connect, count frames, print stats
 punktfunk-client --headless --speed-test --connect host[:port]  # probe burst → recommended bitrate
 ```
 
 > `CARGO_HOME` must be an ASCII path — non-ASCII characters break SDL3's MSVC precompiled-header
-> build. Packaging (MSIX manifest, the Inno Setup installer, signing) lives in [`packaging/`](packaging/).
-
-## Layout
-
-Decode/present/input live in the spawned `punktfunk-session` binary (`clients/session`), not here —
-this crate is the shell that discovers, pairs, and launches it.
-
-```
-src/
-  main.rs                 entry point + CLI paths (--discover · --headless · --speed-test)
-  bin/punktfunk-console.rs  the couch/HTPC Start-menu entry (re-execs with --console)
-  app/                    WinUI 3 shell (windows-reactor), one module per screen:
-                          mod (root/router) · hosts · connect · pair · speed · settings ·
-                          library · help · licenses · stream · style (shared cards/pills)
-  deeplink.rs             punktfunk:// activation, single-instance hand-off, shortcut writer
-  spawn.rs                punktfunk-session child process + its stdout event contract
-  shell_window.rs         hide/restore the shell HWND around a session
-  gpu.rs                  DXGI adapter enumeration for the GPU picker
-  trust.rs · discovery.rs persistent identity, TOFU/PIN pairing, mDNS browse
-  probe.rs · wol.rs       speed probe · Wake-on-LAN
-  logfile.rs              log tee to %LOCALAPPDATA%
-packaging/                MSIX manifest + Inno Setup installer, signing, pack scripts
-```
+> build.
 
 ## Manual smoke checklist
 
-The windows-reactor pin is a moving target and WinUI regressions rarely show up in `cargo check` —
-walk this after a reactor bump or a change to the render/state architecture:
+The windows-reactor pin is a moving target and WinUI regressions rarely show up in `cargo check`.
+Walk this after a reactor bump or a change to the render/state architecture:
 
-- **Hosts** — discovery populates tiles; tile hover fill; "…" menu → Forget and Rename;
-  add-host modal connects; WOL wait screen cancels.
-- **Settings** — every section renders; combos still show their selection after a section
-  switch AND a scope switch (the historic blank-combo reconciler bug); profile create /
-  rename / delete (with confirm); colour swatches repaint; the Overridden marker appears on
-  edit and clears on Reset; GPU combo lists adapters.
-- **Pair** — PIN entry pairs (the typed PIN must reach the Connect click — `use_ref` mirror path).
-- **Session** — connect → session spawns → HUD stats tick; Ctrl+Alt+Shift+Q releases the pointer;
-  shell window restores on exit.
-- **Shell** — speed test completes; library grid loads; `punktfunk://` deep link routes (second
-  instance hands off and exits); window icon appears; screen-entrance animations play.
-
-## Related
-
-- **[Documentation](https://docs.punktfunk.unom.io)** — quick start, pairing, troubleshooting
-- **[Project README](../../README.md)** — the host, the other clients, and how it all fits together
+- **Hosts** — discovery populates tiles; tile hover fill; "…" → Forget and Rename; add-host modal
+  connects; the WOL wait screen cancels.
+- **Settings** — every section renders; combos still show their selection after a section switch
+  *and* a scope switch (the historic blank-combo reconciler bug); profile create / rename / delete;
+  colour swatches repaint; the Overridden marker appears on edit and clears on Reset; the GPU combo
+  lists adapters.
+- **Pair** — PIN entry pairs, and the typed PIN reaches the Connect click (the `use_ref` mirror path).
+- **Session** — connect spawns the session; HUD stats tick; Ctrl+Alt+Shift+Q releases the pointer;
+  the shell window restores on exit.
+- **Shell** — speed test completes; library grid loads; a `punktfunk://` deep link routes and a
+  second instance hands off and exits; the window icon appears.

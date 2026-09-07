@@ -1,16 +1,13 @@
 # pf-driver-proto
 
-The shared **host ↔ driver binary contract** for punktfunk's Windows **pf-vdisplay** virtual display —
-the control IOCTLs and the IDD-push frame transport, defined exactly once.
+The host ↔ `pf-vdisplay` binary contract — control IOCTLs and the encode transport — defined once.
+`src/lib.rs`'s module docs describe both planes; this file exists only to explain the crate's shape.
 
-It's a path dependency of **both** the host workspace ([`crates/punktfunk-host`](../punktfunk-host))
-and the out-of-workspace driver workspace ([`packaging/windows/drivers/`](../../packaging/windows/drivers)),
-so it must resolve identically from either build graph. That's why it's deliberately self-contained:
-`no_std` (+ alloc), platform-neutral (GUID/LUID are plain integers each side converts to its own OS
-type), and free of `*.workspace = true` inheritance.
+It is a path dependency of **two** build graphs: the host workspace
+([`crates/punktfunk-host`](../punktfunk-host)) and the out-of-workspace driver workspace
+([`packaging/windows/drivers/`](../../packaging/windows/drivers)). It must resolve identically from
+either, which is why it is `no_std` (+ alloc), carries no `*.workspace = true` inheritance, and
+passes GUID and LUID as plain integers each side converts to its own OS types.
 
-Defining every wire struct here — with `const` size/offset asserts and `bytemuck` round-trips — turns
-host↔driver ABI drift into a **compile error** instead of a silent frame or IOCTL corruption.
-
-See the crate root ([`src/`](src/)) for the wire types; the Windows virtual-display design is in
-the internal planning repo (punktfunk-planning: `windows-virtual-display-rust-port.md`).
+The `const` size and offset asserts are the point: a one-sided edit to a wire struct becomes a
+compile error rather than a silently corrupt frame or IOCTL.
