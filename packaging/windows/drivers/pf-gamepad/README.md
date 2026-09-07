@@ -45,35 +45,18 @@ $env:Version_Number = '10.0.26100.0'   # else wdk-build picks 10.0.28000.0 (no k
 ```
 
 The shipping flow is `build-gamepad-drivers.ps1` (one level up): workspace `cargo build --release`
-plus the sign steps below, staged for the installer. The original manual dev-box recipe, kept as
-lore (paths reflect that era's cargo-make layout):
+plus the sign steps, staged for the installer.
 
-```powershell
-cargo make                              # -> target\debug\pf_gamepad_package\ (.inf/.cat/.dll)
+**The one step nothing else explains: clear the PE `FORCE_INTEGRITY` bit.** windows-drivers-rs links
+the DLL with `/INTEGRITYCHECK`, which forces a CI-trusted page-hash signature that a self-signed cert
+cannot satisfy — the failure surfaces as CodeIntegrity 3004 *hash not found* or 3089
+VerificationError 7, not as anything naming the bit. `clear-force-integrity.ps1` (two levels up)
+clears bit `0x80` at PE-header offset `+0x5e`, and every driver build reuses it. The real fix is to
+stop `wdk-build` emitting `/INTEGRITYCHECK` at all.
 
-# *** CRITICAL: clear the PE FORCE_INTEGRITY bit ***
-# windows-drivers-rs links the DLL with /INTEGRITYCHECK, which forces a CI-trusted page-hash
-# signature a self-signed cert cannot satisfy (CodeIntegrity 3004 "hash not found" /
-# 3089 VerificationError 7). SudoVDA.dll (third-party VDD prior art, not used by punktfunk) has
-# this bit OFF. Clear bit 0x80 at PE-header offset +0x5e:
-$f = 'target\debug\pf_gamepad_package\pf_gamepad.dll'
-$b = [IO.File]::ReadAllBytes($f); $pe = [BitConverter]::ToInt32($b,0x3c); $off = $pe + 0x5e
-$dc = [BitConverter]::ToUInt16($b,$off); $bb = [BitConverter]::GetBytes([uint16]($dc -band 0xFF7F))
-$b[$off]=$bb[0]; $b[$off+1]=$bb[1]; [IO.File]::WriteAllBytes($f,$b)
-
-signtool sign /fd SHA256 /sha1 <cert-thumbprint> $f
-Remove-Item target\debug\pf_gamepad_package\pf_gamepad.cat
-Inf2Cat /driver:target\debug\pf_gamepad_package /os:10_x64
-signtool sign /fd SHA256 /sha1 <cert-thumbprint> target\debug\pf_gamepad_package\pf_gamepad.cat
-
-pnputil /add-driver target\debug\pf_gamepad_package\pf_gamepad.inf /install
-devgen /add /hardwareid "root\pf_dualsense"     # creates the (transient, SWD) device node
-```
-
-`devgen` (under `Windows Kits\10\Tools\<ver>\x64\`) is only for manual testing — the shipping
-install is `punktfunk-host.exe driver install --gamepad`, and the host SwDeviceCreate's the device
-per session (no persistent devnode). SWD devgen devices clear on reboot. TODO: drop the post-build
-PE patch by stopping wdk-build emitting `/INTEGRITYCHECK`.
+Manual device nodes are for testing only: `devgen` creates a transient SWD node that clears on
+reboot. The shipping install is `punktfunk-host.exe driver install --gamepad`, and the host
+`SwDeviceCreate`s the device per session, so there is no persistent devnode.
 
 ## The three bugs that made it work (porting a WDK C sample to Rust)
 

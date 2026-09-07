@@ -62,29 +62,19 @@ Nothing here arms a performance capture as a side effect of being read. Arming h
 reader did not ask for: stopping writes a recording to disk, and the capture is a single host-wide
 slot the web console also drives. It stays a button.
 
-## Status
+## Traps
 
-**Loaded and exercised on Omarchy 4.0.2** (Hyprland 0.56.2) on 2026-08-31, over a live 2414x1188@240
-HEVC session: `omarchy plugin validate` passes, the shell loads it with no QML warnings, all five
-tabs render, and *Stats* reads real encoder numbers off the running stream.
+Every one of these cost a debugging session, and none of them logs anything useful:
 
-### What running it caught this time
-
-- **A missing `open: root.opened` on the `KeyboardPanel` failed in total silence.** No QML warning,
-  no log line — the panel simply never created its layer surface, while the bar icon kept working.
-  If a panel stops opening and nothing is logged, check that binding first.
-- **`displays` is always empty on Hyprland.** See *Displays* below.
-- **Three numbers that were misleading until real data landed on them** — the encoder target read as
-  throughput, `fps` shown without `repeat_fps`, and stage percentiles in milliseconds. See *Stats*.
-
-Three things the first on-glass run caught, all still true:
-
-- **The manifest shape.** Omarchy uses `kinds: [...]` + `entryPoints: { … }`, and the entry-point
-  key is camelCase (`barWidget`) while the kind is hyphenated (`bar-widget`). `omarchy plugin
-  validate` catches this — run it before you trust an edit.
-- **Quickshell's `Process` does not search `PATH`.** It reports "the binary could not be found" for
-  a program that is on `PATH` and executable. Every spawn here goes through
-  `sh -c 'exec "$@"' sh …`, which does the lookup without re-quoting our argv.
+- **A missing `open: root.opened` on a panel fails in total silence.** No QML warning, no log line —
+  the panel simply never creates its layer surface while the bar icon keeps working. If a panel
+  stops opening and nothing is logged, check that binding first.
+- **The manifest shape is asymmetric.** Omarchy uses `kinds: [...]` + `entryPoints: { … }`, and the
+  entry-point key is camelCase (`barWidget`) while the kind is hyphenated (`bar-widget`).
+  `omarchy plugin validate` catches it — run it before trusting an edit.
+- **Quickshell's `Process` does not search `PATH`.** It reports *the binary could not be found* for a
+  program that is on `PATH` and executable. Every spawn here goes through `sh -c 'exec "$@"' sh …`,
+  which does the lookup without re-quoting our argv.
 - **`parent.<property>` does not resolve inside `StdioCollector`.** Assign through an explicit `id`
   or the whole call chain silently returns nothing.
 

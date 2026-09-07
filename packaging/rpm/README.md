@@ -87,32 +87,11 @@ its signing key's fingerprint against `FEED_KEY` and refuses to sign on a mismat
 the third one fails the publish instead of stranding every Bazzite box in front of a feed it
 can't verify.
 
-After reboot, as the desktop user:
-
-```sh
-ujust add-user-to-input-group           # virtual gamepads need /dev/uinput (re-login).
-                                        # Bazzite is atomic — use ujust, NOT `usermod -aG input`.
-mkdir -p ~/.config/punktfunk
-cp /usr/share/punktfunk/host.env.bazzite ~/.config/punktfunk/host.env   # gamescope defaults
-systemctl --user enable --now punktfunk-host
-# Web console — enable it and read the auto-generated login password (then open https://<host-ip>:47992):
-systemctl --user enable --now punktfunk-web
-journalctl --user -u punktfunk-web-init | sed -n 's/.*password generated: //p'
-```
-
-(See [`../bazzite/README.md`](../bazzite/README.md) for the full appliance walkthrough —
-udev/group, `host.env`, the Steam session unit, firewall, verify.)
-
-## Updates
-
-```sh
-rpm-ostree upgrade            # pulls the newest punktfunk with the system update
-systemctl reboot             # rpm-ostree changes apply on reboot
-```
-
-Layered packages are re-resolved against their repos on every `rpm-ostree upgrade`, so the box
-tracks new builds automatically (Bazzite's auto-update timer does this for you). To pin or stop
-tracking: `rpm-ostree override` / `rpm-ostree uninstall punktfunk`.
+First-run setup and updates are on the docs pages
+([Fedora](https://docs.punktfunk.unom.io/docs/fedora) /
+[Bazzite](https://docs.punktfunk.unom.io/docs/bazzite), where the sysext rather than layering is the
+supported default). Layered packages are re-resolved against their repos on every `rpm-ostree
+upgrade`, so a box tracks new builds automatically.
 
 ## Build an RPM locally
 

@@ -147,40 +147,23 @@ sudo bash packaging/bazzite/update-punktfunk.sh --reboot
 > `punktfunk.repo`, canary's `<next-minor>.0-0.ciN` **outranks** the stable `X.Y.Z-1` and the box
 > silently tracks canary. Enable exactly one channel — set `enabled=0` in the other repo file.
 
-## 2. First-run setup
+## First-run setup and gotchas
 
-All of it — `input`/`punktfunk` groups, `host.env`, enabling the service, the firewall, KDE
-desktop mode, verifying the first stream — lives on the
-[docs page](https://docs.punktfunk.unom.io/docs/bazzite) and applies identically to all three
-install paths. Don't restate it here; a fact stated twice is a fact that drifts (see
-"Where facts live" in [`CONTRIBUTING.md`](../../CONTRIBUTING.md)).
+The walkthrough — udev and group, `host.env`, the service, the firewall, verifying — is on the
+[Bazzite docs page](https://docs.punktfunk.unom.io/docs/bazzite). Two things that bite here and
+nowhere else:
 
-## 3. Gotchas
+- **Use `ujust add-user-to-input-group`, not `usermod -aG input`.** Bazzite is atomic; the plain
+  usermod does not stick across an OS update.
+- **rpm-ostree layering is the last resort**, not a fallback of equal standing: it slows every OS
+  update and can block upgrades. The sysext overlays `/usr` at runtime, survives OS updates and
+  needs no reboot, which is why it is Path A.
+- **A dev unit can shadow the packaged binary.** `scripts/punktfunk-host.service` (the upstream/dev
+  unit) assumes the binary at `%h/punktfunk/target/release/punktfunk-host`, while the packaged one
+  is `/usr/bin/punktfunk-host`. If `systemctl --user cat punktfunk-host` shows an `ExecStart`
+  pointing into a home directory, drop an override setting
+  `ExecStart=/usr/bin/punktfunk-host serve`.
 
-All user-facing ones live on the docs site now — the ds_inhibit SELinux storm with DualSense-type
-pads
-([Troubleshooting](https://docs.punktfunk.unom.io/docs/troubleshooting#stream-lags-then-freezes-with-a-dualsense-pad-bazzite-selinux);
-the `dontaudit`-vs-`allow` rationale is the header of `punktfunk-ds-inhibit.cil`).
-
-One packager-only note: `scripts/punktfunk-host.service` (the upstream/dev unit) assumes the binary
-at `%h/punktfunk/target/release/punktfunk-host`; the packaged binary is `/usr/bin/punktfunk-host`.
-If `systemctl --user cat punktfunk-host` shows `ExecStart` pointing into a home dir, drop an override
-(`systemctl --user edit punktfunk-host`) setting `ExecStart=/usr/bin/punktfunk-host serve`.
-
-## Appendix — if the COPR isn't published yet
-
-The COPR (`enricobuehler/punktfunk`) is **operator-run and may not be live**. If `rpm-ostree install
-punktfunk` can't find the package, build the RPM yourself on a **Fedora** machine/toolbox (not
-Debian/Ubuntu — the spec is Fedora's), per
-`packaging/README.md`:
-
-```sh
-git archive --format=tar.gz --prefix=punktfunk-0.3.0/ \
-  -o ~/rpmbuild/SOURCES/punktfunk-0.3.0.tar.gz HEAD    # 0.3.0 = the spec's default version
-rpmbuild -ba packaging/rpm/punktfunk.spec    # needs the spec's BuildRequires + RPM Fusion
-```
-
-To publish the COPR for others (so `rpm-ostree install punktfunk` / the bootc image work), follow
-`packaging/copr/README.md` — create the project, point build-from-SCM at the repo with spec path
-`packaging/rpm/punktfunk.spec`, add RPM Fusion nonfree as an external repo, and select chroots
-matching your Bazzite Fedora base (`rpm -E %fedora`).
+The user-facing gotchas are on the docs site, including the ds_inhibit SELinux storm with
+DualSense-type pads — the `dontaudit`-vs-`allow` rationale for that one is the header of
+`punktfunk-ds-inhibit.cil`.

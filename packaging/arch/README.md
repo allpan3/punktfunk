@@ -23,33 +23,12 @@ default `makepkg` builds only host+client with no JS tooling — mirroring the R
 > Arch + NVIDIA **and** AMD/Intel (incl. the Steam Deck — see the on-device path above). The client
 > decodes via VAAPI on AMD/Intel with a software fallback.
 
-## Install from the binary repo (recommended)
+## Install
 
-CI (`.gitea/workflows/arch.yml`) builds this PKGBUILD in an `archlinux:base-devel` container on
-every push and publishes the packages to the **Gitea Arch package registry** — a plain pacman
-repo, so an Arch box installs and updates punktfunk with `pacman -Syu` like everything else.
-Two repos mirror the deb/rpm channels: `punktfunk` (release tags) and `punktfunk-canary`
-(rolling main-branch builds, versioned `X.Y.Z-0.<run#>` so a later release always outranks
-them). Enable exactly one.
-
-The registry **signs the repo database and every package**, so first import its key into
-pacman's keyring (a one-time step — after this, packages install signature-verified):
-
-The user-facing walkthrough — key import, repo add, `pacman -Syu` install — lives on the
-[Arch docs page](https://docs.punktfunk.unom.io/docs/arch), stated once so it can't drift (see
-"Where facts live" in [`CONTRIBUTING.md`](../../CONTRIBUTING.md)). Packager notes: no `SigLevel`
-line is needed (pacman's default `Required DatabaseOptional` verifies the signed packages against
-the imported key), the repo-add uses `printf` rather than a heredoc so it works in fish (CachyOS's
-default shell has no `<<EOF`), and Arch is rolling — packages are built against current Arch
-sonames, so the box itself must stay updated.
-
-The repo-add **appends** to `/etc/pacman.conf`; the documented line is guarded with a `grep -q` so a
-second run is a no-op, and the symptom of an unguarded double add (`database already registered`)
-is on the
-[troubleshooting page](https://docs.punktfunk.unom.io/docs/troubleshooting#pacman-error-could-not-register-punktfunk-database-database-already-registered).
-
-Then the same first-run steps as a source build (printed by the install scriptlet): `input`
-group, `host.env`, `systemctl --user enable --now punktfunk-host` — see the next section.
+On the [docs site](https://docs.punktfunk.unom.io/docs/arch). CI (`arch.yml`) builds this PKGBUILD
+in an `archlinux:base-devel` container on every push and publishes to the Arch package registry — a
+plain pacman repo, so a box installs and updates with `pacman -Syu` like anything else. It is a
+binary repo, so a partial upgrade is not supported: always a full `-Syu`.
 
 ### aarch64 (Arch Linux ARM) — the client
 
@@ -149,98 +128,15 @@ so it's a much lighter sysext than the host.
 
 ## Firewall
 
-**Stock Arch ships no firewall** — every port is open by default, so there is nothing to do.
-Spins that enable one **do not** get their ports opened for you: an Arch package never touches the
-admin's running firewall. **CachyOS is the common case** — it ships `ufw` enabled by default (not
-firewalld), so out of the box the host is unreachable until you allow it. Some other spins (e.g.
-EndeavourOS) enable `firewalld` instead.
+**Stock Arch ships no firewall**, so there is nothing to do — but spins that enable one do not get
+their ports opened, because an Arch package never touches the admin's running firewall. **CachyOS is
+the common case**: it ships `ufw` enabled, so the host is unreachable until you allow it. Some spins
+(EndeavourOS) enable `firewalld` instead.
 
-The `punktfunk-host` package ships openers for **both** — a ufw application profile
-(`/etc/ufw/applications.d/punktfunk`) and firewalld service definitions
-(`/usr/lib/firewalld/services/`) — so enabling is one command whichever you run:
-
-```sh
-# ufw (CachyOS, and Ubuntu once you enable ufw) — reads the profile at once, no reload needed:
-sudo ufw allow punktfunk-native        # the native-only host (the default)
-sudo ufw allow punktfunk-gamestream    # …or add this for the Moonlight/GameStream host
-
-# firewalld (EndeavourOS and other Fedora-like spins):
-sudo firewall-cmd --reload                                        # pick up the installed def
-sudo firewall-cmd --permanent --add-service=punktfunk-native
-#                              --add-service=punktfunk-gamestream  # …for the Moonlight host
-sudo firewall-cmd --reload
-```
-
-`punktfunk-gamestream` opens the fixed Moonlight ports + mDNS; `punktfunk-native` opens the QUIC
-control port (UDP 9777) + mDNS + the mgmt/library API (TCP 47990, HTTPS + mTLS). Enable both if the
-host runs `serve --gamestream` (which serves both planes). The **data plane is an *ephemeral* UDP port** the client opens with a hole-punch, so
-there is no fixed data port in either service — the host streams back out through the path the
-client opened, which any firewall that allows outbound UDP (the default) passes. The mgmt REST API
-(TCP 47990, HTTPS + mTLS) binds all interfaces by default so paired clients can browse the game library
-— the `punktfunk-native` profile opens it. Off-loopback it serves only read-only status/library to a
-paired client cert and keeps the admin surface loopback-only (`--mgmt-bind 127.0.0.1:47990` to opt out).
-
-If you installed the **web console** (`punktfunk-web`) and want it reachable from another device,
-open its port with the matching one-liner — `sudo ufw allow punktfunk-web` or `sudo firewall-cmd
---permanent --add-service=punktfunk-web && sudo firewall-cmd --reload` — which opens **TCP 47992**
-(HTTPS, login-gated). The mgmt API (47990) is opened for paired clients by the `punktfunk-native`
-profile (game-library browsing over mTLS); off-loopback it serves only read-only status/library and
-keeps admin loopback-only.
-
-Prefer explicit rules (or a firewall the shipped profiles don't cover)? Open the ports directly.
-The **native `punktfunk/1`** plane:
-
-- **QUIC control plane: UDP 9777** (`serve --native-port N` to change).
-- **Data plane: a separate UDP port.** By default it's *random* — the host binds `0.0.0.0:0` and
-  tells the client which port it got. Video flows host → client, but the **client sends the first
-  packet** (a hole-punch), so the host learns the client's real source and streams back — this
-  traverses NAT / inter-VLAN with no forwarded port. **You normally don't open it:** if a deny-inbound
-  firewall drops the punch, the host waits ~2.5 s and falls back to the client-reported address, and a
-  stateful firewall then admits the return (it just adds ~2.5 s to session start). To skip that delay,
-  pin it with **`serve --data-port <PORT>`** (or `PUNKTFUNK_DATA_PORT`): the host binds that fixed
-  port and streams direct (no punch-wait) — open exactly that one port. A fixed port serves one
-  session at a time (concurrent ones fall back to random + hole-punch), and direct mode needs the
-  client's reported address to be reachable (flat LAN / a non-remapping port-forward).
-
-And the **GameStream / Moonlight** ports (fixed) — only needed if you run the host with
-`serve --gamestream` (opt-in, trusted LAN only); bare `serve` is native-only and doesn't open these:
-
-| Port | Proto | Purpose |
-|---|---|---|
-| 47984 | TCP | HTTPS nvhttp (paired, mutual-TLS) |
-| 47989 | TCP | HTTP nvhttp (`/serverinfo`, `/pair` PIN flow) |
-| 48010 | TCP | RTSP handshake |
-| 47998–48010 | UDP | Video RTP (+ FEC), ENet control (47999), audio (48000) |
-| 5353 | UDP | mDNS auto-discovery |
-
-The mgmt API (TCP 47990, HTTPS + mTLS) binds all interfaces by default so paired clients can browse the
-game library — the `punktfunk-native` profile opens it. Off-loopback it serves only read-only
-status/library to a paired client cert; the admin surface stays loopback-only. Pass
-`--mgmt-bind 127.0.0.1:47990` to keep it loopback-only (then leave 47990 closed).
-
-With `ufw` (explicit ports, instead of the shipped `punktfunk-native`/`punktfunk-gamestream` profile):
-
-```sh
-sudo ufw allow 9777/udp                                 # punktfunk/1 control plane
-sudo ufw allow 47990/tcp                                # mgmt/library API (HTTPS + mTLS; LAN = read-only, paired)
-sudo ufw allow 47984/tcp && sudo ufw allow 47989/tcp && sudo ufw allow 48010/tcp
-sudo ufw allow 47998,47999,48000/udp                    # GameStream video/control/audio
-sudo ufw allow 5353/udp                                 # mDNS discovery
-# The punktfunk/1 data plane uses a random UDP port; leave it closed on a LAN — the host hole-punches
-# and falls back (~2.5s at session start if firewalled). To skip that, pin it: `serve --data-port
-# 9778` and `ufw allow 9778/udp`.
-```
-
-With raw `nftables` (add to your `inet filter input` chain):
-
-```
-udp dport 9777 accept                  # punktfunk/1 control plane
-tcp dport 47990 accept                 # mgmt/library API (HTTPS + mTLS; LAN = read-only, paired)
-tcp dport { 47984, 47989, 48010 } accept
-udp dport { 47998-48000, 5353 } accept # GameStream video/control/audio + mDNS
-# The punktfunk/1 data plane is a random UDP port — normally left closed (hole-punch + ~2.5s
-# fallback). Pin it with `serve --data-port <PORT>` to open exactly one instead.
-```
+The package ships openers for both — a ufw application profile and firewalld service definitions,
+neither auto-enabled. The commands are on the
+[Arch docs page](https://docs.punktfunk.unom.io/docs/arch) and the port breakdown in
+[`data/platforms.json`](../../data/platforms.json).
 
 ## Files
 - `PKGBUILD` — split package: `punktfunk-host` + `punktfunk-client` (builds the working tree via
