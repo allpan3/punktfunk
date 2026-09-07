@@ -257,8 +257,8 @@ data class SettingsOverlay(
         /** Keys this build models; everything else in a stored overlay is carried through. */
         private val KNOWN = setOf(
             "width", "height", "refresh_hz", "bitrate_kbps", "render_scale", "codec",
-            "hdr_enabled", "compositor", "audio_channels", "audio_format", "mic_enabled", "echo_cancel",
-            "keep_host_audio",
+            "hdr_enabled", "ten_bit_sdr", "compositor",
+            "audio_channels", "audio_format", "mic_enabled", "echo_cancel", "keep_host_audio",
             "touch_mode", "mouse_mode", "invert_scroll", "overlay_actions", "gamepad", "gamepad_forwarding",
             "system_buttons", "guide_gesture",
             "stats_verbosity",

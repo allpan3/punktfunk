@@ -159,6 +159,41 @@ class ProfilesTest {
         assertEquals(listOf("Game", "Work"), store.all().map { it.name })
     }
 
+    /**
+     * Every field this build models must be in the store's KNOWN key set, or the load files it
+     * under "keys a newer build wrote" as WELL as into its own field — and `clear` (which only
+     * nulls the field) then writes it straight back out of that carry-through map, so resetting
+     * the row to inherited silently never sticks. `ten_bit_sdr` shipped exactly that way.
+     *
+     * Stated as behaviour rather than by reading KNOWN: set every field, round-trip, and nothing
+     * may have been mistaken for a stranger.
+     */
+    @Test
+    fun everyModelledOverrideSurvivesAResetToInherited() {
+        val store = ProfileStore(RuntimeEnvironment.getApplication())
+        val all = SettingsOverlay(
+            width = 3840, height = 2160, hz = 120, bitrateKbps = 80_000, renderScale = 1.5,
+            codec = "av1", hdrEnabled = false, tenBitSdr = true, compositor = 4,
+            audioChannels = 6, audioFormat = AUDIO_FORMAT_LOSSLESS_96, micEnabled = true,
+            echoCancel = false, keepHostAudio = true, touchMode = TouchMode.POINTER,
+            mouseMode = MouseMode.CAPTURE, invertScroll = true, overlayActions = "ring-blob",
+            gamepad = 6, gamepadForwarding = false, systemButtons = "local", guideGesture = "on",
+            statsVerbosity = StatsVerbosity.DETAILED, lowLatencyMode = false,
+            presentPriority = "smooth", smoothBuffer = 2,
+        )
+        val p = newProfile("Everything").copy(overrides = all)
+        store.save(p)
+        val loaded = store.byId(p.id)!!.overrides
+        assertEquals("a modelled key was carried through as an unknown one", emptyMap<String, Any>(), loaded.extra)
+        assertEquals(all.overridden(), loaded.overridden())
+
+        // …and a reset must still be gone after the store has been through JSON again.
+        for (field in all.overridden()) {
+            store.save(p.copy(overrides = loaded.clear(field)))
+            assertFalse("$field came back after a reset", field in store.byId(p.id)!!.overrides.overridden())
+        }
+    }
+
     @Test
     fun resolvePrefersIdsAndRefusesAmbiguity() {
         val store = ProfileStore(RuntimeEnvironment.getApplication())
