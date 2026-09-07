@@ -850,8 +850,9 @@ impl LibraryShared {
         s.generation += 1;
     }
 
-    /// Fetch the model is on. A shelf records this at push; a later difference means a new fetch owns the list.
-    pub(crate) fn fetch_epoch(&self) -> u64 {
+    /// Fetch the model is on. A shelf records this at push; a later difference means a new fetch
+    /// owns the list. `pub` because the worker that does the fetching lives in the shell crate.
+    pub fn fetch_epoch(&self) -> u64 {
         self.0.lock().unwrap().fetch_epoch
     }
 

@@ -648,7 +648,13 @@ pub fn spawn_session(
         .spawn(move || {
             use std::io::BufRead as _;
             for line in std::io::BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
+                let line = match line {
+                    Ok(line) => line,
+                    // One undecodable line must not end the contract — the child streams on,
+                    // and the shell would simply stop hearing about it.
+                    Err(e) if e.kind() == std::io::ErrorKind::InvalidData => continue,
+                    Err(_) => break,
+                };
                 if let Some(ev) = parse_session_line(&line) {
                     if let SessionEvent::Window { w, h } = ev {
                         persist_window_size(w, h);

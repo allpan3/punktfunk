@@ -126,7 +126,11 @@ pub struct AppModel {
     /// The request-access "waiting for approval" dialog, closed on the first child
     /// event. A shared slot (not a message): dialogs are main-thread GTK objects and
     /// `AppMsg` must stay `Send` for the session child's reader thread.
-    waiting: Rc<RefCell<Option<adw::AlertDialog>>>,
+    ///
+    /// The handler id rides along because `close()` EMITS the close response: closing this
+    /// dialog in code is indistinguishable from the user pressing Cancel unless the handler
+    /// is disconnected first ([`AppModel::close_waiting`]).
+    waiting: crate::ui_trust::WaitingSlot,
 }
 
 #[derive(Debug)]
@@ -643,6 +647,10 @@ impl SimpleComponent for AppModel {
             } => {
                 self.close_waiting();
                 self.hosts.emit(HostsMsg::SetConnecting(None));
+                // A child that reported ready proves the host answered — the exact condition
+                // the dial-first wake fallback exists to rule out. Left armed, it turns a
+                // later ordinary failure into a spurious "waking…".
+                self.wake_fallback = None;
                 if persist_paired {
                     // Request-access: the operator approved this device — a trusted
                     // PAIRED host from now on, like after a PIN ceremony.
@@ -922,8 +930,12 @@ impl AppModel {
         }
     }
 
+    /// Dismiss the waiting dialog without its Cancel handler running. `close()` emits the
+    /// close response, so the handler has to go first or the approval that just landed reads
+    /// as the user cancelling — and kills the child that reported ready.
     fn close_waiting(&mut self) {
-        if let Some(w) = self.waiting.borrow_mut().take() {
+        if let Some((w, handler)) = self.waiting.borrow_mut().take() {
+            w.disconnect(handler);
             w.close();
         }
     }

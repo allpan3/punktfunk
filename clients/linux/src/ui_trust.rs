@@ -12,6 +12,12 @@ use gtk::glib;
 use pf_client_core::orchestrate::{WakeOutcome, WakeWait};
 use relm4::prelude::*;
 
+/// The waiting dialog plus its Cancel handler. Both halves are needed to dismiss it: a bare
+/// `close()` emits the close response, so the dialog must be disconnected first or the code
+/// path that closes it fires the user's own Cancel.
+pub type WaitingSlot =
+    std::rc::Rc<std::cell::RefCell<Option<(adw::AlertDialog, glib::SignalHandlerId)>>>;
+
 /// Wake-and-wait: the FALLBACK after a failed dial to a non-advertising saved host with a
 /// known MAC (`AppMsg::WakeConnect` dials first — mDNS absence ≠ unreachable). The host is
 /// sent a magic packet, then we poll mDNS until it comes back online — re-sending every few
@@ -267,7 +273,7 @@ pub fn pin_dialog(
 pub fn approval_dialog(
     window: &adw::ApplicationWindow,
     sender: &ComponentSender<AppModel>,
-    waiting_slot: std::rc::Rc<std::cell::RefCell<Option<adw::AlertDialog>>>,
+    waiting_slot: WaitingSlot,
     req: ConnectRequest,
 ) {
     let dialog = adw::AlertDialog::new(
@@ -309,7 +315,7 @@ pub fn approval_dialog(
 fn request_access(
     window: &adw::ApplicationWindow,
     sender: &ComponentSender<AppModel>,
-    waiting_slot: std::rc::Rc<std::cell::RefCell<Option<adw::AlertDialog>>>,
+    waiting_slot: WaitingSlot,
     req: ConnectRequest,
 ) {
     let Some(fp_hex) = req.fp_hex.clone() else {
@@ -333,16 +339,18 @@ fn request_access(
     );
     waiting.add_responses(&[("cancel", "Cancel")]);
     waiting.set_close_response("cancel");
-    {
+    let handler = {
         let sender = sender.clone();
         let cancel = cancel.clone();
         waiting.connect_response(Some("cancel"), move |_, _| {
             cancel.kill();
             sender.input(AppMsg::CancelPending);
-        });
-    }
+        })
+    };
     waiting.present(Some(window));
-    *waiting_slot.borrow_mut() = Some(waiting);
+    // The handler rides with the dialog: `close()` emits the close response, so whoever
+    // dismisses this on a child event must disconnect before closing (`close_waiting`).
+    *waiting_slot.borrow_mut() = Some((waiting, handler));
 
     sender.input(AppMsg::StartSession {
         req,

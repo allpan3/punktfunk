@@ -42,6 +42,10 @@ struct State {
     pics: RefCell<HashMap<String, gtk::Picture>>,
     /// Screenshot mode: render injected entries only, never touch the network.
     mock: Cell<bool>,
+    /// Bumped by every [`load`]. A fetch whose generation is stale when it lands is dropped:
+    /// Reload can be pressed again while one is in flight, and results arrive in whatever
+    /// order the two hosts answer, not the order they were asked.
+    generation: Cell<u64>,
 }
 
 /// What the page calls the host it is browsing. A request that carries a one-off profile
@@ -255,6 +259,7 @@ fn build(
         art: RefCell::new(HashMap::new()),
         pics: RefCell::new(HashMap::new()),
         mock: Cell::new(false),
+        generation: Cell::new(0),
     });
     {
         let state = state.clone();
@@ -275,6 +280,8 @@ fn load(state: &Rc<State>) {
         return; // screenshot scene renders injected entries only
     }
     state.stack.set_visible_child_name("loading");
+    let generation = state.generation.get().wrapping_add(1);
+    state.generation.set(generation);
     let port = state.mgmt_port;
     let addr = state.req.addr.clone();
     let identity = state.identity.clone();
@@ -290,6 +297,9 @@ fn load(state: &Rc<State>) {
     glib::spawn_future_local(async move {
         let Ok(result) = rx.recv().await else { return };
         let Some(state) = weak.upgrade() else { return };
+        if state.generation.get() != generation {
+            return; // a newer load already owns the grid
+        }
         match result {
             Ok(games) if games.is_empty() => state.stack.set_visible_child_name("empty"),
             Ok(games) => {

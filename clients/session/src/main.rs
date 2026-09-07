@@ -517,7 +517,7 @@ mod session_main {
     ) -> Option<Box<dyn FnMut(u32, u32)>> {
         settings.match_window.then(|| {
             Box::new(move |w: u32, h: u32| {
-                println!("{{\"window\":{{\"w\":{w},\"h\":{h}}}}}");
+                machine_line(&format!("{{\"window\":{{\"w\":{w},\"h\":{h}}}}}"));
                 if persist_locally {
                     pf_client_core::orchestrate::persist_window_size(w, h);
                 }
@@ -540,9 +540,21 @@ mod session_main {
             })
             .collect();
         match trust_rejected {
-            Some(t) => println!("{{\"{key}\":\"{escaped}\",\"trust_rejected\":{t}}}"),
-            None => println!("{{\"{key}\":\"{escaped}\"}}"),
+            Some(t) => machine_line(&format!(
+                "{{\"{key}\":\"{escaped}\",\"trust_rejected\":{t}}}"
+            )),
+            None => machine_line(&format!("{{\"{key}\":\"{escaped}\"}}")),
         }
+    }
+
+    /// Write one line of the shell contract. A dropped write is NOT fatal: `println!` panics
+    /// on EPIPE, so a shell that exited mid-stream used to abort the stream the user is still
+    /// watching. Status nobody is left to read costs nothing to lose.
+    pub(crate) fn machine_line(line: &str) {
+        use std::io::Write as _;
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{line}");
+        let _ = out.flush();
     }
 
     /// Steam Deck / RADV: Mesa gates Vulkan Video decode — the `VK_KHR_video_decode_*`

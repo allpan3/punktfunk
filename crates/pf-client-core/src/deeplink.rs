@@ -371,8 +371,11 @@ fn is_route_word(s: &str) -> bool {
     )
 }
 
-/// A bare IPv6 (`::1`) keeps its colons and takes the default port; anything else splits at the last colon.
-fn parse_addr_port(s: &str) -> Option<(String, u16)> {
+/// Split `host[:port]`, defaulting to [`DEFAULT_PORT`]. A bare IPv6 (`::1`) keeps its colons;
+/// a bracketed one (`[::1]:9777`) gives up its brackets. `None` = not a host reference at all.
+///
+/// Shared because a hand-rolled `rsplit_once(':')` reads `::1` as host `:` port `1`.
+pub fn parse_addr_port(s: &str) -> Option<(String, u16)> {
     if s.is_empty() {
         return None;
     }

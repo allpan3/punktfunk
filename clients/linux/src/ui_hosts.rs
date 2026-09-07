@@ -50,7 +50,10 @@ pub fn saved_request(k: &trust::KnownHost) -> ConnectRequest {
         name: k.name.clone(),
         addr: k.addr.clone(),
         port: k.port,
-        fp_hex: Some(k.fp_hex.clone()),
+        // `None`, not `Some("")`, for a record saved by address and never paired: the connect
+        // gate reads `Some` as "we hold a pin" and would skip the trust ceremony, then hand the
+        // child an empty `--fp` it refuses. Same shape the Discovered arm already uses.
+        fp_hex: (!k.fp_hex.is_empty()).then(|| k.fp_hex.clone()),
         pair_optional: false,
         launch: None,
         mac: k.mac.clone(),
@@ -126,12 +129,22 @@ pub enum CardOutput {
         danger: bool,
     },
     /// Open the host edit sheet (name, profile binding, pinned cards, clipboard).
+    ///
+    /// Identified by the stable record id with `addr:port` behind it, like [`MakeDefault`] —
+    /// NOT by fingerprint, which an unpaired card leaves empty and which then names every
+    /// other unpaired record.
     Edit {
-        fp_hex: String,
+        id: Option<String>,
+        addr: String,
+        port: u16,
         name: String,
     },
+    /// Drop one saved record. Identified like [`CardOutput::Edit`], and for the same reason:
+    /// keyed by fingerprint, forgetting one unpaired host forgot all of them.
     Forget {
-        fp_hex: String,
+        id: Option<String>,
+        addr: String,
+        port: u16,
         name: String,
     },
     /// Point `Settings::default_host` at this record, or clear it when it already names it.
@@ -382,21 +395,27 @@ impl relm4::factory::FactoryComponent for HostCard {
                     );
                 }
                 {
-                    let (fp, name) = (k.fp_hex.clone(), k.name.clone());
+                    let (id, addr, port, name) =
+                        (k.id.clone(), k.addr.clone(), k.port, k.name.clone());
                     add(
                         "rename",
                         Box::new(move || CardOutput::Edit {
-                            fp_hex: fp.clone(),
+                            id: id.clone(),
+                            addr: addr.clone(),
+                            port,
                             name: name.clone(),
                         }),
                     );
                 }
                 {
-                    let (fp, name) = (k.fp_hex.clone(), k.name.clone());
+                    let (id, addr, port, name) =
+                        (k.id.clone(), k.addr.clone(), k.port, k.name.clone());
                     add(
                         "forget",
                         Box::new(move || CardOutput::Forget {
-                            fp_hex: fp.clone(),
+                            id: id.clone(),
+                            addr: addr.clone(),
+                            port,
                             name: name.clone(),
                         }),
                     );
@@ -1176,8 +1195,18 @@ impl SimpleComponent for HostsPage {
                 CardOutput::Toast(msg) => {
                     let _ = sender.output(HostsOutput::Toast(msg));
                 }
-                CardOutput::Edit { fp_hex, name } => self.edit_host_dialog(&sender, &fp_hex, &name),
-                CardOutput::Forget { fp_hex, name } => self.forget_dialog(&sender, &fp_hex, &name),
+                CardOutput::Edit {
+                    id,
+                    addr,
+                    port,
+                    name,
+                } => self.edit_host_dialog(&sender, id.as_deref(), &addr, port, &name),
+                CardOutput::Forget {
+                    id,
+                    addr,
+                    port,
+                    name,
+                } => self.forget_dialog(&sender, id.as_deref(), &addr, port, &name),
                 // Whole-file writer: rebase on the store before mutating, or a setting another
                 // surface just wrote is reverted.
                 CardOutput::MakeDefault { id, name } => {
@@ -1242,10 +1271,14 @@ impl HostsPage {
     /// spinner — in one straight-line pass.
     fn rebuild(&mut self) {
         let known = KnownHosts::load();
-        // A saved host is ONLINE iff a live advert matches it (fingerprint, or address
-        // when the advert carries no fp).
+        // A saved host is ONLINE iff a live advert matches it. Two known fingerprints decide
+        // it alone: falling back to the address there would let whoever inherits a sleeping
+        // host's DHCP lease be treated AS that host, and learn its record.
         let matches = |k: &KnownHost, a: &DiscoveredHost| {
-            (!a.fp_hex.is_empty() && a.fp_hex == k.fp_hex) || (a.addr == k.addr && a.port == k.port)
+            if !a.fp_hex.is_empty() && !k.fp_hex.is_empty() {
+                return a.fp_hex == k.fp_hex;
+            }
+            a.addr == k.addr && a.port == k.port
         };
         let most_recent = known
             .hosts
@@ -1305,7 +1338,10 @@ impl HostsPage {
                     pf_client_core::host_actions::refresh(&k.addr, mgmt, &k.fp_hex);
                 }
                 saved.push_back(HostCard {
-                    connecting: self.connecting.as_deref() == Some(k.fp_hex.as_str()),
+                    // `saved_key`, the same key `ConnectRequest::card_key` mints — a bare
+                    // `fp_hex` is empty for an unpaired record, so it matched every other
+                    // unpaired card and none of them was the one clicked.
+                    connecting: self.connecting.as_deref() == Some(saved_key(k).as_str()),
                     kind: CardKind::Saved {
                         host: k.clone(),
                         online,
@@ -1453,11 +1489,18 @@ impl HostsPage {
     /// Linux had only "Rename" until now; the clipboard toggle in particular existed in the
     /// store and on the Apple and Windows clients but had no Linux surface at all, so a Linux
     /// user could not turn on a feature they were already paying the storage for.
-    fn edit_host_dialog(&self, sender: &ComponentSender<Self>, fp_hex: &str, current: &str) {
-        let stored = KnownHosts::load()
-            .hosts
-            .iter()
-            .find(|h| h.fp_hex == fp_hex)
+    fn edit_host_dialog(
+        &self,
+        sender: &ComponentSender<Self>,
+        id: Option<&str>,
+        addr: &str,
+        port: u16,
+        current: &str,
+    ) {
+        let known = KnownHosts::load();
+        let stored = known
+            .index_of_card(id, addr, port)
+            .and_then(|i| known.hosts.get(i))
             .cloned();
         let name_row = adw::EntryRow::builder().title("Name").build();
         name_row.set_text(current);
@@ -1533,11 +1576,12 @@ impl HostsPage {
         dialog.set_close_response("cancel");
         {
             let sender = sender.clone();
-            let fp = fp_hex.to_string();
+            let (id, addr, port) = (id.map(str::to_string), addr.to_string(), port);
             dialog.connect_response(Some("save"), move |_, _| {
                 let name = name_row.text().trim().to_string();
                 let mut known = KnownHosts::load();
-                if let Some(h) = known.hosts.iter_mut().find(|h| h.fp_hex == fp) {
+                let target = known.index_of_card(id.as_deref(), &addr, port);
+                if let Some(h) = target.and_then(|i| known.hosts.get_mut(i)) {
                     if !name.is_empty() {
                         h.name = name;
                     }
@@ -1562,7 +1606,14 @@ impl HostsPage {
     }
 
     /// Forget this host (drops the pinned fingerprint — a later connect re-pairs).
-    fn forget_dialog(&self, sender: &ComponentSender<Self>, fp_hex: &str, name: &str) {
+    fn forget_dialog(
+        &self,
+        sender: &ComponentSender<Self>,
+        id: Option<&str>,
+        addr: &str,
+        port: u16,
+        name: &str,
+    ) {
         let dialog = adw::AlertDialog::new(
             Some("Remove saved host?"),
             Some(&format!(
@@ -1575,15 +1626,17 @@ impl HostsPage {
         dialog.set_close_response("cancel");
         {
             let sender = sender.clone();
-            let fp = fp_hex.to_string();
+            let (id, addr, port) = (id.map(str::to_string), addr.to_string(), port);
             dialog.connect_response(Some("remove"), move |_, _| {
                 let mut known = KnownHosts::load();
-                let gone = known
-                    .hosts
-                    .iter()
-                    .find(|h| h.fp_hex == fp)
-                    .and_then(|h| h.id.clone());
-                known.remove_by_fp(&fp);
+                let target = known.index_of_card(id.as_deref(), &addr, port);
+                let gone = target.and_then(|i| known.hosts[i].id.clone());
+                // The cached game catalog is keyed by fingerprint and outlives the record
+                // otherwise: forgetting a host must not leave its title list on disk.
+                if let Some(fp) = target.map(|i| known.hosts[i].fp_hex.clone()) {
+                    pf_client_core::library_cache::forget(&fp);
+                }
+                known.remove_card(id.as_deref(), &addr, port);
                 let _ = known.save();
                 // The resolver already ignores a dangling pointer, so this is hygiene: without
                 // it a later re-pair of a different box would inherit somebody's old choice.

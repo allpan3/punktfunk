@@ -1187,6 +1187,10 @@ impl Worker {
         // Gesture first: synthetic Guide is not in `held_buttons`; a pending Select was never sent.
         let mut due = Vec::new();
         slot.gesture.flush(&mut due);
+        // The ring chord's pending A-up is host-held state too. Its own `ButtonUp` is what
+        // clears it, and masking the pad is exactly what stops that arriving — so it would
+        // survive and eat the release of the NEXT real A, leaving A down on the host.
+        slot.swallow_a = false;
         for (b, down) in due {
             send(c, InputKind::GamepadButton, b, down as i32, pad);
         }

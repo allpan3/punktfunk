@@ -60,10 +60,20 @@ pub fn fullscreen_mode() -> bool {
 
 /// Split `host[:port]`: no colon defaults the port to 9777; a colon with an unparsable
 /// port yields `None` for it (callers decide whether to default or bail).
+///
+/// IPv6 goes through the shared parser — a plain `rsplit_once(':')` reads `::1` as host
+/// `:` port `1`.
 fn parse_host_port(target: &str) -> (String, Option<u16>) {
-    match target.rsplit_once(':') {
-        Some((a, p)) => (a.to_string(), p.parse().ok()),
-        None => (target.to_string(), Some(9777)),
+    match pf_client_core::deeplink::parse_addr_port(target) {
+        Some((addr, port)) => (addr, Some(port)),
+        // Keep the "colon, but no usable port" shape the callers branch on.
+        None => (
+            target
+                .rsplit_once(':')
+                .map_or(target, |(a, _)| a)
+                .to_string(),
+            None,
+        ),
     }
 }
 
@@ -180,12 +190,19 @@ pub fn cli_wake() -> glib::ExitCode {
 }
 
 /// `--library host[:mgmt_port]` — fetch and print the host's game library over the real
-/// mTLS + pinned-fingerprint client, no GTK window. The pin comes from `--fp HEX` when
-/// given, else the known-hosts store (matched by address), else none (TOFU-accept).
+/// mTLS + pinned-fingerprint client, no GTK window. The pin comes from `--fp HEX` when given,
+/// else the saved record for that address. Without one this refuses: an absent pin is not a
+/// weaker check, it is no check — the verifier accepts any certificate.
 pub fn headless_library(target: &str) -> glib::ExitCode {
-    let (addr, port) = match target.rsplit_once(':') {
-        Some((a, p)) if p.parse::<u16>().is_ok() => (a.to_string(), p.parse().unwrap()),
-        _ => (target.to_string(), crate::library::DEFAULT_MGMT_PORT),
+    // `parse_addr_port` defaults a bare host to the STREAM port, but here a bare host means
+    // "ask the saved record" — so a port counts only when the target spelled one out. A bare
+    // `::1` carries colons and no port, which is why this is not a colon test.
+    let (addr, explicit_port) = match pf_client_core::deeplink::parse_addr_port(target) {
+        Some((a, p)) => {
+            let spelled = target.len() > a.len() && target.ends_with(&format!(":{p}"));
+            (a, spelled.then_some(p))
+        }
+        None => (target.to_string(), None),
     };
     let identity = match crate::trust::load_or_create_identity() {
         Ok(i) => i,
@@ -194,15 +211,27 @@ pub fn headless_library(target: &str) -> glib::ExitCode {
             return glib::ExitCode::FAILURE;
         }
     };
-    let pin = arg_value("--fp")
+    // The saved record is keyed by its STREAM port, so it is resolved by address alone — a
+    // lookup on the mgmt port never matches, and `fetch_games` reads a `None` pin as "accept
+    // any certificate". A host we cannot pin is refused rather than fetched unpinned.
+    let known = crate::trust::KnownHosts::load();
+    let saved = known
+        .hosts
+        .iter()
+        .find(|h| h.addr == addr && !h.fp_hex.is_empty());
+    let Some(pin) = arg_value("--fp")
         .as_deref()
         .and_then(crate::trust::parse_hex32)
-        .or_else(|| {
-            crate::trust::KnownHosts::load()
-                .find_by_addr(&addr, port)
-                .and_then(|h| crate::trust::parse_hex32(&h.fp_hex))
-        });
-    match crate::library::fetch_games(&addr, port, &identity, pin) {
+        .or_else(|| saved.and_then(|h| crate::trust::parse_hex32(&h.fp_hex)))
+    else {
+        eprintln!("library: no pinned fingerprint for {addr} — pair the host first, or pass --fp");
+        return glib::ExitCode::FAILURE;
+    };
+    // An explicit `host:port` names the mgmt port; otherwise the saved record's own.
+    let port = explicit_port
+        .or_else(|| saved.map(|h| h.effective_mgmt_port()))
+        .unwrap_or(crate::library::DEFAULT_MGMT_PORT);
+    match crate::library::fetch_games(&addr, port, &identity, Some(pin)) {
         Ok(games) => {
             // A fourth column, appended: `game` or `launcher` (design D4). Appended rather than
             // folded into an existing field so anything reading the first three columns is

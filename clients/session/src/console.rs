@@ -413,6 +413,16 @@ struct Service {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+/// Is this advert this saved host? Two known fingerprints settle it on their own — falling
+/// back to the address there would let whoever inherits a sleeping host's DHCP lease be
+/// treated AS that host, and hide the real one from the discovered shelf.
+fn same_host(h: &trust::KnownHost, d: &pf_client_core::discovery::DiscoveredHost) -> bool {
+    if !h.fp_hex.is_empty() && !d.fp_hex.is_empty() {
+        return h.fp_hex == d.fp_hex;
+    }
+    h.addr == d.addr && h.port == d.port
+}
+
 impl Service {
     fn start(
         console: ConsoleShared,
@@ -924,10 +934,7 @@ impl ServiceState {
                 } else {
                     h.fp_hex.clone()
                 };
-                let advert = self.discovered.values().find(|d| {
-                    (!h.fp_hex.is_empty() && d.fp_hex == h.fp_hex)
-                        || (d.addr == h.addr && d.port == h.port)
-                });
+                let advert = self.discovered.values().find(|d| same_host(h, d));
                 let online = probed.get(&key).copied().unwrap_or(false);
                 // Everything the advert teaches, while it is visible: mgmt port, OS chain, wake
                 // MAC — a Deck in Gaming Mode runs only this console and the Decky panel, and a
@@ -1021,12 +1028,7 @@ impl ServiceState {
         let mut extra: Vec<HostRow> = self
             .discovered
             .values()
-            .filter(|d| {
-                !known.hosts.iter().any(|h| {
-                    (!h.fp_hex.is_empty() && h.fp_hex == d.fp_hex)
-                        || (h.addr == d.addr && h.port == d.port)
-                })
-            })
+            .filter(|d| !known.hosts.iter().any(|h| same_host(h, d)))
             .map(|d| HostRow {
                 key: if d.fp_hex.is_empty() {
                     format!("{}:{}", d.addr, d.port)
@@ -1164,9 +1166,14 @@ fn spawn_fetch(
     // than the previous host's. A cached catalog can land within a millisecond of this, so there
     // is no phase transition for anyone to observe.
     shared.begin_fetch();
+    let epoch = shared.fetch_epoch();
     std::thread::Builder::new()
         .name("punktfunk-library".into())
         .spawn(move || {
+            // This worker retries for up to a minute and cannot be cancelled, so the player can
+            // be two hosts further on by the time it answers. Every write below asks first
+            // whether this fetch still owns the model.
+            let mine = || shared.fetch_epoch() == epoch;
             if let Ok(path) = std::env::var("PUNKTFUNK_FAKE_LIBRARY") {
                 load_fake(&shared, &path);
                 return;
@@ -1176,7 +1183,7 @@ fn spawn_fetch(
             // is still recognised as the same host with the same library.
             let mut have_cached = false;
             if let Some(cached) = pf_client_core::library_cache::load(&fp_hex) {
-                if !cached.games.is_empty() {
+                if !cached.games.is_empty() && mine() {
                     have_cached = true;
                     shared.set_games_cached(to_model(&cached.games));
                 }
@@ -1219,6 +1226,9 @@ fn spawn_fetch(
 
             let Some(games) = fetched else {
                 let e = last_err.expect("the loop runs at least once and every miss records why");
+                if !mine() {
+                    return;
+                }
                 if have_cached {
                     // The shelf stays; only the words change. The player can still pick a title
                     // — the launch will wake and dial the host on its own.
@@ -1234,6 +1244,9 @@ fn spawn_fetch(
                 return;
             };
 
+            if !mine() {
+                return;
+            }
             let base = library::base_url(&addr, mgmt);
             let jobs: VecDeque<(String, Vec<String>)> = games
                 .iter()
@@ -1250,6 +1263,9 @@ fn spawn_fetch(
             if !jobs.is_empty() {
                 let rx = library::spawn_art_fetch(base, identity, pin, jobs);
                 while let Ok((id, bytes)) = rx.recv_blocking() {
+                    if !mine() {
+                        return;
+                    }
                     shared.push_art(id, bytes);
                 }
             }

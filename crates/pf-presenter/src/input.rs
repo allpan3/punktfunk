@@ -254,17 +254,10 @@ impl Capture {
         true
     }
 
-    /// Flush held keys/buttons/touches as ups. `by_user` (the chord) stays
-    /// released; focus loss re-engages on gain. Caller turns off relative mouse.
-    pub fn release(&mut self, by_user: bool) -> bool {
-        if by_user {
-            self.user_released = true;
-        }
-        if !std::mem::replace(&mut self.captured, false) {
-            return false;
-        }
-        self.pending_rel = (0, 0); // never send motion gathered while captured
-        self.pending_abs = None;
+    /// Send an up for everything currently held, and forget it. Capture is untouched: an
+    /// overlay that starts eating events needs this WITHOUT releasing the pointer, and a
+    /// press whose release never reaches the host stays down there forever.
+    pub fn flush_held(&mut self) {
         for vk in self.held_keys.drain() {
             send(
                 &self.connector,
@@ -298,8 +291,22 @@ impl Capture {
                 0,
             );
         }
-        // Tap-drag's left button was flushed via `held_buttons`; only forget state.
+        // Tap-drag's left button went out via `held_buttons`; only forget state.
         self.gestures.reset();
+    }
+
+    /// Flush held keys/buttons/touches as ups. `by_user` (the chord) stays
+    /// released; focus loss re-engages on gain. Caller turns off relative mouse.
+    pub fn release(&mut self, by_user: bool) -> bool {
+        if by_user {
+            self.user_released = true;
+        }
+        if !std::mem::replace(&mut self.captured, false) {
+            return false;
+        }
+        self.pending_rel = (0, 0); // never send motion gathered while captured
+        self.pending_abs = None;
+        self.flush_held();
         true
     }
 

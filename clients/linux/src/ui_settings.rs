@@ -305,6 +305,7 @@ fn scope_group(
     catalog: &ProfilesFile,
     active: Option<&StreamProfile>,
     next_scope: &Rc<RefCell<Option<Scope>>>,
+    pending_dup: &Rc<RefCell<Option<String>>>,
     parent: &impl IsA<gtk::Widget>,
 ) -> adw::PreferencesGroup {
     let g = group(
@@ -335,8 +336,14 @@ fn scope_group(
     {
         let (dialog, next, parent) = (dialog.clone(), next_scope.clone(), parent.as_ref().clone());
         let ids: Vec<String> = catalog.profiles.iter().map(|p| p.id.clone()).collect();
+        let restore = row.restorer();
         row.connect_changed(move |i| {
             if i == new_index {
+                // Put the row back on the layer being edited before asking. The prompt can be
+                // cancelled or refused, and a row parked on "New profile…" both names the wrong
+                // layer and — `changed` firing only on a real index change — makes picking it
+                // again do nothing at all.
+                restore_selected(&restore, current);
                 // Creation is the one branch that has to ask a question first; the switch
                 // happens in its callback, so a cancelled prompt leaves the dialog put.
                 let (dialog, next) = (dialog.clone(), next.clone());
@@ -415,15 +422,16 @@ fn scope_group(
             if matches!(action, ProfileAction::Delete) {
                 b.add_css_class("destructive-action");
             }
-            let (dialog, next, parent, id, name) = (
+            let (dialog, next, dup, parent, id, name) = (
                 dialog.clone(),
                 next_scope.clone(),
+                pending_dup.clone(),
                 parent.as_ref().clone(),
                 active.id.clone(),
                 active.name.clone(),
             );
             b.connect_clicked(move |_| {
-                run_profile_action(action, &parent, &dialog, &next, &id, &name)
+                run_profile_action(action, &parent, &dialog, &next, &dup, &id, &name)
             });
             buttons.append(&b);
         }
@@ -447,10 +455,16 @@ fn run_profile_action(
     parent: &gtk::Widget,
     dialog: &adw::PreferencesDialog,
     next: &Rc<RefCell<Option<Scope>>>,
+    pending_dup: &Rc<RefCell<Option<String>>>,
     id: &str,
     name: &str,
 ) {
-    let (dialog, next, id) = (dialog.clone(), next.clone(), id.to_string());
+    let (dialog, next, pending_dup, id) = (
+        dialog.clone(),
+        next.clone(),
+        pending_dup.clone(),
+        id.to_string(),
+    );
     match action {
         ProfileAction::Rename => {
             let keep = id.clone();
@@ -476,24 +490,12 @@ fn run_profile_action(
             );
         }
         ProfileAction::Duplicate => {
-            let mut catalog = ProfilesFile::load();
-            let Some(source) = catalog.find_by_id(&id).cloned() else {
-                return;
-            };
-            // "Work 2", "Work 3", … — the first name the catalog doesn't already hold.
-            let copy_name = (2..)
-                .map(|n| format!("{} {n}", source.name))
-                .find(|n| !catalog.name_taken(n, None))
-                .unwrap_or_else(|| source.name.clone());
-            let mut copy = StreamProfile::new(copy_name);
-            copy.overrides = source.overrides.clone();
-            copy.accent = source.accent.clone();
-            let new_id = copy.id.clone();
-            catalog.profiles.push(copy);
-            if catalog.save().is_ok() {
-                *next.borrow_mut() = Some(Scope::Profile(new_id));
-                dialog.close();
-            }
+            // Only NAMED here; the copy is taken in the close handler. The rows the user
+            // edited are still in the widgets and reach the catalog when this dialog closes,
+            // so duplicating from disk now would copy the profile as it was BEFORE those
+            // edits — and land them on the original the user thought they were leaving.
+            *pending_dup.borrow_mut() = Some(id.clone());
+            dialog.close();
         }
         ProfileAction::Delete => {
             // The warning counts what actually breaks: hosts that fall back to the defaults,
@@ -888,6 +890,9 @@ fn gamescope_session() -> bool {
 
 type ChangedFn = Rc<RefCell<Vec<Box<dyn Fn(u32)>>>>;
 
+/// The weak half of a [`ChangedFn`], held by [`RowRestore`].
+type ChangedWeak = std::rc::Weak<RefCell<Vec<Box<dyn Fn(u32)>>>>;
+
 /// A titled single-choice preference row. On a desktop this is a stock popover
 /// [`adw::ComboRow`]; under gamescope (see [`gamescope_session`]) it becomes an activatable
 /// row that pushes an in-window selection subpage onto the preferences dialog instead.
@@ -1041,16 +1046,57 @@ impl ChoiceRow {
 
     fn set_selected(&self, i: u32) {
         if let Some(combo) = self.row.downcast_ref::<adw::ComboRow>() {
-            combo.set_selected(i); // the notify handler syncs the cell
+            combo.set_selected(i); // the notify handler syncs the cell and dispatches
         } else {
-            self.selected.set(i);
+            let moved = self.selected.replace(i) != i;
             self.sync_value();
+            // Subpage mode (gamescope) has no `notify` to ride, so it has to dispatch what
+            // the combo branch gets for free — a per-row Reset reverts through here, and the
+            // rows whose caption or visibility follow this one are updated by these handlers.
+            if moved {
+                let fns = self.changed.borrow();
+                for f in fns.iter() {
+                    f(i);
+                }
+            }
         }
     }
 
     fn connect_changed(&self, f: impl Fn(u32) + 'static) {
         self.changed.borrow_mut().push(Box::new(f));
     }
+
+    /// A handle for putting this row's selection back from inside its own handler. The Rc
+    /// halves are weak, so a row never owns the closure that owns the row.
+    fn restorer(&self) -> RowRestore {
+        RowRestore {
+            row: self.row.clone(),
+            selected: Rc::downgrade(&self.selected),
+            changed: Rc::downgrade(&self.changed),
+        }
+    }
+}
+
+/// See [`ChoiceRow::restorer`].
+struct RowRestore {
+    row: adw::PreferencesRow,
+    selected: std::rc::Weak<Cell<u32>>,
+    changed: ChangedWeak,
+}
+
+/// Move a row's selection without running its handlers — for a handler that has just decided
+/// the change should not stand. `set_selected` dispatches them in both modes, so they are
+/// parked for the duration rather than reasoned about.
+fn restore_selected(r: &RowRestore, i: u32) {
+    let (Some(changed), Some(selected)) = (r.changed.upgrade(), r.selected.upgrade()) else {
+        return;
+    };
+    let parked = std::mem::take(&mut *changed.borrow_mut());
+    match r.row.downcast_ref::<adw::ComboRow>() {
+        Some(combo) => combo.set_selected(i),
+        None => selected.set(i),
+    }
+    *changed.borrow_mut() = parked;
 }
 
 /// Update a row's caption after construction — the dynamic-caption hook (touch mode,
@@ -1208,6 +1254,8 @@ pub fn show_scoped(
     let globals: Settings = settings.borrow().clone();
     // Where a scope switch wants to go once this dialog has committed and closed.
     let next_scope: Rc<RefCell<Option<Scope>>> = Rc::default();
+    // The profile "Duplicate" asked for, copied once this dialog's edits are committed.
+    let pending_dup: Rc<RefCell<Option<String>>> = Rc::default();
 
     // The dialog exists before the rows: ChoiceRow's gamescope mode pushes its selection
     // subpage onto it.
@@ -2136,6 +2184,7 @@ pub fn show_scoped(
         &catalog,
         active.as_ref(),
         &next_scope,
+        &pending_dup,
         parent,
     ));
     let session_group = group("Session", "");
@@ -2436,6 +2485,26 @@ pub fn show_scoped(
                 *s = Settings::load();
                 apply_rows(&mut s);
                 s.save();
+            }
+        }
+        // Deferred Duplicate: the source has just been committed above, so the copy is
+        // taken from what the user was actually looking at.
+        if let Some(src) = pending_dup.borrow_mut().take() {
+            let mut catalog = ProfilesFile::load();
+            if let Some(source) = catalog.find_by_id(&src).cloned() {
+                // "Work 2", "Work 3", … — the first name the catalog doesn't already hold.
+                let copy_name = (2..)
+                    .map(|n| format!("{} {n}", source.name))
+                    .find(|n| !catalog.name_taken(n, None))
+                    .unwrap_or_else(|| source.name.clone());
+                let mut copy = StreamProfile::new(copy_name);
+                copy.overrides = source.overrides.clone();
+                copy.accent = source.accent.clone();
+                let new_id = copy.id.clone();
+                catalog.profiles.push(copy);
+                if catalog.save().is_ok() {
+                    *next_scope.borrow_mut() = Some(Scope::Profile(new_id));
+                }
             }
         }
         // A scope switch closed this dialog to commit first; now re-open in the new scope.

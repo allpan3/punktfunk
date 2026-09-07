@@ -534,16 +534,17 @@ fn build_ring(
         drag.set_content(Some(&gdk::ContentProvider::for_value(
             &(k as u32).to_value(),
         )));
-        {
-            let b = button.clone();
-            drag.connect_drag_begin(move |source, _| {
-                source.set_icon(
-                    Some(&gtk::WidgetPaintable::new(Some(&b))),
-                    (disc / 2.0) as i32,
-                    (disc / 2.0) as i32,
-                );
-            });
-        }
+        // The controller's own widget, not a captured clone: the closure is owned by the
+        // controller the button owns, so holding the button here is a cycle and the whole
+        // page leaks on every rebuild.
+        drag.connect_drag_begin(move |source, _| {
+            let Some(w) = source.widget() else { return };
+            source.set_icon(
+                Some(&gtk::WidgetPaintable::new(Some(&w))),
+                (disc / 2.0) as i32,
+                (disc / 2.0) as i32,
+            );
+        });
         button.add_controller(drag);
         let target = gtk::DropTarget::new(u32::static_type(), gdk::DragAction::MOVE);
         {
@@ -931,8 +932,11 @@ fn shortcut_page(
                 }
                 d.key = Some(name.to_string());
             }
+            // Copy out first: `set_active` emits `toggled` synchronously, and that handler
+            // takes the draft mutably — a borrow still live inside the call panics.
+            let mods = draft.borrow().mods;
             for (i, b) in mod_buttons.iter().enumerate() {
-                b.set_active(draft.borrow().mods[i]);
+                b.set_active(mods[i]);
             }
             for (n, b) in key_buttons.borrow().iter() {
                 if *n == name {

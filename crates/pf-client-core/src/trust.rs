@@ -414,7 +414,12 @@ impl KnownHosts {
         Ok(())
     }
 
+    /// The record pinned to `fp_hex`. An empty fingerprint is not a key — it would match
+    /// every not-yet-paired placeholder, and the first one is never the one meant.
     pub fn find_by_fp(&self, fp_hex: &str) -> Option<&KnownHost> {
+        if fp_hex.is_empty() {
+            return None;
+        }
         self.hosts.iter().find(|h| h.fp_hex == fp_hex)
     }
 
@@ -445,17 +450,51 @@ impl KnownHosts {
         self.index_by_addr(addr, port).map(|i| &self.hosts[i])
     }
 
+    /// Drop the record pinned to `fp_hex`. An empty fingerprint removes NOTHING: `retain`
+    /// on `!= ""` would delete every not-yet-paired host at once, which is how one Forget
+    /// used to take the whole set. Placeholders go through [`KnownHosts::remove_card`].
     pub fn remove_by_fp(&mut self, fp_hex: &str) -> bool {
+        if fp_hex.is_empty() {
+            return false;
+        }
         let before = self.hosts.len();
         self.hosts.retain(|h| h.fp_hex != fp_hex);
         self.hosts.len() != before
+    }
+
+    /// Index of the record a UI card names: its stable [`KnownHost::id`], falling back to
+    /// `addr:port` for a record minted before ids existed. Deliberately never keyed by a
+    /// fingerprint — a card for an unpaired host carries an empty one.
+    pub fn index_of_card(&self, id: Option<&str>, addr: &str, port: u16) -> Option<usize> {
+        if let Some(id) = id.filter(|i| !i.is_empty()) {
+            if let Some(i) = self.hosts.iter().position(|h| h.id.as_deref() == Some(id)) {
+                return Some(i);
+            }
+        }
+        self.index_by_addr(addr, port)
+    }
+
+    /// Drop exactly the record a card names — one record, never a class of them.
+    pub fn remove_card(&mut self, id: Option<&str>, addr: &str, port: u16) -> bool {
+        match self.index_of_card(id, addr, port) {
+            Some(i) => {
+                self.hosts.remove(i);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Insert or refresh an entry, keyed by fingerprint. `paired` only ever upgrades
     /// (a later TOFU connect must not demote a PIN-paired host).
     pub fn upsert(&mut self, entry: KnownHost) {
         if let Some(h) = self.hosts.iter_mut().find(|h| h.fp_hex == entry.fp_hex) {
-            h.name = entry.name;
+            // A label the user chose is theirs. A name that is empty, or is just the address,
+            // is one the caller synthesised for want of anything better — re-pairing used to
+            // replace "Desk" with "192.168.1.50".
+            if !entry.name.is_empty() && (entry.name != entry.addr || h.name.is_empty()) {
+                h.name = entry.name;
+            }
             h.addr = entry.addr;
             h.port = entry.port;
             h.paired |= entry.paired;
@@ -609,10 +648,14 @@ fn learn_target<'a>(
 }
 
 /// Copy MAC / OS / mgmt port from an advert onto a saved record; `true` if anything moved.
-/// Pure (no disk). An omitted field is left alone — forgetting a learned MAC costs wake.
+/// Pure (no disk). An omitted field is left alone, and the MAC is learned once — see below.
 fn apply_advert(h: &mut KnownHost, mac: &[String], os: &str, mgmt_port: Option<u16>) -> bool {
     let mut changed = false;
-    if !mac.is_empty() && h.mac != mac {
+    // An advert may TEACH a wake MAC, never replace one. The fingerprint it matched on is
+    // broadcast in clear, so anything on the LAN can claim to be this host; every other
+    // field here is corrected by the next real advert, but a MAC is not — a sleeping host
+    // sends none, which is exactly when wake is the only way back.
+    if !mac.is_empty() && h.mac.is_empty() {
         h.mac = mac.to_vec();
         changed = true;
     }
@@ -672,6 +715,11 @@ pub fn rekey_addr(fp_hex: &str, addr: &str, port: u16) {
 
 /// Stamp now as this host's last successful connect. No-op if the fingerprint is not stored.
 pub fn touch_last_used(fp_hex: &str) {
+    // An empty fingerprint would stamp the first placeholder in the file, and `last_used`
+    // drives the "most recent" accent on the hosts page.
+    if fp_hex.is_empty() {
+        return;
+    }
     let mut known = KnownHosts::load();
     if let Some(h) = known.hosts.iter_mut().find(|h| h.fp_hex == fp_hex) {
         h.last_used = std::time::SystemTime::now()
@@ -2000,6 +2048,59 @@ mod tests {
     }
 
     /// An advert lands on the fingerprint match, not a stale namesake earlier in the file.
+    /// Forgetting one host that has never been paired takes that host and no other.
+    ///
+    /// `remove_by_fp` is `retain(|h| h.fp_hex != key)`, so an empty key kept only the hosts
+    /// WITH a fingerprint — one Forget on an address-added card wiped every address-added
+    /// card in the file. Records saved by address really do carry an empty fingerprint
+    /// (`KnownHost { addr, port, ..Default::default() }`), which is what made it reachable.
+    #[test]
+    fn forgetting_one_unpaired_host_keeps_the_others() {
+        let mut k = KnownHosts {
+            hosts: vec![
+                KnownHost {
+                    name: "Desk".into(),
+                    addr: "192.168.1.50".into(),
+                    port: 9777,
+                    ..Default::default()
+                },
+                KnownHost {
+                    name: "Shed".into(),
+                    addr: "192.168.1.51".into(),
+                    port: 9777,
+                    ..Default::default()
+                },
+                KnownHost {
+                    name: "Paired".into(),
+                    addr: "192.168.1.52".into(),
+                    port: 9777,
+                    fp_hex: fp('a'),
+                    ..Default::default()
+                },
+            ],
+        };
+        assert!(k.hosts.iter().all(|h| h.id.is_some()), "ids are minted");
+
+        // An empty fingerprint is not a key, in either direction.
+        assert!(!k.remove_by_fp(""), "an empty fingerprint removes nothing");
+        assert_eq!(k.hosts.len(), 3);
+        assert!(k.find_by_fp("").is_none(), "and finds nothing");
+
+        // Forget "Shed" by the card's own identity.
+        let shed = k.hosts[1].id.clone();
+        assert!(k.remove_card(shed.as_deref(), "192.168.1.51", 9777));
+        let left: Vec<&str> = k.hosts.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(left, ["Desk", "Paired"], "only the named card went");
+
+        // A record old enough to predate the minted ids still resolves by address.
+        k.hosts[0].id = None;
+        assert!(k.remove_card(None, "192.168.1.50", 9777));
+        assert_eq!(k.hosts.len(), 1);
+        // …and a card naming nothing in the file removes nothing.
+        assert!(!k.remove_card(None, "192.168.1.99", 9777));
+        assert_eq!(k.hosts.len(), 1);
+    }
+
     #[test]
     fn learn_target_prefers_the_fingerprint_match() {
         let (dead, live) = (fp('c'), fp('a'));

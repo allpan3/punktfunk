@@ -219,11 +219,14 @@ pub fn forward_child_stderr(stderr: impl std::io::Read + Send + 'static) {
         .spawn(move || {
             use std::io::{BufRead as _, Write as _};
             let mut reader = std::io::BufReader::new(stderr);
-            let mut line = String::new();
-            while matches!(reader.read_line(&mut line), Ok(n) if n > 0) {
-                let _ = std::io::stderr().write_all(line.as_bytes());
-                note(line.trim_end().to_string());
-                line.clear();
+            let mut buf = Vec::new();
+            // Bytes, not `read_line`: that fails the whole read on one non-UTF-8 byte, which
+            // ended the drain — and a stderr pipe nobody empties fills up and blocks the child
+            // mid-stream.
+            while matches!(reader.read_until(b'\n', &mut buf), Ok(n) if n > 0) {
+                let _ = std::io::stderr().write_all(&buf);
+                note(String::from_utf8_lossy(&buf).trim_end().to_string());
+                buf.clear();
             }
         });
 }

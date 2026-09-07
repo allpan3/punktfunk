@@ -1156,11 +1156,10 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
         let overlay_now = overlay_focus.as_ref().is_some_and(|of| of.is_open());
         #[cfg(not(target_os = "linux"))]
         let overlay_now = false;
-        let want_mask = focus_lost || overlay_now;
-        if want_mask != mask_applied {
-            mask_applied = want_mask;
-            gamepad.set_masked(want_mask);
-        }
+        // Remembered, not applied: the ring is a third owner of this same mask and is only
+        // known further down. Applying here too gave one boolean two latches, and whichever
+        // fell last unmasked the pads while the other still wanted them masked.
+        let want_mask_ui = focus_lost || overlay_now;
         pump.tick();
         // One coalesced MouseMove per iteration — pure motion must reach the host
         // without waiting for a click/key to flush it.
@@ -1275,8 +1274,21 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                 .is_some_and(|o| o.ring_open() || o.holds_stream());
         if ring_open != ring_was_open {
             ring_was_open = ring_open;
-            gamepad.set_masked(ring_open);
             gamepad.set_ring_nav(ring_open);
+            // The ring takes the pointer plane too: it eats every event while open, so a
+            // button already down would never see its release forwarded and would stay
+            // pressed on the host.
+            if ring_open {
+                if let Some(cap) = stream.as_mut().and_then(|s| s.capture.as_mut()) {
+                    cap.flush_held();
+                }
+            }
+        }
+        // One owner for the mask: any gate that wants the pads keeps them masked.
+        let want_mask = want_mask_ui || ring_open;
+        if want_mask != mask_applied {
+            mask_applied = want_mask;
+            gamepad.set_masked(want_mask);
         }
         if ring_open {
             while let Ok(ev) = menu_rx.try_recv() {
@@ -1518,7 +1530,14 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                             st.hdr_untonemapped,
                             st.profile.as_deref(),
                         );
-                        println!("stats: {}", full.replace('\n', " | "));
+                        // Not `println!`: it panics on EPIPE, and this is the most frequent
+                        // write on a pipe whose reader (the shell) can exit mid-stream.
+                        use std::io::Write as _;
+                        let _ = writeln!(
+                            std::io::stdout().lock(),
+                            "stats: {}",
+                            full.replace('\n', " | ")
+                        );
                     }
                     st.last_stats = Some(s);
                 }

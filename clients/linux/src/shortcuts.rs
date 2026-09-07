@@ -25,16 +25,26 @@ pub fn write_desktop_entry(label: &str, url: &str) -> Result<PathBuf, String> {
     let home = std::env::var("HOME").map_err(|_| "HOME isn't set".to_string())?;
     let dir = PathBuf::from(home).join(".local/share/applications");
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let path = dir.join(format!("punktfunk-{}.desktop", file_slug(label)));
+    // The URL, not just the label: two hosts can share a name, and the file name was the only
+    // thing telling their shortcuts apart — the second silently replaced the first. The same
+    // host always resolves to the same URL, so re-creating its shortcut still overwrites its own.
+    let path = dir.join(format!(
+        "punktfunk-{}-{:08x}.desktop",
+        file_slug(label),
+        url_tag(url)
+    ));
     // Desktop-entry values are line-oriented: a newline in a host name would end the Name
     // key and turn the rest into an unparsable line (or, worse, another key).
     let name = one_line(label);
+    // `%` starts a field code in Exec (`%u`, `%f`), and the URL is percent-encoded — a literal
+    // one has to be doubled or the launcher eats it and the pair of characters after it.
+    let exec_url = url.replace('%', "%%");
     let entry = format!(
         "[Desktop Entry]\n\
          Type=Application\n\
          Name={name}\n\
          Comment=Stream from this Punktfunk host\n\
-         Exec=punktfunk-client \"{url}\"\n\
+         Exec=punktfunk-client \"{exec_url}\"\n\
          Icon=io.unom.Punktfunk\n\
          Terminal=false\n\
          Categories=Game;Network;\n\
@@ -53,6 +63,17 @@ pub fn write_desktop_entry(label: &str, url: &str) -> Result<PathBuf, String> {
         .stderr(std::process::Stdio::null())
         .status();
     Ok(path)
+}
+
+/// A short stable tag for a URL — FNV-1a, so the same host names the same file on every
+/// build. Only has to separate one host's shortcut from another's.
+fn url_tag(url: &str) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in url.as_bytes() {
+        h ^= u32::from(*b);
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h
 }
 
 /// A filename-safe slug: ASCII alphanumerics and `-`, everything else collapsed to one `-`,
