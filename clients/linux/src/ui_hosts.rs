@@ -1685,15 +1685,12 @@ impl HostsPage {
                 if text.is_empty() {
                     return;
                 }
-                // A pasted `host:port` wins over the port field; else the field.
-                let (addr, port) = match text.rsplit_once(':') {
-                    Some((a, p)) if p.parse::<u16>().is_ok() => {
-                        (a.to_string(), p.parse::<u16>().unwrap())
-                    }
-                    _ => (
-                        text.clone(),
-                        port_row.text().trim().parse::<u16>().unwrap_or(9777),
-                    ),
+                // A pasted `host:port` wins over the port field; else the field. The shared
+                // parser, so a pasted `::1` stays one address instead of host `:` port `1`.
+                let field = port_row.text().trim().parse::<u16>().unwrap_or(9777);
+                let (addr, port) = match pf_client_core::deeplink::split_host_port(&text) {
+                    Some((a, spelled)) => (a, spelled.unwrap_or(field)),
+                    None => (text.clone(), field),
                 };
                 let name = name_row.text().trim().to_string();
                 let _ = sender.output(HostsOutput::Connect(ConnectRequest {

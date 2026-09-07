@@ -38,7 +38,7 @@ mod console;
 mod ctl_socket {
     use pf_client_core::gamepad::GamepadService;
     use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::net::UnixListener;
+    use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::PathBuf;
 
     fn path() -> Option<PathBuf> {
@@ -57,10 +57,27 @@ mod ctl_socket {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(move || {
             let Some(path) = path() else { return };
-            // A previous session's socket file refuses the bind — it's ours to replace.
-            let _ = std::fs::remove_file(&path);
+            // Bind FIRST. Unlinking on sight handed the socket to whichever session started
+            // last, leaving the running one holding an unreachable inode — so the Decky
+            // panel's guide/qam reached only the newest stream.
             let listener = match UnixListener::bind(&path) {
                 Ok(l) => l,
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                    // Held, or left behind by a session that died? A live socket accepts;
+                    // only a stale one is ours to replace.
+                    if UnixStream::connect(&path).is_ok() {
+                        tracing::debug!(path = %path.display(), "session ctl socket held by another session");
+                        return;
+                    }
+                    let _ = std::fs::remove_file(&path);
+                    match UnixListener::bind(&path) {
+                        Ok(l) => l,
+                        Err(e) => {
+                            tracing::debug!(error = %e, path = %path.display(), "session ctl socket unavailable");
+                            return;
+                        }
+                    }
+                }
                 Err(e) => {
                     tracing::debug!(error = %e, path = %path.display(), "session ctl socket unavailable");
                     return;
@@ -71,6 +88,9 @@ mod ctl_socket {
                 .spawn(move || {
                     for stream in listener.incoming() {
                         let Ok(mut s) = stream else { continue };
+                        // A peer that connects and says nothing must not hold the one thread
+                        // that serves this socket.
+                        let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(5)));
                         let mut line = String::new();
                         if BufReader::new(&s).read_line(&mut line).is_err() {
                             continue;
@@ -217,18 +237,14 @@ mod session_main {
         }
     }
 
-    /// `host[:port]`, port defaulting to the native 9777.
+    /// `host[:port]`, port defaulting to the native 9777. Shared parser: a plain
+    /// `rsplit_once(':')` reads the bare IPv6 `::1` as host `:` port `1`, which then both
+    /// dials the wrong address and misses the saved record keyed by the right one.
     pub(crate) fn parse_host_port(target: &str) -> (String, u16) {
-        match target.rsplit_once(':') {
-            Some((a, p)) => match p.parse() {
-                Ok(port) => (a.to_string(), port),
-                Err(_) => {
-                    eprintln!("unparsable port in '{target}', using default 9777");
-                    (a.to_string(), 9777)
-                }
-            },
-            None => (target.to_string(), 9777),
-        }
+        pf_client_core::deeplink::parse_addr_port(target).unwrap_or_else(|| {
+            eprintln!("unparsable port in '{target}', using default 9777");
+            (target.to_string(), pf_client_core::deeplink::DEFAULT_PORT)
+        })
     }
 
     /// `--profile <id|name>` — the settings profile this one session runs with, overriding the

@@ -15,14 +15,16 @@ path = "src/main.rs"
 # Everything is Linux-gated so `cargo build --workspace` stays green on macOS (the Mac
 # client lives in clients/apple); on other platforms this builds as a stub binary.
 [target.'cfg(target_os = "linux")'.dependencies]
-# Session pump, decode, audio, gamepads, trust, discovery, keymap — the UI-agnostic
-# plumbing, shared with the upcoming Vulkan session binary (design: punktfunk-planning
-# linux-client-rearchitecture.md). This crate keeps only the GTK shell + GL presenter.
-pf-client-core = { path = "../../crates/pf-client-core" }
+# Settings, trust, discovery, gamepads, audio devices, the library model and the spawner —
+# the UI-agnostic plumbing this shell shares with the session binary. No `pyrowave`: the
+# default feature set CMake-builds a vendored C++ tree for a decoder that only the session
+# binary runs, and this crate decodes nothing. Same shape as cli/session/windows.
+pf-client-core = { path = "../../crates/pf-client-core", default-features = false, features = [
+    "desktop",
+] }
 punktfunk-core = { path = "../../crates/punktfunk-core", features = ["quic"] }
 
-# UI shell. GraphicsOffload needs GTK ≥ 4.14; black-background ≥ 4.16. AlertDialog/
-# PreferencesDialog need libadwaita ≥ 1.5.
+# UI shell. AlertDialog/PreferencesDialog need libadwaita ≥ 1.5.
 gtk = { package = "gtk4", version = "0.11", features = ["v4_16"] }
 adw = { package = "libadwaita", version = "0.9", features = ["v1_5"] }
 async-channel = "2"

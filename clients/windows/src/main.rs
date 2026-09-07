@@ -201,10 +201,10 @@ fn run_headless_cli(args: &[String], identity: (String, String)) {
         eprintln!("--headless requires --connect host[:port]");
         std::process::exit(2);
     };
-    let (host, port) = match target.rsplit_once(':') {
-        Some((a, p)) => (a.to_string(), p.parse().unwrap_or(9777)),
-        None => (target.clone(), 9777u16),
-    };
+    // Shared parser: this value is also handed to `find_by_addr`, so a mis-split IPv6
+    // both probes the wrong address and misses its own saved record.
+    let (host, port) = pf_client_core::deeplink::parse_addr_port(&target)
+        .unwrap_or_else(|| (target.clone(), pf_client_core::deeplink::DEFAULT_PORT));
 
     // Speed test: measure the path over the real data plane, print the outcome, exit. The saved
     // fingerprint for this address (if any) pins the connect, like the GUI's per-host test.

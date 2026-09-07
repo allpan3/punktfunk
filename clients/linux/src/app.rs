@@ -131,6 +131,10 @@ pub struct AppModel {
     /// dialog in code is indistinguishable from the user pressing Cancel unless the handler
     /// is disconnected first ([`AppModel::close_waiting`]).
     waiting: crate::ui_trust::WaitingSlot,
+    /// Set when this shell kills the session child itself (the request-access Cancel). Read
+    /// once on the child's exit: without it, EVERY signal death read as "we meant that" and
+    /// an OOM-killed or crashed stream vanished with no message at all.
+    session_cancelled: bool,
 }
 
 #[derive(Debug)]
@@ -347,6 +351,7 @@ impl SimpleComponent for AppModel {
             busy: false,
             wake_fallback: None,
             waiting: Rc::new(RefCell::new(None)),
+            session_cancelled: false,
         };
         install_actions(&model.window, &sender);
 
@@ -680,6 +685,7 @@ impl SimpleComponent for AppModel {
                 // a failed dial to the non-advertising host it was armed for falls into the
                 // visible wake-and-wait instead of an error alert. Matched by fingerprint (else
                 // address) so a stale armed request can never redirect another host's failure.
+                let cancelled = std::mem::take(&mut self.session_cancelled);
                 let wake_fb =
                     self.wake_fallback
                         .take()
@@ -709,7 +715,12 @@ impl SimpleComponent for AppModel {
                     (_, Some((msg, _)), _) => self
                         .hosts
                         .emit(HostsMsg::ShowError(format!("Couldn't connect — {msg}"))),
-                    (-1, None, _) => {} // killed (request-access cancel) — already handled
+                    // Killed by us (request-access cancel) — the toast already said so.
+                    (-1, None, _) if cancelled => {}
+                    (-1, None, _) => self.hosts.emit(HostsMsg::ShowError(
+                        "Stream session was killed — out of memory, or stopped by the system"
+                            .into(),
+                    )),
                     (_, None, _) if wake_fb.is_some() => {
                         crate::ui_trust::wake_and_connect(&self.window, &sender, req)
                     }
@@ -764,6 +775,8 @@ impl SimpleComponent for AppModel {
                 self.hosts.emit(HostsMsg::Refresh);
             }
             AppMsg::CancelPending => {
+                // The child is being killed by the handler that sent this; its exit is ours.
+                self.session_cancelled = true;
                 self.close_waiting();
                 self.busy = false;
                 self.hosts.emit(HostsMsg::SetConnecting(None));

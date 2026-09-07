@@ -371,6 +371,17 @@ fn is_route_word(s: &str) -> bool {
     )
 }
 
+/// Split `host[:port]` where a MISSING port is meaningful — a dialog falls back to its own
+/// port field, a CLI to the saved record — so it is reported rather than defaulted.
+/// `Some((addr, None))` = a host and no port. IPv6-aware: see [`parse_addr_port`].
+pub fn split_host_port(s: &str) -> Option<(String, Option<u16>)> {
+    let (addr, port) = parse_addr_port(s)?;
+    // `parse_addr_port` supplies DEFAULT_PORT when none was written, and a bare `::1` is all
+    // address despite its colons — so "was one spelled?" is a suffix test, not a colon test.
+    let spelled = s.len() > addr.len() && s.ends_with(&format!(":{port}"));
+    Some((addr, spelled.then_some(port)))
+}
+
 /// Split `host[:port]`, defaulting to [`DEFAULT_PORT`]. A bare IPv6 (`::1`) keeps its colons;
 /// a bracketed one (`[::1]:9777`) gives up its brackets. `None` = not a host reference at all.
 ///
@@ -721,5 +732,39 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(parse(&link.to_url()).unwrap().host, link.host);
+    }
+    /// A port is reported only when it was WRITTEN, and an IPv6 literal keeps its colons.
+    ///
+    /// Seven hand-rolled `rsplit_once(':')` splitters read `::1` as host `:` port `1`; the
+    /// three callers that must tell "no port" from "port 9777" apart used to hand-roll that
+    /// distinction too.
+    #[test]
+    fn split_host_port_reports_whether_a_port_was_written() {
+        use super::split_host_port as split;
+        assert_eq!(
+            split("192.168.1.50"),
+            Some(("192.168.1.50".into(), None)),
+            "a bare host names no port"
+        );
+        assert_eq!(
+            split("192.168.1.50:47990"),
+            Some(("192.168.1.50".into(), Some(47990)))
+        );
+        // A bare IPv6 is all address, colons and all — the case every rsplit got wrong.
+        assert_eq!(split("::1"), Some(("::1".into(), None)));
+        assert_eq!(split("[::1]"), Some(("::1".into(), None)));
+        assert_eq!(split("[::1]:9777"), Some(("::1".into(), Some(9777))));
+        assert_eq!(
+            split("fe80::1%eth0"),
+            Some(("fe80::1%eth0".into(), None)),
+            "a zone id is part of the address"
+        );
+        // The default port spelled out is still spelled out.
+        assert_eq!(
+            split("desk:9777"),
+            Some(("desk".into(), Some(super::DEFAULT_PORT)))
+        );
+        assert_eq!(split("desk:nope"), None, "an unusable port is not a split");
+        assert_eq!(split(""), None);
     }
 }

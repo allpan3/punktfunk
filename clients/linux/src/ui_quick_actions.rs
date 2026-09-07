@@ -201,6 +201,17 @@ fn key_name(key: gdk::Key) -> Option<&'static str> {
     })
 }
 
+/// The name of the key at this physical position with NOTHING held, for a chord whose
+/// shifted symbol the grid cannot name — `Shift+1` arrives as `!` on a US layout, and the
+/// whole chord used to be dropped instead of read as Shift plus `1`.
+fn unshifted_key_name(keycode: u32) -> Option<&'static str> {
+    let entries = gdk::Display::default()?.map_keycode(keycode)?;
+    entries
+        .iter()
+        .find(|(k, _)| k.group() == 0 && k.level() == 0)
+        .and_then(|(_, keyval)| key_name(*keyval))
+}
+
 /// The modifiers held with a key, as the chord names them.
 fn held_modifiers(state: gdk::ModifierType) -> Vec<String> {
     let mut v = Vec::new();
@@ -916,11 +927,11 @@ fn shortcut_page(
             mod_buttons.clone(),
             key_buttons.clone(),
         );
-        key.connect_key_pressed(move |_, keyval, _, state| {
+        key.connect_key_pressed(move |_, keyval, keycode, state| {
             if !capture.is_active() {
                 return glib::Propagation::Proceed;
             }
-            let Some(name) = key_name(keyval) else {
+            let Some(name) = key_name(keyval).or_else(|| unshifted_key_name(keycode)) else {
                 // A lone modifier: keep waiting for the key.
                 return glib::Propagation::Stop;
             };

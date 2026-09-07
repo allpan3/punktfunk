@@ -486,9 +486,15 @@ impl ServiceState {
     fn run(mut self, stop: Arc<AtomicBool>) {
         let (discovery_rx, rescan) = discovery::browse();
         self.rescan = Some(rescan);
+        // `rows()` re-parses the host store AND the profile catalog, so rebuilding it every
+        // 100 ms read both files ten times a second for a list that changes on events. Rebuilt
+        // when something could have moved it, with a floor so anything unmarked still lands.
+        let mut dirty = true;
+        let mut last_rows = Instant::now() - Duration::from_secs(1);
         while !stop.load(Ordering::SeqCst) {
             // mDNS churn.
             while let Ok(ev) = discovery_rx.try_recv() {
+                dirty = true;
                 match ev {
                     discovery::DiscoveryEvent::Resolved(host) => {
                         self.discovered.insert(host.fullname.clone(), host);
@@ -501,18 +507,25 @@ impl ServiceState {
 
             // Shell commands (plus the binary's own seeded initial fetch).
             for cmd in self.bus.drain() {
+                dirty = true;
                 self.handle(cmd);
             }
 
-            // The 10 s reachability sweep — saved hosts that don't advertise (routed /
-            // multicast-filtered networks) still get honest presence pips.
-            if self.last_probe.elapsed() >= Duration::from_secs(10) {
-                self.last_probe = Instant::now();
-                self.sweep();
-                self.refresh_host_state();
+            let probe_due = self.last_probe.elapsed() >= Duration::from_secs(10);
+            if dirty || probe_due || last_rows.elapsed() >= Duration::from_millis(500) {
+                let rows = self.rows();
+                // The 10 s reachability sweep — saved hosts that don't advertise (routed /
+                // multicast-filtered networks) still get honest presence pips. It reuses this
+                // tick's list rather than building two more of its own.
+                if probe_due {
+                    self.last_probe = Instant::now();
+                    self.sweep(&rows);
+                    self.refresh_host_state(&rows);
+                }
+                self.console.set_hosts(rows);
+                last_rows = Instant::now();
+                dirty = false;
             }
-
-            self.console.set_hosts(self.rows());
             std::thread::sleep(Duration::from_millis(100));
         }
         if let Some(c) = &self.wake_cancel {
@@ -873,13 +886,12 @@ impl ServiceState {
     /// definition — an advert is a cache entry with a 75-minute TTL that a suspending host sends
     /// no goodbye for, so skipping them left a sleeping machine reading Online (and, since the
     /// wake item is gated on `!online`, unwakeable). Runs on its own thread; at most one in flight.
-    fn sweep(&self) {
+    fn sweep(&self, rows: &[HostRow]) {
         if self.probe_inflight.swap(true, Ordering::SeqCst) {
             return;
         }
-        let targets: Vec<(String, (String, u16))> = self
-            .rows()
-            .into_iter()
+        let targets: Vec<(String, (String, u16))> = rows
+            .iter()
             .map(|r| (r.key.clone(), (r.addr.clone(), r.port)))
             .collect();
         let probed = self.probed.clone();
@@ -902,8 +914,8 @@ impl ServiceState {
     /// shared TTL'd caches in `pf_client_core`). Idempotent and cheap — each only reaches the
     /// network when its own entry has lapsed, and the running one lapses far sooner: what a
     /// host has UP is what changes between two visits to the carousel.
-    fn refresh_host_state(&self) {
-        for r in self.rows() {
+    fn refresh_host_state(&self, rows: &[HostRow]) {
+        for r in rows {
             if r.paired && r.online && r.pin.is_none() {
                 pf_client_core::host_actions::refresh(&r.addr, r.mgmt_port, &r.fp_hex);
                 library::refresh_running(&r.addr, r.mgmt_port, &r.fp_hex);

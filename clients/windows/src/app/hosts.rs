@@ -1370,10 +1370,10 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
             if text.is_empty() {
                 return;
             }
-            let (addr, port) = match text.rsplit_once(':') {
-                Some((a, p)) => (a.to_string(), p.parse().unwrap_or(9777)),
-                None => (text.to_string(), 9777),
-            };
+            // Shared parser: a pasted `::1` is one address, not host `:` port `1`, and this
+            // value is persisted and compared against saved records.
+            let (addr, port) = pf_client_core::deeplink::parse_addr_port(text)
+                .unwrap_or_else(|| (text.to_string(), pf_client_core::deeplink::DEFAULT_PORT));
             sa.call(false);
             initiate(
                 &ctx2,
