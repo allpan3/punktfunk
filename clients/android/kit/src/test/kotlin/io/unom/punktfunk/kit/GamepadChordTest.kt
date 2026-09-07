@@ -194,6 +194,38 @@ class GamepadChordTest {
         }
     }
 
+    /**
+     * `Select+A` opens the quick-action ring, and does so on a pad whose owner never touched a
+     * setting. This used to key on the hold-Select guide gesture's pending timer, which resolves
+     * OFF by default on Android — so the one chord the start banner promises every pad user opened
+     * nothing, and on a gamepad-only session (no touchscreen twist, Back forwarded to the host)
+     * there was no route to the ring at all.
+     *
+     * Select-first only: A means [RingNav.Confirm] once the ring is up, so A-then-Select would arm
+     * it under a thumb already mid-press. And a Select the guide gesture has already turned into
+     * the host's guide button keeps its A — whatever that opened host-side owns it.
+     */
+    @Test
+    fun `Select plus A opens the ring regardless of the guide gesture`() {
+        fun opens(held: Int, bit: Int, asGuide: Boolean = false) =
+            GamepadRouter.opensRing(held, bit, asGuide)
+
+        assertTrue("Select held, A pressed", opens(Gamepad.BTN_BACK, Gamepad.BTN_A))
+        assertTrue(
+            "other buttons held alongside Select must not block it",
+            opens(Gamepad.BTN_BACK or Gamepad.BTN_LB, Gamepad.BTN_A),
+        )
+        assertFalse("A alone is not the chord", opens(0, Gamepad.BTN_A))
+        assertFalse("A first, then Select, is not the chord", opens(Gamepad.BTN_A, Gamepad.BTN_BACK))
+        assertFalse(
+            "a Select already transformed into the host's guide keeps its A",
+            opens(Gamepad.BTN_BACK, Gamepad.BTN_A, asGuide = true),
+        )
+        for (other in listOf(Gamepad.BTN_B, Gamepad.BTN_X, Gamepad.BTN_Y, Gamepad.BTN_DPAD_UP)) {
+            assertFalse("$other opened the ring", opens(Gamepad.BTN_BACK, other))
+        }
+    }
+
     /** The chord bits are the wire's, so they must stay inside the 32-bit button mask. */
     @Test
     fun `chord masks are wire button bits`() {
