@@ -100,3 +100,16 @@ pub(super) fn take_flags(map: &mut VecDeque<(u64, u32)>, pts_us: u64) -> u32 {
     }
     0
 }
+
+/// p50/max of an unsorted µs sample vec, in ms — the HUD's per-stage summary, shared by both
+/// presenters. `(0, 0)` when empty.
+pub(super) fn p50_max_ms(mut v: Vec<u64>) -> (f64, f64) {
+    if v.is_empty() {
+        return (0.0, 0.0);
+    }
+    v.sort_unstable();
+    (
+        v[v.len() / 2] as f64 / 1000.0,
+        v[v.len() - 1] as f64 / 1000.0,
+    )
+}

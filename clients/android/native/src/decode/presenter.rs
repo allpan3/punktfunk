@@ -34,7 +34,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use super::display::DisplayTracker;
-use super::latency::now_realtime_ns;
+use super::latency::{now_realtime_ns, p50_max_ms};
 use super::vsync::VsyncShared;
 
 /// Submit-margin ahead of a timeline's EXPECTED PRESENT — SurfaceFlinger's own latch lead: the
@@ -284,17 +284,6 @@ impl PresentMeter {
             std::mem::take(&mut g.e2e_us),
         )
     }
-}
-
-/// p50/max of an unsorted µs sample vec, in ms. (0, 0) when empty.
-fn p50_max_ms(mut v: Vec<u64>) -> (f64, f64) {
-    if v.is_empty() {
-        return (0.0, 0.0);
-    }
-    v.sort_unstable();
-    let p50 = v[v.len() / 2] as f64 / 1000.0;
-    let max = *v.last().unwrap() as f64 / 1000.0;
-    (p50, max)
 }
 
 pub(super) struct Presenter {
