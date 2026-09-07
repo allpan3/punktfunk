@@ -904,6 +904,7 @@ impl AppModel {
                 let dialog = adw::AlertDialog::new(Some("Open this link?"), Some(&body));
                 dialog.add_responses(&[("cancel", "Cancel"), ("connect", "Connect")]);
                 dialog.set_response_appearance("connect", adw::ResponseAppearance::Suggested);
+                dialog.set_default_response(Some("connect"));
                 dialog.set_close_response("cancel");
                 let sender = sender.clone();
                 let wake = plan.wake;
@@ -997,6 +998,7 @@ impl AppModel {
             }
         }
         dialog.set_response_enabled("apply", false);
+        dialog.set_default_response(Some("close"));
         dialog.set_close_response("close");
         dialog.present(Some(&self.window));
 

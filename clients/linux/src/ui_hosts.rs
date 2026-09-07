@@ -1460,6 +1460,7 @@ impl HostsPage {
             dialog.set_extra_child(Some(&entry));
             dialog.add_responses(&[("close", "Close"), ("copy", "Copy link")]);
             dialog.set_response_appearance("copy", adw::ResponseAppearance::Suggested);
+            dialog.set_default_response(Some("copy"));
             dialog.set_close_response("close");
             {
                 let url = url.to_string();

@@ -129,11 +129,9 @@ pub fn install(enabled: bool) {
     PROVIDER.with(|p| *p.borrow_mut() = Some(provider));
     ENABLED.with(|e| e.set(enabled));
     apply_now();
-    // ponytail: a 2 s poll, not a `GFileMonitor` — `~/.local/state/omarchy/current` is a
-    // SYMLINK that `omarchy-theme-set` re-points, so a monitor on the resolved path would sit
-    // watching the PREVIOUS theme's file forever. The web console polls the same file on the
-    // same interval. Swap for an inotify watch on the symlink's parent if this ever shows up
-    // in a profile.
+    // A 2 s poll, not a `GFileMonitor`: `~/.local/state/omarchy/current` is a SYMLINK that
+    // `omarchy-theme-set` re-points, so a monitor on the resolved path would watch the
+    // PREVIOUS theme's file forever. The web console polls the same file on the same interval.
     glib::timeout_add_seconds_local(2, || {
         apply_now();
         glib::ControlFlow::Continue

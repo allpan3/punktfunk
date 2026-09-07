@@ -83,9 +83,8 @@ const RESOLUTIONS: &[(u32, u32)] = &[
 ];
 /// `0` = the monitor's native refresh, resolved at connect.
 const REFRESH: &[u32] = &[0, 30, 60, 90, 120, 144, 165, 240];
-/// Render-scale multipliers (persisted as f64; mirrors [`punktfunk_core::render_scale::PRESETS`]).
-/// `1.0` = Native. Applied at connect and each match-window resize.
-const RENDER_SCALES: &[f64] = &[0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0];
+/// Render-scale multipliers. `1.0` = Native; applied at connect and each match-window resize.
+use punktfunk_core::render_scale::PRESETS as RENDER_SCALES;
 
 /// Where each picker sits for a given settings snapshot. Factored out because two places need
 /// exactly this: seeding the dialog, and putting ONE row back to the inherited value when its
@@ -292,6 +291,15 @@ fn swatch_row(current: Option<&str>, on_pick: impl Fn(String) + 'static) -> gtk:
     row
 }
 
+/// Report a failed catalog write on the dialog that asked for it. Without this the prompt
+/// closes, nothing changes, and the button simply appears dead.
+fn saved(dialog: &adw::PreferencesDialog, r: anyhow::Result<()>) -> bool {
+    if let Err(e) = &r {
+        dialog.add_toast(adw::Toast::new(&format!("Couldn't save — {e:#}")));
+    }
+    r.is_ok()
+}
+
 /// The scope switcher, plus (in profile scope) that profile's management actions.
 ///
 /// Switching scope does not swap the rows in place: it closes the dialog — which commits the
@@ -362,7 +370,7 @@ fn scope_group(
                         profile.accent = accent;
                         let id = profile.id.clone();
                         catalog.profiles.push(profile);
-                        if catalog.save().is_ok() {
+                        if saved(&dialog, catalog.save()) {
                             *next.borrow_mut() = Some(Scope::Profile(id));
                             dialog.close();
                         }
@@ -482,7 +490,7 @@ fn run_profile_action(
                     if let Some(p) = catalog.profiles.iter_mut().find(|p| p.id == keep) {
                         p.name = new_name;
                     }
-                    if catalog.save().is_ok() {
+                    if saved(&dialog, catalog.save()) {
                         *next.borrow_mut() = Some(Scope::Profile(keep.clone()));
                         dialog.close();
                     }
@@ -527,11 +535,12 @@ fn run_profile_action(
             let confirm = adw::AlertDialog::new(Some("Delete profile?"), Some(&body));
             confirm.add_responses(&[("cancel", "Cancel"), ("delete", "Delete")]);
             confirm.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+            confirm.set_default_response(Some("cancel"));
             confirm.set_close_response("cancel");
             confirm.connect_response(Some("delete"), move |_, _| {
                 let mut catalog = ProfilesFile::load();
                 catalog.profiles.retain(|p| p.id != id);
-                if catalog.save().is_ok() {
+                if saved(&dialog, catalog.save()) {
                     // Bindings and pins are left dangling on purpose: they resolve as "no
                     // profile" everywhere, and rewriting every host record here would be a
                     // second, racier source of truth.
