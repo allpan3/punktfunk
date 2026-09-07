@@ -250,8 +250,13 @@ pub fn pin_dialog(
             match rx.recv().await {
                 Ok(Ok(fp)) => {
                     let fp_hex = trust::hex(&fp);
-                    trust::persist_host(&req.name, &req.addr, req.port, &fp_hex, true);
-                    sender.input(AppMsg::Toast("Paired — connecting…".into()));
+                    let saved = trust::persist_host(&req.name, &req.addr, req.port, &fp_hex, true);
+                    sender.input(AppMsg::Toast(match saved {
+                        Ok(()) => "Paired — connecting…".into(),
+                        // The ceremony succeeded and this session will connect; the pairing
+                        // just did not reach the disk, so the next launch will ask again.
+                        Err(e) => format!("Paired, but couldn't save — {e:#}"),
+                    }));
                     sender.input(AppMsg::StartSession {
                         req,
                         fp_hex,

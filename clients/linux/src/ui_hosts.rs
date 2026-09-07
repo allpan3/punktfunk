@@ -1597,7 +1597,9 @@ impl HostsPage {
                         .filter(|(_, row)| row.is_active())
                         .map(|(id, _)| id.clone())
                         .collect();
-                    let _ = known.save();
+                    if let Err(e) = known.save() {
+                        let _ = sender.output(HostsOutput::Toast(format!("Couldn't save — {e:#}")));
+                    }
                 }
                 sender.input(HostsMsg::Refresh);
             });
@@ -1637,7 +1639,9 @@ impl HostsPage {
                     pf_client_core::library_cache::forget(&fp);
                 }
                 known.remove_card(id.as_deref(), &addr, port);
-                let _ = known.save();
+                if let Err(e) = known.save() {
+                    let _ = sender.output(HostsOutput::Toast(format!("Couldn't save — {e:#}")));
+                }
                 // The resolver already ignores a dangling pointer, so this is hygiene: without
                 // it a later re-pair of a different box would inherit somebody's old choice.
                 let mut settings = trust::Settings::load();

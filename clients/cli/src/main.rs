@@ -589,7 +589,9 @@ from the config directory for a true factory reset."
         match trust::pair_with_host(&addr, port, &identity, &pin, &name) {
             Ok(fp) => {
                 let fp_hex = trust::hex(&fp);
-                trust::persist_host(&addr, &addr, port, &fp_hex, true);
+                if let Err(e) = trust::persist_host(&addr, &addr, port, &fp_hex, true) {
+                    eprintln!("couldn't save the host: {e:#}");
+                }
                 trust::forget_placeholder(&addr, port);
                 println!("paired {addr}:{port} fp={fp_hex}");
                 OK
@@ -1108,13 +1110,15 @@ from the config directory for a true factory reset."
                     // exactly this identity by completing a pinned handshake against it.
                     if persist_paired {
                         if let Some(fp_hex) = &plan.host.fp_hex {
-                            trust::persist_host(
+                            if let Err(e) = trust::persist_host(
                                 &plan.host.name,
                                 &plan.host.addr,
                                 plan.host.port,
                                 fp_hex,
                                 true,
-                            );
+                            ) {
+                                eprintln!("couldn't save the host: {e:#}");
+                            }
                             trust::forget_placeholder(&plan.host.addr, plan.host.port);
                         }
                     }

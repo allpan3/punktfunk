@@ -2349,17 +2349,39 @@ pub fn show_scoped(
         // Sharing it is what keeps the two scopes from interpreting the same controls
         // differently (the tri-state resolution row is the obvious trap).
         let apply_rows = |s: &mut Settings| {
+            // A value these tables cannot list (the console offers the Deck's 1280x800, this
+            // one offers 144 Hz up) displays as the fallback rung, so writing it back erases it
+            // just by opening and closing. Write only what this table lists, or what moved —
+            // the rule the gamepad and pad-speaker rows below already follow.
+            let listed_res = s.match_window
+                || (s.width, s.height) == (0, 0)
+                || RESOLUTIONS.contains(&(s.width, s.height));
+            let (seed_res, seed_hz, seed_scale) = (
+                index::resolution(s),
+                index::refresh(s),
+                index::render_scale(s),
+            );
             // Index 1 is the virtual "Match window" option; 0 = Native, 2.. = explicit.
             let res_i = (res_row.selected() as usize).min(RESOLUTIONS.len());
-            s.match_window = res_i == 1;
-            (s.width, s.height) = if res_i <= 1 {
-                (0, 0)
-            } else {
-                RESOLUTIONS[res_i - 1]
-            };
-            s.refresh_hz = REFRESH[(hz_row.selected() as usize).min(REFRESH.len() - 1)];
-            s.render_scale =
-                RENDER_SCALES[(scale_row.selected() as usize).min(RENDER_SCALES.len() - 1)];
+            if listed_res || res_i as u32 != seed_res {
+                s.match_window = res_i == 1;
+                (s.width, s.height) = if res_i <= 1 {
+                    (0, 0)
+                } else {
+                    RESOLUTIONS[res_i - 1]
+                };
+            }
+            let hz_i = (hz_row.selected() as usize).min(REFRESH.len() - 1);
+            if REFRESH.contains(&s.refresh_hz) || hz_i as u32 != seed_hz {
+                s.refresh_hz = REFRESH[hz_i];
+            }
+            let scale_i = (scale_row.selected() as usize).min(RENDER_SCALES.len() - 1);
+            let listed_scale = RENDER_SCALES
+                .iter()
+                .any(|&x| (x - s.render_scale).abs() < 1e-6);
+            if listed_scale || scale_i as u32 != seed_scale {
+                s.render_scale = RENDER_SCALES[scale_i];
+            }
             s.bitrate_kbps = (bitrate_row.value() * 1000.0) as u32;
             // Keep a stored preference this table doesn't list (e.g. "switchpro" — valid to the
             // session, hand-edited or written by another client): it displays as "Automatic", and
@@ -2475,12 +2497,9 @@ pub fn show_scoped(
                 commit_profile(active, &touched, &values);
             }
             None => {
-                // Rebase on the file, not the shell's start-of-app snapshot: the settings file
-                // has other whole-file writers (the spawner persists `last_window_w/h` after a
-                // match-window resize — see `profiles.rs` on why there's no merge), and saving
-                // the stale snapshot here would silently revert whatever they stored while this
-                // app was open. The rows carry every value this dialog owns, so applying them
-                // onto a fresh load loses nothing.
+                // Rebase on the file, not the start-of-app snapshot: other whole-file writers
+                // exist (the spawner persists `last_window_w/h`), and saving the stale snapshot
+                // would revert them. The rows carry every value this dialog owns.
                 let mut s = settings.borrow_mut();
                 *s = Settings::load();
                 apply_rows(&mut s);
@@ -2520,6 +2539,52 @@ pub fn show_scoped(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The premise the write guard rests on: a stored value this dialog's table does not
+    /// list seeds the row at a FALLBACK rung, indistinguishable from the user having chosen
+    /// that rung. `apply_rows` therefore leaves such a row alone unless it moved — otherwise
+    /// opening and closing Settings rewrites a value another client set.
+    ///
+    /// No display needed: these are the pure index helpers the rows are seeded from.
+    #[test]
+    fn off_ladder_values_seed_a_fallback_rung() {
+        // The Steam Deck's panel, which the console's table offers and this one does not.
+        let deck = Settings {
+            width: 1280,
+            height: 800,
+            ..Default::default()
+        };
+        assert_eq!(index::resolution(&deck), 0, "seeds Native, not 1280x800");
+        assert!(
+            !RESOLUTIONS.contains(&(deck.width, deck.height)),
+            "the premise: this table cannot show it"
+        );
+
+        // A refresh rung the console's table lacks round-trips here, so it must be written.
+        let fast = Settings {
+            refresh_hz: 240,
+            ..Default::default()
+        };
+        assert!(REFRESH.contains(&fast.refresh_hz));
+        assert_eq!(REFRESH[index::refresh(&fast) as usize], 240);
+
+        // One this table lacks seeds rung 0 and must NOT be written back.
+        let odd = Settings {
+            refresh_hz: 75,
+            ..Default::default()
+        };
+        assert!(!REFRESH.contains(&odd.refresh_hz));
+        assert_eq!(index::refresh(&odd), 0);
+
+        // Render scale falls back to 1.0's rung, which is not index 0 — so "unmoved" cannot
+        // be spelled as "index 0" for this row.
+        let odd_scale = Settings {
+            render_scale: 0.63,
+            ..Default::default()
+        };
+        let fallback = index::render_scale(&odd_scale);
+        assert!(RENDER_SCALES[fallback as usize] == 1.0 && fallback != 0);
+    }
 
     /// Depth-first search for an [`adw::ActionRow`] with the given title.
     fn find_action_row(root: &gtk::Widget, title: &str) -> Option<adw::ActionRow> {

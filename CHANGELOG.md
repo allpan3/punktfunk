@@ -23,6 +23,12 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Breaking
 
+- **`punktfunk-client` drops seven headless flags the `punktfunk` CLI already had.** `--pair`,
+  `--wake`, `--list-hosts`, `--reachable`, `--add-host`, `--reset` and their probe helper were a
+  second implementation over the same store, in the same package. Use `punktfunk pair`,
+  `punktfunk wake`, `punktfunk hosts list --probe --json`, `punktfunk reachable`,
+  `punktfunk hosts add` and `punktfunk reset`; `--forget-host`, `--library`, `--set-host`,
+  `--omarchy-menu`, the update flags and the deep link are unchanged.
 - **The host links no FFmpeg.** libavcodec's NVENC and VAAPI backends and the Windows `amf-qsv`
   path are gone: NVIDIA encodes through the direct SDK, AMD and Intel through the native VAAPI
   session, Windows Intel through native QSV, and CPU frames are uploaded to the GPU instead of
@@ -371,6 +377,14 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **A failed save says so.** Pairing wrote the host store and reported success whatever
+  happened, so a read-only config dir or a sandbox denial announced "Paired" for a pairing that
+  was gone at the next launch; the console and the hosts page swallowed the same failure on
+  every edit. Each now names it. Nothing to do.
+- **A resolution or refresh rate this client cannot list survives it.** Values differ between
+  our own clients — the console offers the Deck's 1280x800, the desktop offers 144/165/240 Hz —
+  and opening Settings on the other one rewrote the stored value to the rung it displayed.
+  Nothing to do.
 - **Windows Forget removes the host you picked.** It removed by fingerprint, which a host saved
   by address does not have, so it took every such record; Edit and pinning wrote to whichever one
   came first in the file. All three now name one record by its stable id. Nothing to do.

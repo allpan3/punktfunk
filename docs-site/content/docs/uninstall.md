@@ -291,7 +291,7 @@ sudo pacman -Rns punktfunk-client     # Arch / CachyOS
 
 Then remove the repository as described under the host sections above, if this box had no host on
 it. To clear the client's own state without uninstalling — saved hosts and stream settings, keeping
-the paired identity — run `punktfunk-client --reset` instead.
+the paired identity — run `punktfunk reset` instead.
 
 ### Windows client (installer)
 
@@ -381,10 +381,10 @@ To undo only a pairing, you don't need to uninstall anything. The two halves are
 - **On the host** — unpair the device from the [web console](/docs/web-console); it stops being
   trusted immediately.
 - **On a Linux client** — `punktfunk-client --forget-host <fingerprint|host[:port]>` drops a saved
-  host from that client's list, and `punktfunk-client --reset` clears all of them plus the stream
-  settings (the client keeps its identity, so a re-pair doesn't look like a brand-new device).
+  host from that client's list.
 - **On a Linux or Windows client** — the headless `punktfunk` command that ships with the same
-  package does the same two jobs: `punktfunk hosts forget <host-ref>` for one host,
-  `punktfunk reset` for all of them plus the stream settings.
+  package does both jobs: `punktfunk hosts forget <host-ref>` for one host, `punktfunk reset` for
+  all of them plus the stream settings (the client keeps its identity, so a re-pair doesn't look
+  like a brand-new device).
 
 See [Pairing](/docs/pairing) for the full model.

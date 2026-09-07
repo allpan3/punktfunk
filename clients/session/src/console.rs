@@ -206,7 +206,9 @@ pub fn run(target: Option<&str>) -> u8 {
             // host as paired (it was unsaved/discovered), keyed to the fingerprint we pinned.
             if let Some(p) = pending_cb.lock().unwrap().take() {
                 if p.fp_hex == fp_hex {
-                    trust::persist_host(&p.name, &p.addr, p.port, &fp_hex, true);
+                    if let Err(e) = trust::persist_host(&p.name, &p.addr, p.port, &fp_hex, true) {
+                        tracing::warn!(error = %format!("{e:#}"), "saving the approved host");
+                    }
                 }
             }
             // Where this host serves its library, from the session's own Welcome — recorded
@@ -669,7 +671,11 @@ impl ServiceState {
                         match trust::pair_with_host(&addr, port, &identity, &pin, &device_name) {
                             Ok(fp) => {
                                 let fp_hex = trust::hex(&fp);
-                                trust::persist_host(&name, &addr, port, &fp_hex, true);
+                                if let Err(e) =
+                                    trust::persist_host(&name, &addr, port, &fp_hex, true)
+                                {
+                                    tracing::warn!(error = %format!("{e:#}"), "saving the paired host");
+                                }
                                 console.set_pair(PairPhase::Paired { key: fp_hex });
                             }
                             Err(e) => {
@@ -700,9 +706,7 @@ impl ServiceState {
                         ..Default::default()
                     });
                 }
-                if let Err(e) = known.save() {
-                    tracing::warn!(error = %format!("{e:#}"), "saving known hosts");
-                }
+                self.save_known(&known);
                 self.last_probe = Instant::now() - Duration::from_secs(60); // probe it now
             }
             ConsoleCmd::UpdateHost {
@@ -727,9 +731,7 @@ impl ServiceState {
                 };
                 h.addr = addr;
                 h.port = port;
-                if let Err(e) = known.save() {
-                    tracing::warn!(error = %format!("{e:#}"), "saving known hosts");
-                }
+                self.save_known(&known);
                 self.last_probe = Instant::now() - Duration::from_secs(60); // the address moved
             }
             ConsoleCmd::ForgetHost { key } => {
@@ -739,9 +741,7 @@ impl ServiceState {
                     return;
                 };
                 let gone = known.hosts.remove(i);
-                if let Err(e) = known.save() {
-                    tracing::warn!(error = %format!("{e:#}"), "saving known hosts");
-                }
+                self.save_known(&known);
                 // A forgotten host leaves no list of what somebody plays behind on disk. The
                 // catalog cache is keyed on the fingerprint, so this is the only moment that
                 // key is still known.
@@ -824,9 +824,7 @@ impl ServiceState {
                 } else if !pin {
                     h.pinned_profiles.retain(|id| *id != profile_id);
                 }
-                if let Err(e) = known.save() {
-                    tracing::warn!(error = %format!("{e:#}"), "saving known hosts");
-                }
+                self.save_known(&known);
                 // `run` refreshes the rows right after this drain, so the carousel and
                 // the pin screen reflect the new card within the same service pass.
             }
@@ -858,9 +856,7 @@ impl ServiceState {
                     }
                 };
                 if changed {
-                    if let Err(e) = known.save() {
-                        tracing::warn!(error = %format!("{e:#}"), "saving known hosts");
-                    }
+                    self.save_known(&known);
                 }
             }
             ConsoleCmd::SetClipboard { key, on } => {
@@ -874,9 +870,7 @@ impl ServiceState {
                 };
                 if h.clipboard_sync != on {
                     h.clipboard_sync = on;
-                    if let Err(e) = known.save() {
-                        tracing::warn!(error = %format!("{e:#}"), "saving known hosts");
-                    }
+                    self.save_known(&known);
                 }
             }
         }
@@ -908,6 +902,16 @@ impl ServiceState {
                 inflight.store(false, Ordering::SeqCst);
             })
             .ok();
+    }
+
+    /// Write the host store, and SAY so when it fails. The console is the only surface the
+    /// user has here — a warning in the log reaches nobody on a TV — and a dropped write
+    /// means the change they just made is not on disk.
+    fn save_known(&self, known: &trust::KnownHosts) {
+        if let Err(e) = known.save() {
+            tracing::warn!(error = %format!("{e:#}"), "saving known hosts");
+            self.console.set_notice(format!("Couldn't save — {e:#}"));
+        }
     }
 
     /// Keep every paired, reachable host's advertised actions and running title fresh (the

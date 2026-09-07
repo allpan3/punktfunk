@@ -659,15 +659,21 @@ impl SimpleComponent for AppModel {
                 if persist_paired {
                     // Request-access: the operator approved this device — a trusted
                     // PAIRED host from now on, like after a PIN ceremony.
-                    trust::persist_host(&req.name, &req.addr, req.port, &fp_hex, true);
-                    self.toast("Approved — connected");
+                    match trust::persist_host(&req.name, &req.addr, req.port, &fp_hex, true) {
+                        Ok(()) => self.toast("Approved — connected"),
+                        // The stream is up (the pin was carried in memory), but nothing was
+                        // written — say so, or the host is simply gone at the next launch.
+                        Err(e) => self.toast(&format!("Connected, but couldn't save — {e:#}")),
+                    }
                 } else if tofu {
                     // The advertised fingerprint proved itself on a real connect.
-                    trust::persist_host(&req.name, &req.addr, req.port, &fp_hex, false);
-                    self.toast(&format!(
-                        "Trusted on first use — fingerprint {}…",
-                        &fp_hex[..16.min(fp_hex.len())]
-                    ));
+                    match trust::persist_host(&req.name, &req.addr, req.port, &fp_hex, false) {
+                        Ok(()) => self.toast(&format!(
+                            "Trusted on first use — fingerprint {}…",
+                            &fp_hex[..16.min(fp_hex.len())]
+                        )),
+                        Err(e) => self.toast(&format!("Connected, but couldn't save — {e:#}")),
+                    }
                 }
                 self.hosts.emit(HostsMsg::Refresh);
             }
@@ -1229,24 +1235,10 @@ pub fn run() -> glib::ExitCode {
     // physical pad Steam Input has virtualized; the Settings controller list needs the
     // real devices (same rationale as the session binary).
     clear_steam_sdl_device_filter();
-    // Headless paths (no GTK window).
-    if let Some(pin_arg) = crate::cli::arg_value("--pair") {
-        if pin_arg != "-" {
-            eprintln!("a pairing PIN may not be passed in argv; use `--pair -` and stdin");
-            return glib::ExitCode::FAILURE;
-        }
-        let mut pin = String::new();
-        if std::io::stdin().read_line(&mut pin).is_err() || pin.trim().is_empty() {
-            eprintln!("no pairing PIN on stdin");
-            return glib::ExitCode::FAILURE;
-        }
-        return crate::cli::headless_pair(pin.trim());
-    }
+    // Headless paths (no GTK window). Pairing, wake, host listing and reset live in the
+    // `punktfunk` CLI, which ships in the same package.
     if let Some(target) = crate::cli::arg_value("--library") {
         return crate::cli::headless_library(&target);
-    }
-    if crate::cli::arg_value("--wake").is_some() {
-        return crate::cli::cli_wake();
     }
     // Headless known-hosts management (list/add/edit/forget/reset) + reachability probes —
     // the shared store the Decky plugin drives; returns None when argv names none of them.
