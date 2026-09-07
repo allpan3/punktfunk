@@ -1523,7 +1523,12 @@ final class SessionModel: ObservableObject {
                             // Impossible samples the host-anchored meters refused this window:
                             // nonzero ⇒ the clock offset is lying and e2e/hostnet above are
                             // truncated distributions — disregard their p50/p95.
-                            + "skew_trim=%lld",
+                            + "skew_trim=%lld "
+                            // Against `e2e_p95`, this splits a late frame from a frame we sat
+                            // on: both high ⇒ it arrived late; this low and `e2e_p95` high ⇒ it
+                            // arrived on time and the client held it. The HUD has always shown
+                            // it; a field report could not.
+                            + "hostnet_p95=%.1f",
                         frames,
                         displayWindow?.count ?? 0,
                         self.endToEndValid ? self.endToEndP50Ms : -1.0,
@@ -1540,7 +1545,8 @@ final class SessionModel: ObservableObject {
                         self.audioValid ? self.audioAvOffsetMs : 0,
                         self.linkInfoValid ? Double(self.linkLatencyAskFrames) : -1.0,
                         self.linkInfoValid ? Double(self.linkLatencyFrames) : -1.0,
-                        self.skewTrimPerS)
+                        self.skewTrimPerS,
+                        self.hostNetworkValid ? self.hostNetworkP95Ms : -1.0)
                     statsLog.info("\(line, privacy: .public)")
                     if statsToStdout { print("pf.stats \(line)") }
                 }

@@ -392,6 +392,11 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   read against. `drift_sheds` now means sheds plus trims, as it already does on the three Rust
   clients, and the line carries `max_quiet_ms` per interval.
 
+- **The Apple stats line carries `hostnet_p95`.** It reported `e2e_p95` but no stage p95, so a
+  frame that arrived late and a frame the client held read identically in a field report, which
+  is the split issue #740 turns on. `hostNetworkP95Ms` was already measured and already drawn on
+  the stream HUD; it is now printed last, after `skew_trim`, so existing parsers are unaffected.
+
 - **The Nix packages carry every dlopen'd library in their RUNPATH.** A `buildInputs` entry only
   reaches RUNPATH when something links it, and nothing links `libvulkan.so.1` or `libva.so.2`, so
   on NixOS all Vulkan died at `Entry::load()` and native VAAPI was about to follow it the moment
