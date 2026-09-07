@@ -280,7 +280,11 @@ pub(super) fn run_sync(
                             let lat_ns = received_ns + clock_offset as i128 - frame.pts_ns as i128;
                             let lat_us = (lat_ns > 0 && lat_ns < 10_000_000_000)
                                 .then_some((lat_ns / 1000) as u64);
-                            stats.note_received(frame.data.len(), lat_us, clock_offset != 0);
+                            // On a parts stream the completing delivery carries only the AU's
+                            // suffix — its offset restores the full AU byte count for bitrate.
+                            let au_len =
+                                frame.part.map_or(0, |p| p.offset as usize) + frame.data.len();
+                            stats.note_received(au_len, lat_us, clock_offset != 0);
                             // Phase-2 split: park this AU's capture→received sample, then match any
                             // 0xCF host timings that have arrived — host = the host's own
                             // capture→sent, network = our capture→received minus it (per-frame
