@@ -53,7 +53,7 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 use super::async_loop::DecodeEvent;
-use super::latency::now_realtime_ns;
+use super::latency::{now_realtime_ns, p50_max_ms};
 use super::presenter::PresentPriority;
 use super::surface_control::{Layer, PresentComplete};
 use super::vsync::now_monotonic_ns;
@@ -632,16 +632,4 @@ pub(super) fn asc_backend_selected() -> bool {
         )
     };
     !(n > 0 && &buf[..n as usize] == b"surfaceview")
-}
-
-/// p50/max of an unsorted µs sample vec, in ms. (0, 0) when empty.
-fn p50_max_ms(mut v: Vec<u64>) -> (f64, f64) {
-    if v.is_empty() {
-        return (0.0, 0.0);
-    }
-    v.sort_unstable();
-    (
-        v[v.len() / 2] as f64 / 1000.0,
-        *v.last().unwrap() as f64 / 1000.0,
-    )
 }

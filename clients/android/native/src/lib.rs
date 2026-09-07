@@ -19,7 +19,7 @@
 //! (`clients/android`). The surface: the native-link proof (`abiVersion`/`coreVersion`), mDNS host
 //! discovery ([`discovery`]), and the session lifecycle in [`session`] — connect/pair + the trust
 //! surface, the per-plane pumps (video → AMediaCodec, audio ↔ AAudio, mic uplink), input, and
-//! rumble/HID feedback ([`feedback`]). Mode renegotiation is still TODO (see [`session`]).
+//! rumble/HID feedback ([`feedback`]), and mid-session mode renegotiation.
 
 use jni::errors::LogErrorAndDefault;
 use jni::objects::{JObject, JString};

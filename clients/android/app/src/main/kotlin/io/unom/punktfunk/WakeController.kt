@@ -115,7 +115,7 @@ class WakeController(private val scope: CoroutineScope) {
                 // Checked before sent, so a host that is already up never gets a packet. Re-sent on
                 // a cadence because a single one can be missed, and some NICs only wake on a fresh
                 // packet after dropping into a deeper sleep state.
-                if (sentAt == null || elapsed() - sentAt!! >= RESEND_EVERY_S) {
+                if (sentAt == null || elapsed() - sentAt >= RESEND_EVERY_S) {
                     sentAt = elapsed()
                     val csv = macs.joinToString(",")
                     launch(Dispatchers.IO) { NativeBridge.nativeWakeOnLan(csv, lastIp) }
