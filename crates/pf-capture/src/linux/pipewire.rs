@@ -661,7 +661,7 @@ const PTS_REPORT_EVERY: std::time::Duration = std::time::Duration::from_secs(30)
 /// PipeWire stamps `spa_meta_header.pts` in `CLOCK_MONOTONIC`; the wire speaks realtime-since-epoch.
 /// A failed read reports 0, which puts every rebased stamp outside the 50 ms plausibility window
 /// and falls the stream back to delivery stamps — the safe direction.
-fn realtime_minus_monotonic_ns() -> i64 {
+pub(super) fn realtime_minus_monotonic_ns() -> i64 {
     let rt = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as i64)

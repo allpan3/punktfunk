@@ -370,6 +370,12 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **A Hyprland session captures the compositor directly.** The screen-share portal
+  re-requested every frame on a millisecond timer with a 6 ms floor, which halved the rate
+  above about 140 Hz and left each frame ~3 ms older than the copy needed; the host now
+  drives `ext-image-copy-capture-v1` itself, measuring 165 fps at 165 Hz where the portal
+  gave 82. Nothing to do; `PUNKTFUNK_DIRECT_CAPTURE=0` restores the portal, and any
+  compositor without the protocol keeps using it.
 - **A GNOME 49+ virtual monitor paints when the host asks.** The capture stream now drives the
   PipeWire graph as a lazy driver, so Mutter composites a frame on a client's commit instead of
   on its own vblank timer, one paint per wire interval at most: no beat against the host's

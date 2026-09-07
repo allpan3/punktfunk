@@ -3139,6 +3139,7 @@ version = "0.34.0"
 dependencies = [
  "anyhow",
  "ashpd",
+ "bitflags 2.13.1",
  "libc",
  "pf-driver-proto",
  "pf-encode-win",
@@ -3150,6 +3151,9 @@ dependencies = [
  "pipewire",
  "tokio",
  "tracing",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-scanner",
  "windows 0.62.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "x11rb",
 ]

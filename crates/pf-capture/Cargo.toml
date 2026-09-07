@@ -41,6 +41,15 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "sy
 # `RustConnection` is the pure-Rust default (no libxcb link → no new C dependency on the host); the
 # `xfixes` feature (auto-pulls `render` + `shape`) is what exposes GetCursorImage/SelectCursorInput.
 x11rb = { version = "0.14", default-features = false, features = ["xfixes"] }
+# Direct `ext-image-copy-capture-v1` capture (`linux/wl_capture.rs`): the same
+# wayland-client + scanner pair pf-vdisplay uses for KWin's screencast, with the protocol
+# XML vendored under `protocols/`. The buffers we allocate come from libgbm, which
+# pf-zerocopy already links for the EGL importer — no new build dependency.
+wayland-client = "0.31"
+wayland-scanner = "0.31"
+wayland-backend = "0.3"
+# The scanner emits `bitflags::bitflags!` for linux-dmabuf's tranche/flag bitfields.
+bitflags = "2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # The `Encoder` contract the driver-encode proxy implements, and the D3D11 converters the
