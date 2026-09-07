@@ -142,7 +142,8 @@ class GamepadRouter(
         var pendingGuide: Runnable? = null
         var pendingTapUp: Runnable? = null
         var selectAsGuide = false
-        /** `Select+A` opened the ring: neither press reached the host, so neither release may. */
+        /** `Select+A` opened the ring: this press never reached the host, so its release may not
+         *  either. Cleared by [releaseHeld] — the flush the ring's open performs. */
         var swallowA = false
         var swallowSelect = false
     }
@@ -218,9 +219,10 @@ class GamepadRouter(
     var onStatsChord: (() -> Unit)? = null
 
     /**
-     * `Select+A`, Select first, while Select is still pending its guide hold: the quick-action
-     * ring's opener (design/touch-client-overlay.md §2.6) — the first chord the host never sees.
-     * A is "jump" or "confirm" in most games, so both presses are swallowed.
+     * `Select+A`, Select first ([opensRing]): the quick-action ring's opener
+     * (design/touch-client-overlay.md §2.6) — the one chord the host never sees the A of. On a
+     * gamepad-only session this is the only route to the ring at all: Back is a wire button while
+     * streaming, and the twist needs a touchscreen.
      */
     var onRingChord: (() -> Unit)? = null
 
@@ -364,12 +366,17 @@ class GamepadRouter(
             return
         }
         if (down) {
-            // `Select+A`, Select first: the ring chord. The pending Select was never sent, A
-            // is not sent, and both releases are dropped when they come.
-            if (bit == Gamepad.BTN_A && slot.pendingGuide != null && send) {
-                slot.pendingGuide?.let { mainHandler.removeCallbacks(it) }
-                slot.pendingGuide = null
-                slot.swallowSelect = true
+            // `Select+A`, Select first: the ring chord ([opensRing]). A is "jump" or "confirm"
+            // in most games, so its press is withheld and its release dropped with it. A Select
+            // still pending its guide hold belongs to the ring instead: cancel the hold and drop
+            // its withheld press too. A Select already on the wire needs neither — the ring's own
+            // held-state flush ([setRingOpen]) lifts it.
+            if (send && opensRing(slot.held, bit, slot.selectAsGuide)) {
+                slot.pendingGuide?.let {
+                    mainHandler.removeCallbacks(it)
+                    slot.pendingGuide = null
+                    slot.swallowSelect = true
+                }
                 slot.swallowA = true
                 slot.held = slot.held or bit
                 onRingChord?.invoke()
@@ -833,10 +840,14 @@ class GamepadRouter(
                 NativeBridge.nativeSendGamepadButton(handle, Gamepad.BTN_GUIDE, false, slot.index)
             }
         }
-        // A swallowed chord's buttons were never pressed on the wire: drop them from the
-        // release sweep, and keep the flags so their eventual physical releases are dropped.
+        // A swallowed chord's buttons were never pressed on the wire: drop them from the release
+        // sweep, then clear the flags. The flush IS what they were protecting — the ring opens on
+        // this path and swallows every event until it closes, so a flag left standing would eat
+        // the release of a LATER, real press and strand that button down on the host.
         if (slot.swallowA) slot.held = slot.held and Gamepad.BTN_A.inv()
         if (slot.swallowSelect) slot.held = slot.held and Gamepad.BTN_BACK.inv()
+        slot.swallowA = false
+        slot.swallowSelect = false
         var bits = slot.held
         while (bits != 0) {
             val bit = bits and -bits // lowest set bit
@@ -929,6 +940,20 @@ class GamepadRouter(
          */
         internal fun completesChord(wasHeld: Int, bit: Int, chord: Int): Boolean =
             wasHeld and bit == 0 && bit and chord != 0 && (wasHeld or bit) and chord == chord
+
+        /**
+         * Whether pressing [bit] on a pad holding [held] opens the quick-action ring: A, with
+         * Select already down. Select-first only — [RingNav.Confirm] is A's meaning once the ring
+         * is up, so A-then-Select would arm the ring under a thumb that is mid-press.
+         *
+         * Independent of the hold-Select guide gesture, which is off by default here: this used to
+         * key on that gesture's pending timer, so the one chord the start banner promises every pad
+         * user opened nothing at all unless they had turned the gesture on. [selectAsGuide] is the
+         * one exception — once the hold has become the host's guide button, A belongs to whatever
+         * that opened on the host.
+         */
+        internal fun opensRing(held: Int, bit: Int, selectAsGuide: Boolean): Boolean =
+            bit == Gamepad.BTN_A && held and Gamepad.BTN_BACK != 0 && !selectAsGuide
 
         /** Synthetic slot-key base for [ExternalPad]s — below every real (positive) InputDevice id. */
         const val EXTERNAL_ID_BASE = -1000
