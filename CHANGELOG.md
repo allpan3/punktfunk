@@ -385,6 +385,13 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **The Apple audio vitals count the hard-cap trim and report the worst packet gap.**
+  `drift_sheds` counted only the smooth drift shed, so a bunching link — which trims far more
+  often than it sheds — logged `drift_sheds=0` while the ring was discarding audio on every
+  burst, and nothing on the client stated the arrival gap the host's `max_spacing_ms` should be
+  read against. `drift_sheds` now means sheds plus trims, as it already does on the three Rust
+  clients, and the line carries `max_quiet_ms` per interval.
+
 - **The Nix packages carry every dlopen'd library in their RUNPATH.** A `buildInputs` entry only
   reaches RUNPATH when something links it, and nothing links `libvulkan.so.1` or `libva.so.2`, so
   on NixOS all Vulkan died at `Entry::load()` and native VAAPI was about to follow it the moment

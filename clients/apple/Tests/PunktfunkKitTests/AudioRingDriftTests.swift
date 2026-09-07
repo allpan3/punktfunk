@@ -1487,5 +1487,23 @@ final class AudioRingDriftTests: XCTestCase {
                 empty.bufferedMS, 0, "\(channels)ch: an over-capacity write is dropped, not wrapped")
         }
     }
+
+    /// A hard-cap trim is reported as a drop, like `PlaybackVitals::sheds` on the Rust clients.
+    /// A bunching link trims far more often than it sheds, so counting only the smooth shed
+    /// reports `drift_sheds=0` on exactly the link that is correcting hardest — and a field log
+    /// then reads as a ring that is not correcting at all.
+    func testTheHardCapTrimIsCounted() {
+        let ring = AudioRing(seconds: 1, channels: channels, rateHz: 48_000)
+        // A fresh ring's cap is target(20) + headroom(30) = 50 ms.
+        let under = [Float](repeating: 0.5, count: 40 * perMS)
+        under.withUnsafeBufferPointer { ring.write($0.baseAddress!, count: under.count) }
+        XCTAssertEqual(ring.stats.sheds, 0, "40 ms is under the cap — nothing to drop")
+
+        // 30 ms more takes the depth to 70 ms, so 20 ms is trimmed off the front.
+        let burst = [Float](repeating: 0.5, count: 30 * perMS)
+        burst.withUnsafeBufferPointer { ring.write($0.baseAddress!, count: burst.count) }
+        XCTAssertEqual(ring.bufferedMS, 50, "trimmed back to the cap")
+        XCTAssertEqual(ring.stats.sheds, 1, "the trim is a counted drop, not a silent one")
+    }
 }
 #endif

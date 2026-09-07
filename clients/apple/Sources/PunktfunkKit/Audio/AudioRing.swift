@@ -228,10 +228,13 @@ final class AudioRing: @unchecked Sendable {
     private var windowRun = 0
     /// Consumed samples since the last underrun (drives the relax-back-down step).
     private var quietRun = 0
-    /// Reported, not acted on: short reads that actually starved the callback, and smooth drift
+    /// Reported, not acted on: short reads that actually starved the callback, and drift
     /// corrections. A rising underrun count means the ring is being starved (network or CPU),
     /// which is a different problem from the depth being wrong.
     private var underrunCount = 0
+    /// Smooth sheds AND hard-cap trims, like `PlaybackVitals::sheds` on the Rust clients. A
+    /// bunching link trims far more often than it sheds, so counting only the shed reports zero
+    /// on exactly the link that is correcting hardest.
     private var shedCount = 0
     /// Sync-driven inserts: one duplicated, crossfaded frame each. Concealment in BOTH directions
     /// must be visible — a ring being quietly deepened is a picture moving away from its audio.
@@ -491,8 +494,11 @@ final class AudioRing: @unchecked Sendable {
             target + renderQuantum)
         if writeIdx - readIdx > cap {
             // Crossfaded, like the smooth shed — see `dropFront`. This is the correction a
-            // bunching link actually pays, so it is the one that most needs not to click.
+            // bunching link actually pays, so it is the one that most needs not to click, and
+            // the one that must be COUNTED: the Rust clients report trims and sheds together
+            // (`PlaybackVitals::sheds`), and an uncounted trim reports `drift_sheds=0`.
             dropFront(writeIdx - readIdx - cap)
+            shedCount += 1
             depthAvg = Double(writeIdx - readIdx)
             overRun = 0
             underRun = 0

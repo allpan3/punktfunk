@@ -1139,6 +1139,10 @@ public final class SessionAudio {
         let thread = Thread { [connection, flag, drainDone] in
             defer { drainDone.signal() }
             var drained = 0
+            // Worst gap between two real packets since the last vitals line — the client mirror
+            // of the host's `max_spacing_ms`. Without it a starving ring cannot be told from a
+            // stalled wire.
+            var maxQuietMS = 0
             var av = AvSync(channels: channels, rateHz: rateHz)
             // WP-C1 — the drought half of concealment. Core heals a SEQ GAP, but only when a later
             // packet arrives to reveal it; when the wire simply goes quiet nothing arrives to
@@ -1184,6 +1188,9 @@ public final class SessionAudio {
                     guard decoded else { return true }
                     let quietMS = Int(
                         (DispatchTime.now().uptimeNanoseconds &- lastPacketNs) / 1_000_000)
+                    // Before the gate, not after: a drought the ring was deep enough to cover is
+                    // still a stalled wire, and it is the one that explains a later underrun.
+                    maxQuietMS = max(maxQuietMS, quietMS)
                     guard drought.conceal(sinceLastPacketMS: quietMS, depthMS: ring.bufferedMS)
                     else {
                         return true
@@ -1244,8 +1251,11 @@ public final class SessionAudio {
                 if drained % 2_000 == 0 {
                     let s = ring.stats
                     log.info(
-                        "audio: rate_hz=\(rateHz) frame_us=\(frameUs) buffer_ms=\(s.bufferedMS) target_ms=\(s.targetMS) underruns=\(s.underruns) drift_sheds=\(s.sheds) drift_inserts=\(s.inserts) av_offset_ms=\(s.avOffsetMS) plc_ms=\(s.plcMS)"
+                        "audio: rate_hz=\(rateHz) frame_us=\(frameUs) buffer_ms=\(s.bufferedMS) target_ms=\(s.targetMS) underruns=\(s.underruns) drift_sheds=\(s.sheds) drift_inserts=\(s.inserts) av_offset_ms=\(s.avOffsetMS) plc_ms=\(s.plcMS) max_quiet_ms=\(maxQuietMS)"
                     )
+                    // Per-interval, not per-session: a single stall early on would otherwise
+                    // pin the figure for the whole log.
+                    maxQuietMS = 0
                 }
                 return true
                 }
