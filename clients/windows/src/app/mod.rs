@@ -299,8 +299,8 @@ fn root(cx: &mut RenderCx, ctx: &Arc<AppCtx>) -> Element {
     // MenuFlyout whose item clicks are wired straight in the reactor backend, bypassing the normal
     // event-dispatch flush — a sync page-local setter marks state dirty but never re-renders. See
     // `hosts::HostsProps`.
-    let (forget, set_forget) = cx.use_async_state(Option::<(String, String)>::None);
-    let (rename, set_rename) = cx.use_async_state(Option::<(String, String)>::None);
+    let (forget, set_forget) = cx.use_async_state(Option::<hosts::HostRef>::None);
+    let (rename, set_rename) = cx.use_async_state(Option::<hosts::HostRef>::None);
     let (show_add, set_show_add) = cx.use_async_state(false);
     // Hovered host tile (its stable id), driving the WinUI-style card hover fill. Root state for
     // the same reason as `forget`/`rename`: pointer enter/exit handlers are wired straight in the

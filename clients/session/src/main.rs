@@ -287,13 +287,12 @@ mod session_main {
                 .find_by_addr(&addr, port)
                 .is_some_and(|h| h.clipboard_sync)
         });
-        // Re-apply the shell-persisted forwarded-controller pin (stable `vid:pid:name`
-        // key) to OUR gamepad service — the shells' in-process services can't reach this
-        // process. Applied per params-build (idempotent; browse re-launches included) so
-        // it lands before the session attaches. Empty = automatic (most recent).
-        if !settings.forward_pad.is_empty() {
-            gamepad.set_pinned(Some(settings.forward_pad.clone()));
-        }
+        // The shell-persisted forwarded-controller pin (stable `vid:pid:name`), applied to
+        // OUR service — the shells' own can't reach this process. Empty = automatic. Set
+        // unconditionally for `set_forwarding`'s reason below: browse mode reuses one
+        // service, so a cleared pin has to clear it there too.
+        gamepad
+            .set_pinned((!settings.forward_pad.is_empty()).then(|| settings.forward_pad.clone()));
         // Whether to forward controllers AT ALL (off = the pad reaches the host by some other
         // route — VirtualHere and friends). Set unconditionally, not only when off: browse mode
         // reuses one service across launches, so a stream that follows one with it off must put

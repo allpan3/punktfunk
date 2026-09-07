@@ -16,6 +16,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
+/// Poster bytes as they arrive from the fetch threads, keyed by entry id.
+type ArtRx = async_channel::Receiver<(String, Vec<u8>)>;
+
 /// Everything the page re-renders from. Kept alive by the widget closures (reload/retry/
 /// card activation); dropped when the page is popped, which also winds down any in-flight
 /// art consumer (its weak upgrade fails).
@@ -42,10 +45,24 @@ struct State {
     pics: RefCell<HashMap<String, gtk::Picture>>,
     /// Screenshot mode: render injected entries only, never touch the network.
     mock: Cell<bool>,
+    /// The art channel, kept so dropping this page CLOSES it. The consuming future parks on
+    /// `recv()` and holds its own handle, so on an all-miss run nothing ever wakes it and the
+    /// fetch threads would carry on against a page nobody can see.
+    art_rx: RefCell<Option<ArtRx>>,
     /// Bumped by every [`load`]. A fetch whose generation is stale when it lands is dropped:
     /// Reload can be pressed again while one is in flight, and results arrive in whatever
     /// order the two hosts answer, not the order they were asked.
     generation: Cell<u64>,
+}
+
+impl Drop for State {
+    /// Close the art channel: the fetch threads watch it to know whether anyone is still
+    /// looking. Nothing else here needs teardown.
+    fn drop(&mut self) {
+        if let Some(rx) = self.art_rx.borrow().as_ref() {
+            rx.close();
+        }
+    }
 }
 
 /// What the page calls the host it is browsing. A request that carries a one-off profile
@@ -259,6 +276,7 @@ fn build(
         art: RefCell::new(HashMap::new()),
         pics: RefCell::new(HashMap::new()),
         mock: Cell::new(false),
+        art_rx: RefCell::new(None),
         generation: Cell::new(0),
     });
     {
@@ -538,6 +556,10 @@ fn load_art(state: &Rc<State>, games: &[GameEntry]) {
     let identity = state.identity.clone();
     let pin = state.req.fp_hex.as_deref().and_then(trust::parse_hex32);
     let rx = library::spawn_art_fetch(base, identity, pin, jobs);
+    // A previous page's channel closes here too: one library page, one art run.
+    if let Some(old) = state.art_rx.replace(Some(rx.clone())) {
+        old.close();
+    }
     let weak = Rc::downgrade(state);
     glib::spawn_future_local(async move {
         while let Ok((id, bytes)) = rx.recv().await {

@@ -371,6 +371,17 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **Windows Forget removes the host you picked.** It removed by fingerprint, which a host saved
+  by address does not have, so it took every such record; Edit and pinning wrote to whichever one
+  came first in the file. All three now name one record by its stable id. Nothing to do.
+- **Poster fetches stop when the library page closes.** The worker only checked whether anyone was
+  still listening after a poster it had actually found, so a shelf where every poster missed — or
+  whose host went away — kept requesting against a closed page. Nothing to do.
+- **Clearing the controller pin clears it.** In the console shell one gamepad service is reused
+  across launches, so a pin set for one stream stayed in force after it was set back to Automatic.
+  Nothing to do.
+- **Cancelling a wake no longer clears the next host's card.** The cancelled thread finished its
+  probe and wrote its result over whatever had replaced it. Nothing to do.
 - **Request access connects instead of cancelling itself.** Closing the "Waiting for Approval"
   dialog emits its close response, so the approval landing fired the dialog's own Cancel, killed
   the child that had just reported ready and said "Cancelled" — the flow could never succeed.

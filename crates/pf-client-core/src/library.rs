@@ -412,9 +412,19 @@ pub fn spawn_art_fetch(
                     return;
                 };
                 loop {
+                    // Asked before every request, not only on a hit: a title whose posters all
+                    // miss never reaches `send_blocking`, so a run of misses used to grind
+                    // through the whole queue against a page that had already been closed —
+                    // or a host that had gone away.
+                    if tx.is_closed() {
+                        return;
+                    }
                     let job = queue.lock().unwrap().pop_front();
                     let Some((id, candidates)) = job else { break };
                     for url in &candidates {
+                        if tx.is_closed() {
+                            return;
+                        }
                         match fetch_art(&agent, &base, url) {
                             Ok(bytes) => {
                                 // Receiver dropped (page popped) — stop fetching.

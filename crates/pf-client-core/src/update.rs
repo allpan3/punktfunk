@@ -20,7 +20,6 @@ use pf_update_check::PublicKey;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
 
 /// The unit the polkit rule scopes to. Its presence is the "helper is installed" probe.
 const HELPER_UNIT: &str = "punktfunk-client-update.service";
@@ -35,9 +34,6 @@ const PACMAN_OPTIN_CONF: &str = "/etc/punktfunk/update.conf";
 
 /// Mirrors `packaging/linux/49-punktfunk-client-update.rules`.
 const OPT_IN_GROUP: &str = "punktfunk-update";
-
-/// Cap on one helper run. A stale package manager is slow; a stuck one must still error.
-const HELPER_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -450,11 +446,6 @@ pub fn apply(current: &str) -> ApplyOutcome {
         after: result.after_version,
         error: None,
     }
-}
-
-/// [`HELPER_TIMEOUT`], so a caller can size its wait above the helper's cap.
-pub const fn helper_timeout() -> Duration {
-    HELPER_TIMEOUT
 }
 
 #[cfg(test)]

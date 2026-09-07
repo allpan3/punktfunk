@@ -103,6 +103,25 @@ jobs:
       - name: Capture screenshots
         run: bash clients/linux/tools/screenshots.sh
 
+      # The client's display tests are `#[ignore]`d for wanting an X/Wayland server, and this is
+      # the only job in the repo that HAS one — ci.yml's container has no Xvfb, so they otherwise
+      # execute nowhere. A weak gate (tags only, best-effort); the strong one is Xvfb in
+      # ci/rust-ci.Dockerfile so ci.yml can run them per PR.
+      #
+      # ONE PROCESS PER TEST, not one run: GTK binds to whichever thread first calls
+      # `gtk::init()`, and libtest gives every test its own thread — so a second display test in
+      # the same process dies with "Attempted to initialize GTK from two different threads",
+      # which `--test-threads=1` does not fix. Discovered by name so a new one is picked up.
+      - name: Display-only client tests
+        run: |
+          cargo test -p punktfunk-client-linux --locked -- --ignored --list --format terse \
+            | sed -n 's/: test$//p' \
+            | while read -r t; do
+                echo "--- $t"
+                xvfb-run -a cargo test -p punktfunk-client-linux --locked -- \
+                  --ignored --exact "$t"
+              done
+
       - name: Upload screenshots
         if: always()
         # v3: Gitea's API rejects upload-artifact@v4 (see apple.yml). Download is a zip.

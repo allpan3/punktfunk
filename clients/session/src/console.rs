@@ -1092,8 +1092,9 @@ fn spawn_wake(
             let started = Instant::now();
             let mut last_packet: Option<Instant> = None;
             loop {
+                // A cancelled thread writes NOTHING: the card it would clear may already have
+                // been replaced by the next host's, and `CancelWake` cleared the slot itself.
                 if cancel.load(Ordering::SeqCst) {
-                    console.set_wake(None);
                     return;
                 }
                 let elapsed = started.elapsed();
@@ -1109,6 +1110,11 @@ fn spawn_wake(
                 .first()
                 .copied()
                 .unwrap_or(false);
+                // Re-checked after the probe: it blocks for ~900 ms, which is long enough for
+                // the user to go back and start waking a different host.
+                if cancel.load(Ordering::SeqCst) {
+                    return;
+                }
                 console.set_wake(Some(WakeStatus {
                     key: row.key.clone(),
                     name: row.name.clone(),

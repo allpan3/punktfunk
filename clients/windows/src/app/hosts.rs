@@ -76,6 +76,35 @@ const TILE_GAP: f64 = 12.0;
 /// Props for the hosts page: the services plus the changing discovery/status data that must
 /// drive its re-render (compared by value, so a new host list or error refreshes the page).
 ///
+/// Which saved record a per-host action means. NOT the fingerprint: a host added by address
+/// has none, and keying on `""` matched the first such record — Forget removed the wrong set,
+/// Edit and pinning wrote to the wrong host. `addr`/`port` are the fallback for a record older
+/// than the minted ids, and are also why the id is the durable key: the edit sheet can change
+/// them under itself.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct HostRef {
+    pub(crate) id: Option<String>,
+    pub(crate) addr: String,
+    pub(crate) port: u16,
+    pub(crate) name: String,
+}
+
+impl HostRef {
+    fn of(h: &pf_client_core::trust::KnownHost) -> Self {
+        Self {
+            id: h.id.clone(),
+            addr: h.addr.clone(),
+            port: h.port,
+            name: h.name.clone(),
+        }
+    }
+
+    /// The record this names, if it is still in the store.
+    fn index(&self, known: &KnownHosts) -> Option<usize> {
+        known.index_of_card(self.id.as_deref(), &self.addr, self.port)
+    }
+}
+
 /// `forget` and `rename` are the per-host action state, and they live in ROOT (not this page's
 /// own `use_state`) on purpose: the "…" overflow is a WinUI `MenuFlyout`, whose item clicks are
 /// wired directly in the reactor backend (`add_Click`) and so bypass the normal event-dispatch
@@ -96,8 +125,8 @@ pub(crate) struct HostsProps {
     /// Connected-controller count (root state, mirrored from the gamepad service) — a
     /// pad plus a paired host surfaces the "Open console UI" hint card.
     pub(crate) pads: usize,
-    pub(crate) forget: Option<(String, String)>,
-    pub(crate) rename: Option<(String, String)>,
+    pub(crate) forget: Option<HostRef>,
+    pub(crate) rename: Option<HostRef>,
     /// Whether the "Add host" modal is open. Root state (like `forget`/`rename`), not the page's
     /// own `use_state`: a child component's sync `SetState` marks its slot dirty but does not
     /// re-render when its props are otherwise unchanged, so the toggle wouldn't take.
@@ -111,8 +140,8 @@ pub(crate) struct HostsProps {
     /// state it already reads — pinning/unpinning a profile tile, which rewrites the
     /// known-hosts store behind the tiles (the hosts-page mirror of `settings_rev`).
     pub(crate) hosts_rev: u64,
-    pub(crate) set_forget: AsyncSetState<Option<(String, String)>>,
-    pub(crate) set_rename: AsyncSetState<Option<(String, String)>>,
+    pub(crate) set_forget: AsyncSetState<Option<HostRef>>,
+    pub(crate) set_rename: AsyncSetState<Option<HostRef>>,
     pub(crate) set_show_add: AsyncSetState<bool>,
     pub(crate) set_hover: AsyncSetState<Option<String>>,
     pub(crate) set_hosts_rev: AsyncSetState<u64>,
@@ -308,17 +337,17 @@ fn status_row_with(
 /// through a re-render.
 #[allow(clippy::too_many_arguments)]
 fn edit_editor(
-    fp: &str,
+    who: &HostRef,
     initial_name: &str,
     name_draft: HookRef<String>,
     addr_draft: HookRef<String>,
     port_draft: HookRef<String>,
     mac_draft: HookRef<String>,
     clip_draft: HookRef<bool>,
-    set_edit: AsyncSetState<Option<(String, String)>>,
+    set_edit: AsyncSetState<Option<HostRef>>,
 ) -> Element {
     let commit = {
-        let (fp, se) = (fp.to_string(), set_edit.clone());
+        let (who, se) = (who.clone(), set_edit.clone());
         let (name_draft, addr_draft, port_draft, mac_draft, clip_draft) = (
             name_draft.clone(),
             addr_draft.clone(),
@@ -328,7 +357,8 @@ fn edit_editor(
         );
         move || {
             let mut known = KnownHosts::load();
-            if let Some(h) = known.hosts.iter_mut().find(|h| h.fp_hex == fp) {
+            let target = who.index(&known);
+            if let Some(h) = target.and_then(|i| known.hosts.get_mut(i)) {
                 // Each field falls back to what was stored: a cleared box means "leave it",
                 // never "erase it" — except the MAC, which is legitimately clearable.
                 let name = name_draft.borrow().trim().to_string();
@@ -364,11 +394,10 @@ fn edit_editor(
     // fields are text boxes that genuinely need one.
     let profile_picker = {
         let catalog = pf_client_core::profiles::ProfilesFile::load();
-        let stored = KnownHosts::load()
-            .hosts
-            .iter()
-            .find(|h| h.fp_hex == fp)
-            .and_then(|h| h.profile_id.clone());
+        let known = KnownHosts::load();
+        let stored = who
+            .index(&known)
+            .and_then(|i| known.hosts[i].profile_id.clone());
         let mut names = vec!["Default settings".to_string()];
         let mut ids: Vec<String> = vec![String::new()];
         for p in &catalog.profiles {
@@ -381,7 +410,7 @@ fn edit_editor(
             .as_ref()
             .and_then(|id| ids.iter().position(|i| i == id))
             .unwrap_or(0);
-        let fp = fp.to_string();
+        let who = who.clone();
         ComboBox::new(names)
             .header("Profile")
             .selected_index(current as i32)
@@ -390,7 +419,8 @@ fn edit_editor(
                     return;
                 };
                 let mut known = KnownHosts::load();
-                if let Some(h) = known.hosts.iter_mut().find(|h| h.fp_hex == fp) {
+                let target = who.index(&known);
+                if let Some(h) = target.and_then(|i| known.hosts.get_mut(i)) {
                     h.profile_id = (!id.is_empty()).then(|| id.clone());
                     let _ = known.save();
                 }
@@ -568,13 +598,17 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
     let clip_draft = cx.use_ref(false);
     let edit_seed = cx.use_ref(Option::<String>::None);
     {
-        let active = rename.as_ref().map(|(fp, _)| fp.clone());
+        // One string per record, so the seed only re-runs when a DIFFERENT host is opened:
+        // the minted id, or addr:port for a record older than ids.
+        let active = rename.as_ref().map(|who| {
+            who.id
+                .clone()
+                .unwrap_or_else(|| format!("{}:{}", who.addr, who.port))
+        });
         if *edit_seed.borrow() != active {
-            let stored = active.as_ref().and_then(|fp| {
-                KnownHosts::load()
-                    .hosts
-                    .into_iter()
-                    .find(|h| &h.fp_hex == fp)
+            let stored = rename.as_ref().and_then(|who| {
+                let known = KnownHosts::load();
+                who.index(&known).map(|i| known.hosts[i].clone())
             });
             name_draft.set(stored.as_ref().map(|h| h.name.clone()).unwrap_or_default());
             addr_draft.set(stored.as_ref().map(|h| h.addr.clone()).unwrap_or_default());
@@ -772,7 +806,7 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                 let (svc, target) = (props.svc.clone(), target.clone());
                 let click_actions = host_actions.clone();
                 let (sf, sr) = (set_forget.clone(), set_rename.clone());
-                let (fp, name) = (k.fp_hex.clone(), k.name.clone());
+                let who = HostRef::of(k);
                 let menu_profiles = profiles.clone();
                 let pinned_now = k.pinned_profiles.clone();
                 let (hosts_rev, set_hosts_rev) = (props.hosts_rev, props.set_hosts_rev.clone());
@@ -934,9 +968,10 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                             else {
                                 return;
                             };
-                            tracing::info!(pin = %id, host = %fp, on, "pin toggle");
+                            tracing::info!(pin = %id, host = %who.name, on, "pin toggle");
                             let mut known = KnownHosts::load();
-                            if let Some(h) = known.hosts.iter_mut().find(|h| h.fp_hex == fp) {
+                            let target = who.index(&known);
+                            if let Some(h) = target.and_then(|i| known.hosts.get_mut(i)) {
                                 h.pinned_profiles.retain(|x| x != id);
                                 if on {
                                     h.pinned_profiles.push(id.clone());
@@ -1038,8 +1073,8 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                             svc.set_speed.call(SpeedState::Running);
                             svc.set_screen.call(Screen::SpeedTest);
                         }
-                        MENU_EDIT => sr.call(Some((fp.clone(), name.clone()))),
-                        MENU_FORGET => sf.call(Some((fp.clone(), name.clone()))),
+                        MENU_EDIT => sr.call(Some(who.clone())),
+                        MENU_FORGET => sf.call(Some(who.clone())),
                         // Whole-file writer: rebase on the store before mutating, or a setting
                         // another surface just wrote is reverted.
                         MENU_DEFAULT | MENU_DEFAULT_SET => {
@@ -1121,7 +1156,7 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                 pinned_target.profile = Some(id.clone());
                 let pinned_menu = {
                     let (svc, target) = (props.svc.clone(), pinned_target.clone());
-                    let (fp, pin_id) = (k.fp_hex.clone(), id.clone());
+                    let (unpin_who, pin_id) = (HostRef::of(k), id.clone());
                     let (hosts_rev, set_hosts_rev) = (props.hosts_rev, props.set_hosts_rev.clone());
                     let link_host = k.clone();
                     let link_profile = id.clone();
@@ -1163,9 +1198,10 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                                 pf_client_core::clipboard::set_text(&url);
                             }
                             other if other == unpin_item => {
-                                tracing::info!(pin = %pin_id, host = %fp, on = false, "pin toggle");
+                                tracing::info!(pin = %pin_id, host = %unpin_who.name, on = false, "pin toggle");
                                 let mut known = KnownHosts::load();
-                                if let Some(h) = known.hosts.iter_mut().find(|h| h.fp_hex == fp) {
+                                let target = unpin_who.index(&known);
+                                if let Some(h) = target.and_then(|i| known.hosts.get_mut(i)) {
                                     h.pinned_profiles.retain(|x| x != &pin_id);
                                     if let Err(e) = known.save() {
                                         tracing::warn!(
@@ -1275,7 +1311,8 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
         let pending = forget.clone();
         let content = pending
             .as_ref()
-            .map(|(_, name)| {
+            .map(|who| {
+                let name = &who.name;
                 format!(
                     "Forget \u{201C}{name}\u{201D}? You'll need to pair (or trust) it again to \
                      reconnect."
@@ -1289,15 +1326,17 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
             .is_open(pending.is_some())
             .on_closed(move |r: ContentDialogResult| {
                 if r == ContentDialogResult::Primary
-                    && let Some((fp, _)) = &pending
+                    && let Some(who) = &pending
                 {
                     let mut known = KnownHosts::load();
-                    let gone = known
-                        .hosts
-                        .iter()
-                        .find(|h| h.fp_hex == *fp)
-                        .and_then(|h| h.id.clone());
-                    known.remove_by_fp(fp);
+                    let target = who.index(&known);
+                    let gone = target.and_then(|i| known.hosts[i].id.clone());
+                    // Keyed by fingerprint and outliving the record otherwise: forgetting a
+                    // host must not leave its title list on disk (as the Linux shell does).
+                    if let Some(fp) = target.map(|i| known.hosts[i].fp_hex.clone()) {
+                        pf_client_core::library_cache::forget(&fp);
+                    }
+                    known.remove_card(who.id.as_deref(), &who.addr, who.port);
                     let _ = known.save();
                     // The resolver already ignores a dangling pointer, so this is hygiene:
                     // without it a re-pair of a different box inherits an old choice.
@@ -1447,10 +1486,10 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
         border(vstack(Vec::<Element>::new())).into()
     };
     // The host editor sheet, in its own stable slot (see the add modal's note).
-    let edit_slot: Element = if let Some((fp, initial)) = &rename {
+    let edit_slot: Element = if let Some(who) = &rename {
         edit_editor(
-            fp,
-            initial,
+            who,
+            &who.name,
             name_draft.clone(),
             addr_draft.clone(),
             port_draft.clone(),
