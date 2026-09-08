@@ -6,13 +6,11 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.hardware.usb.UsbManager
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.AudioEffect
 import android.media.audiofx.NoiseSuppressor
-import android.net.wifi.WifiManager
 import android.os.Build
 import android.text.InputType
 import android.util.Log
@@ -21,7 +19,6 @@ import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
-import android.view.WindowManager
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
@@ -65,8 +62,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
@@ -114,9 +109,6 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
     // The negotiated stream refresh, known from the handshake (0 = unknown / older native lib) —
     // drives the panel mode pin, the render-rate vote, and the presenter's latch grid.
     val streamHz = remember(handle) { NativeBridge.nativeVideoSize(handle)?.getOrNull(2) ?: 0 }
-    val controller = remember(window) {
-        window?.let { WindowCompat.getInsetsController(it, it.decorView) }
-    }
 
     // The session's access level (the per-client grants of design/per-client-access.md), the
     // courtesy mirror of what the host enforces: seeded from the Welcome's advert here, kept live
@@ -414,31 +406,10 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
     // main thread, so a plain flag is race-free; AtomicBoolean just makes the intent explicit.
     val closed = remember { AtomicBoolean(false) }
 
-    // Wi-Fi locks held for the stream's duration — BOTH of them, unconditionally (Moonlight does
-    // the same). Without an effective lock, Wi-Fi power save batches downlink delivery into
-    // beacon-interval clumps: hundreds of ms of latency mush, sawtoothing bitrate, and periodic
-    // whole-frame loss when the AP's power-save buffer overflows (all observed live on a phone).
-    //  - FULL_LOW_LATENCY (API 29+) is the only lock that actually disables power save on modern
-    //    Android; it needs the app foreground + screen on, which a stream always is.
-    //  - FULL_HIGH_PERF covers older releases — it is deprecated AND a documented no-op on recent
-    //    Android, which is exactly why it can't be the only lock (a lesson learned: holding just
-    //    HIGH_PERF left power save fully active on Android 13+).
-    // acquire() ENFORCES the WAKE_LOCK permission (manifest) — and a failed acquire MUST be loud:
-    // a silent runCatching hid the missing permission for weeks (dumpsys wifi showed
-    // low_latency_active_time_ms=0 across every "locked" stream). Non-reference-counted: one
-    // explicit acquire/release each.
-    val wifiLocks = remember(handle) {
-        val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-            ?: return@remember emptyList<WifiManager.WifiLock>()
-        buildList {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                wm.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "punktfunk:stream-ll")
-                    ?.let(::add)
-            }
-            @Suppress("DEPRECATION")
-            wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "punktfunk:stream-hp")
-                ?.let(::add)
-        }.onEach { it.setReferenceCounted(false) }
+    // Everything this stream does to the window — wake/Wi-Fi locks, the refresh pin, ALLM, the
+    // cutout and soft-keyboard modes, the landscape lock — and the prior values it puts back.
+    val streamWindow = remember(handle) {
+        StreamWindow(activity, context, composeView, lowLatencyMode, isTv, streamHz)
     }
 
     // True while the gamepad exit chord (Select+Start+L1+R1) is held and counting down — drives the
@@ -459,59 +430,7 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
     var videoView by remember { mutableStateOf<SurfaceView?>(null) }
 
     DisposableEffect(handle) {
-        window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        wifiLocks.forEach { lock ->
-            runCatching { lock.acquire() }.onFailure { e ->
-                Log.w("punktfunk", "WifiLock acquire failed — power save stays ON: $lock", e)
-            }
-        }
-        // HDMI Auto Low-Latency Mode: ask the display to drop its post-processing (game mode) —
-        // the biggest panel-side latency win on the TV boxes. No-op where ALLM isn't supported. API
-        // 30+. Part of the experimental low-latency stack.
-        if (lowLatencyMode && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            window?.setPreferMinimalPostProcessing(true)
-        }
-        // System bars: NOT hidden here — App.kt owns hide/show (one owner; the AnimatedContent
-        // handoff broke per-screen ownership, see the `immersive` effect there).
-        // The soft keyboard (three-finger swipe up → KeyCaptureView below) must OVERLAY the
-        // stream, never pan/resize it — the video is a fixed-mode surface, not a document.
-        // Scoped to the stream; the app's other screens keep the default for their text fields.
-        val priorSoftInput = window?.attributes?.softInputMode
-            ?: WindowManager.LayoutParams.SOFT_INPUT_ADJUST_UNSPECIFIED
-        window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
-        // Draw under the display cutout, explicitly. Android 15's SDK-35 edge-to-edge enforcement
-        // makes ALWAYS the immersive default, but pre-15 devices letterbox the notch as a dead
-        // black bar unless asked — and the stream's own letterbox is black anyway, so the cutout
-        // region can never show anything wrong. Captured + restored like the rest of the window
-        // state so the menus keep their platform-default behaviour.
-        val priorCutout = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            window?.attributes?.layoutInDisplayCutoutMode
-        } else {
-            null
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            window?.let { w ->
-                w.attributes = w.attributes.apply {
-                    layoutInDisplayCutoutMode =
-                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
-                }
-            }
-        }
-        // Lock to landscape while streaming — the host streams a landscape desktop, so pin the device
-        // there (either landscape direction is fine) and stop it rotating to portrait mid-session. The
-        // activity declares configChanges=orientation, so this re-lays out the surface in place without
-        // recreating the activity (no stream restart). On TV (fixed landscape) it's a harmless no-op.
-        // The prior request is captured and restored on the way out.
-        //
-        // COMPACT devices only (sw < 600 dp): on tablets/foldables/desktop windows the lock is a
-        // large-display anti-pattern (Play flags it; Android 16+ ignores it there outright), and the
-        // stream doesn't need it — the aspect-ratio letterbox renders correctly in any orientation,
-        // the lock is purely a phone-ergonomics choice.
-        val compactDevice = context.resources.configuration.smallestScreenWidthDp < 600
-        val priorOrientation = activity?.requestedOrientation
-        if (compactDevice) {
-            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-        }
+        streamWindow.attach()
         activity?.streamHandle = handle // route hardware keys to this session
         // Multi-controller router: a stable wire pad index per connected controller, per-device axis
         // state, Arrival/Remove on hot-plug, and feedback routed back by pad index. Forwards every
@@ -631,30 +550,9 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
         } else {
             null
         }
-        // Pin the panel to the stream's refresh (exact / multiple) for the session. The decoder's
-        // own ANativeWindow_setFrameRate hint still aligns vsync, but it is advisory — some OEM
-        // refresh governors ignore it outright and would leave a 120 Hz session on a 60/90 Hz
-        // panel. TV boxes skip the pin: the native side actively drives the HDMI mode there.
-        if (isTv) {
-            activity?.setConsoleHighRefreshRate(false) // the decoder's HDMI mode switch governs
-        } else {
-            activity?.setStreamDisplayMode(streamHz)
-        }
-        // Touch/pointer events are vsync-batched by default — up to a frame of input latency the
-        // stream shouldn't pay. Unbuffered dispatch delivers them the moment the kernel does.
-        // Undone by passing 0 on the way out (API 30+).
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            composeView.requestUnbufferedDispatch(android.view.InputDevice.SOURCE_CLASS_POINTER)
-        }
-        // Vote the app's RENDER rate up to the stream's (API 35+). The mode pin above governs the
-        // panel, but the platform separately down-rates a quiet app's choreographer stream
-        // (frame-rate categories: a non-animating UI reads as "normal" = 60) — observed on-glass
-        // as 16.6 ms vsync callbacks on a 120 Hz panel, which would pace the presenter at half
-        // rate. The native side also subdivides onto the panel grid, so this vote is the belt to
-        // that braces. Reset to no-preference on the way out.
-        if (Build.VERSION.SDK_INT >= 35 && streamHz > 0) {
-            composeView.requestedFrameRate = streamHz.toFloat()
-        }
+        // The panel's refresh pin, unbuffered pointer dispatch and the render-rate vote — here, not
+        // with the rest of the window state, because that is where they have always run.
+        streamWindow.pinDisplay()
         // Host→client feedback (rumble + DualSense lightbar/LEDs), routed to each controller by pad
         // index via the router; poll threads stopped + joined before the router is released and the
         // session closed. "Rumble on this phone" (opt-in) additionally mirrors controller 1's
@@ -862,28 +760,7 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
             activity?.requestStreamExit = null
             // Back in the menus: the SC2 (if present) resumes driving the console UI.
             activity?.startSc2MenuNav()
-            activity?.setConsoleHighRefreshRate(true) // back to the console UI's max refresh
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                composeView.requestUnbufferedDispatch(0) // back to ordinary batched dispatch
-            }
-            if (Build.VERSION.SDK_INT >= 35) {
-                composeView.requestedFrameRate = View.REQUESTED_FRAME_RATE_CATEGORY_DEFAULT
-            }
-            controller?.hide(WindowInsetsCompat.Type.ime()) // drop any keyboard left showing
-            window?.setSoftInputMode(priorSoftInput)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && priorCutout != null) {
-                window?.let { w ->
-                    w.attributes = w.attributes.apply { layoutInDisplayCutoutMode = priorCutout }
-                }
-            }
-            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            if (lowLatencyMode && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                window?.setPreferMinimalPostProcessing(false)
-            }
-            wifiLocks.forEach { runCatching { if (it.isHeld) it.release() } }
-            // Release the landscape lock so the rest of the app follows the device/system again.
-            activity?.requestedOrientation =
-                priorOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            streamWindow.detach()
             // Leaving the stream: stop the mic + audio + decode threads and tear down the session.
             releaseMicEffects(micEffects)
             NativeBridge.nativeStopMic(handle)
