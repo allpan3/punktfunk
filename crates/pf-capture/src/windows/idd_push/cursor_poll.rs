@@ -21,9 +21,10 @@ use windows::Win32::Graphics::Gdi::{
     BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC,
 };
 use windows::Win32::System::StationsAndDesktops::{
-    CloseDesktop, OpenInputDesktop, SetThreadDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS,
-    HDESK,
+    CloseDesktop, GetThreadDesktop, OpenInputDesktop, SetThreadDesktop, DESKTOP_ACCESS_FLAGS,
+    DESKTOP_CONTROL_FLAGS, HDESK,
 };
+use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::HiDpi::{
     SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
@@ -268,8 +269,11 @@ fn run(
 
 /// Owned input-desktop handle: keep the current binding, swap on demand, close
 /// exactly once (same reattach model as [`SendInputInjector`] in `pf-inject`).
+///
+/// `.1` is the desktop this thread started on, captured before the first rebind and only ever
+/// restored — `GetThreadDesktop` returns a borrowed handle, so it is never closed.
 #[derive(Default)]
-struct DesktopBinding(Option<HDESK>);
+struct DesktopBinding(Option<HDESK>, Option<HDESK>);
 
 impl DesktopBinding {
     /// Rebind to the current input desktop (the binding stays put if it cannot be
@@ -282,6 +286,11 @@ impl DesktopBinding {
         // or used after close. `SetThreadDesktop` rebinds only this calling thread (which owns
         // no windows/hooks, so the rebind cannot fail on that account).
         unsafe {
+            // Where this thread started, captured once and BEFORE the first rebind — after it,
+            // `GetThreadDesktop` would just hand back the desktop we are about to own.
+            if self.1.is_none() {
+                self.1 = GetThreadDesktop(GetCurrentThreadId()).ok();
+            }
             if let Ok(h) = OpenInputDesktop(
                 DESKTOP_CONTROL_FLAGS(0),
                 false,
@@ -303,8 +312,17 @@ impl DesktopBinding {
 impl Drop for DesktopBinding {
     fn drop(&mut self) {
         if let Some(h) = self.0.take() {
-            // SAFETY: `h` is our owned desktop handle, closed exactly once here.
-            let _ = unsafe { CloseDesktop(h) };
+            // `CloseDesktop` refuses a desktop still assigned to the calling thread, so put the
+            // thread back on the one it started on — otherwise the handle leaks, one per
+            // session. Same order as `input_desktop.rs`: restore, then close.
+            // SAFETY: both are FFI calls on by-value args. `self.1` is borrowed (GetThreadDesktop
+            // creates no handle, so it is never closed); `h` is ours, closed exactly once.
+            unsafe {
+                if let Some(previous) = self.1 {
+                    let _ = SetThreadDesktop(previous);
+                }
+                let _ = CloseDesktop(h);
+            }
         }
     }
 }
