@@ -55,9 +55,11 @@ fn extract_and_run(exe: &Path, data: &[u8], payload: &[u8]) -> Result<ExitCode, 
     #[cfg(windows)]
     {
         // Absolute: `CreateProcess` searches the cwd before `%PATH%`, and setup runs elevated.
-        let icacls = std::env::var("SystemRoot")
-            .map(|r| format!("{r}\\System32\\icacls.exe"))
-            .unwrap_or_else(|_| "icacls".to_string());
+        // Never the bare name — that is the search this avoids.
+        let root = std::env::var("SystemRoot")
+            .or_else(|_| std::env::var("WINDIR"))
+            .unwrap_or_else(|_| r"C:\Windows".to_string());
+        let icacls = format!(r"{root}\System32\icacls.exe");
         let _ = std::process::Command::new(icacls)
             .arg(&root)
             .args(["/setowner", "*S-1-5-32-544", "/T", "/C", "/Q"])

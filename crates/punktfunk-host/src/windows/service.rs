@@ -1597,10 +1597,7 @@ fn warn_if_public_network() {
 ///
 /// Absolute: `CreateProcess` searches the cwd before `%PATH%`, and this runs elevated.
 fn sc(args: &[&str]) -> Result<()> {
-    let sc_exe = std::env::var("SystemRoot")
-        .map(|r| format!("{r}\\System32\\sc.exe"))
-        .unwrap_or_else(|_| "sc".to_string());
-    let status = std::process::Command::new(sc_exe)
+    let status = std::process::Command::new(crate::install::resolve_tool("sc"))
         .args(args)
         .status()
         .context("run sc.exe")?;

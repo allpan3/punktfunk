@@ -28,13 +28,16 @@ fn flag_present(args: &[String], name: &str) -> bool {
 ///
 /// `CreateProcess` searches the calling process's directory and cwd before `%PATH%`. These run
 /// elevated, so a `certutil.exe` planted beside the installer would run with its privileges.
-fn resolve_tool(cmd: &str) -> String {
+/// Never falls back to the bare name — that is the PATH search this exists to avoid — so an
+/// unset `SystemRoot` walks to `WINDIR` and then to the literal default, as the audio path does.
+pub(crate) fn resolve_tool(cmd: &str) -> String {
     if cmd.contains('\\') || cmd.contains('/') {
         return cmd.to_string();
     }
-    std::env::var("SystemRoot")
-        .map(|r| format!("{r}\\System32\\{cmd}.exe"))
-        .unwrap_or_else(|_| cmd.to_string())
+    let root = std::env::var("SystemRoot")
+        .or_else(|_| std::env::var("WINDIR"))
+        .unwrap_or_else(|_| r"C:\Windows".to_string());
+    format!("{root}\\System32\\{cmd}.exe")
 }
 fn run_quiet(cmd: &str, args: &[&str]) -> bool {
     Command::new(resolve_tool(cmd))
