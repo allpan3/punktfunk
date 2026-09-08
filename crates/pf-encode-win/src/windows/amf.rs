@@ -1144,6 +1144,14 @@ impl AmfEncoder {
     }
 
     /// Build or rebuild the AMF context + component on the capturer's device, plus the input ring.
+    /// Open the session now instead of at the first submit, so `caps()` reports the LTR and
+    /// intra-refresh the encoder actually negotiated. The host latches those once per session
+    /// and gates reference-frame invalidation on them — read early, every lost frame costs a
+    /// full IDR for the whole session.
+    pub fn prepare(&mut self, device: &ID3D11Device) -> Result<()> {
+        self.ensure_inner(device)
+    }
+
     fn ensure_inner(&mut self, device: &ID3D11Device) -> Result<()> {
         let dev_raw = device.as_raw() as isize;
         if self.inner.is_some() && self.bound_device == dev_raw {
