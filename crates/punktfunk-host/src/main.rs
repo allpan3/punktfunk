@@ -43,7 +43,7 @@ mod encode {
     pub(crate) fn validate_refresh(refresh_hz: u32) -> anyhow::Result<()> {
         const MAX_HZ: u32 = 1000;
         let mult = pf_host_config::config().vdisplay_hz_mult.max(1);
-        let effective = refresh_hz.checked_mul(mult).unwrap_or(u32::MAX);
+        let effective = refresh_hz.saturating_mul(mult);
         anyhow::ensure!(
             (1..=MAX_HZ).contains(&refresh_hz) && effective <= MAX_HZ,
             "refresh {refresh_hz} Hz is out of range (1..={} at hz_mult {mult})",
