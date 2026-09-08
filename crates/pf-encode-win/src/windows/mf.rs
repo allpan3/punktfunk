@@ -1013,20 +1013,27 @@ impl Encoder for MfEncoder {
                     );
                 }
             }
+            // The entry goes in BEFORE the MFT takes the frame: the event callback runs on the
+            // MFT's own thread and can pop for this frame the moment ProcessInput returns, so
+            // pushing after it races an empty queue and skews every later AU's pts by one frame.
+            // Both under one lock: the credit this submit spends, and the entry the callback
+            // pairs its next output with.
+            {
+                let mut g = lock(&inner.shared.out);
+                g.need_input = g.need_input.saturating_sub(1);
+                g.pending.push_back(PendingMeta {
+                    pts_ns: captured.pts_ns,
+                });
+            }
             inner.mft.ProcessInput(0, &sample, 0)
         };
         if let Err(e) = submitted {
+            // The MFT never took it, so take the entry back off.
+            lock(&inner.shared.out).pending.pop_back();
             self.force_kf = true;
             bail!("IMFTransform::ProcessInput: {e}");
         }
         inner.frames_submitted += 1;
-        // Both under one lock: the credit this submit spent, and the entry the callback pairs
-        // its next output with. The MFT owns the frame from here.
-        let mut g = lock(&inner.shared.out);
-        g.need_input = g.need_input.saturating_sub(1);
-        g.pending.push_back(PendingMeta {
-            pts_ns: captured.pts_ns,
-        });
         Ok(())
     }
 
