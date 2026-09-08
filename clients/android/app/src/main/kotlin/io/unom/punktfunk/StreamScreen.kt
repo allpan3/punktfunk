@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.AudioEffect
@@ -616,44 +617,19 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
         var sc2UsbReceiver: BroadcastReceiver? = null
         if (sc2 != null) {
             feedback.onHidRaw = sc2::onHidRaw
-            val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
             val usbDev = sc2.findUsbDevice()
-            when {
-                usbDev != null && usbManager.hasPermission(usbDev) -> sc2.startUsb(usbDev)
-                usbDev != null -> {
-                    // One-time system dialog; capture engages on grant (Android remembers the
-                    // grant for as long as the device stays attached).
-                    val action = "io.unom.punktfunk.SC2_USB_PERMISSION"
-                    val receiver = object : BroadcastReceiver() {
-                        override fun onReceive(c: Context?, intent: Intent?) {
-                            if (intent?.action != action) return
-                            val ok = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
-                            if (ok) sc2.startUsb(usbDev) else Log.i("punktfunk", "SC2 USB permission denied")
-                        }
-                    }
-                    sc2UsbReceiver = receiver
-                    ContextCompat.registerReceiver(
-                        context, receiver, IntentFilter(action), ContextCompat.RECEIVER_NOT_EXPORTED,
-                    )
-                    usbManager.requestPermission(
-                        usbDev,
-                        PendingIntent.getBroadcast(
-                            context, 0,
-                            Intent(action).setPackage(context.packageName),
-                            // MUTABLE: the USB stack appends the grant extras to this intent.
-                            PendingIntent.FLAG_MUTABLE,
-                        ),
-                    )
-                }
+            if (usbDev != null) {
+                sc2UsbReceiver = requestUsbCapture(
+                    context, usbDev, "io.unom.punktfunk.SC2_USB_PERMISSION", 0, "SC2", sc2::startUsb,
+                )
+            } else {
                 // No USB pad: fall back to a bonded BLE one. The Bluetooth-permission gate lives
                 // inside pairedBleAddress() (it answers null, and says why, when the grant is
                 // missing) rather than being restated here — the grant itself is asked for where
                 // a user can act on it, in the console UI and the Controllers screen.
-                else -> {
-                    sc2.pairedBleAddress()?.let { addr ->
-                        Log.i("punktfunk", "SC2: no USB pad — using the paired BLE controller $addr")
-                        sc2.startBle(addr)
-                    }
+                sc2.pairedBleAddress()?.let { addr ->
+                    Log.i("punktfunk", "SC2: no USB pad — using the paired BLE controller $addr")
+                    sc2.startBle(addr)
                 }
             }
         }
@@ -695,35 +671,13 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
                     override fun stop(pad: Int) = NativeBridge.nativeStopPadAudio(handle, pad)
                 }
             }
-            val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
-            val usbDev = ds.findUsbDevice()
-            when {
-                usbDev != null && usbManager.hasPermission(usbDev) -> ds.startUsb(usbDev)
-                usbDev != null -> {
-                    // One-time system dialog; capture engages on grant (Android remembers the
-                    // grant for as long as the device stays attached).
-                    val action = "io.unom.punktfunk.DS_USB_PERMISSION"
-                    val receiver = object : BroadcastReceiver() {
-                        override fun onReceive(c: Context?, intent: Intent?) {
-                            if (intent?.action != action) return
-                            val ok = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
-                            if (ok) ds.startUsb(usbDev) else Log.i("punktfunk", "Sony pad USB permission denied")
-                        }
-                    }
-                    dsUsbReceiver = receiver
-                    ContextCompat.registerReceiver(
-                        context, receiver, IntentFilter(action), ContextCompat.RECEIVER_NOT_EXPORTED,
-                    )
-                    usbManager.requestPermission(
-                        usbDev,
-                        PendingIntent.getBroadcast(
-                            context, 2, // requestCode 2 — 0/1 are the SC2 stream/menu grants
-                            Intent(action).setPackage(context.packageName),
-                            // MUTABLE: the USB stack appends the grant extras to this intent.
-                            PendingIntent.FLAG_MUTABLE,
-                        ),
-                    )
-                }
+            // Its OWN action, not the Controllers screen's [DS_USB_PERMISSION_ACTION] — that one is
+            // registered by MainActivity and the console shell too, and a stream must not answer
+            // their grants. requestCode 2: 0/1 are the SC2 stream/menu grants.
+            ds.findUsbDevice()?.let { usbDev ->
+                dsUsbReceiver = requestUsbCapture(
+                    context, usbDev, "io.unom.punktfunk.DS_USB_PERMISSION", 2, "Sony pad", ds::startUsb,
+                )
             }
         }
         onDispose {
@@ -1261,6 +1215,55 @@ private fun TouchFallbackHint(modifier: Modifier = Modifier) {
  * returning null (unsupported / claimed) is quietly nothing — the HAL preset still does its part.
  * Needs no extra permission: the effect APIs attach to our own recording session.
  */
+/**
+ * Engage a USB capture on [dev], asking the user for access first when we don't already hold it.
+ *
+ * Returns the receiver left waiting on that grant — the caller unregisters it on teardown — or null
+ * when [start] has already run, which is the common case: Android remembers a grant for as long as
+ * the device stays attached, so the dialog appears once per plug-in and never mid-stream after that.
+ *
+ * Shared by the Steam Controller 2 and Sony captures, whose bring-up differed only in the broadcast
+ * action, the [requestCode] and the wording of the denial. Two copies of a permission handshake is
+ * one copy too many: a fix to either — and the fix that made the grant intent MUTABLE was one —
+ * has to be found and made twice.
+ */
+private fun requestUsbCapture(
+    context: Context,
+    dev: UsbDevice,
+    action: String,
+    /** Distinct per capture: PendingIntents with equal request codes and actions collide. */
+    requestCode: Int,
+    /** What the denial is called in the log — the pad the user just refused. */
+    label: String,
+    start: (UsbDevice) -> Unit,
+): BroadcastReceiver? {
+    val usb = context.getSystemService(Context.USB_SERVICE) as UsbManager
+    if (usb.hasPermission(dev)) {
+        start(dev)
+        return null
+    }
+    val receiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context?, intent: Intent?) {
+            if (intent?.action != action) return
+            val ok = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
+            if (ok) start(dev) else Log.i("punktfunk", "$label USB permission denied")
+        }
+    }
+    ContextCompat.registerReceiver(
+        context, receiver, IntentFilter(action), ContextCompat.RECEIVER_NOT_EXPORTED,
+    )
+    usb.requestPermission(
+        dev,
+        PendingIntent.getBroadcast(
+            context, requestCode,
+            Intent(action).setPackage(context.packageName),
+            // MUTABLE: the USB stack appends the grant extras to this intent.
+            PendingIntent.FLAG_MUTABLE,
+        ),
+    )
+    return receiver
+}
+
 private fun attachMicEffects(sessionId: Int, into: MutableList<AudioEffect>) {
     if (sessionId <= 0) return
     if (AcousticEchoCanceler.isAvailable()) {
