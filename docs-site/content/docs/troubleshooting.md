@@ -578,6 +578,24 @@ Freezes that repeat *without* a steady rhythm are caught too: search the log for
 list. Every session also stamps one `GPU-priority posture for this capture session` line near
 its start, so a log shows the levers even before any stall fires.
 
+## A browser animates at 60 fps, whatever the session rate (Hyprland)
+
+The stream runs at the rate you set, but a page in Chromium or Firefox stays at 60 fps. Two separate
+causes, neither of them the host.
+
+**Chromium** takes its frame clock from the compositor's presentation feedback, and a Hyprland
+virtual display reports the frame interval as unknown, so Chromium keeps its 60 Hz default. The cause
+is in [aquamarine](https://github.com/hyprwm/aquamarine), Hyprland's backend library: a headless
+output sends the present event without a refresh interval. On a 120 Hz virtual display a stock
+aquamarine measures 59 fps and a patched one 120, so the fix belongs upstream.
+
+**Firefox** does not adopt a Wayland output's refresh rate here at all, fixed compositor or not. Set
+`layout.frame_rate` in `about:config` to the session's rate to lift it.
+
+A physical monitor left on at a lower rate held Chromium at *that* rate in our tests, even on a fixed
+compositor. Set **Virtual displays → Topology** to **Exclusive** to switch those heads off for the
+session.
+
 ## Stutter, drops, or high latency
 
 - Lower the **bitrate**. On a busy or Wi-Fi link, the requested bitrate may be too high — the native
