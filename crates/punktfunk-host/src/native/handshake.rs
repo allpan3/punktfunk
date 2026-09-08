@@ -380,6 +380,7 @@ pub(super) async fn negotiate(
 
     crate::encode::validate_dimensions(codec, hello.mode.width, hello.mode.height)
         .context("client-requested mode")?;
+    crate::encode::validate_refresh(hello.mode.refresh_hz).context("client-requested mode")?;
 
     let (compositor, gamescope_route) = negotiate_compositor(source, &hello).await?;
 

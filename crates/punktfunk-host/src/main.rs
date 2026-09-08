@@ -34,6 +34,23 @@ mod drm_sync;
 // Shim: encode backends live in `pf-encode`; keep `crate::encode::*` for this crate's callers.
 mod encode {
     pub(crate) use pf_encode::*;
+
+    /// Refresh rate a client may ask for, the companion to [`validate_dimensions`].
+    ///
+    /// The driver multiplies it by `vdisplay_hz_mult` before advertising the mode, so bound the
+    /// product: an out-of-contract value otherwise reaches mode selection and kills the session
+    /// after Welcome, and a huge one overflows the multiply.
+    pub(crate) fn validate_refresh(refresh_hz: u32) -> anyhow::Result<()> {
+        const MAX_HZ: u32 = 1000;
+        let mult = pf_host_config::config().vdisplay_hz_mult.max(1);
+        let effective = refresh_hz.checked_mul(mult).unwrap_or(u32::MAX);
+        anyhow::ensure!(
+            (1..=MAX_HZ).contains(&refresh_hz) && effective <= MAX_HZ,
+            "refresh {refresh_hz} Hz is out of range (1..={} at hz_mult {mult})",
+            MAX_HZ / mult
+        );
+        Ok(())
+    }
 }
 mod events;
 // Session⇄game lifetime — design/session-game-lifetime.md.

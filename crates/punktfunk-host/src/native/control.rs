@@ -143,7 +143,8 @@ pub(super) async fn run(task: Task) {
                 let Ok(msg) = msg else { break };
                 if let Ok(req) = Reconfigure::decode(&msg) {
                     let now = std::time::Instant::now();
-                    let valid = req.mode.refresh_hz > 0
+                    // Same bound as the handshake: `> 0` alone acked a mode that cannot land.
+                    let valid = crate::encode::validate_refresh(req.mode.refresh_hz).is_ok()
                         && crate::encode::validate_dimensions(
                             codec,
                             req.mode.width,
