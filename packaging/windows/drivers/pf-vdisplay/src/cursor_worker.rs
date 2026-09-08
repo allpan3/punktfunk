@@ -161,6 +161,19 @@ pub fn setup_and_spawn(
     // COMPOSITE render mode) skips the declaration: the worker spawns anyway so a later
     // enable-flip has an event to declare against; its queries just fail NOT_SUPPORTED until
     // then (logged once, harmless).
+    // Spawn BEFORE declaring. A declaration names `data_event`, and the caller closes that event
+    // when this returns `None` — so declaring first and then failing to spawn left IddCx holding
+    // a hardware cursor against a closed handle. Spawning first is already a supported shape:
+    // the `declare = false` path below does exactly that.
+    //
+    // The IddCx monitor handle is a raw pointer; the view carries its own `Send` wrapper.
+    let monitor_v = monitor as usize;
+    let view = Sendable(view);
+    let worker = Worker::spawn("pf-vd-cursor", move |stop| {
+        let view = view; // the wrapper, not the field: the view unmaps when this thread returns
+        run_worker(monitor_v, view.0.base() as usize, data_event, stop, &cell);
+    })?;
+
     if declare {
         let st = setup_hardware_cursor(monitor, data_event);
         if !nt_success(st) {
@@ -168,20 +181,14 @@ pub fn setup_and_spawn(
                 "[pf-vd] cursor: IddCxMonitorSetupHardwareCursor failed 0x{:08x}",
                 st as u32
             );
+            // `worker` drops here → stops and joins the thread it just started.
             return None;
         }
-        dbglog!("[pf-vd] cursor: hardware cursor declared — worker starting");
+        dbglog!("[pf-vd] cursor: hardware cursor declared — worker started");
     } else {
-        dbglog!("[pf-vd] cursor: channel adopted UNdeclared (composite mode) — worker starting");
+        dbglog!("[pf-vd] cursor: channel adopted UNdeclared (composite mode) — worker started");
     }
-
-    // The IddCx monitor handle is a raw pointer; the view carries its own `Send` wrapper.
-    let monitor_v = monitor as usize;
-    let view = Sendable(view);
-    Worker::spawn("pf-vd-cursor", move |stop| {
-        let view = view; // the wrapper, not the field: the view unmaps when this thread returns
-        run_worker(monitor_v, view.0.base() as usize, data_event, stop, &cell);
-    })
+    Some(worker)
 }
 
 /// The wait→query→publish loop, exiting when `stop` signals.
