@@ -163,14 +163,21 @@ impl CursorShared {
                         rows * pitch,
                     );
                 }
-                // Writer raced mid-shape (seq moved) — retry without caching.
-                if seq.load(Ordering::Acquire) != s1 {
+                // Writer raced mid-shape (seq moved) — retry without caching. The fence is what
+                // keeps the payload reads above from being reordered after this check: an
+                // acquire LOAD only orders what follows it. Free on x86, load-load ordering on
+                // aarch64, where the reads could otherwise straddle a writer's update.
+                std::sync::atomic::fence(Ordering::Acquire);
+                if seq.load(Ordering::Relaxed) != s1 {
                     continue;
                 }
                 self.cached = Some(shape_rgba(&hdr, &raw).into());
                 self.cached_id = hdr.shape_id;
-            } else if seq.load(Ordering::Acquire) != s1 {
-                continue;
+            } else {
+                std::sync::atomic::fence(Ordering::Acquire);
+                if seq.load(Ordering::Relaxed) != s1 {
+                    continue;
+                }
             }
             let shape = self.cached.as_ref()?;
             return Some(pf_frame::CursorOverlay {
