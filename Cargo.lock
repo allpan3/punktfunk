@@ -3390,7 +3390,6 @@ dependencies = [
  "hex",
  "libc",
  "pf-driver-proto",
- "pf-encode",
  "pf-frame",
  "pf-gpu",
  "pf-host-config",

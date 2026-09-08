@@ -2,9 +2,9 @@
 # Linux backends (KWin zkde-screencast, wlroots swaymsg, Mutter RemoteDesktop, Hyprland) and the
 # Windows IddCx/pf-vdisplay driver backend — behind one VirtualDisplay trait, plus the mode-conflict
 # admission registry and the DDC/CI panel control. Extracted into a subsystem crate; depends on the
-# shared leaves (pf-frame's DXGI identity, pf-win-display's CCD helpers, pf-gpu, pf-paths) + pf-encode
-# (the NVENC session-budget admission gate), never on capture/inject or the orchestrator (the display
-# lifecycle events invert to a host-registered sink).
+# shared leaves (pf-frame's DXGI identity, pf-win-display's CCD helpers, pf-gpu, pf-paths), never on
+# an encoder, capture/inject or the orchestrator (the display lifecycle events invert to a
+# host-registered sink).
 [package]
 name = "pf-vdisplay"
 version.workspace = true
@@ -64,13 +64,11 @@ bitflags = "2"
 x11rb = { version = "0.14", default-features = false }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-# Windows-only, both, and gated here rather than unconditionally so the LINUX build does not
-# drag their closures in for nothing: `pf-gpu` for the render-adapter LUID, and `pf-encode` for
-# the admission gate's NVENC session budget (`can_open_another_session`, admission.rs, itself
-# `#[cfg(windows)]`). Every use site of both is Windows-gated — verified by grep — and between
-# them they pull FFmpeg, ash and openh264, none of which a Linux host reaches through this crate.
+# Windows-only and gated here rather than unconditionally so the LINUX build does not drag its
+# closure in for nothing: `pf-gpu` for the render-adapter LUID (manager.rs). Every use site is
+# Windows-gated. `pf-encode` was gated here too, for an admission gate that reads the NVENC
+# session budget — but `admission.rs` never called it, so this crate no longer names it.
 pf-gpu = { path = "../pf-gpu" }
-pf-encode = { path = "../pf-encode" }
 # The host<->driver wire contract for the pf-vdisplay IddCx backend (control IOCTLs + Pod structs).
 pf-driver-proto = { path = "../pf-driver-proto" }
 bytemuck = { version = "1.19", features = ["derive"] }
