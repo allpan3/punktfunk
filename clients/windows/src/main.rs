@@ -34,7 +34,6 @@ mod gpu;
 #[cfg(windows)]
 mod logfile;
 #[cfg(windows)]
-mod probe;
 #[cfg(windows)]
 mod shell_window;
 #[cfg(windows)]
@@ -212,7 +211,7 @@ fn run_headless_cli(args: &[String], identity: (String, String)) {
         let fp = trust::KnownHosts::load()
             .find_by_addr(&host, port)
             .map(|k| k.fp_hex.clone());
-        match probe::run_speed_probe(&host, port, fp.as_deref(), identity) {
+        match pf_client_core::speed::run_speed_probe(&host, port, fp.as_deref(), identity) {
             Ok(r) => {
                 let mbps = f64::from(r.throughput_kbps) / 1000.0;
                 let recommended = f64::from(r.throughput_kbps / 10 * 7) / 1000.0;

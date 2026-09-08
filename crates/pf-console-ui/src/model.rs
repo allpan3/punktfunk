@@ -15,6 +15,12 @@ pub struct ProfileChip {
     pub name: String,
     /// `#RRGGBB`.
     pub accent: Option<String>,
+    /// Bitrate this profile pins, if it pins one; `None` inherits the global. Only the
+    /// speed test reads it, to name the layer the tested host actually resolves bitrate
+    /// from. A producer that predates the field leaves it `None`, which reads as
+    /// "inherits" — the safe half, since that is where the console writes.
+    #[serde(default)]
+    pub bitrate_kbps: Option<u32>,
 }
 
 /// Home carousel row, fully resolved by the service thread. The shell renders it
@@ -121,12 +127,40 @@ pub struct WakeStatus {
     pub then_connect: bool,
 }
 
+/// A network speed test in progress (one at a time). The service thread connects, asks the
+/// host to burst, and reports; the shell renders the takeover and applies the answer.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SpeedStatus {
+    /// [`HostRow::key`] of the tested host — the shell re-reads the row to name the layer
+    /// Apply writes to, rather than trusting a copy taken when the test started.
+    pub key: String,
+    pub name: String,
+    pub phase: SpeedPhase,
+}
+
+/// Where a speed test is: it connects, it measures, then it has an answer or a reason.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum SpeedPhase {
+    Connecting,
+    Measuring,
+    Failed(String),
+    /// `recommended_kbps` keeps headroom under `throughput_kbps` for FEC and for the loss a
+    /// real stream meets — [`pf_client_core::speed::recommended_kbps`], so every client
+    /// recommends the same kilobit.
+    Done {
+        throughput_kbps: u32,
+        loss_pct: f32,
+        recommended_kbps: u32,
+    },
+}
+
 #[derive(Default)]
 struct ConsoleState {
     hosts: Vec<HostRow>,
     hosts_gen: u64,
     pair: PairPhase,
     wake: Option<WakeStatus>,
+    speed: Option<SpeedStatus>,
     /// One-shot toast. The shell `take`s it on the next sync — unlike [`PairPhase`]
     /// there is no modal state, so a take-once string is the whole protocol.
     notice: Option<String>,
@@ -170,6 +204,27 @@ impl ConsoleShared {
         self.0.lock().unwrap().wake.clone()
     }
 
+    /// `None` closes the takeover. The shell also clears it when the player dismisses, so
+    /// a service thread that reports a late phase must not resurrect a closed test — see
+    /// [`Self::advance_speed`].
+    pub fn set_speed(&self, speed: Option<SpeedStatus>) {
+        self.0.lock().unwrap().speed = speed;
+    }
+
+    /// Report a new phase for the test on `key`. A no-op once the shell has cleared the slot,
+    /// and a no-op for a different host: the burst outlives a dismiss, so its result must
+    /// neither reopen the takeover nor land under the name of a test started since.
+    pub fn advance_speed(&self, key: &str, phase: SpeedPhase) {
+        let mut s = self.0.lock().unwrap();
+        if let Some(sp) = s.speed.as_mut().filter(|sp| sp.key == key) {
+            sp.phase = phase;
+        }
+    }
+
+    pub(crate) fn speed(&self) -> Option<SpeedStatus> {
+        self.0.lock().unwrap().speed.clone()
+    }
+
     /// One-shot toast. A newer notice replaces an unshown older one.
     pub fn set_notice(&self, text: String) {
         self.0.lock().unwrap().notice = Some(text);
@@ -210,6 +265,20 @@ pub enum ConsoleCmd {
     SendLogs {
         addr: String,
         mgmt: u16,
+        fp_hex: String,
+        host_name: String,
+    },
+    /// Measure the path to this host over the real data plane: connect, ask it to burst,
+    /// report goodput and loss. Progress arrives back as [`ConsoleShared::advance_speed`],
+    /// not as a notice — the takeover narrates it and holds the Apply button.
+    ///
+    /// A second connect, not the running stream's: the console offers this out of session,
+    /// and a burst down a live stream is what the host's keyframe-at-probe-end guard exists
+    /// to survive rather than something to invite.
+    SpeedTest {
+        key: String,
+        addr: String,
+        port: u16,
         fp_hex: String,
         host_name: String,
     },

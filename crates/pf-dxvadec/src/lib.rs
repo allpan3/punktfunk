@@ -28,11 +28,15 @@ pub mod pic;
 pub mod pic_av1;
 pub mod pic_h265;
 
+/// `NumDeltaPocsOfRefRpsIdx` (7.4.8), re-exported from [`pf_vkdecode`]: one
+/// derivation for both backends, tested there.
+pub use pf_vkdecode::num_delta_pocs_of_ref_rps_idx;
 /// Spec-literal `tile_group_obu()` ranges (AV1 5.11.1). Shared with Vulkan;
 /// [`Av1Bitstream::groups`] is the DXVA-only half — see [`mod@pack_av1`].
 pub use pf_vkdecode::plan_bitstream;
 pub use pf_vkdecode::Av1Bitstream;
 pub use pf_vkdecode::Av1TileError;
+pub use pf_vkdecode::RefRpsIdxError;
 /// DPB slot ledger, re-exported from [`pf_vkdecode`] (crate docs).
 pub use pf_vkdecode::SlotError;
 pub use pf_vkdecode::SlotMap;

@@ -70,7 +70,7 @@ impl AuDump {
                 tracing::warn!(
                     error = %e,
                     dir = %dir.display(),
-                    "PUNKTFUNK_DUMP_VIDEO set but capture files could not be created"
+                    "PUNKTFUNK_DUMP_VIDEO capture file create failed — capture disabled"
                 );
                 None
             }

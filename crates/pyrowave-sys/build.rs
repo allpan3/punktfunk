@@ -125,5 +125,5 @@ fn main() {
         .expect("bindgen failed for pyrowave.h");
     bindings
         .write_to_file(&bindings_path)
-        .expect("failed to write pyrowave bindings");
+        .expect("write the pyrowave bindings");
 }

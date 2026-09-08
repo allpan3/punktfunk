@@ -110,7 +110,7 @@ fn forward_to_runner(args: &[String]) -> Result<()> {
         .args(&prefix)
         .args(args)
         .status()
-        .with_context(|| format!("failed to run the plugin runner ({})", program.display()))?;
+        .with_context(|| format!("run the plugin runner ({})", program.display()))?;
     if !status.success() {
         // The runner already printed the reason; do not add a second error line.
         std::process::exit(status.code().unwrap_or(1));
@@ -256,13 +256,13 @@ fn grant(dir: Option<&str>) -> Result<()> {
         .arg(dir)
         .args(["/grant", &format!("{LOCAL_SERVICE_SID}:(OI)(CI)(RX)")])
         .status()
-        .context("failed to run icacls")?
+        .context("run icacls")?
         .success();
     if !ok {
         bail!(
-            "icacls could not change '{dir}'. Changing a folder's permissions is done by its OWNER \
-             or an administrator - run this as the user who owns the folder, or from an elevated \
-             prompt."
+            "icacls left '{dir}' unchanged: a folder's permissions are changed by its OWNER or \
+             an administrator - run this as the user who owns the folder, or from an elevated \
+             prompt"
         );
     }
     println!(
@@ -444,7 +444,7 @@ fn run_systemctl(args: &[&str]) -> Result<()> {
         .arg("--user")
         .args(args)
         .status()
-        .context("failed to run systemctl (is systemd available in this session?)")?;
+        .context("run systemctl (is systemd available in this session?)")?;
     if !status.success() {
         bail!(
             "systemctl --user {} failed — is the punktfunk-scripting package installed?",
@@ -572,7 +572,7 @@ fn grant_runner_secret_reads() {
     for name in RUNNER_UNIT_DIRS {
         let dir = cfg.join(name);
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            eprintln!("warning: could not create {}: {e}", dir.display());
+            eprintln!("warning: {} not created: {e}", dir.display());
             continue;
         }
         let ok = Command::new(icacls_path())
@@ -593,7 +593,7 @@ fn grant_runner_secret_reads() {
     for name in RUNNER_STATE_DIRS {
         let dir = cfg.join(name);
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            eprintln!("warning: could not create {}: {e}", dir.display());
+            eprintln!("warning: {} not created: {e}", dir.display());
             continue;
         }
         let ok = Command::new(icacls_path())
@@ -614,7 +614,7 @@ fn grant_runner_secret_reads() {
     for name in RUNNER_INGEST_DIRS {
         let dir = cfg.join(name);
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            eprintln!("warning: could not create {}: {e}", dir.display());
+            eprintln!("warning: {} not created: {e}", dir.display());
             continue;
         }
         let ok = Command::new(icacls_path())
@@ -728,7 +728,7 @@ fn powershell(command: &str) -> Result<()> {
     let status = Command::new(powershell_path())
         .args(["-NoProfile", "-NonInteractive", "-Command", command])
         .status()
-        .context("failed to run powershell")?;
+        .context("run powershell")?;
     if !status.success() {
         bail!(
             "the {TASK} scheduled task couldn't be changed — is punktfunk installed with the \

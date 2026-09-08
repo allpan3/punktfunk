@@ -722,7 +722,7 @@ impl SimpleComponent for AppModel {
                         crate::ui_trust::wake_and_connect(&self.window, &sender, req)
                     }
                     (code, None, _) => self.hosts.emit(HostsMsg::ShowError(format!(
-                        "Stream session failed (punktfunk-session exit {code})"
+                        "The session didn't start (exit {code}). Check the client log."
                     ))),
                 }
             }
@@ -1023,9 +1023,14 @@ impl AppModel {
                     Some(identity),
                     std::time::Duration::from_secs(15),
                 )
-                .map_err(|e| format!("connect: {e:?}"))?;
-                c.request_probe(3_000_000, 2_000)
-                    .map_err(|e| format!("probe: {e:?}"))?;
+                .map_err(|e| {
+                    tracing::warn!(error = ?e, "speed test connect");
+                    "Couldn't start the speed test".to_string()
+                })?;
+                c.request_probe(3_000_000, 2_000).map_err(|e| {
+                    tracing::warn!(error = ?e, "speed test probe request");
+                    "The host didn't start the speed test".to_string()
+                })?;
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
                 loop {
                     std::thread::sleep(std::time::Duration::from_millis(250));
@@ -1036,7 +1041,7 @@ impl AppModel {
                         return Ok(c.probe_result());
                     }
                     if std::time::Instant::now() > deadline {
-                        return Err("probe timed out".to_string());
+                        return Err("The speed test didn't finish in time".to_string());
                     }
                 }
             })();

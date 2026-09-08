@@ -60,7 +60,7 @@ export const SourceSettingsDialog: FC<{
 				const res = await fetch(`/api/plugin-config/${pluginId}`, {
 					credentials: "same-origin",
 				});
-				if (!res.ok) throw new Error(`HTTP ${res.status}`);
+				if (!res.ok) throw new Error(m.library_source_settings_refused());
 				const body = (await res.json()) as {
 					schema: JsonSchemaDoc | null;
 					value: JsonObject | null;
@@ -71,7 +71,10 @@ export const SourceSettingsDialog: FC<{
 				setRaw(JSON.stringify(value, null, 2));
 			} catch (e) {
 				if (!cancelled) {
-					setState({ tag: "error", message: String(e) });
+					setState({
+						tag: "error",
+						message: e instanceof Error ? e.message : String(e),
+					});
 				}
 			}
 		})();
@@ -93,12 +96,16 @@ export const SourceSettingsDialog: FC<{
 				const body = (await res.json().catch(() => null)) as {
 					issue?: string;
 				} | null;
-				throw new Error(body?.issue ?? `HTTP ${res.status}`);
+				throw new Error(body?.issue ?? m.library_source_settings_refused());
 			}
 			toast.success(m.library_source_settings_saved());
 			onClose();
 		} catch (e) {
-			toast.error(m.library_source_settings_failed({ issue: String(e) }));
+			toast.error(
+				m.library_source_settings_failed({
+					issue: e instanceof Error ? e.message : String(e),
+				}),
+			);
 		} finally {
 			setSaving(false);
 		}
@@ -213,7 +220,9 @@ const ConfigForm: FC<{
 							onSave(JSON.parse(raw) as JsonObject);
 						} catch (e) {
 							toast.error(
-								m.library_source_settings_failed({ issue: String(e) }),
+								m.library_source_settings_failed({
+									issue: e instanceof Error ? e.message : String(e),
+								}),
 							);
 						}
 					}}

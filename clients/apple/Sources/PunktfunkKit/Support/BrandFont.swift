@@ -38,7 +38,7 @@ public enum BrandFont {
             if !CTFontManagerRegisterFontsForURL(url as CFURL, .process, &error) {
                 #if DEBUG
                 let message = error?.takeRetainedValue().localizedDescription ?? "unknown error"
-                print("BrandFont: failed to register \(face): \(message)")
+                print("BrandFont: \(face) not registered: \(message)")
                 #endif
             }
         }

@@ -31,54 +31,12 @@ encumbered-codec question it answered — no longer enter into it.
 App id: **`io.unom.Punktfunk`** (matches the Apple bundle id family and the Decky plugin's
 flatpak fallback).
 
-## Install (recommended): the hosted repo
+## Install
 
-The user-facing walkthrough (the `.flatpakref` one-liner, updates) lives on the docs pages —
-[Install a client](https://docs.punktfunk.unom.io/docs/install-client) /
-[Steam Deck](https://docs.punktfunk.unom.io/docs/steam-deck) — stated once so it can't drift (see
-"Where facts live" in [`CONTRIBUTING.md`](../../CONTRIBUTING.md)). Mechanically: the flatpakref
-adds the signed `unom` remote, auto-adds Flathub for the GNOME runtime, and `flatpak update`
-tracks new builds from then on.
-
-## Install on the Deck via the bundle (no-remote fallback)
-
-The generic registry is a plain HTTP file store, so just download the bundle and install it
-per-user (no root, survives SteamOS updates). This is what the Decky plugin uses; the hosted
-repo above is the better path for a human on the Deck:
-
-```sh
-# Pick a version: a tag like 1.2.3, or the newest main build's <next-minor>-ciN.gSHA.
-VER=1.2.3
-URL="https://git.unom.io/api/packages/unom/generic/punktfunk-client-flatpak/$VER/punktfunk-client-$VER.flatpak"
-
-# Flathub must be enabled (it is on the Deck) so the GNOME runtime pulls in:
-flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-
-curl -fL -o /tmp/punktfunk-client.flatpak "$URL"
-flatpak install --user --bundle /tmp/punktfunk-client.flatpak
-```
-
-Run it:
-
-```sh
-flatpak run io.unom.Punktfunk                 # GUI host list (mDNS)
-flatpak run io.unom.Punktfunk --connect HOST:PORT
-```
-
-The **Decky plugin** launches exactly this (`flatpak run io.unom.Punktfunk --connect …`) once
-installed — see [`../../clients/decky/README.md`](../../clients/decky/README.md).
-
-## Updating the bundle install
-
-If you installed from the **bundle** (not the hosted repo), it has no remote to track, so updates
-are "download the newer bundle and reinstall":
-
-```sh
-flatpak install --user --bundle /tmp/punktfunk-client.flatpak   # same command, newer file
-```
-
-Installs from `https://flatpak.unom.io` instead just take `flatpak update` (see "Install
-(recommended)" above).
+On the [docs site](https://docs.punktfunk.unom.io/docs/install-client#linux-desktop-flatpak) — the
+hosted repo is the supported path, with a single-file bundle as the no-remote fallback for a Deck
+that cannot reach it. Packager note: the bundle install has no remote, so it cannot self-update;
+re-running the install with a newer bundle is the upgrade.
 
 ## Build locally / the CI fallback
 

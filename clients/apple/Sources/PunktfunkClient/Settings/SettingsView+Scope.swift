@@ -212,6 +212,8 @@ extension SettingsView {
         base.keepHostAudio = keepHostAudio
         base.gamepadType = gamepadType
         base.gamepadForwarding = gamepadForwarding
+        base.systemButtons = systemButtons
+        base.guideGesture = guideGesture
         base.statsVerbosity = statsVerbosityRaw
         base.fullscreenWhileStreaming = fullscreenWhileStreaming
         base.presentPriority = presentPriority

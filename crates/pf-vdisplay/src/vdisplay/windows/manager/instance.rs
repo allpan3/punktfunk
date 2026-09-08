@@ -73,10 +73,10 @@ fn acquire_single_instance(name: &str) -> Result<OwnedHandle> {
             // ACCESS_DENIED cannot distinguish a live protected owner, a squat,
             // or a token that cannot create a Global object.
             Err(e) if e.code().0 == 0x8007_0005u32 as i32 => anyhow::bail!(
-                "{in_use}\n\nIf no matching punktfunk-host is running, this process either cannot \
-                 create/open `{name}` (run elevated or as the installed service account), or that \
-                 name is squatted by another process. Sysinternals `handle.exe -a \
-                 punktfunk-vdisplay-manager` distinguishes a holder from a missing privilege."
+                "{in_use}. If no matching punktfunk-host is running, this process lacks rights \
+                 on `{name}` (run elevated or as the installed service account), or that name is \
+                 squatted by another process. Sysinternals `handle.exe -a \
+                 punktfunk-vdisplay-manager` tells a holder from a missing privilege"
             ),
             Err(e) => {
                 return Err(e).with_context(|| format!("CreateMutexW({name})"));

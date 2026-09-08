@@ -48,7 +48,7 @@ pub(crate) async fn set_hooks(ApiJson(cfg): ApiJson<crate::hooks::HooksConfig>) 
         }
         Err(e) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("persist hooks.json: {e:#}"),
+            &format!("Couldn't save the hooks — {e:#}"),
         ),
     }
 }

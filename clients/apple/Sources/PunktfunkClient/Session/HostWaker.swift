@@ -91,6 +91,9 @@ final class HostWaker: ObservableObject {
                     guard let self, !Task.isCancelled else { return }
                     self.waking = nil
                     self.loop = nil
+                    // The wait is over, so "Try Again" has nothing to replay: leaving it armed
+                    // lets a stray retry wake a host the user has already moved on from.
+                    self.replay = nil
                     onOnline()
                     return
                 }

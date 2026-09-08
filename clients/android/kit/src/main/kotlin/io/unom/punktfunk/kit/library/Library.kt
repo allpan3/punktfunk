@@ -202,13 +202,13 @@ object LibraryClient {
     ): LibraryResult {
         if (fpHex.isBlank()) {
             return LibraryResult.Unauthorized(
-                "Connect to this host once first — the library uses the identity created on pairing to authenticate.",
+                "connect to this host once first — pairing is what lets it show its games",
             )
         }
         val client = try {
             mtlsHttpClient(certPem, keyPem, address, fpHex)
         } catch (e: Exception) {
-            return LibraryResult.Error("Couldn't set up the secure connection: ${e.message}")
+            return LibraryResult.Error("couldn't set up a secure connection — ${e.message}")
         }
         val base = "https://$address:$mgmtPort"
         val req = Request.Builder().url("$base/api/v1/library").build()
@@ -217,15 +217,13 @@ object LibraryClient {
                 when (resp.code) {
                     200 -> LibraryResult.Ok(parse(resp.body?.string().orEmpty(), base))
                     401 -> LibraryResult.Unauthorized(
-                        "The host didn't recognize this device. Pair with the host first — it authorizes paired clients by their certificate.",
+                        "the host doesn't recognize this device — pair with it first",
                     )
-                    else -> LibraryResult.Error("The management API returned HTTP ${resp.code}.")
+                    else -> LibraryResult.Error("the host refused it (${resp.code})")
                 }
             }
         } catch (e: Exception) {
-            LibraryResult.Error(
-                "Couldn't reach the host's management API: ${e.message}. It binds the LAN by default, so check the host is updated and reachable.",
-            )
+            LibraryResult.Error("couldn't reach the host — ${e.message}")
         }
     }
 

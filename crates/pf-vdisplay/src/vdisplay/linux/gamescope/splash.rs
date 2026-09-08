@@ -146,17 +146,16 @@ fn connect_with_retry() -> Result<(RustConnection, usize)> {
                 }
             }
         })
-        .context("gamescope splash: could not start the X connect thread")?;
+        .context("gamescope splash: start the X connect thread")?;
     // One second past the worker deadline so a slow-but-finished connect still wins.
     match rx.recv_timeout(CONNECT_BUDGET + Duration::from_secs(1)) {
         Ok(Ok(conn)) => Ok(conn),
-        Ok(Err(e)) => Err(e).context("gamescope splash: could not connect to the session DISPLAY"),
+        Ok(Err(e)) => Err(e).context("gamescope splash: connect to the session DISPLAY"),
         Err(_) => {
             tracing::warn!(
                 secs = CONNECT_BUDGET.as_secs(),
-                "gamescope splash: the session's X server accepted no connection and never \
-                 answered — giving up. Nothing will paint in this gamescope, so it will composite \
-                 nothing and the capture will starve; the gamescope log is where the reason is."
+                "gamescope splash: the session's X server accepted no connection — nothing paints \
+                 in this gamescope, so the capture starves; the reason is in the gamescope log"
             );
             anyhow::bail!("gamescope splash: connecting to the session DISPLAY did not return")
         }

@@ -11,6 +11,10 @@
 #
 # Report-only: the script flags regressions vs scripts/bench/gpu-baseline.json but never fails the
 # job. Refresh the baseline on the runner with `scripts/bench/gpu-stream.sh <mode> <secs> --update`.
+#
+# The second job is not a benchmark. It shares this file because this is the only workflow with a
+# GPU runner and a nightly schedule, and duplicating both to run one `cargo test` is not worth a
+# second file. See its own comment.
 name: bench-gpu
 
 on:
@@ -35,3 +39,30 @@ jobs:
         env:
           BENCH_MODE: ${{ inputs.mode || '1920x1080x120' }}
         run: bash scripts/bench/gpu-stream.sh "$BENCH_MODE" 12
+
+  # The decode stack's pixel-parity suite. 159 `#[ignore]`d tests exist across 15 crates and no job
+  # ran a single one — the only `--ignored` anywhere in this directory was a comment in
+  # windows-host.yml saying it stays a manual run on the validation boxes. These 16 are the set one
+  # existing runner can execute unattended: SHA-256 per display-order frame against checked-in
+  # libavcodec goldens, all inputs vendored under tests/data.
+  #
+  # REPORT-ONLY, deliberately. The legs assert rather than skip, and each needs a Vulkan Video
+  # device for its own codec, so a box without AV1 decode fails those three legs for a reason that
+  # is not a regression. Read one scheduled run, then narrow the filter to the codecs this box
+  # actually has and drop continue-on-error — a gate is the point, this is the step that earns it.
+  #
+  # The H.265 field-triage leg is skipped by name: it is an operator tool that requires
+  # PF_VKD_FIELD_STREAM to point at a hand-made capture, so it can never pass unattended.
+  vkdecode-parity:
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: pf-vkdecode pixel parity + smoke (the ignored GPU legs)
+        continue-on-error: true
+        # RADV gates video decode behind a perf flag; harmless on NVIDIA.
+        env:
+          RADV_PERFTEST: video_decode
+        run: >-
+          cargo test --locked -p pf-vkdecode --test gpu_parity --test gpu_smoke --
+          --ignored --skip field_h265_stream_writes_frame_hashes_for_ffmpeg_diff

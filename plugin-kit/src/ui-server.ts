@@ -349,10 +349,9 @@ const verifyCategoryLanded = (
 			if (!mine || mine.category === category) return Effect.void;
 			return Effect.logWarning(
 				`registered without category "${category}" (the host reports ` +
-					`${mine.category === undefined ? "none" : `"${mine.category}"`}). ` +
-					`This plugin will appear in the console's sidebar instead of its intended ` +
-					`section. The usual cause is an @punktfunk/host older than 0.1.3, which drops ` +
-					`the field before registering — update it, or the host, to resolve it.`,
+					`${mine.category === undefined ? "none" : `"${mine.category}"`}) — it lands ` +
+					`in the console's sidebar, not its section. An @punktfunk/host older than 0.1.3 ` +
+					`drops the field before registering; update it.`,
 			);
 		}),
 		// Advisory only: never let a diagnostic take down the plugin it is diagnosing.

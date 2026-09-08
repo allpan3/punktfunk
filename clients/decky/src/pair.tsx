@@ -17,13 +17,13 @@ function pairErrorBody(error: string | undefined, name: string): string {
     case "refused":
       return "Wrong PIN, or the host isn’t showing one. Arm pairing again and retry.";
     case "unreachable":
-      return `Couldn’t reach ${name}.`;
+      return `Couldn’t reach ${name}`;
     case "client-outdated":
-      return "Update the Punktfunk client to pair from here.";
+      return "Update the Punktfunk client to pair from here";
     case "client-unavailable":
       return "Couldn’t reach the Punktfunk client — is it still installed?";
     default:
-      return "Pairing failed.";
+      return "Pairing failed";
   }
 }
 

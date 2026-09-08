@@ -10,7 +10,9 @@
 use crate::anim::{springs, Spring};
 use crate::glyphs::GlyphStyle;
 use crate::library::{mesh_sksl, palette, LibraryShared};
-use crate::model::{ConsoleBus, ConsoleCmd, ConsoleShared, HostRow, PairPhase, WakeStatus};
+use crate::model::{
+    ConsoleBus, ConsoleCmd, ConsoleShared, HostRow, PairPhase, SpeedPhase, SpeedStatus, WakeStatus,
+};
 use crate::platform::Platform;
 use crate::pointer::{Pointer, PointerKind};
 use crate::screens::{Bg, ConnectIntent, Ctx, Nav, Outbox, Screen};
@@ -279,6 +281,10 @@ pub(crate) struct Shell {
     /// first `WakeStatus` (~100 ms–1 s). `sync` must not clear it in that
     /// window or navigation races the wake ungated.
     wake_optimistic: bool,
+    /// The speed-test takeover. No optimistic twin: [`Self::apply`] seeds the shared slot
+    /// itself, so the service thread only ever advances the phase and `sync` can mirror
+    /// the slot verbatim — including the `None` a dismiss writes.
+    speed: Option<SpeedStatus>,
     toast: Option<Toast>,
     /// Fingerprint of a first pairing whose shelf has not opened yet. See
     /// [`Self::open_first_paired_library`].
@@ -382,6 +388,7 @@ impl Shell {
             last_connect_title: None,
             wake: None,
             wake_optimistic: false,
+            speed: None,
             toast: None,
             first_pair: None,
             exit_armed: None,
@@ -582,6 +589,39 @@ impl Shell {
             && self.connecting.is_none()
             && !self.holds_stream()
             && self.stack.last().is_some_and(Screen::editing)
+    }
+
+    /// What a screen reader should speak for the focused row. `None` while a takeover owns
+    /// the input, or on a screen that names no focus.
+    /// `&mut` only to hand `Ctx` the settings it wants by `&mut`; nothing on this
+    /// path writes them. A host polls this once per frame, so cloning the settings
+    /// to get an `&self` here would be ~9 string allocations per frame on a still
+    /// screen — the per-frame-work-that-changes-nothing shape this shell has
+    /// already paid to remove once.
+    pub(crate) fn focus_announcement(&mut self) -> Option<String> {
+        if self.in_stream
+            || self.holds_stream()
+            || self.connecting.is_some()
+            || self.wake.is_some()
+            || self.speed.is_some()
+        {
+            return None;
+        }
+        let t = self.t();
+        let screen = self.stack.last()?;
+        let ctx = Ctx {
+            hosts: &self.hosts,
+            library: &self.library,
+            settings: &mut self.settings,
+            store: &*self.store,
+            platform: self.platform,
+            pads: &self.pads,
+            deck: self.deck,
+            fallback_ui: self.fallback_ui,
+            device_name: &self.device_name,
+            t,
+        };
+        screen.announcement(&ctx)
     }
 
     /// The console is covering a live stream — a launch hold — and wants the
@@ -869,6 +909,7 @@ impl Shell {
             None if !self.wake_optimistic => self.wake = None,
             None => {}
         }
+        self.speed = self.console.speed();
         if let Some(w) = &self.wake {
             if w.online {
                 let intent = w.then_connect.then(|| {
@@ -1048,6 +1089,24 @@ impl Shell {
                 _ => return None,
             }
         }
+        if self.speed.is_some() {
+            match ev {
+                // Dismissing mid-burst abandons the measurement, not the burst: the host
+                // finishes it either way, and `advance_speed` drops the late report.
+                MenuEvent::Back => {
+                    self.close_speed();
+                    return Some(MenuPulse::Confirm);
+                }
+                MenuEvent::Confirm => {
+                    let kbps = self.speed_recommendation()?;
+                    let text = self.apply_speed_bitrate(kbps);
+                    self.close_speed();
+                    self.show_toast(text);
+                    return Some(MenuPulse::Confirm);
+                }
+                _ => return None,
+            }
+        }
         // Back is always heard by the transition (`nav_back`). Other events
         // wait until the spring is past `NAV_INPUT_OPENS` so a double-tapped
         // A cannot push two screens. Threshold is position, not elapsed time.
@@ -1110,14 +1169,18 @@ impl Shell {
             return true;
         }
         if p.kind == PointerKind::Back {
-            if self.stack.len() > 1 || self.connecting.is_some() || self.wake.is_some() {
+            if self.stack.len() > 1
+                || self.connecting.is_some()
+                || self.wake.is_some()
+                || self.speed.is_some()
+            {
                 self.handle_menu(MenuEvent::Back);
             }
             return true;
         }
         // Clicking through a connect takeover onto the library would start
         // a second session. Same early return as the menu path.
-        if self.connecting.is_some() || self.wake.is_some() {
+        if self.connecting.is_some() || self.wake.is_some() || self.speed.is_some() {
             return true;
         }
         if !matches!(self.motion, Motion::None) {
@@ -1235,6 +1298,57 @@ impl Shell {
         self.bus.send(cmd);
     }
 
+    /// Drop the takeover on both sides. Clearing the shared slot is what makes a late
+    /// phase from the still-running burst a no-op rather than a reopened dialog.
+    fn close_speed(&mut self) {
+        self.console.set_speed(None);
+        self.speed = None;
+    }
+
+    /// The bitrate Confirm would write, or `None` when there is nothing to write: no answer
+    /// yet, or a bound profile that pins bitrate — see [`Self::speed_pinned_by`].
+    fn speed_recommendation(&self) -> Option<u32> {
+        let sp = self.speed.as_ref()?;
+        let SpeedPhase::Done {
+            recommended_kbps, ..
+        } = sp.phase
+        else {
+            return None;
+        };
+        self.speed_pinned_by(&sp.key)
+            .is_none()
+            .then_some(recommended_kbps)
+    }
+
+    /// Name of the profile this host resolves bitrate from, when that profile PINS one.
+    ///
+    /// The console writes the global default and has no profile editor, so a pinned
+    /// bitrate makes the measurement read-only here: applying the default would leave the
+    /// tested host streaming at the profile's number and quietly retune every other host.
+    /// A profile that inherits bitrate is not pinned, and the default is the right layer.
+    fn speed_pinned_by(&self, key: &str) -> Option<&str> {
+        self.hosts
+            .iter()
+            .find(|h| h.key == key)
+            .and_then(|h| h.bound_profile.as_ref())
+            .filter(|p| p.bitrate_kbps.is_some())
+            .map(|p| p.name.as_str())
+    }
+
+    /// Write a measured bitrate to the global default. Rebase-then-save like the settings
+    /// screen's typed field, and clamped to the same platform ceiling — a 2.5 Gbps LAN
+    /// measures well above what a webOS TV will keep.
+    fn apply_speed_bitrate(&mut self, kbps: u32) -> String {
+        self.settings = self.store.load();
+        let ceiling = crate::screens::settings::bitrate_ceiling_kbps(self.platform);
+        self.settings.bitrate_kbps = kbps.min(ceiling);
+        self.store.save(&self.settings);
+        format!(
+            "{} Mb/s set as the default",
+            self.settings.bitrate_kbps / 1_000
+        )
+    }
+
     fn apply(&mut self, fx: Outbox) {
         for cmd in fx.cmds {
             // Gate wake in this call, like `connecting`. First WakeStatus is
@@ -1256,6 +1370,17 @@ impl Shell {
                     then_connect: *then_connect,
                 });
                 self.wake_optimistic = true;
+            }
+            // The shell seeds the slot, not the service thread: the takeover must be up
+            // before the connect blocks, and seeding it on the side that clears it is what
+            // makes a dismissed test's late report a no-op (`ConsoleShared::advance_speed`).
+            if let ConsoleCmd::SpeedTest { key, host_name, .. } = &cmd {
+                self.console.set_speed(Some(SpeedStatus {
+                    key: key.clone(),
+                    name: host_name.clone(),
+                    phase: SpeedPhase::Connecting,
+                }));
+                self.speed = self.console.speed();
             }
             self.bus.send(cmd);
         }

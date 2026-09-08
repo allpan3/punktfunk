@@ -33,7 +33,7 @@ pub(crate) struct ClientLogUploaded {
         (status = FORBIDDEN, description = "The device's access has expired (per-client access)", body = ApiError),
         (status = PAYLOAD_TOO_LARGE, description = "Bundle exceeds the size cap", body = ApiError),
         (status = UNPROCESSABLE_ENTITY, description = "Empty body", body = ApiError),
-        (status = INTERNAL_SERVER_ERROR, description = "Could not store the bundle", body = ApiError),
+        (status = INTERNAL_SERVER_ERROR, description = "Couldn't store the log bundle", body = ApiError),
     )
 )]
 pub(crate) async fn client_logs_upload(
@@ -100,7 +100,7 @@ pub(crate) async fn client_logs_upload(
         }
         Err(e) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("could not store the bundle: {e}"),
+            &format!("Couldn't store the log bundle — {e}"),
         ),
     }
 }
@@ -152,7 +152,7 @@ pub(crate) async fn client_logs_get(
         }
         Err(e) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("could not read the bundle: {e}"),
+            &format!("Couldn't read the log bundle — {e}"),
         ),
     }
 }
@@ -170,7 +170,7 @@ pub(crate) async fn client_logs_get(
         (status = NO_CONTENT, description = "Bundle deleted"),
         (status = NOT_FOUND, description = "No bundle with that id", body = ApiError),
         (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
-        (status = INTERNAL_SERVER_ERROR, description = "Could not delete the bundle", body = ApiError),
+        (status = INTERNAL_SERVER_ERROR, description = "Couldn't delete the log bundle", body = ApiError),
     )
 )]
 pub(crate) async fn client_logs_delete(
@@ -187,7 +187,7 @@ pub(crate) async fn client_logs_delete(
         }
         Err(e) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("could not delete the bundle: {e}"),
+            &format!("Couldn't delete the log bundle — {e}"),
         ),
     }
 }

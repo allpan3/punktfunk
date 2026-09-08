@@ -49,7 +49,7 @@ fn try_clear_lizard_mode() {
         }
         Err(e) => tracing::debug!(
             error = %e,
-            "could not clear hid_steam lizard_mode (no root?) — using the gamepad_mode pulse + guard"
+            "hid_steam lizard_mode not cleared (no root?) — using the gamepad_mode pulse + guard"
         ),
     }
 }

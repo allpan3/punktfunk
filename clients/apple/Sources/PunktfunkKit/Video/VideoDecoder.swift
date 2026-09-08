@@ -89,14 +89,15 @@ private final class FrameContext {
 /// retained `FrameContext` set at submit; reclaim it here (balancing `passRetained`) and unpack the
 /// AU's receipt instant (for the decode stage) and wire flags (for the re-anchor gate).
 private let decoderOutputCallback: VTDecompressionOutputCallback = {
-    refcon, frameRefcon, status, _, imageBuffer, pts, _ in
+    refcon, frameRefcon, status, infoFlags, imageBuffer, pts, _ in
     guard let refcon else { return }
     let ctx = frameRefcon.map { Unmanaged<FrameContext>.fromOpaque($0).takeRetainedValue() }
     Unmanaged<VideoDecoder>.fromOpaque(refcon)
         .takeUnretainedValue()
         .handleDecoded(
             status: status, imageBuffer: imageBuffer, pts: pts,
-            receivedNs: ctx?.receivedNs ?? 0, flags: ctx?.flags ?? 0)
+            receivedNs: ctx?.receivedNs ?? 0, flags: ctx?.flags ?? 0,
+            dropped: infoFlags.contains(.frameDropped))
 }
 
 /// Owns a `VTDecompressionSession` rebuilt whenever the format description changes (every IDR /
@@ -160,6 +161,10 @@ public final class VideoDecoder: @unchecked Sendable {
         let needsNew: Bool = {
             guard let session, let format else { return true }
             if CMFormatDescriptionEqual(format, otherFormatDescription: newFormat) { return false }
+            // The output pixel format is chosen from the format's HDR-ness at session creation, so
+            // an SDR→HDR flip the live session would otherwise "accept" must still rebuild — it
+            // would keep emitting 8-bit NV12 for a PQ stream and the presenter would stay SDR.
+            if Self.isHDRFormat(newFormat) != Self.isHDRFormat(format) { return true }
             // A new desc that the live session can still accept (rare for HEVC) avoids a rebuild.
             return !VTDecompressionSessionCanAcceptFormatDescription(session, formatDescription: newFormat)
         }()
@@ -167,6 +172,9 @@ public final class VideoDecoder: @unchecked Sendable {
             lock.unlock()
             return false
         }
+        // Adopt it on the accept path too: leaving `format` stale re-runs the compare and the
+        // accept probe on every single AU.
+        format = newFormat
         // Submit WHILE holding the lock so a concurrent reset()/teardown (main thread) can't
         // invalidate the session between here and DecodeFrame. The VT output callback takes the
         // ring lock, not this one, so there's no re-entrancy. DecodeFrame is async — non-blocking.
@@ -307,9 +315,14 @@ public final class VideoDecoder: @unchecked Sendable {
     /// AU's receipt instant and `flags` its wire `user_flags`, both threaded through the frame refcon
     /// (0 = unknown).
     fileprivate func handleDecoded(
-        status: OSStatus, imageBuffer: CVImageBuffer?, pts: CMTime, receivedNs: Int64, flags: UInt32
+        status: OSStatus, imageBuffer: CVImageBuffer?, pts: CMTime, receivedNs: Int64,
+        flags: UInt32, dropped: Bool
     ) {
         guard status == noErr, let imageBuffer else {
+            // A frame VideoToolbox chose to DROP under load reports success with no image and the
+            // dropped flag. Reporting it as a decode error armed the display freeze and asked the
+            // host for keyframes, which is the opposite of what an overloaded decoder needs.
+            if dropped, status == noErr { return }
             onDecodeError(status)
             return
         }

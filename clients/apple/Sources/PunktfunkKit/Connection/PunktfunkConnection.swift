@@ -2,7 +2,7 @@
 //
 // Threading contract (mirrors the C header): one PunktfunkConnection is pumped from a single
 // video thread via nextAU(); nextAudio() runs on its own (single) drain thread, and
-// nextRumble()/nextHidOutput() share one feedback drain thread (two core planes, one puller
+// nextRumble2()/nextHidOutput() share one feedback drain thread (two core planes, one puller
 // each — polling them sequentially from one thread is within the contract); the core keeps
 // per-plane borrow slots, so the planes never alias. send() is enqueue-only and safe
 // alongside all of them. The pointers inside an AU/audio packet are only valid until the
@@ -109,6 +109,12 @@ public enum HostRejection: Sendable {
     /// going to sleep or shutting down, deliberately. Without this case the close reads as a
     /// transport failure, and sleeping your own host from the couch looks like a crash.
     case hostPower
+    /// The host accepted the connection and then failed to bring the stream up — no encoder
+    /// for the codec, pf-vdisplay missing, capture open failed. Everything host-side funnels
+    /// here, so the cause is in the host's log, not on this device. Missing this case sent the
+    /// connect down the untyped path, where a reachable host reads as unreachable and the app
+    /// answers with Wake-on-LAN.
+    case setupFailed
 
     init?(status: Int32) {
         switch status {
@@ -124,6 +130,7 @@ public enum HostRejection: Sendable {
         case PUNKTFUNK_STATUS_REJECTED_ACCESS_EXPIRED.rawValue: self = .accessExpired
         case PUNKTFUNK_STATUS_REJECTED_LAUNCH_NOT_PERMITTED.rawValue: self = .launchNotPermitted
         case PUNKTFUNK_STATUS_REJECTED_HOST_POWER.rawValue: self = .hostPower
+        case PUNKTFUNK_STATUS_REJECTED_SETUP_FAILED.rawValue: self = .setupFailed
         default: return nil
         }
     }
@@ -162,6 +169,9 @@ public enum HostRejection: Sendable {
         case .hostPower:
             return "The host is going to sleep or shutting down — wake it when you want "
                 + "to play again."
+        case .setupFailed:
+            return "The host accepted the connection but couldn't start the stream — the "
+                + "host's log (web console → Log) has the cause."
         }
     }
 }
@@ -220,7 +230,11 @@ public extension PunktfunkConnection {
     }
 }
 
-public final class PunktfunkConnection {
+/// `@unchecked Sendable` because the safety argument is the plane locks, not the type system:
+/// every mutable field is either immutable after init or reached only under `abiLock` or a plane
+/// lock, and `close()` takes them all before freeing the handle. Callers hand this to detached
+/// tasks and raw pump threads, which the Swift 6 checker will require this to state.
+public final class PunktfunkConnection: @unchecked Sendable {
     /// One-shot ABI version-equality gate (`static let` = dispatch_once), touched before the
     /// first C call a connection makes. This enforces the guard the v27 `PunktfunkHidOutput`
     /// widening's safety argument rests on: `punktfunk_abi_version()` mismatch has always meant
@@ -452,9 +466,11 @@ public final class PunktfunkConnection {
     /// atomic load behind the FFI — and never park it in a `let` or a closure capture list.
     /// Cross-thread reads follow the `framesDropped()` precedent.
     public var clockOffsetNs: Int64 {
-        guard let handle else { return 0 }
+        abiLock.lock()
+        defer { abiLock.unlock() }
+        guard let h = handle, !closeRequested else { return 0 }
         var offset: Int64 = 0
-        _ = punktfunk_connection_clock_offset_now_ns(handle, &offset)
+        _ = punktfunk_connection_clock_offset_now_ns(h, &offset)
         return offset
     }
 
@@ -571,10 +587,8 @@ public final class PunktfunkConnection {
 
     /// The host answered `HOST_CAP_CURSOR`: it stopped compositing the pointer and forwards
     /// shape/state on the cursor planes — the client MUST draw the cursor locally.
-    /// `0x08` — the bit moved when `HOST_CAP_TEXT_INPUT` claimed `0x04` on main; testing the
-    /// old bit would mistake a text-input-capable host (e.g. Windows) for a cursor grant.
     public var hostSupportsCursor: Bool {
-        hostCaps & 0x08 != 0
+        hostCaps & UInt8(PUNKTFUNK_HOST_CAP_CURSOR) != 0
     }
 
     /// The host injects full-fidelity stylus input (`HOST_CAP_PEN`) — the gate for splitting
@@ -1107,36 +1121,13 @@ public final class PunktfunkConnection {
         videoDropLock.lock(); videoDropped = dropped; videoDropLock.unlock()
     }
 
-    /// Feed each received AU's `frameIndex` (in receive order) so the client recovers from loss with a
-    /// cheap reference-frame invalidation instead of always paying for a full IDR. On a forward gap —
-    /// a `frameIndex` jump means the intervening frames were lost and the following AUs reference a
-    /// picture that never arrived — the core fires a THROTTLED RFI request for the lost range, and an
-    /// RFI-capable host (AMD LTR / NVENC) recovers with a clean P-frame rather than a 20-40× IDR
-    /// spike. Call it for every received AU; the `framesDropped`-driven `requestKeyframe()` path stays
-    /// the backstop for when the recovery frame itself is lost. Cheap; silently dropped after close.
-    public func noteFrameIndex(_ frameIndex: UInt32) {
-        abiLock.lock()
-        defer { abiLock.unlock() }
-        guard let h = handle, !closeRequested else { return }
-        _ = punktfunk_connection_note_frame_index(h, frameIndex, nil)
-    }
-
-    /// Like `noteFrameIndex`, but also reports whether the core saw a FORWARD frame-index gap — the
-    /// signal that intervening frames were lost and the following AUs reference a picture that never
-    /// arrived. The post-loss re-anchor gate arms its display freeze on a gap (the earliest, most
-    /// precise loss trigger — ahead of the `framesDropped` climb). Same core side effect as
-    /// `noteFrameIndex` (the throttled RFI request); call it for every received AU. Returns false
-    /// after close.
-    public func noteFrameIndexGap(_ frameIndex: UInt32) -> Bool {
-        noteFrameIndexGapWidth(frameIndex) > 0
-    }
-
-    /// Like `noteFrameIndexGap`, but reports the gap's WIDTH — how many frames this arrival revealed
-    /// as missing (0 = none). The post-loss re-anchor gate arms with the width
-    /// (`ReanchorGate.arm(expectingDrops:)`) so the reassembler's later `framesDropped` climb for
-    /// the SAME loss cannot re-freeze a stream an RFI anchor already healed (the double-arm race).
-    /// Same core side effect as `noteFrameIndex` (the throttled RFI request); call it for every
-    /// received AU. Returns 0 after close.
+    /// Feed each received AU's `frameIndex` (in receive order) and get back the WIDTH of the
+    /// forward gap it revealed (0 = none). A gap means the intervening frames were lost and the
+    /// following AUs reference a picture that never arrived, so the core fires a THROTTLED RFI
+    /// request for the lost range and an RFI-capable host recovers with a clean P-frame instead of
+    /// a 20-40x IDR spike. The re-anchor gate arms with the width, so the reassembler's later
+    /// `framesDropped` climb for the SAME loss cannot re-freeze a stream an anchor already healed.
+    /// Call it for every received AU. Returns 0 after close.
     public func noteFrameIndexGapWidth(_ frameIndex: UInt32) -> UInt32 {
         abiLock.lock()
         defer { abiLock.unlock() }
@@ -1345,29 +1336,6 @@ public final class PunktfunkConnection {
             return AudioPCM(
                 samples: samples, frameCount: Int(out.frame_count),
                 channels: channels, ptsNs: out.pts_ns, seq: out.seq)
-        case statusNoFrame:
-            return nil
-        case statusClosed:
-            throw PunktfunkClientError.closed
-        default:
-            throw PunktfunkClientError.status(rc)
-        }
-    }
-
-    /// Pull the next force-feedback update for the GCController haptics engine:
-    /// `(pad, lowFrequency, highFrequency)` with 0...0xFFFF amplitudes, (0, 0) = stop.
-    /// Drain from the (single) feedback thread, alongside `nextHidOutput`. Drops the v2
-    /// self-termination TTL — use `nextRumble2` to honor the host lease.
-    public func nextRumble(timeoutMs: UInt32 = 0) throws -> (pad: UInt16, low: UInt16, high: UInt16)? {
-        feedbackLock.lock()
-        defer { feedbackLock.unlock() }
-        guard let h = liveHandle() else { throw PunktfunkClientError.closed }
-
-        var pad: UInt16 = 0, low: UInt16 = 0, high: UInt16 = 0
-        let rc = punktfunk_connection_next_rumble(h, &pad, &low, &high, timeoutMs)
-        switch rc {
-        case statusOK:
-            return (pad, low, high)
         case statusNoFrame:
             return nil
         case statusClosed:
@@ -1996,7 +1964,12 @@ public final class PunktfunkConnection {
     /// Read it before tearing the connection down: once `close()` has been requested this reports
     /// `.none`, which is the safe direction (the caller falls back to its normal handling).
     public var sessionEndReason: SessionEndReason {
-        guard let h = liveHandle() else { return .none }
+        // Held ACROSS the call, not just for the snapshot: these two read from the main actor
+        // with no plane lock of their own, so a `liveHandle()` snapshot could be freed by a
+        // concurrent close between the check and the call.
+        abiLock.lock()
+        defer { abiLock.unlock() }
+        guard let h = handle, !closeRequested else { return .none }
         var out: UInt8 = 0
         guard punktfunk_connection_end_reason(h, &out) == statusOK else { return .none }
         return SessionEndReason(rawValue: out) ?? .none
@@ -2012,7 +1985,9 @@ public final class PunktfunkConnection {
     /// teardown); nil for every ordinary end and for connect-time rejections (those surface
     /// from the connect itself as `.rejected`).
     public var endRejection: HostRejection? {
-        guard let h = liveHandle() else { return nil }
+        abiLock.lock()
+        defer { abiLock.unlock() }
+        guard let h = handle, !closeRequested else { return nil }
         var status: Int32 = 0
         guard punktfunk_connection_end_reject(h, &status) == statusOK, status != 0
         else { return nil }

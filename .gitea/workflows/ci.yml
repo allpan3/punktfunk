@@ -77,28 +77,34 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends libgtk-4-dev libadwaita-1-dev libsdl3-dev
 
-      # The committed pf-zerocopy SPIR-V blobs are pulled in with include_bytes! and rebuilt only
-      # by hand — edit a .comp, forget the rebuild, and the OLD kernel ships with no compile error
-      # or failing test. Recompile each shader and diff the disassembly. Filtering OpSourceExtension
-      # (+ --no-header) is exactly what absorbs the shaderc-vs-glslang generator difference; every
-      # instruction, ID and constant must match.
+      # These SPIR-V blobs are pulled in with include_bytes! and rebuilt only by hand — edit a
+      # .comp, forget the rebuild, and the OLD kernel ships with no compile error or failing test.
+      # Recompile each shader and diff the disassembly. Filtering OpSourceExtension (+ --no-header)
+      # is exactly what absorbs the shaderc-vs-glslang generator difference; every instruction, ID
+      # and constant must match.
+      #
+      # Only shaders whose rebuild command is plain `glslangValidator -V` belong here. The four
+      # pf-client-core blobs are compiled by their build.sh with `glslc -O`, so gating them would
+      # pin this diff to CI's spirv-opt version and go red on a toolchain bump, not on drift.
       #
       # Disassemble to FILES rather than `diff <(…) <(…)`: Gitea's runner executes a step's `run:`
-      # under `sh -e`, not bash, and dash has no process substitution — the shell rejected the
-      # script at PARSE time, so the gate never compared anything. Worse, it took the whole `rust`
-      # job with it: Format, Clippy, Build, Test and every gate below were skipped on each of the
-      # 35 commits between the gate landing (143a707f) and this fix. A gate that cannot run is
-      # indistinguishable from one that passes, which is exactly the failure it exists to prevent.
-      - name: Shader SPIR-V drift gate (pf-zerocopy)
+      # under `sh -e`, and dash has no process substitution — it rejects the script at PARSE time,
+      # taking the whole `rust` job with it. A gate that cannot run looks exactly like one that
+      # passes, which is the failure it exists to prevent.
+      - name: Shader SPIR-V drift gate (pf-zerocopy, pf-encode)
         run: |
           apt-get install -y --no-install-recommends glslang-tools spirv-tools
-          for s in rgb2nv12_buf cursor_blend; do
-            d=crates/pf-zerocopy/src/imp
-            glslangValidator -V "$d/$s.comp" -o "/tmp/$s.spv" >/dev/null
-            spirv-dis --no-header "$d/$s.spv"  | grep -v OpSourceExtension > "/tmp/$s.committed"
+          for p in crates/pf-zerocopy/src/imp/rgb2nv12_buf \
+                   crates/pf-zerocopy/src/imp/cursor_blend \
+                   crates/pf-encode/src/enc/linux/rgb2yuv \
+                   crates/pf-encode/src/enc/linux/rgb2yuv10 \
+                   crates/pf-encode/src/enc/linux/rgb2yuv444; do
+            s=${p##*/}
+            glslangValidator -V "$p.comp" -o "/tmp/$s.spv" >/dev/null
+            spirv-dis --no-header "$p.spv"      | grep -v OpSourceExtension > "/tmp/$s.committed"
             spirv-dis --no-header "/tmp/$s.spv" | grep -v OpSourceExtension > "/tmp/$s.rebuilt"
             diff "/tmp/$s.committed" "/tmp/$s.rebuilt" \
-              || { echo "::error::$d/$s.spv is stale — rebuild it from $s.comp"; exit 1; }
+              || { echo "::error::$p.spv is stale — rebuild it from $s.comp"; exit 1; }
           done
 
       # Best-effort caches (act_runner's built-in cache server). Keyed on Cargo.lock:
@@ -259,6 +265,29 @@ jobs:
           git diff --exit-code include/punktfunk_core.h \
             || (echo "include/punktfunk_core.h is stale — commit the regenerated header" && exit 1)
 
+      - name: THIRD-PARTY-NOTICES drift gate
+        # Every other derived artifact here is gated — the OpenAPI spec and the cbindgen header
+        # above, sdk/src/gen, web/bun.nix. This one was not, and went 36 crates stale while three
+        # separate comments claimed something regenerated it. It is also the only one whose
+        # staleness is a compliance defect rather than a build annoyance: the .deb, three RPM
+        # subpackages and the signed Windows host installer ship it verbatim as their licence
+        # file, and both MIT and Apache-2.0 require the notice.
+        #
+        # Not in check-docs-drift.sh, whose stated budget is "no cargo": the generator reads
+        # `cargo metadata`. Its output is reproducible across machines — the same 600 crates and
+        # the same SHA-256 on macOS and on Linux with unrelated registry caches — so this compares
+        # bytes rather than the crate count.
+        run: |
+          bash scripts/gen-third-party-notices.sh
+          git config --global --add safe.directory "$PWD"
+          git diff --exit-code -- \
+            THIRD-PARTY-NOTICES.txt \
+            clients/linux/THIRD-PARTY-NOTICES.txt \
+            clients/windows/THIRD-PARTY-NOTICES.txt \
+            clients/apple/Sources/PunktfunkKit/Resources/THIRD-PARTY-NOTICES.txt \
+            clients/android/app/src/main/assets/THIRD-PARTY-NOTICES.txt \
+            || (echo "::error::attribution is stale — run scripts/gen-third-party-notices.sh and commit" && exit 1)
+
   # The client stack cross-checked for aarch64. NOT an artifact job — deb.yml ships those —
   # this exists so a portability defect fails here instead of surfacing in a release build or
   # on a user's board. It earns its runtime: the bug that motivated it (a Vulkan extension
@@ -369,6 +398,11 @@ jobs:
       # 30s is enough to ride out a load burst without making that wait a minute and a half.
       - name: Install dependencies
         run: bash ../scripts/ci/retry.sh 3 bun install --frozen-lockfile --ignore-scripts
+      # biome.json is configured and the tree is clean, but nothing ran it — `lint` is tsc.
+      # Before the build on purpose: biome honours .gitignore, so the generated orval client
+      # and paraglide messages are out of scope either way, and this fails in a second.
+      - name: Biome (format + lint)
+        run: bun run check
       # Build first: it generates the orval API client + paraglide messages that
       # typechecking imports.
       - name: Build
@@ -416,11 +450,15 @@ jobs:
       - name: Install git + CA certs
         run: apt-get update && apt-get install -y --no-install-recommends ca-certificates git
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Typecheck SDK
+      # Both suites run here, not only on a `sdk-v*` / `plugin-kit-v*` publish tag: 25 test files
+      # gating the client, the runner CLI and the plugin runtime, for ~5 s. On the tag alone a
+      # break surfaces a whole release cycle after the commit that caused it.
+      - name: Typecheck + test SDK
         working-directory: sdk
         run: |
           bash ../scripts/ci/retry.sh 3 bun install --frozen-lockfile --ignore-scripts
           bun run typecheck
+          bun run test
           bun run build
       # The generated client is committed so consumers never need the generator, which means it
       # can drift from api/openapi.json without anything noticing. This is the thing that notices:
@@ -433,7 +471,7 @@ jobs:
             echo "::error::sdk/src/gen/punktfunk.ts is stale — run 'bun run gen' in sdk/ and commit"
             exit 1
           }
-      - name: Typecheck plugin kit
+      - name: Typecheck + test plugin kit
         working-directory: plugin-kit
         run: |
           bash ../scripts/ci/retry.sh 3 bun install --frozen-lockfile --ignore-scripts
@@ -442,6 +480,7 @@ jobs:
             cp -R ../sdk node_modules/@punktfunk/host
           fi
           bun run typecheck
+          bun run test
 
   decky-typecheck:
     runs-on: ubuntu-24.04

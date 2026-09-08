@@ -468,12 +468,23 @@ public final class StreamViewController: StreamViewControllerBase {
         // the video reconfigure a mode switch performs anyway. Main-thread-only closure.
         var cachedMode = CGSize.zero
         var cachedAt = CACurrentMediaTime() - 1
-        streamView.currentHostMode = { [weak connection] in
+        // The DECODED frame's size, not the negotiated mode's: the two disagree whenever a host
+        // correctively acks a different mode (Windows falls back to an advertised one), and the
+        // presenter aspect-fits to the decoded size — so mapping touches through the mode would
+        // letterbox against a different rectangle and offset every tap for the session. The mode
+        // is the fallback until the first frame lands.
+        streamView.currentHostMode = { [weak self, weak connection] in
             let now = CACurrentMediaTime()
             if now - cachedAt > 0.25 {
-                guard let connection else { return .zero }
-                let mode = connection.currentMode()
-                cachedMode = CGSize(width: Double(mode.width), height: Double(mode.height))
+                if let decoded = self?.lastDecodedContentSize,
+                   decoded.width > 0, decoded.height > 0 {
+                    cachedMode = decoded
+                } else if let connection {
+                    let mode = connection.currentMode()
+                    cachedMode = CGSize(width: Double(mode.width), height: Double(mode.height))
+                } else {
+                    return .zero
+                }
                 cachedAt = now
             }
             return cachedMode
@@ -610,6 +621,14 @@ public final class StreamViewController: StreamViewControllerBase {
         }
         capture.start()
         inputCapture = capture
+        #if os(tvOS)
+        // tvOS has no click-to-capture and no pointer lock, so nothing here ever flips these the
+        // way `setCaptured` does on iOS — an attached Bluetooth mouse or keyboard had its motion,
+        // buttons, scroll and every key dropped while the handlers sat installed. A session IS the
+        // capture on this platform, so forwarding runs for as long as one does.
+        capture.setForwarding(true)
+        capture.gcMouseForwarding = true
+        #endif
         // Match-window (C3): when ON, follow the scene's pixel size so a resizable iPad scene
         // streams 1:1 (pixel-exact) instead of the presenter resampling a fixed-mode frame into it.
         // `viewDidLayoutSubviews` feeds it — covers Stage Manager / Split View resizes and rotation.
@@ -847,6 +866,12 @@ public final class StreamViewController: StreamViewControllerBase {
         let size = CGSize(width: width, height: height)
         guard size.width > 0, size.height > 0, size != lastDecodedContentSize else { return }
         lastDecodedContentSize = size
+        #if os(tvOS)
+        // A mid-stream flip to HDR reaches us as a new decoded format, and the display-criteria
+        // request is otherwise only attempted from layout — which a full-screen tvOS session
+        // never runs again, so the TV stayed in its SDR mode for the rest of the session.
+        applyDisplayCriteriaIfNeeded()
+        #endif
         presenter.setContentSize(size)
         layoutMetalLayer()
     }

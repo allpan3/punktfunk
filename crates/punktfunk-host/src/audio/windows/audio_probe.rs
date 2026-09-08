@@ -460,7 +460,7 @@ fn remove_devnode(inst: &str) {
             o.status.code(),
             String::from_utf8_lossy(&o.stderr).trim()
         ),
-        Err(e) => println!("audio-probe: could not run pnputil for {inst}: {e}"),
+        Err(e) => println!("audio-probe: pnputil did not run for {inst}: {e}"),
     }
 }
 
@@ -697,7 +697,7 @@ fn restore_defaults(prev_render: Option<String>, prev_capture: Option<String>) {
         if audio_control::default_render_id().as_deref() != Some(prev.as_str()) {
             match audio_control::set_default_endpoint(&prev) {
                 Ok(()) => println!("audio-probe: default playback restored"),
-                Err(e) => println!("audio-probe: could not restore default playback: {e:#}"),
+                Err(e) => println!("audio-probe: default playback not restored: {e:#}"),
             }
         }
     }
@@ -705,7 +705,7 @@ fn restore_defaults(prev_render: Option<String>, prev_capture: Option<String>) {
         if audio_control::default_capture_id().as_deref() != Some(prev.as_str()) {
             match audio_control::set_default_endpoint(&prev) {
                 Ok(()) => println!("audio-probe: default recording restored"),
-                Err(e) => println!("audio-probe: could not restore default recording: {e:#}"),
+                Err(e) => println!("audio-probe: default recording not restored: {e:#}"),
             }
         }
     }

@@ -125,7 +125,7 @@ pub(crate) async fn set_session_settings(
     if let Err(e) = crate::session_settings::store().set(settings) {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("persist session settings: {e:#}"),
+            &format!("Couldn't save the session settings — {e:#}"),
         );
     }
     let state = session_settings_state();

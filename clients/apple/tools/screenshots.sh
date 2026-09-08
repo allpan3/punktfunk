@@ -145,7 +145,9 @@ shoot_sim() {
   # PF_SHOT_DERIVED_DATA (optional): a STABLE DerivedData root, so repeat runs reuse the
   # incremental build instead of cold-building into a throwaway tmpdir — CI pins this
   # (apple.yml); local runs keep the self-cleaning mktemp default.
-  local dd; dd="${PF_SHOT_DERIVED_DATA:-$(mktemp -d)}"; mkdir -p "$dd"
+  local dd owned=0
+  if [ -n "${PF_SHOT_DERIVED_DATA:-}" ]; then dd="$PF_SHOT_DERIVED_DATA"; else dd="$(mktemp -d)"; owned=1; fi
+  mkdir -p "$dd"
   # tvOS-SIMULATOR trap (Xcode 26.6 and the 27 beta, local only so far): the build planner
   # schedules the SwiftPM MACRO plugin targets that swiftui-navigation-transitions pulls in
   # (OnceMacro/SwizzlingMacro/AssociationMacro) for the *tvOS* triple and never plans their
@@ -164,16 +166,21 @@ shoot_sim() {
 
   for scene in "${SCENES[@]}"; do
     xcrun simctl terminate "$udid" "$BUNDLE_ID" 2>/dev/null || true
-    SIMCTL_CHILD_PUNKTFUNK_SHOT_SCENE="$scene" \
-      ${PUNKTFUNK_SHOT_HERO:+SIMCTL_CHILD_PUNKTFUNK_SHOT_HERO="$PUNKTFUNK_SHOT_HERO"} \
-      xcrun simctl launch "$udid" "$BUNDLE_ID" >/dev/null
+    # `env` with an array: bash decides what is an assignment BEFORE expanding, so a
+    # ${VAR:+NAME=...} word would be run as the command name instead.
+    local envs=("SIMCTL_CHILD_PUNKTFUNK_SHOT_SCENE=$scene")
+    [ -n "${PUNKTFUNK_SHOT_HERO:-}" ] \
+      && envs+=("SIMCTL_CHILD_PUNKTFUNK_SHOT_HERO=$PUNKTFUNK_SHOT_HERO")
+    env "${envs[@]}" xcrun simctl launch "$udid" "$BUNDLE_ID" >/dev/null
     sleep "$SETTLE"
     local dest="$OUT/$prefix-$scene.png"
     xcrun simctl io "$udid" screenshot "$dest" >/dev/null
     log "$prefix/$scene → $dest ($(pixels "$dest"))"
   done
   xcrun simctl terminate "$udid" "$BUNDLE_ID" 2>/dev/null || true
-  rm -rf "$dd"
+  # Only the mktemp default is ours to delete. A caller's pinned root is the incremental
+  # build CI reuses across the three invocations.
+  if [ "$owned" = 1 ]; then rm -rf "$dd"; fi
 }
 
 pixels() { sips -g pixelWidth -g pixelHeight "$1" 2>/dev/null | awk '/pixel/{print $2}' | paste -sd× -; }

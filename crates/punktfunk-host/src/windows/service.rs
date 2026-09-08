@@ -356,7 +356,7 @@ fn supervise(stop: HANDLE, session_ev: HANDLE) -> Result<()> {
             Err(e) => {
                 tracing::error!(
                     session,
-                    "failed to launch host into the active console session: {e:#}"
+                    "launch the host into the active console session: {e:#}"
                 );
                 // A host that never starts is the boot loop the rollback exists for.
                 restarts += 1;
@@ -859,7 +859,7 @@ impl WebSlot {
                 self.child = Some(child);
             }
             Err(e) => {
-                tracing::error!("failed to launch the web console: {e:#}");
+                tracing::error!("web console did not launch: {e:#}");
                 self.schedule_retry();
             }
         }
@@ -1135,7 +1135,7 @@ fn install(args: &[String]) -> Result<()> {
         });
     match recovery {
         Ok(()) => println!("Crash recovery: the SCM restarts the service at 1s/5s/60s."),
-        Err(e) => eprintln!("warning: could not set the service recovery actions: {e}"),
+        Err(e) => eprintln!("warning: service recovery actions not set: {e}"),
     }
 
     ensure_default_host_env()?;
@@ -1298,7 +1298,7 @@ fn apply_gamestream_choice(enable: bool) {
     };
     let Ok(text) = std::fs::read_to_string(&path) else {
         eprintln!(
-            "warning: could not read {} to apply the GameStream choice",
+            "warning: {} not read, so the GameStream choice is unapplied",
             path.display()
         );
         return;
@@ -1329,7 +1329,7 @@ fn apply_gamestream_choice(enable: bool) {
     out.push('\n');
     // `write_secret_file` re-asserts the SYSTEM/Administrators DACL.
     if let Err(e) = pf_paths::write_secret_file(&path, out.as_bytes()) {
-        eprintln!("warning: could not write {}: {e}", path.display());
+        eprintln!("warning: {} not written: {e}", path.display());
         return;
     }
     println!(
@@ -1448,7 +1448,7 @@ fn add_firewall_rules(allow_public: bool) {
             };
             println!("Firewall rule added: {name} ({ports}{scope}) [{profile}]");
         } else {
-            eprintln!("warning: could not add firewall rule '{name}' (add it manually if needed)");
+            eprintln!("warning: firewall rule '{name}' not added (add it manually if needed)");
         }
     }
     add_data_plane_firewall_rule(profile, exe.as_deref());
@@ -1707,7 +1707,7 @@ fn maybe_boot_loop_rollback(restarts: u32, attempted: &mut bool) {
     {
         // Detached: it stops this service and reinstalls the previous version.
         Ok(child) => drop(child),
-        Err(e) => tracing::error!(error = %e, "failed to spawn the rollback installer"),
+        Err(e) => tracing::error!(error = %e, "rollback installer did not spawn"),
     }
 }
 

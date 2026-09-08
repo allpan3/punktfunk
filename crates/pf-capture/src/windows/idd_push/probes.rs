@@ -241,7 +241,7 @@ impl ProbeEngine {
 
 fn spawn_detached(name: &str, f: impl FnOnce() + Send + 'static) {
     if let Err(e) = std::thread::Builder::new().name(name.into()).spawn(f) {
-        tracing::debug!(name, error = %e, "micro-probe thread failed to spawn — probe absent");
+        tracing::debug!(name, error = %e, "micro-probe thread not spawned — probe absent");
     }
 }
 

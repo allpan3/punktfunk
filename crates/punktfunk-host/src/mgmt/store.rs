@@ -21,7 +21,7 @@ where
         tracing::error!("plugin-store worker panicked: {e}");
         api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "the plugin store worker failed",
+            "The plugin store stopped responding",
         )
     })
 }
@@ -450,7 +450,7 @@ pub(crate) async fn install_plugin(ApiJson(req): ApiJson<InstallRequest>) -> Res
                 if let Some(reason) = entry.incompatible_reason() {
                     return api_error(
                         StatusCode::BAD_REQUEST,
-                        &format!("this plugin cannot run on this host: {reason}"),
+                        &format!("This plugin can't run on this host — {reason}"),
                     );
                 }
                 match jobs::Plan::from_entry(&entry, source, verified) {

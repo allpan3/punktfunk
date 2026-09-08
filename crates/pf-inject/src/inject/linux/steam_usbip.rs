@@ -417,8 +417,8 @@ fn attach_via_cli(dev: UsbDevice, label: &str) -> Result<UsbipAttachment> {
 
     let before = vhci_used_ports();
     usbip_attach_cli().context("usbip CLI attach")?;
-    let vhci_port = wait_for_new_port(&before)
-        .context("could not determine the vhci port the usbip CLI attached to")?;
+    let vhci_port =
+        wait_for_new_port(&before).context("determine the vhci port the usbip CLI attached to")?;
 
     tracing::info!(
         label,

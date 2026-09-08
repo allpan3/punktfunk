@@ -101,6 +101,38 @@ on:
       - 'Cargo.toml'
       - '.gitea/workflows/windows-host.yml'
     tags: ['v*']
+  # Same paths as the push leg, driving the lint-only `pr-lint` job below. Until this existed the
+  # workflow ran on `main` alone, so the Windows-only half of punktfunk-host, pf-encode-win,
+  # pf-inject, pf-win-display and pf-vdisplay's Windows arm first met a compiler AFTER merge —
+  # the hole four separate paths-list patches kept re-plugging one crate at a time.
+  # Keep this list in step with the push leg above; the comments there say why each entry is here.
+  pull_request:
+    paths:
+      - 'crates/punktfunk-host/**'
+      - 'crates/punktfunk-core/**'
+      - 'crates/punktfunk-tray/**'
+      - 'crates/pf-encode/**'
+      - 'crates/pf-encode-win/**'
+      - 'crates/libvpl-sys/**'
+      - 'crates/pf-frame/**'
+      - 'crates/pf-gpu/**'
+      - 'crates/pf-zerocopy/**'
+      - 'crates/pf-host-config/**'
+      - 'crates/pf-capture/**'
+      - 'crates/pf-win-display/**'
+      - 'crates/pf-vdisplay/**'
+      - 'crates/pf-inject/**'
+      - 'crates/pf-paths/**'
+      - 'crates/pf-driver-proto/**'
+      - 'crates/pf-clipboard/**'
+      - 'crates/pyrowave-sys/**'
+      - 'packaging/windows/**'
+      - 'scripts/windows/**'
+      - 'web/**'
+      - 'sdk/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - '.gitea/workflows/windows-host.yml'
   workflow_dispatch:
     inputs:
       publish:
@@ -123,8 +155,82 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
+  # SECURITY: this runner is host-mode, persistent, and shared with the release-signing jobs, so a
+  # pull request must never reach it with the packaging steps' secrets. `pr-lint` below is the only
+  # job a PR runs, it is fail-closed to same-repo PRs, and `package` stays off PRs entirely.
+  # See windows-client.yml for the full rationale.
+  pr-lint:
+    runs-on: windows-amd64
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Ensure Windows toolchain (WDK, Inno Setup, ARM64 target)
+        run: ./scripts/ci/ensure-windows-toolchain.ps1
+
+      - name: Configure
+        # Same two knobs the package job sets, and for the same reasons: CARGO_TARGET_DIR=C:\t
+        # dodges the MAX_PATH wall in the CMake-from-source crates, and CMake 4.x refuses the
+        # vendored opus' `cmake_minimum_required < 3.5` without the policy floor. Reusing C:\t
+        # rather than a lint-only tree is deliberate — a second dep tree on this runner is the
+        # C1069 disk-exhaustion trigger, and cargo's own lock serialises us against a `main` build.
+        run: |
+          "CARGO_TARGET_DIR=C:\t" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CMAKE_POLICY_VERSION_MINIMUM=3.5" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: sccache preflight (a dead cache costs a cold build, not the leg)
+        # Verbatim from the package job: storage.unom.io has answered the daemon's startup check
+        # with a 401, which kills cargo at `rustc -vV` before a line compiles.
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $stats = & sccache --show-stats 2>&1
+          $code = $LASTEXITCODE
+          $stats | Select-Object -First 12 | Write-Output
+          if ($code -ne 0) {
+            Write-Warning "sccache daemon failed to start - building this leg without the cache"
+            "RUSTC_WRAPPER=" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+
+      - name: Clippy (Windows host subsystem)
+        # --release and --locked for the same reasons as the package job: reuse C:\t\release
+        # instead of spawning a second dep tree, and resolve the graph that is committed.
+        # pf-encode-win, pf-inject and pf-win-display are here because they appear in no other
+        # workflow's -p list at all — their Windows `#[test]`s reached no compiler anywhere.
+        # pf-encode-win takes nvenc,qsv and not pyrowave: this lane never builds the PyroWave
+        # C++ tree, and the drivers lane already compiles that backend.
+        run: |
+          cargo clippy --release --locked -p punktfunk-host --features nvenc,qsv --target x86_64-pc-windows-msvc -- -D warnings; if ($LASTEXITCODE) { throw "host clippy" }
+          cargo clippy --release --locked -p pf-encode --all-targets --features nvenc,qsv --target x86_64-pc-windows-msvc -- -D warnings; if ($LASTEXITCODE) { throw "pf-encode clippy" }
+          cargo clippy --release --locked -p pf-encode-win --all-targets --features nvenc,qsv --target x86_64-pc-windows-msvc -- -D warnings; if ($LASTEXITCODE) { throw "pf-encode-win clippy" }
+          cargo clippy --release --locked -p pf-capture --all-targets --target x86_64-pc-windows-msvc -- -D warnings; if ($LASTEXITCODE) { throw "pf-capture clippy" }
+          cargo clippy --release --locked -p pf-vdisplay --all-targets --target x86_64-pc-windows-msvc -- -D warnings; if ($LASTEXITCODE) { throw "pf-vdisplay clippy" }
+          cargo clippy --release --locked -p pf-win-display --all-targets --target x86_64-pc-windows-msvc -- -D warnings; if ($LASTEXITCODE) { throw "pf-win-display clippy" }
+          cargo clippy --release --locked -p pf-inject --all-targets --target x86_64-pc-windows-msvc -- -D warnings; if ($LASTEXITCODE) { throw "pf-inject clippy" }
+          cargo clippy --release --locked -p punktfunk-tray --target x86_64-pc-windows-msvc -- -D warnings; if ($LASTEXITCODE) { throw "tray clippy" }
+
+      - name: Format check
+        # Cheap, needs no compile, and the Linux lane cannot see these crates' Windows modules.
+        run: cargo fmt -p punktfunk-host -p pf-encode -p pf-encode-win -p pf-capture -p pf-vdisplay -p pf-win-display -p pf-inject -p punktfunk-tray --check
+
+      - name: Test (pf-capture + pf-vdisplay, Windows)
+        # The two crates whose Windows test binaries link against nothing this runner lacks —
+        # settled empirically when the package job's equivalents were added. The host and
+        # pf-encode(-win) stay clippy-only: nvidia-video-codec-sdk cannot link on MSVC.
+        run: |
+          cargo test --release --locked -p pf-capture --target x86_64-pc-windows-msvc; if ($LASTEXITCODE) { throw "pf-capture tests" }
+          cargo test --release --locked -p pf-vdisplay --target x86_64-pc-windows-msvc; if ($LASTEXITCODE) { throw "pf-vdisplay tests" }
+
   package:
     runs-on: windows-amd64
+    # Never on a pull request: every step below this job's tests packages, signs or publishes, and
+    # the PR lane above covers the compile question without touching a secret.
+    if: github.event_name != 'pull_request'
     timeout-minutes: 90
     # The arm64 leg must never hold back the x64 canary (and its update manifest) while it is
     # unproven on hardware; drop the override once a Snapdragon box has run it.
@@ -224,12 +330,12 @@ jobs:
         # x64 = all-vendor host: NVENC (NVIDIA, direct SDK) + native QSV (Intel, static VPL
         # dispatcher) + native AMF (AMD, always compiled in).
         # arm64 = gamestream only; the driver's Media Foundation backend carries no feature.
-        run: cargo build --release -p punktfunk-host ${{ matrix.host_flags }} --target ${{ matrix.target }}
+        run: cargo build --release --locked -p punktfunk-host ${{ matrix.host_flags }} --target ${{ matrix.target }}
 
       - name: Build (release, status tray)
         shell: pwsh
         # The per-user notification-area companion the installer bundles (punktfunk-tray.exe).
-        run: cargo build --release -p punktfunk-tray --target ${{ matrix.target }}
+        run: cargo build --release --locked -p punktfunk-tray --target ${{ matrix.target }}
 
       - name: Clippy (host + tray, Windows)
         shell: pwsh
@@ -244,10 +350,12 @@ jobs:
         # openh264 rebuild), and keeps everything in one C:\t\release tree. Same reason
         # pf-vkhdr-layer's clippy below runs --release.
         #
-        # pf-encode, pf-capture and pf-vdisplay are linted SEPARATELY with --all-targets so their
-        # Windows `#[cfg(test)]` modules are type-checked — pf-encode's AMF C-ABI layout assertions
-        # (`variant_layout_matches_c` and friends, which are the only guard on a hand-mirrored
-        # vtable ABI), the QSV tests, the PyroWave-Windows smoke test; pf-capture's `StallWatch`
+        # The subsystem crates are linted SEPARATELY with --all-targets so their Windows
+        # `#[cfg(test)]` modules are type-checked. NOTE the AMF C-ABI layout assertions, the QSV
+        # tests and the PyroWave-Windows smoke test moved to pf-encode-win in the 2026-09-03 split
+        # (b3f56f32a) — this step claimed them for months after they had left, which is how
+        # pf-encode-win, pf-inject and pf-win-display ended up in no -p list in any workflow.
+        # They are on the line below now. What stays here: pf-capture's `StallWatch`
         # tests, the DXGI HDR self-tests and the cursor-conversion tables. The host lint above
         # cannot cover them: `-p punktfunk-host` only builds those crates as dependencies, so their
         # test targets are never compiled anywhere, and that blind spot is what let the Linux twin's
@@ -269,11 +377,14 @@ jobs:
         # execute, so linting them was leaving real coverage on the table. See the run step below.
         run: |
           $t = '${{ matrix.target }}'
-          cargo clippy --release -p punktfunk-host ${{ matrix.host_flags }} --target $t -- -D warnings; if ($LASTEXITCODE) { throw "host clippy" }
-          cargo clippy --release -p pf-encode --all-targets ${{ matrix.encode_flags }} --target $t -- -D warnings; if ($LASTEXITCODE) { throw "pf-encode clippy" }
-          cargo clippy --release -p pf-capture --all-targets --target $t -- -D warnings; if ($LASTEXITCODE) { throw "pf-capture clippy" }
-          cargo clippy --release -p pf-vdisplay --all-targets --target $t -- -D warnings; if ($LASTEXITCODE) { throw "pf-vdisplay clippy" }
-          cargo clippy --release -p punktfunk-tray --target $t -- -D warnings; if ($LASTEXITCODE) { throw "tray clippy" }
+          cargo clippy --release --locked -p punktfunk-host ${{ matrix.host_flags }} --target $t -- -D warnings; if ($LASTEXITCODE) { throw "host clippy" }
+          cargo clippy --release --locked -p pf-encode --all-targets ${{ matrix.encode_flags }} --target $t -- -D warnings; if ($LASTEXITCODE) { throw "pf-encode clippy" }
+          cargo clippy --release --locked -p pf-encode-win --all-targets ${{ matrix.encode_flags }} --target $t -- -D warnings; if ($LASTEXITCODE) { throw "pf-encode-win clippy" }
+          cargo clippy --release --locked -p pf-capture --all-targets --target $t -- -D warnings; if ($LASTEXITCODE) { throw "pf-capture clippy" }
+          cargo clippy --release --locked -p pf-vdisplay --all-targets --target $t -- -D warnings; if ($LASTEXITCODE) { throw "pf-vdisplay clippy" }
+          cargo clippy --release --locked -p pf-win-display --all-targets --target $t -- -D warnings; if ($LASTEXITCODE) { throw "pf-win-display clippy" }
+          cargo clippy --release --locked -p pf-inject --all-targets --target $t -- -D warnings; if ($LASTEXITCODE) { throw "pf-inject clippy" }
+          cargo clippy --release --locked -p punktfunk-tray --target $t -- -D warnings; if ($LASTEXITCODE) { throw "tray clippy" }
 
       - name: Test (pf-capture, Windows)
         if: matrix.arch == 'x64'
@@ -296,7 +407,7 @@ jobs:
         # command was run on a Windows dev box against a workspace checkout and linked + executed
         # cleanly, building in ~51 s off an existing release target dir.
         run: |
-          cargo test --release -p pf-capture --target ${{ matrix.target }}; if ($LASTEXITCODE) { throw "pf-capture tests" }
+          cargo test --release --locked -p pf-capture --target ${{ matrix.target }}; if ($LASTEXITCODE) { throw "pf-capture tests" }
 
       - name: Test (pf-vdisplay, Windows)
         if: matrix.arch == 'x64'
@@ -319,7 +430,7 @@ jobs:
         # Note this DOES build a second, featureless pf-encode; it is small precisely because none
         # of the encoder features are on.
         run: |
-          cargo test --release -p pf-vdisplay --target ${{ matrix.target }}; if ($LASTEXITCODE) { throw "pf-vdisplay tests" }
+          cargo test --release --locked -p pf-vdisplay --target ${{ matrix.target }}; if ($LASTEXITCODE) { throw "pf-vdisplay tests" }
 
       - name: Build + lint the HDR Vulkan layer (pf-vkhdr-layer)
         shell: pwsh
@@ -330,7 +441,7 @@ jobs:
         run: |
           Push-Location packaging/windows/pf-vkhdr-layer
           cargo fmt --check; if ($LASTEXITCODE) { throw "pf-vkhdr-layer rustfmt" }
-          cargo clippy --release --target ${{ matrix.target }} -- -D warnings; if ($LASTEXITCODE) { throw "pf-vkhdr-layer clippy" }
+          cargo clippy --release --locked --target ${{ matrix.target }} -- -D warnings; if ($LASTEXITCODE) { throw "pf-vkhdr-layer clippy" }
           Pop-Location
 
       # The console output is fully self-contained (Nitro noExternals) and most pushes

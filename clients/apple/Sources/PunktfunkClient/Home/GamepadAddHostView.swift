@@ -331,26 +331,24 @@ struct GamepadAddHostView: View {
     private func activate(id: String) {
         switch id {
         case "add":
-            guard canAdd else {
-                // Not addable yet — jump straight to what's missing instead of a dead press.
-                focusID = "address"
-                openKeyboard("address")
+            // Not addable yet — open the field that is actually wrong. Always sending the user
+            // to the address meant a bad PORT looked like a dead press with nothing to fix.
+            if let problem = draft.problem {
+                let field = problem == .badPort ? "port" : "address"
+                focusID = field
+                openKeyboard(field)
                 return
             }
-            let typedName = name.trimmingCharacters(in: .whitespaces)
-            let typedAddress = address.trimmingCharacters(in: .whitespaces)
-            let typedPort = UInt16(port) ?? 9777
             if var host = editingHost {
                 // Mutate a COPY of the stored record rather than building a fresh one: everything
                 // this form does not show — the pinned fingerprint, WoL MACs, pinned profile
                 // cards, the default binding, `addedAt` — has to survive a rename.
-                host.name = typedName
-                host.address = typedAddress
-                host.port = typedPort
+                draft.apply(to: &host)
                 onAdd(host)
             } else {
-                onAdd(StoredHost(
-                    name: typedName, address: typedAddress, port: typedPort))
+                var host = StoredHost(name: "", address: "")
+                draft.apply(to: &host)
+                onAdd(host)
             }
             performClose()
         default:
@@ -358,10 +356,11 @@ struct GamepadAddHostView: View {
         }
     }
 
-    private var canAdd: Bool {
-        !address.trimmingCharacters(in: .whitespaces).isEmpty
-            && UInt16(port).map { $0 > 0 } == true
+    /// The same rules the pointer sheet uses — see `HostFormDraft`.
+    private var draft: HostFormDraft {
+        HostFormDraft(name: name, address: address, port: port)
     }
+    private var canAdd: Bool { draft.canSave }
 
     private func openKeyboard(_ id: String) {
         withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { editing = id }

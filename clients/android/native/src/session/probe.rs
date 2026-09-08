@@ -41,7 +41,7 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeSpeedTest(
         match h.client.request_probe(target, duration) {
             Ok(()) => true,
             Err(e) => {
-                log::warn!("speed test: could not ask the host to probe: {e:?}");
+                log::warn!("speed test: probe request: {e:?}");
                 false
             }
         }

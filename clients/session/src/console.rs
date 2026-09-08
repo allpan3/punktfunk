@@ -21,7 +21,7 @@ use pf_client_core::gamepad::is_steam_deck;
 use pf_client_core::{discovery, library, start, trust, wol};
 use pf_console_ui::{
     ConsoleCmd, ConsoleEntry, ConsoleHandles, ConsoleOptions, ConsoleShared, HostRow, LibraryGame,
-    LibraryPhase, LibraryShared, PairPhase, SkiaOverlay, WakeStatus,
+    LibraryPhase, LibraryShared, PairPhase, SkiaOverlay, SpeedPhase, WakeStatus,
 };
 use pf_presenter::overlay::OverlayAction;
 use pf_presenter::ActionOutcome;
@@ -601,6 +601,50 @@ impl ServiceState {
                     })
                     .ok();
             }
+            ConsoleCmd::SpeedTest {
+                key,
+                addr,
+                port,
+                fp_hex,
+                host_name,
+            } => {
+                // A worker like every other command here, but a long one: the probe opens
+                // its own session and bursts for two seconds. The shell already raised the
+                // takeover, so this only advances the phase.
+                let identity = self.identity.clone();
+                let console = self.console.clone();
+                std::thread::Builder::new()
+                    .name("punktfunk-speedtest".into())
+                    .spawn(move || {
+                        console.advance_speed(&key, SpeedPhase::Measuring);
+                        let fp = (!fp_hex.is_empty()).then_some(fp_hex.as_str());
+                        match pf_client_core::speed::run_speed_probe(&addr, port, fp, identity) {
+                            Ok(r) => {
+                                tracing::info!(
+                                    host = %host_name,
+                                    kbps = r.throughput_kbps,
+                                    loss = r.loss_pct,
+                                    "speed test finished"
+                                );
+                                console.advance_speed(
+                                    &key,
+                                    SpeedPhase::Done {
+                                        throughput_kbps: r.throughput_kbps,
+                                        loss_pct: r.loss_pct,
+                                        recommended_kbps: pf_client_core::speed::recommended_kbps(
+                                            r.throughput_kbps,
+                                        ),
+                                    },
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(host = %host_name, error = %e, "speed test failed");
+                                console.advance_speed(&key, SpeedPhase::Failed(e));
+                            }
+                        }
+                    })
+                    .ok();
+            }
             ConsoleCmd::HostAction {
                 addr,
                 mgmt,
@@ -924,6 +968,9 @@ impl ServiceState {
             id: p.id.clone(),
             name: p.name.clone(),
             accent: p.accent.clone(),
+            // Only the speed test reads this: a profile that PINS bitrate is the layer its
+            // host streams at, so the console must not offer to write the global instead.
+            bitrate_kbps: p.overrides.bitrate_kbps,
         };
         // Primary rows paired with their pinned cards, so the sort below can order hosts
         // while every host's cards stay glued behind its primary tile.

@@ -70,6 +70,9 @@ pub struct D3d11Frame {
     pub rgb10: bool,
     /// Intra (IDR/I) — the pump's post-loss re-anchor. See [`crate::video::DecodedImage::is_keyframe`].
     pub keyframe: bool,
+    /// Whole prediction chain was fully available. Corroborates a host
+    /// `USER_FLAG_RECOVERY_ANCHOR`: see [`crate::video::DecodedImage::anchor_evidence`].
+    pub references_clean: bool,
     /// Slot NT handle (`CreateSharedHandle`), stable for the ring's lifetime. Raw `isize` so
     /// the frame can cross the pump→presenter channel.
     pub handle: isize,
@@ -400,6 +403,8 @@ pub(crate) struct HandoffSource<'a> {
     pub color: ColorDesc,
     /// Intra (IDR/I) — the pump's post-loss re-anchor.
     pub keyframe: bool,
+    /// Whole prediction chain was fully available — see [`D3d11Frame::references_clean`].
+    pub references_clean: bool,
     /// Decoder name for [`log_layout_once`]; the key includes it so a demotion logs the new rung.
     pub decoder: &'a str,
 }
@@ -457,6 +462,7 @@ impl HandoffRing {
             height,
             color,
             keyframe,
+            references_clean,
             decoder,
         } = source;
         // AddRef'd locals so the mutable `ring` borrow below doesn't lock all of `self`.
@@ -610,6 +616,7 @@ impl HandoffRing {
                 },
                 rgb10: ring.pq_out,
                 keyframe,
+                references_clean,
                 handle,
                 generation,
             })

@@ -245,7 +245,7 @@ jobs:
       # cc-rs's cl.exe fan-out, which is what tips this runner into C1069 (see the header).
       - name: Build (release)
         shell: pwsh
-        run: cargo build --release -p punktfunk-client-windows -p punktfunk-client-session -p punktfunk-cli ${{ matrix.session_flags }} --target ${{ matrix.target }}
+        run: cargo build --release --locked -p punktfunk-client-windows -p punktfunk-client-session -p punktfunk-cli ${{ matrix.session_flags }} --target ${{ matrix.target }}
 
       - name: Clippy (-D warnings)
         shell: pwsh
@@ -256,7 +256,7 @@ jobs:
           $pkgs = @('-p','punktfunk-client-windows','-p','punktfunk-client-session','-p','punktfunk-cli','-p','pf-client-core','-p','pf-presenter','-p','pf-bitstream','-p','pf-vkdecode','-p','pf-dxvadec')
           $sf = @()
           if ('${{ matrix.target }}' -eq 'aarch64-pc-windows-msvc') { $sf = @('--no-default-features') } else { $pkgs += @('-p','pf-console-ui') }
-          cargo clippy --release @pkgs --all-targets @sf --target ${{ matrix.target }} -- -D warnings
+          cargo clippy --release --locked @pkgs --all-targets @sf --target ${{ matrix.target }} -- -D warnings
           if ($LASTEXITCODE) { throw "clippy" }
 
       - name: Rustfmt check
@@ -271,7 +271,7 @@ jobs:
         if: matrix.arch == 'x64'
         shell: pwsh
         run: |
-          cargo test --release -p punktfunk-client-windows -p punktfunk-client-session -p punktfunk-cli -p pf-client-core -p pf-presenter -p pf-console-ui -p pf-dxvadec --target ${{ matrix.target }}
+          cargo test --release --locked -p punktfunk-client-windows -p punktfunk-client-session -p punktfunk-cli -p pf-client-core -p pf-presenter -p pf-console-ui -p pf-dxvadec --target ${{ matrix.target }}
           if ($LASTEXITCODE) { throw "tests" }
 
       - name: sccache stats (visibility only)

@@ -173,7 +173,7 @@ mod imp {
             &EventHandler::<RawGameController>::new(|_, _| Ok(())),
         );
         if gp_tok.is_err() || raw_tok.is_err() {
-            eprintln!("warning: could not subscribe to WGI Added events; counts may read zero");
+            eprintln!("warning: WGI Added subscription failed — counts may read zero");
         }
         std::thread::sleep(Duration::from_millis(1500));
     }
@@ -552,7 +552,7 @@ mod imp {
         // process.
         match unsafe { CoIncrementMTAUsage() } {
             Ok(_cookie) => {}
-            Err(e) => eprintln!("warning: could not start an MTA, WGI calls may fail: {e}"),
+            Err(e) => eprintln!("warning: MTA start failed — WGI calls may fail: {e}"),
         }
         wake_wgi();
 

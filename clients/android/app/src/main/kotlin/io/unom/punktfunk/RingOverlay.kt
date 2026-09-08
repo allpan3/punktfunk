@@ -289,7 +289,7 @@ private fun spec(slot: SlotId, cfg: OverlayConfig, a: RingActions): SlotSpec = w
         SlotSpec(
             "host:${slot.actionId}", act?.label ?: slot.actionId, icon,
             enabled = act?.available == true,
-            reason = act?.unavailableReason?.ifEmpty { null } ?: "This host does not offer it",
+            reason = act?.unavailableReason?.ifEmpty { null } ?: "This host doesn't offer it",
             armed = act?.danger ?: true,
         )
     }

@@ -51,7 +51,12 @@ extension SettingsView {
     func described<Content: View>(
         _ caption: String, field: String? = nil, @ViewBuilder content: () -> Content
     ) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
+        // A name the overlay does not model silently loses both the marker and its Reset, with no
+        // compile error to say so — the one-way door the marker exists to prevent. Caught here in
+        // debug rather than by noticing a missing badge.
+        assert(field.map { OverlayField.isModelled($0) } ?? true,
+               "described(field:) got \(field ?? "") — not a field SettingsOverlay models")
+        return VStack(alignment: .leading, spacing: 5) {
             content()
             Text(caption)
                 .font(.geist(13, relativeTo: .footnote))
@@ -102,8 +107,8 @@ extension SettingsView {
         let bitrate = scoped(SettingsFields.bitrateKbps)
         return Binding(
             get: {
-                let v = Double(bitrate.wrappedValue)
-                    .clamped(Self.minSliderKbps, Self.maxSliderKbps)
+                let v = min(max(Double(bitrate.wrappedValue), Self.minSliderKbps),
+                            Self.maxSliderKbps)
                 return log(v / Self.minSliderKbps)
                     / log(Self.maxSliderKbps / Self.minSliderKbps)
             },

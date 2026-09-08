@@ -240,8 +240,10 @@ public final class GamepadManager: ObservableObject {
     /// hands the host the same pad twice. Held only while `Sc2Capture` has a claimed wire slot
     /// (`syncShadowSuppression`), never for its lifetime: an SC2 the capture cannot open must
     /// keep the ordinary path rather than be forwarded on neither.
-    var steamController2Suppressed = false {
-        didSet { if steamController2Suppressed != oldValue { rebuild() } }
+    /// COUNTED, not a flag: a second SC2 the capture never claimed would otherwise be dropped
+    /// here as well and forwarded on neither plane.
+    var steamController2Claims = 0 {
+        didSet { if steamController2Claims != oldValue { rebuild() } }
     }
 
     /// Whether a GameController device is the SC2 family's shadow. Keyed on the measured
@@ -272,8 +274,18 @@ public final class GamepadManager: ObservableObject {
     }
 
     private func reselect() {
+        // Suppress at most as many twins as the capture actually holds. They cannot be matched to
+        // their captured device from here, so the most recently connected ones are dropped, and a
+        // pad beyond the claim count keeps the ordinary path.
+        var remaining = steamController2Claims
+        var suppressed: Set<ObjectIdentifier> = []
+        for entry in controllers.reversed() where remaining > 0 {
+            guard Self.isSteamController2(entry.controller) else { continue }
+            suppressed.insert(ObjectIdentifier(entry.controller))
+            remaining -= 1
+        }
         let candidates = controllers.filter {
-            $0.isExtended && !(steamController2Suppressed && Self.isSteamController2($0.controller))
+            $0.isExtended && !suppressed.contains(ObjectIdentifier($0.controller))
         }
         // The pin wins when present; otherwise the most recently connected extended pad
         // (list is in connect order). A stale pin falls back to automatic.

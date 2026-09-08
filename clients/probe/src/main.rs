@@ -1326,7 +1326,7 @@ async fn session(args: Args) -> Result<()> {
             let mut audio_out = audio_out_path.as_deref().and_then(|p| {
                 std::fs::File::create(p)
                     .map(std::io::BufWriter::new)
-                    .map_err(|e| tracing::error!(path = p, error = %e, "cannot open --audio-out"))
+                    .map_err(|e| tracing::error!(path = p, error = %e, "--audio-out did not open"))
                     .ok()
             });
             // Raw interleaved f32 LE, so the reader needs no container — the rate and channel

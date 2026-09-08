@@ -164,7 +164,8 @@ pub fn register(reg: Registration) -> LiveSessionGuard {
 
 /// Drops the registry entry for this session (any video-loop scope exit).
 pub struct LiveSessionGuard {
-    id: u64,
+    /// Same id `/status` reports; the video loop's log span names it.
+    pub(crate) id: u64,
     /// Sleep inhibit for the session lifetime: a passive viewer must not let
     /// the box auto-suspend ([`crate::sleep_inhibit`]).
     _sleep: crate::sleep_inhibit::StreamHold,

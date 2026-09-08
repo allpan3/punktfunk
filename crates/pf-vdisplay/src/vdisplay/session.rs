@@ -566,7 +566,7 @@ pub fn try_recover_session() -> bool {
         }
         Err(e) => {
             tracing::error!(cmd = %cmd, error = %e,
-                "session-recovery command failed to launch");
+                "the session-recovery command did not launch");
             false
         }
     }

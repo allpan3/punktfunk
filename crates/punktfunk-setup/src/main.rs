@@ -421,7 +421,7 @@ fn load_facts(
 ) -> Result<Facts, String> {
     if let Some(file) = &cli.facts_file {
         let text = std::fs::read_to_string(file)
-            .map_err(|e| format!("could not read {}: {e}", file.display()))?;
+            .map_err(|e| format!("couldn't read {}: {e}", file.display()))?;
         return serde_json::from_str(&text)
             .map_err(|e| format!("{} is not a Facts document: {e}", file.display()));
     }

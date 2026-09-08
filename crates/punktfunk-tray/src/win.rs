@@ -339,7 +339,7 @@ fn notify_on_connect(hwnd: HWND) {
                     "Streaming {}×{} @ {} fps",
                     sess.width, sess.height, sess.fps
                 ),
-                None => "A client is streaming from this host.".to_string(),
+                None => "A client is streaming from this host".to_string(),
             },
         ),
         _ => return, // is_streaming() implies Running

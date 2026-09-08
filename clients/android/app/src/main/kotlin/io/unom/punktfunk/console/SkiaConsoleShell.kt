@@ -78,6 +78,11 @@ fun SkiaConsoleShell(
     // input is held while it is up, and Back closes it.
     var platformScreen by remember { mutableStateOf<String?>(null) }
 
+    // The console's surface, once `factory` has built it. A Skia surface has no accessibility
+    // node tree, so the focused row is spoken through this view instead — the only thing a
+    // TalkBack user would otherwise get here is an opaque rectangle.
+    var consoleView by remember { mutableStateOf<SurfaceView?>(null) }
+
     val currentOnConnected by rememberUpdatedState(onConnected)
     val currentOnSettingsChange by rememberUpdatedState(onSettingsChange)
     DisposableEffect(handle) {
@@ -93,6 +98,12 @@ fun SkiaConsoleShell(
                     "confirm" -> haptics.confirm()
                     "boundary" -> haptics.boundary()
                 }
+            },
+            onAnnounce = { text ->
+                // Deprecated in favour of live regions, which need a node tree this surface
+                // cannot have. Still the only way to speak a Skia-drawn focus.
+                @Suppress("DEPRECATION")
+                consoleView?.announceForAccessibility(text)
             },
         )
         onDispose { SkiaConsole.detach() }
@@ -364,6 +375,7 @@ fun SkiaConsoleShell(
                         } else false
                     }
                     importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                    consoleView = this
                 }
             },
             // Applied here rather than in `factory` so flipping the setting takes effect without
@@ -464,9 +476,7 @@ private fun padAction(activity: MainActivity?, action: String, padKey: String) {
                     SkiaConsole.notice(
                         when {
                             r > 0 -> "Haptics test passed — $r frames to the pad."
-                            r == -1 ->
-                                "Could not open the pad's audio interface. Some kernels " +
-                                    "refuse it; the pad still works normally."
+                            r == -1 -> "Couldn't open the pad's haptics — the pad still works normally"
                             r == -2 -> "The audio stream stopped part-way."
                             else -> "The stream opened but no audio reached the pad."
                         },

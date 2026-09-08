@@ -61,7 +61,13 @@ struct AddHostSheet: View {
 
     private var isEditing: Bool { existing != nil }
     private var actionTitle: String { isEditing ? "Save" : "Add Host" }
-    private var canSave: Bool { !address.trimmingCharacters(in: .whitespaces).isEmpty }
+    /// One rule for every host form (see `HostFormDraft`): a blank port means the default, an
+    /// out-of-range one is refused rather than silently clamped, and a pasted `address:port` is
+    /// split rather than stored whole.
+    private var draft: HostFormDraft {
+        HostFormDraft(name: name, address: address, port: String(port))
+    }
+    private var canSave: Bool { draft.canSave }
 
     init(existing: StoredHost? = nil, suggestedMacs: [String] = [], onSave: @escaping (StoredHost) -> Void) {
         self.existing = existing
@@ -278,9 +284,7 @@ struct AddHostSheet: View {
 
     private func save() {
         var host = existing ?? StoredHost(name: "", address: "")
-        host.name = name.trimmingCharacters(in: .whitespaces)
-        host.address = address.trimmingCharacters(in: .whitespaces)
-        host.port = UInt16(clamping: port)
+        draft.apply(to: &host)
         host.macAddresses = Self.parseMacs(mac)
         #if !os(tvOS)
         // nil when off: the key stays absent from the saved JSON (forward-compat, and "never

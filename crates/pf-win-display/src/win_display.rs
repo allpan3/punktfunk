@@ -805,7 +805,7 @@ pub fn set_active_mode(gdi_name: &str, mode: Mode) -> bool {
     }
     tracing::warn!(
         result = apply.0,
-        "{gdi_name}: failed to apply {}x{}@{} ({})",
+        "{gdi_name}: {}x{}@{} not applied ({})",
         mode.width,
         mode.height,
         chosen_hz,
@@ -1448,7 +1448,7 @@ pub fn isolate_displays_ccd_checked(
         .map(|t| format!("{} {} \"{}\"", t.key, t.tech, t.friendly))
         .collect();
     tracing::error!(
-        "display isolate (CCD): failed to isolate target set {keep:?} after 4 attempts — still active or unverifiable: [{}] (field-reported exclusive-mode bug)",
+        "display isolate (CCD): target set {keep:?} not isolated after 4 attempts — still active or unverifiable: [{}] (field-reported exclusive-mode bug)",
         survivors.join(", ")
     );
     Some((saved, IsolateOutcome::Unverified { attempts: 4 }))

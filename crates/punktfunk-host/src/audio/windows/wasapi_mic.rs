@@ -337,7 +337,7 @@ fn try_install_steam_audio(inf_name: &str) -> bool {
     let Ok(newdev) =
         (unsafe { LoadLibraryExW(w!("newdev.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) })
     else {
-        tracing::warn!("could not load newdev.dll — Steam-audio auto-install unavailable");
+        tracing::warn!("newdev.dll not loaded — Steam-audio auto-install unavailable");
         return false;
     };
     // SAFETY: `newdev` is the live module just loaded; the export name is a static literal.

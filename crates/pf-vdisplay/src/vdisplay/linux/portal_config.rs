@@ -202,7 +202,7 @@ pub(crate) fn ensure_key(path: &Path, block: Block<'_>, key: &str, value: &str) 
         Err(e) => {
             return Err(e).with_context(|| {
                 format!(
-                    "read {} (refusing to rewrite a portal config we could not read)",
+                    "read {} — refusing to rewrite an unread portal config",
                     path.display()
                 )
             })
@@ -247,7 +247,7 @@ pub(crate) fn ensure_key(path: &Path, block: Block<'_>, key: &str, value: &str) 
             Err(e) => tracing::warn!(
                 backup = %backup.display(),
                 error = %e,
-                "could not back up the existing portal config; editing it anyway"
+                "existing portal config not backed up — editing it anyway"
             ),
         }
     }

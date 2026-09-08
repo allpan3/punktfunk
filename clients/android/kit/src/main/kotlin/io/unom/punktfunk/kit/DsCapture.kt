@@ -308,7 +308,7 @@ class DsCapture(
         val fd = conn?.fileDescriptor ?: -1
         if (fd < 0) {
             conn?.close()
-            Log.w(TAG, "pad audio: could not open a second USB connection")
+            Log.w(TAG, "pad audio: second USB connection failed")
             return
         }
         padAudioConn = conn
@@ -350,7 +350,7 @@ class DsCapture(
         val m = model ?: return
         if (m == DsDevice.Model.DUALSHOCK4) return // no voice coils, no audio-haptics path
         if (!usb.writeControl(DsDevice.ds5AudioHapticsReport(m))) {
-            Log.w(TAG, "pad audio: could not hand the coils back to audio haptics")
+            Log.w(TAG, "pad audio: handing the coils back to audio haptics failed")
         }
     }
 

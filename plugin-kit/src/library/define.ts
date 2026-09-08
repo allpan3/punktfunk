@@ -335,7 +335,7 @@ export const defineLibraryPlugin = <S extends Schema.Top>(
 							JSON.parse(
 								fs.readFileSync(compare as string, "utf8"),
 							) as ReturnType<typeof fromHostEntry>[],
-						catch: (cause) => new Error(`cannot read ${compare}: ${cause}`),
+						catch: (cause) => new Error(`read ${compare}: ${cause}`),
 					});
 					const cfg = yield* (yield* config).load;
 					const { entries } = yield* computeEntries(cfg);

@@ -88,7 +88,7 @@ pub fn fetch_actions(
 /// `POST /api/v1/actions/{id}` with an empty body.
 ///
 /// `Ok(())` is 202 Accepted: the host then ends every session and acts ~1 s later.
-/// 4xx becomes [`crate::library::LibraryError::Unreachable`]; other failures go through [`crate::library::classify`].
+/// 4xx becomes [`crate::library::LibraryError::Http`]; other failures go through [`crate::library::classify`].
 #[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub fn invoke(
     addr: &str,
@@ -106,9 +106,9 @@ pub fn invoke(
     );
     match agent.post(&url).send_empty() {
         Ok(_) => Ok(()),
-        Err(ureq::Error::StatusCode(code)) if (400..500).contains(&code) => Err(
-            LibraryError::Unreachable(format!("the host refused ({code})")),
-        ),
+        Err(ureq::Error::StatusCode(code)) if (400..500).contains(&code) => {
+            Err(LibraryError::Http(code))
+        }
         Err(e) => Err(crate::library::classify(e)),
     }
 }

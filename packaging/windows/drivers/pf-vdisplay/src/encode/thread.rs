@@ -194,7 +194,7 @@ fn run(stop: HANDLE, ctx: ThreadCtx, live: Arc<AtomicBool>) {
         Ok(d) => d,
         Err(f) => return fail(wire::SET_ENCODE_NO_DEVICE, f),
     };
-    let (enc, spec, reply) = match open_listed(&ctx.session.request, &adapter, &device) {
+    let (mut enc, spec, reply) = match open_listed(&ctx.session.request, &adapter, &device) {
         Ok(x) => x,
         Err(reply) => {
             let _ = ctx.opened.send(reply);
@@ -231,6 +231,10 @@ fn run(stop: HANDLE, ctx: ThreadCtx, live: Arc<AtomicBool>) {
         if pool.bypass() { "bypass" } else { "pool" },
         ctx.session.request.target_id
     );
+    // What the pool guarantees, so a backend that can encode an input texture where it lies skips
+    // its own copy of every frame. A slot the encoder holds is in `encoding`, which no drain pass
+    // takes back until the AU is published.
+    enc.set_input_ring_depth(super::drive::MAX_INFLIGHT);
     section.store_u32(offset_of!(AuHeader, driver_status), DRV_STATUS_OPENED);
     section.store_u32(
         offset_of!(AuHeader, driver_status_detail),
@@ -324,6 +328,12 @@ pub fn open_backend(
             spec.codec, format, w, h, fps, bps, depth, chroma, 1, luid,
         )
         .and_then(|mut e| {
+            // The drive loop parks on handles, so the session opens async and hands its
+            // completion events out through `ready_event` — no retrieve thread, no sampling.
+            // `PFVD_NVENC_EVENTS=0` (machine environment, read per open) falls back to the sync
+            // session and the loop's bounded-poll arm: the A/B for a GPU whose async encode
+            // retires slower than its sync one.
+            e.use_completion_events(crate::log::knob("PFVD_NVENC_EVENTS").as_deref() != Some("0"));
             // NVENC alone defers its session to the first frame, and the host reads the caps in
             // our reply once per session: open it here or it caches the defaults.
             e.prepare_d3d11(device, format, w, h)?;

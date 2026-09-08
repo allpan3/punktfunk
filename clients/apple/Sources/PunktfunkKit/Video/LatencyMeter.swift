@@ -125,6 +125,19 @@ public final class LatencyMeter: @unchecked Sendable {
         return n
     }
 
+    /// Forget everything, level included. A meter outlives the session that fed it (the HUD holds
+    /// it), and a pump can still deliver a frame after `disconnect`, so a new session would
+    /// otherwise publish the previous one's percentiles in its first window.
+    public func reset() {
+        lock.lock()
+        defer { lock.unlock() }
+        samplesUs.removeAll(keepingCapacity: true)
+        skewCorrected = false
+        trimmed = 0
+        latestNs = 0
+        latestAtNs = 0
+    }
+
     /// Percentiles over the samples accumulated since the last drain, then reset the window. `nil`
     /// when no samples arrived in the interval.
     public func drain() -> Stats? {

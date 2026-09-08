@@ -908,7 +908,7 @@ fn quarantine_catalog() {
             "the custom-preset catalog held entries this host could not read; the original was \
              copied aside before being rewritten"),
         Err(e) => tracing::warn!(error = %e, path = %bad.display(),
-            "could not preserve the unreadable custom-preset catalog before rewriting it"),
+            "unreadable custom-preset catalog not preserved before the rewrite"),
     }
 }
 

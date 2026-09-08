@@ -238,9 +238,10 @@ fn spawn_with(
         // receive/decode/present log in the client log file.
         .stderr(Stdio::piped())
         .creation_flags(CREATE_NO_WINDOW);
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("couldn't start punktfunk-session: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        tracing::error!(error = %e, "spawning the session binary");
+        "The session didn't start. Check the client log.".to_string()
+    })?;
     tracing::info!(host = %host_label, "session binary spawned");
 
     if let Some(stderr) = child.stderr.take() {
@@ -290,7 +291,10 @@ fn spawn_with(
             tracing::info!(code, "session binary exited");
             on_event(SpawnEvent::Exited { error, ended, code });
         })
-        .map_err(|e| format!("session reader thread: {e}"))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "spawning the session reader thread");
+            "The session didn't start. Check the client log.".to_string()
+        })?;
     Ok(())
 }
 

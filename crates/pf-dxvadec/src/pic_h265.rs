@@ -25,6 +25,8 @@ use cros_codecs::codec::h265::parser::Sps;
 use pf_bitstream::h265::AuPlan;
 use pf_bitstream::h265::PicId;
 use pf_bitstream::h265::RefPic;
+use pf_vkdecode::num_delta_pocs_of_ref_rps_idx;
+use pf_vkdecode::RefRpsIdxError;
 use pf_vkdecode::SlotError;
 use pf_vkdecode::SlotMap;
 use tracing::trace;
@@ -105,20 +107,11 @@ pub enum PlanToDxvaH265Error {
     },
     /// The AU references more distinct pictures than `RefPicList` holds (15).
     TooManyReferences(usize),
-    /// The first slice's inline `st_ref_pic_set()` predicts from a missing SPS
-    /// candidate — `ucNumDeltaPocsOfRefRpsIdx` cannot be derived, and hardware
-    /// would misparse the slice header.
-    InvalidRefRpsIdx {
-        curr_rps_idx: u8,
-        delta_idx_minus1: u8,
-    },
+    /// `ucNumDeltaPocsOfRefRpsIdx` is not derivable from this plan.
+    RefRpsIdx(RefRpsIdxError),
     /// Inline `st_ref_pic_set()` bit count exceeds `u16`
     /// (`wNumBitsForShortTermRPSInSlice`) — a header that large is corrupt.
     StRpsBitsOverflow(u32),
-    /// Predicted-from candidate `NumDeltaPocs` exceeds `u8`. Impossible off a
-    /// real parse (≤ 32); an error rather than a clamp, because a clamped count
-    /// makes hardware misparse the slice header.
-    NumDeltaPocsOverflow(u32),
     /// The map was built for a different DPB depth than this plan's
     /// `max_dpb_frames` — an SPS renegotiation resized the DPB; rebuild decoder,
     /// pool and map.
@@ -159,19 +152,9 @@ impl std::fmt::Display for PlanToDxvaH265Error {
             PlanToDxvaH265Error::TooManyReferences(count) => {
                 write!(f, "{count} references exceed DXVA's RefPicList of 15")
             }
-            PlanToDxvaH265Error::InvalidRefRpsIdx {
-                curr_rps_idx,
-                delta_idx_minus1,
-            } => write!(
-                f,
-                "inline RPS {curr_rps_idx} predicts from delta_idx_minus1 \
-                 {delta_idx_minus1}, which names no SPS candidate"
-            ),
+            PlanToDxvaH265Error::RefRpsIdx(err) => write!(f, "{err}"),
             PlanToDxvaH265Error::StRpsBitsOverflow(bits) => {
                 write!(f, "inline st_ref_pic_set of {bits} bits exceeds u16")
-            }
-            PlanToDxvaH265Error::NumDeltaPocsOverflow(count) => {
-                write!(f, "candidate NumDeltaPocs {count} exceeds u8")
             }
             PlanToDxvaH265Error::CapacityMismatch { required, capacity } => write!(
                 f,
@@ -193,6 +176,7 @@ impl std::error::Error for PlanToDxvaH265Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             PlanToDxvaH265Error::Slot(err) => Some(err),
+            PlanToDxvaH265Error::RefRpsIdx(err) => Some(err),
             _ => None,
         }
     }
@@ -204,39 +188,10 @@ impl From<SlotError> for PlanToDxvaH265Error {
     }
 }
 
-/// `ucNumDeltaPocsOfRefRpsIdx`: when the first slice's inline `st_ref_pic_set()`
-/// uses inter-RPS prediction, hardware re-parses those slice bits and needs
-/// `NumDeltaPocs[RefRpsIdx]` of the source candidate to size the
-/// `used_by_curr_pic_flag`/`use_delta_flag` loop (7.4.8); otherwise 0.
-///
-/// Byte-for-byte the derivation `pf_vkdecode::pic_h265` makes for Vulkan's
-/// `NumDeltaPocsOfRefRpsIdx`. Duplicated because it is private there; both
-/// copies' tests plan the same vendored vector and will disagree if they drift.
-fn num_delta_pocs_of_ref_rps_idx(plan: &AuPlan) -> Result<u8, PlanToDxvaH265Error> {
-    let hdr = &plan
-        .slices
-        .first()
-        .expect("caller validated the plan holds slices")
-        .header;
-    // Inline means CurrRpsIdx == num_short_term_ref_pic_sets (8.3.2 NOTE 2); an
-    // SPS-indexed RPS re-parses nothing in the slice header.
-    let inline = !hdr.short_term_ref_pic_set_sps_flag
-        && hdr.curr_rps_idx == plan.sps.num_short_term_ref_pic_sets;
-    if !inline || !hdr.short_term_ref_pic_set.inter_ref_pic_set_prediction_flag {
-        return Ok(0);
+impl From<RefRpsIdxError> for PlanToDxvaH265Error {
+    fn from(err: RefRpsIdxError) -> Self {
+        PlanToDxvaH265Error::RefRpsIdx(err)
     }
-    // RefRpsIdx = stRpsIdx - (delta_idx_minus1 + 1), stRpsIdx = CurrRpsIdx here
-    // (equation 7-59). u16 so a hostile delta cannot wrap.
-    let delta = hdr.short_term_ref_pic_set.delta_idx_minus1;
-    let source = u16::from(hdr.curr_rps_idx)
-        .checked_sub(u16::from(delta) + 1)
-        .and_then(|idx| plan.sps.short_term_ref_pic_set.get(usize::from(idx)))
-        .ok_or(PlanToDxvaH265Error::InvalidRefRpsIdx {
-            curr_rps_idx: hdr.curr_rps_idx,
-            delta_idx_minus1: delta,
-        })?;
-    u8::try_from(source.num_delta_pocs)
-        .map_err(|_| PlanToDxvaH265Error::NumDeltaPocsOverflow(source.num_delta_pocs))
 }
 
 fn dxva_ref(slot: u8, rp: &RefPic) -> DxvaRefH265 {

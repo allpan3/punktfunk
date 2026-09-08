@@ -706,9 +706,22 @@ public final class StreamLayerView: NSView {
     /// the bitmap grows with the host's display scaling (96 px at 300% DPI), scaling by this is what
     /// keeps a high-DPI host from forwarding a giant pointer. Falls back to 1 before the first
     /// mode/layout.
+    /// The size the picture is actually being drawn at, in host pixels: the DECODED frame's, not
+    /// the negotiated mode's. The two disagree whenever a host correctively acks a different mode
+    /// (Windows falls back to an advertised one), and the presenter aspect-fits to the decoded
+    /// size — so mapping input through the mode would letterbox against a different rectangle and
+    /// offset every click for the whole session. Falls back to the mode before the first frame.
+    private func hostContentSize() -> (width: UInt32, height: UInt32) {
+        if let decoded = lastDecodedContentSize, decoded.width > 0, decoded.height > 0 {
+            return (UInt32(decoded.width), UInt32(decoded.height))
+        }
+        let mode = connection?.currentMode() ?? (width: 0, height: 0, refreshHz: 0)
+        return (mode.width, mode.height)
+    }
+
     private func cursorFitScale() -> CGFloat {
-        guard let connection else { return 1 }
-        let mode = connection.currentMode()
+        guard connection != nil else { return 1 }
+        let mode = hostContentSize()
         guard mode.width > 0, mode.height > 0, bounds.width > 0, bounds.height > 0 else { return 1 }
         let fit = AVMakeRect(
             aspectRatio: CGSize(width: Int(mode.width), height: Int(mode.height)), insideRect: bounds)
@@ -733,8 +746,8 @@ public final class StreamLayerView: NSView {
     /// `CGWarpMouseCursorPosition` convention `CursorCapture` established) through the
     /// aspect-fit letterbox — the inverse direction of `hostPoint(from:)`.
     private func cgScreenPoint(forHostX hx: Int32, _ hy: Int32) -> CGPoint? {
-        guard let connection, let window else { return nil }
-        let mode = connection.currentMode()
+        guard connection != nil, let window else { return nil }
+        let mode = hostContentSize()
         guard mode.width > 0, mode.height > 0 else { return nil }
         let fit = AVMakeRect(
             aspectRatio: CGSize(width: Int(mode.width), height: Int(mode.height)),
@@ -830,8 +843,8 @@ public final class StreamLayerView: NSView {
     /// events in the letterbox bars (outside the video rect) so the host's cursor isn't dragged
     /// onto a black edge, and until a mode is negotiated.
     private func hostPoint(from event: NSEvent) -> HostPoint? {
-        guard let connection, let window, event.window === window else { return nil }
-        let mode = connection.currentMode()
+        guard connection != nil, let window, event.window === window else { return nil }
+        let mode = hostContentSize()
         guard mode.width > 0, mode.height > 0 else { return nil }
         // Window → view coords (non-flipped: origin bottom-left), then flip y into view-top-left.
         let inView = convert(event.locationInWindow, from: nil)

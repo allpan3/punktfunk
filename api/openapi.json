@@ -292,7 +292,7 @@
             }
           },
           "500": {
-            "description": "Could not store the bundle",
+            "description": "Couldn't store the log bundle",
             "content": {
               "application/json": {
                 "schema": {
@@ -408,7 +408,7 @@
             }
           },
           "500": {
-            "description": "Could not delete the bundle",
+            "description": "Couldn't delete the log bundle",
             "content": {
               "application/json": {
                 "schema": {
@@ -877,7 +877,7 @@
             }
           },
           "500": {
-            "description": "Could not persist the catalog",
+            "description": "Couldn't save the catalog",
             "content": {
               "application/json": {
                 "schema": {
@@ -959,7 +959,7 @@
             }
           },
           "500": {
-            "description": "Could not persist the catalog",
+            "description": "Couldn't save the catalog",
             "content": {
               "application/json": {
                 "schema": {
@@ -1013,7 +1013,7 @@
             }
           },
           "500": {
-            "description": "Could not persist the catalog",
+            "description": "Couldn't save the catalog",
             "content": {
               "application/json": {
                 "schema": {
@@ -1726,7 +1726,7 @@
             }
           },
           "500": {
-            "description": "Could not persist the catalog",
+            "description": "Couldn't save the catalog",
             "content": {
               "application/json": {
                 "schema": {
@@ -1807,7 +1807,7 @@
             }
           },
           "500": {
-            "description": "Could not persist the catalog",
+            "description": "Couldn't save the catalog",
             "content": {
               "application/json": {
                 "schema": {
@@ -1859,7 +1859,7 @@
             }
           },
           "500": {
-            "description": "Could not persist the catalog",
+            "description": "Couldn't save the catalog",
             "content": {
               "application/json": {
                 "schema": {
@@ -1932,7 +1932,7 @@
             }
           },
           "500": {
-            "description": "Could not persist the settings",
+            "description": "Couldn't save the settings",
             "content": {
               "application/json": {
                 "schema": {
@@ -2030,7 +2030,7 @@
             }
           },
           "500": {
-            "description": "Could not persist the catalog",
+            "description": "Couldn't save the catalog",
             "content": {
               "application/json": {
                 "schema": {
@@ -2091,7 +2091,7 @@
             }
           },
           "500": {
-            "description": "Could not persist the catalog",
+            "description": "Couldn't save the catalog",
             "content": {
               "application/json": {
                 "schema": {
@@ -2265,7 +2265,7 @@
             }
           },
           "500": {
-            "description": "Could not persist the settings",
+            "description": "Couldn't save the settings",
             "content": {
               "application/json": {
                 "schema": {
@@ -2430,7 +2430,7 @@
             }
           },
           "500": {
-            "description": "Could not persist the trust store",
+            "description": "Couldn't save the paired-device list",
             "content": {
               "application/json": {
                 "schema": {
@@ -2576,7 +2576,7 @@
             }
           },
           "500": {
-            "description": "Could not persist the trust store",
+            "description": "Couldn't save the paired-device list",
             "content": {
               "application/json": {
                 "schema": {
@@ -2832,7 +2832,7 @@
             }
           },
           "500": {
-            "description": "Could not persist the trust store",
+            "description": "Couldn't save the paired-device list",
             "content": {
               "application/json": {
                 "schema": {
@@ -3524,7 +3524,7 @@
             }
           },
           "500": {
-            "description": "Could not write the recording to disk",
+            "description": "Couldn't save the recording",
             "content": {
               "application/json": {
                 "schema": {
@@ -3672,7 +3672,7 @@
             }
           },
           "500": {
-            "description": "Could not delete the recording",
+            "description": "Couldn't delete the recording",
             "content": {
               "application/json": {
                 "schema": {

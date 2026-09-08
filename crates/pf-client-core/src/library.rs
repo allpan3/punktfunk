@@ -121,25 +121,20 @@ pub enum LibraryError {
 }
 
 impl std::fmt::Display for LibraryError {
+    /// A phrase, never a sentence. Every caller supplies the frame — a
+    /// "Couldn't load the library" title on the three library screens, a
+    /// "{label} failed — " lead on a host action, "Couldn't send logs — " on
+    /// an upload. A sentence here reads as a second headline under the first.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LibraryError::NotPaired => f.write_str(
-                "The host didn't recognize this device. Pair with the host first — the \
-                 library is authorized by this device's certificate (no token needed).",
-            ),
-            LibraryError::PinMismatch => f.write_str(
-                "The host's certificate doesn't match the pinned fingerprint. \
-                 Re-pair with a PIN to re-establish trust.",
-            ),
-            LibraryError::Http(code) => {
-                write!(f, "The management API returned HTTP {code}.")
+            LibraryError::NotPaired => {
+                f.write_str("the host doesn't recognize this device — pair with it first")
             }
-            LibraryError::Unreachable(why) => write!(
-                f,
-                "Couldn't reach the host's management API: {why}. Check the host is \
-                 updated and reachable (a host pinned to --mgmt-bind 127.0.0.1 is \
-                 loopback-only and can't be browsed remotely)."
-            ),
+            LibraryError::PinMismatch => {
+                f.write_str("the host's certificate isn't the one you paired with — pair again")
+            }
+            LibraryError::Http(code) => write!(f, "the host refused it ({code})"),
+            LibraryError::Unreachable(why) => write!(f, "couldn't reach the host — {why}"),
         }
     }
 }

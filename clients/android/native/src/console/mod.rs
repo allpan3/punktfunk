@@ -21,7 +21,7 @@ use pf_client_core::console::{PointerButton, PointerInput};
 use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuSample, PadBattery, PadInfo};
 use pf_console_ui::{
     ConsoleEntry, ConsoleOptions, HostRow, Insets, Key, LibraryGame, LibraryPhase, PairPhase,
-    Platform, SnapshotStore, Stale, WakeStatus,
+    Platform, SnapshotStore, SpeedPhase, Stale, WakeStatus,
 };
 use punktfunk_core::config::GamepadPref;
 use std::collections::HashMap;
@@ -628,6 +628,30 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetW
     env.with_env(|env| -> jni::errors::Result<()> {
         if let (Some(h), Some(w)) = (host(handle), json_arg::<Option<WakeStatus>>(env, &json)) {
             h.handles.console.set_wake(w);
+        }
+        Ok(())
+    })
+    .resolve::<LogErrorAndDefault>()
+}
+
+/// `NativeBridge.nativeConsoleAdvanceSpeed(handle, key, json)` — a new [`SpeedPhase`] for the
+/// speed test on `key`. No setter for the status itself: the shell seeds and clears that slot,
+/// which is what makes a dismissed (or superseded) test's late result a no-op here.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleAdvanceSpeed(
+    mut env: EnvUnowned,
+    _this: JObject,
+    handle: jlong,
+    key: JString,
+    json: JString,
+) {
+    env.with_env(|env| -> jni::errors::Result<()> {
+        if let (Some(h), Ok(k), Some(p)) = (
+            host(handle),
+            key.try_to_string(env),
+            json_arg::<SpeedPhase>(env, &json),
+        ) {
+            h.handles.console.advance_speed(&k, p);
         }
         Ok(())
     })

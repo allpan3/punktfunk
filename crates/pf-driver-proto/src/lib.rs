@@ -1126,6 +1126,33 @@ pub mod encode {
         stash.filter(|s| queued == 0 && idle.contains(s))
     }
 
+    /// Where the drain worker's pass writes. A free slot always wins; with none left the
+    /// oldest queued frame is overwritten, so the encoder takes the freshest composed picture
+    /// under back-pressure rather than the incoming one being thrown away. `lost` is whether a
+    /// consumer was there to miss the recycled frame.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum OfferSlot {
+        Free(usize),
+        Recycle { slot: usize, lost: bool },
+    }
+
+    /// [`OfferSlot`] for a pool with `free` (any free slot) and `oldest_full` (the front of the
+    /// queue), `live` while an encode thread is consuming. `None` means no slot at all.
+    ///
+    /// The driver's pool is Windows-only; the rule lives here so it is covered everywhere.
+    #[must_use]
+    pub fn offer_slot(
+        free: Option<usize>,
+        oldest_full: Option<usize>,
+        live: bool,
+    ) -> Option<OfferSlot> {
+        match (free, oldest_full) {
+            (Some(slot), _) => Some(OfferSlot::Free(slot)),
+            (None, Some(slot)) => Some(OfferSlot::Recycle { slot, lost: live }),
+            (None, None) => None,
+        }
+    }
+
     /// [`IOCTL_ENCODE_CTL`] input: one op against one monitor's live encoder. Unused `arg*` /
     /// `payload` bytes are zero. The ops are the `Encoder` trait calls the stream loop already
     /// makes locally on Linux, forwarded by a control proxy — so the wire shape is deliberately
@@ -2273,6 +2300,27 @@ pub mod cursor {
         pub hot_y: u32,
     }
 
+    /// The part of a `w`×`h` cursor shape drawn at `(x, y)` that lands on a `width`×`height`
+    /// target: `(x, y, w, h)` clipped to it, or `None` when none of it does. The shape's
+    /// top-left is in target coordinates and may be negative — the pointer half off an edge.
+    ///
+    /// What a save-under of the blend has to copy, and put back. The driver's blend is
+    /// Windows-only; the rule lives here so it is covered everywhere.
+    #[must_use]
+    pub fn clip_rect(
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+        width: u32,
+        height: u32,
+    ) -> Option<(u32, u32, u32, u32)> {
+        let (x0, y0) = (i64::from(x).max(0), i64::from(y).max(0));
+        let x1 = (i64::from(x) + i64::from(w)).min(i64::from(width));
+        let y1 = (i64::from(y) + i64::from(h)).min(i64::from(height));
+        (x1 > x0 && y1 > y0).then(|| (x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32))
+    }
+
     /// `(width, rows, pitch)` of the shape bytes a reader copies out for `hdr`, clamped to the
     /// section so a corrupt header can never index past it.
     #[must_use]
@@ -3366,6 +3414,64 @@ mod tests {
         assert_eq!(republish_slot(Some(1), 0, &[2]), None);
         // Nothing was ever encoded on this pool.
         assert_eq!(republish_slot(None, 0, &[1, 2]), None);
+    }
+
+    #[test]
+    fn a_full_pool_recycles_the_oldest_frame_not_the_new_one() {
+        use encode::{offer_slot, OfferSlot};
+        // A free slot is always taken, whatever is queued behind it.
+        assert_eq!(offer_slot(Some(2), Some(0), true), Some(OfferSlot::Free(2)));
+        // No free slot: the oldest queued frame goes, and a consumer lost it.
+        assert_eq!(
+            offer_slot(None, Some(0), true),
+            Some(OfferSlot::Recycle {
+                slot: 0,
+                lost: true
+            })
+        );
+        // Between sessions nobody is reading, so the same recycle costs nothing.
+        assert_eq!(
+            offer_slot(None, Some(0), false),
+            Some(OfferSlot::Recycle {
+                slot: 0,
+                lost: false
+            })
+        );
+        // Every slot is out at the encoder: this frame has nowhere to land.
+        assert_eq!(offer_slot(None, None, true), None);
+    }
+
+    #[test]
+    fn a_cursor_save_under_covers_only_what_the_target_holds() {
+        use cursor::clip_rect;
+        // Wholly inside: the shape's own box.
+        assert_eq!(
+            clip_rect(100, 50, 32, 32, 1920, 1080),
+            Some((100, 50, 32, 32))
+        );
+        // Half off each edge in turn; the origin moves only where the shape starts negative.
+        assert_eq!(
+            clip_rect(-10, 50, 32, 32, 1920, 1080),
+            Some((0, 50, 22, 32))
+        );
+        assert_eq!(
+            clip_rect(100, -10, 32, 32, 1920, 1080),
+            Some((100, 0, 32, 22))
+        );
+        assert_eq!(
+            clip_rect(1900, 50, 32, 32, 1920, 1080),
+            Some((1900, 50, 20, 32))
+        );
+        assert_eq!(
+            clip_rect(100, 1060, 32, 32, 1920, 1080),
+            Some((100, 1060, 32, 20))
+        );
+        // Fully off, in both directions: nothing to save.
+        assert_eq!(clip_rect(-40, 50, 32, 32, 1920, 1080), None);
+        assert_eq!(clip_rect(1920, 50, 32, 32, 1920, 1080), None);
+        // A shape with no pixels covers nothing.
+        assert_eq!(clip_rect(100, 50, 0, 32, 1920, 1080), None);
+        assert_eq!(clip_rect(100, 50, 32, 0, 1920, 1080), None);
     }
 
     #[test]

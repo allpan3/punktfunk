@@ -66,9 +66,9 @@ object SendLogs {
                 // The host answers 201 Created, not 200 — this is a route that STORES a bundle
                 // (`mgmt/client_logs.rs`). Any 2xx is a success; OkHttp's own predicate spares us
                 // a second hand-written list of codes to get wrong.
-                if (resp.isSuccessful) "" else "host answered HTTP ${resp.code}"
+                if (resp.isSuccessful) "" else "the host refused the upload (${resp.code})"
             }
-        }.getOrElse { it.message ?: "upload failed" }
+        }.getOrElse { it.message ?: "the upload didn't go through" }
         return if (err.isEmpty()) {
             "Logs sent to $hostName — download them from its web console's Logs page"
         } else {

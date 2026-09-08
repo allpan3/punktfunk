@@ -43,12 +43,20 @@ final class RingState: ObservableObject {
     @Published var highlight: Int?
     /// The sheet row the pad is on.
     @Published var sheetCursor = 0
-    /// A pad press awaiting the overlay (`RingOverlay` consumes it); `navSeq` makes each an event.
-    var pendingNav: RingNav?
+    /// The in-flight wind-in, so a second close cannot clear `closing` under the first.
+    private var closeTask: Task<Void, Never>?
+    /// Pad presses awaiting the overlay (`RingOverlay` drains them); `navSeq` makes each an event.
+    ///
+    /// A QUEUE, not a slot: capture emits several of these from one poll — a stick crossing a
+    /// sector boundary in the same frame as an A press — and SwiftUI coalesces the `navSeq` bumps
+    /// into one update, so a single slot delivered only the last of them. The dropped ones were
+    /// the presses: the highlight moved and nothing fired, and the same race ate B, so the ring
+    /// refused to close.
+    var pendingNav: [RingNav] = []
     @Published var navSeq = 0
 
     func nav(_ n: RingNav) {
-        pendingNav = n
+        pendingNav.append(n)
         navSeq &+= 1
     }
 
@@ -113,11 +121,15 @@ final class RingState: ObservableObject {
     func close() {
         if committed {
             // An open ring winds in over ~120 ms before it unmounts; a cancel short of commit
-            // leaves at once (`progress` alone held it).
+            // leaves at once (`progress` alone held it). Held and cancelled, because two closes
+            // inside the wind (a scrim tap, then the idle timeout) would otherwise let the first
+            // task clear the flag mid-wind and pop the discs out.
             closing = true
-            Task {
+            closeTask?.cancel()
+            closeTask = Task { [weak self] in
                 try? await Task.sleep(for: .milliseconds(140))
-                closing = false
+                guard !Task.isCancelled else { return }
+                self?.closing = false
             }
         }
         committed = false
@@ -258,7 +270,7 @@ private func spec(_ slot: SlotId, _ cfg: OverlayConfig, _ a: RingActions) -> Slo
         }
         return SlotSpec(id: "host:\(id)", label: act?.label ?? id, icon: icon,
                         enabled: act?.available == true,
-                        reason: act?.unavailableReason ?? "This host does not offer it",
+                        reason: act?.unavailableReason ?? "This host doesn't offer it",
                         armed: act?.danger ?? true)
     case .shortcut(let id):
         let s = cfg.shortcut(id)
@@ -440,10 +452,9 @@ struct RingOverlay: View {
             if state.native == nil { state.native = actions.currentMode() }
         }
         .onChange(of: state.navSeq) { _, _ in
-            if let n = state.pendingNav {
-                state.pendingNav = nil
-                handleNav(n)
-            }
+            let pending = state.pendingNav
+            state.pendingNav = []
+            for n in pending { handleNav(n) }
         }
         .animation(reduceMotion ? .easeOut(duration: 0.12) : .smooth(duration: 0.25), value: state.sheet)
         // Idle: the exit disc's 8 s rule, for the same latency reason — unless the sheet is up.

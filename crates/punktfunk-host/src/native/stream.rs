@@ -1179,8 +1179,9 @@ pub(super) struct SessionContext {
     pub(super) cursor_forward: bool,
     /// `true` = client draws; `false` = host composites. Always `true` (inert) for non-cap sessions.
     pub(super) cursor_client_draws: Arc<AtomicBool>,
+    /// Depth-1 latest-wins; see [`super::cursor_fwd::CursorForwarder::tick`].
     pub(super) cursor_shape_tx:
-        tokio::sync::mpsc::UnboundedSender<punktfunk_core::quic::CursorShape>,
+        tokio::sync::watch::Sender<Option<punktfunk_core::quic::CursorShape>>,
     /// Without this, a mid-session probe consumes video indexes the gap detector cannot see.
     pub(super) probe_seq: bool,
     pub(super) streamed_au: bool,
@@ -1580,7 +1581,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                     spawned_now = true;
                 }
                 Err(e) => {
-                    tracing::warn!(launch_id = id, error = %e, "could not launch requested library title")
+                    tracing::warn!(launch_id = id, error = %e, "requested library title not launched")
                 }
             }
         }
@@ -1617,7 +1618,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
                 Some(spawned)
             }
             Err(e) => {
-                tracing::warn!(command = %cmd, error = %e, "could not launch requested title into the session");
+                tracing::warn!(command = %cmd, error = %e, "requested title not launched into the session");
                 None
             }
         },
@@ -1684,7 +1685,7 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
     });
     #[cfg(target_os = "linux")]
     if let Some(Err(e)) = steam_exit_watch.as_ref().map(|r| r.as_ref()) {
-        tracing::warn!(error = %e, "could not start the dedicated Steam exit watcher");
+        tracing::warn!(error = %e, "dedicated Steam exit watcher not started");
     }
 
     let game_lease = launch_target.as_ref().map(|target| {
@@ -1808,6 +1809,9 @@ pub(super) fn virtual_stream(ctx: SessionContext, prepared: Option<PreparedDispl
         game: game_shared,
         capture_health: capture_health.clone(),
     });
+    // Concurrent sessions interleave in one log; this stamps every line below with
+    // the id `/status` reports. Sync body, so the guard never straddles an await.
+    let _session_span = tracing::info_span!("session", id = _live_session.id).entered();
     // Capture-health publish cadence (WP18): `/status` polls at 2 s; twice a second is plenty
     // and keeps the report's clone off the per-frame path.
     let mut health_published_at = std::time::Instant::now();
@@ -3871,7 +3875,7 @@ fn is_permanent_build_error(chain: &str) -> bool {
     const PERMANENT: &[&str] = &[
         "virtual displays require linux",
         "unknown punktfunk_compositor",
-        "could not detect compositor",
+        "compositor not detected",
         "kwin virtual output failed",
         "must be a node id",
         "is it installed",

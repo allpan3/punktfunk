@@ -70,7 +70,7 @@ fn extract_rust_array(src: &str, symbol: &str) -> Result<Vec<u8>, String> {
     let open = tail
         .find('[')
         .and_then(|i| tail[i + 1..].find('[').map(|j| i + 1 + j + 1))
-        .ok_or("could not find the array literal")?;
+        .ok_or("no array literal found")?;
     let close = tail[open..]
         .find(']')
         .ok_or("array literal is never closed")?
@@ -393,7 +393,7 @@ fn main() -> ExitCode {
         let dev = match api.open_path(d.path()) {
             Ok(dev) => dev,
             Err(e) => {
-                eprintln!("  !! could not open: {e}");
+                eprintln!("  !! open failed: {e}");
                 failures += 1;
                 continue;
             }
@@ -403,7 +403,7 @@ fn main() -> ExitCode {
         let len = match dev.get_report_descriptor(&mut buf) {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("  !! could not read the report descriptor: {e}");
+                eprintln!("  !! report-descriptor read failed: {e}");
                 failures += 1;
                 continue;
             }

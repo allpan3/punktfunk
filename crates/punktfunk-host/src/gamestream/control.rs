@@ -780,12 +780,12 @@ fn on_receive(
             tracing::warn!(
                 len = pt.len(),
                 bytes = %hex,
-                "gamestream: SS_TOUCH/SS_PEN packet failed to decode (malformed/unexpected layout)"
+                "gamestream: malformed SS_TOUCH/SS_PEN packet (unexpected layout)"
             );
         } else {
             tracing::warn!(
                 len = pt.len(),
-                "gamestream: SS_TOUCH/SS_PEN packet failed to decode (malformed/unexpected layout)"
+                "gamestream: malformed SS_TOUCH/SS_PEN packet (unexpected layout)"
             );
         }
         return;

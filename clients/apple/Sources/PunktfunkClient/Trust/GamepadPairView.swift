@@ -62,10 +62,11 @@ struct GamepadPairView: View {
             focusID: $focusID,
             onActivate: { activate(id: $0.id) },
             onBack: { performClose() },
-            // A ceremony in flight also takes the list out of the loop: `pair()` blocks on a
-            // background thread and its result rewrites this screen, so letting B peel a layer
-            // or A fire a second ceremony underneath it would race the completion.
-            isActive: controllerActive && editing == nil && !ceremony.busy
+            // Stays live through a ceremony so B can still abandon it — `pair()` blocks on its
+            // own timeout (90 s by default), and a controller-only user with the list stopped has
+            // no way out for that whole time. `performClose` abandons before closing, and
+            // `activate` already refuses to start a second ceremony.
+            isActive: controllerActive && editing == nil
         ) { row, focused in
             rowView(row, focused: focused)
                 .frame(maxWidth: metrics.rowMaxWidth)

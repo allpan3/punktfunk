@@ -108,10 +108,10 @@ public struct SettingsOverlay: Codable, Equatable, Sendable {
     /// Profileable because it is about how a HOST is streamed (a wired desktop can afford
     /// lossless; a phone on cellular cannot), not about this device's hardware.
     ///
-    /// ⚠ The one key here with **no counterpart in the Rust overlay yet**
-    /// (`pf-client-core::profiles`): Apple is the first client to carry it. `audio_format` is the
-    /// name the others should adopt, and until they do a profile written here round-trips through
-    /// their unknown-key carry-through untouched rather than being honoured.
+    /// The Rust overlay (`pf-client-core::profiles`) carries the same `audio_format` key with the
+    /// same spellings, but its table stops at `opus`/`lossless48`/`lossless96`. A profile written
+    /// here as `lossless441` or `lossless882` round-trips there intact and plays as Opus, since an
+    /// unrecognized value falls back to the default rather than failing the connect.
     public var audioFormat: String?
     public var micEnabled: Bool?
     public var echoCancel: Bool?
@@ -370,6 +370,15 @@ public enum OverlayField {
         case "modifier_layout": return o.modifierLayout != nil
         default: return false
         }
+    }
+
+    /// Does this build model `field` at all? `clear` and `isOverridden` both answer "no override"
+    /// for a name they do not know, which is indistinguishable from "not overridden" — so a typo
+    /// in a settings row loses its marker and its Reset with nothing to report it. Callers that
+    /// take a field name from source rather than from data assert on this.
+    public static func isModelled(_ field: String) -> Bool {
+        var probe = SettingsOverlay()
+        return clear(field, in: &probe)
     }
 }
 

@@ -107,20 +107,11 @@ pub enum PlanToVkH265Error {
         set: &'static str,
         len: usize,
     },
-    /// The first slice's inline `st_ref_pic_set()` predicts from a missing SPS
-    /// candidate — `NumDeltaPocsOfRefRpsIdx` cannot be derived, and hardware
-    /// would misparse the slice header.
-    InvalidRefRpsIdx {
-        curr_rps_idx: u8,
-        delta_idx_minus1: u8,
-    },
+    /// `NumDeltaPocsOfRefRpsIdx` is not derivable from this plan.
+    RefRpsIdx(RefRpsIdxError),
     /// Inline `st_ref_pic_set()` bit count exceeds `u16`
     /// (`NumBitsForSTRefPicSetInSlice`) — a header that large is corrupt.
     StRpsBitsOverflow(u32),
-    /// Predicted-from candidate `NumDeltaPocs` exceeds `u8`. Impossible off a
-    /// real parse (≤ 32); an error rather than a clamp, because a clamped count
-    /// makes hardware misparse the slice header.
-    NumDeltaPocsOverflow(u32),
     /// The map was built for a different DPB depth than this plan's
     /// `max_dpb_frames` — an SPS renegotiation resized the DPB. Rebuild the
     /// video session and its [`SlotMap`]; converting against the stale map
@@ -160,21 +151,9 @@ impl std::fmt::Display for PlanToVkH265Error {
                     "{set} holds {len} entries; Vulkan expresses at most {H265_RPS_LIST_SIZE}"
                 )
             }
-            PlanToVkH265Error::InvalidRefRpsIdx {
-                curr_rps_idx,
-                delta_idx_minus1,
-            } => {
-                write!(
-                    f,
-                    "inline st_ref_pic_set predicts from a nonexistent candidate \
-                     (CurrRpsIdx {curr_rps_idx}, delta_idx_minus1 {delta_idx_minus1})"
-                )
-            }
+            PlanToVkH265Error::RefRpsIdx(err) => write!(f, "{err}"),
             PlanToVkH265Error::StRpsBitsOverflow(bits) => {
                 write!(f, "st_ref_pic_set bit count {bits} exceeds u16")
-            }
-            PlanToVkH265Error::NumDeltaPocsOverflow(count) => {
-                write!(f, "candidate NumDeltaPocs {count} exceeds u8")
             }
             PlanToVkH265Error::CapacityMismatch { required, capacity } => {
                 write!(
@@ -191,6 +170,7 @@ impl std::error::Error for PlanToVkH265Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             PlanToVkH265Error::Slot(err) => Some(err),
+            PlanToVkH265Error::RefRpsIdx(err) => Some(err),
             _ => None,
         }
     }
@@ -199,6 +179,12 @@ impl std::error::Error for PlanToVkH265Error {
 impl From<SlotError> for PlanToVkH265Error {
     fn from(err: SlotError) -> Self {
         PlanToVkH265Error::Slot(err)
+    }
+}
+
+impl From<RefRpsIdxError> for PlanToVkH265Error {
+    fn from(err: RefRpsIdxError) -> Self {
+        PlanToVkH265Error::RefRpsIdx(err)
     }
 }
 
@@ -214,11 +200,53 @@ fn ref_info(rp: &RefPic) -> hh::StdVideoDecodeH265ReferenceInfo {
     std
 }
 
+/// `NumDeltaPocsOfRefRpsIdx` derivation failures. Both backends convert this
+/// into their own conversion error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefRpsIdxError {
+    /// The first slice's inline `st_ref_pic_set()` predicts from a missing SPS
+    /// candidate — the count cannot be derived, and hardware would misparse the
+    /// slice header.
+    Invalid {
+        curr_rps_idx: u8,
+        delta_idx_minus1: u8,
+    },
+    /// Predicted-from candidate `NumDeltaPocs` exceeds `u8`. Impossible off a
+    /// real parse (≤ 32); an error rather than a clamp, because a clamped count
+    /// makes hardware misparse the slice header.
+    NumDeltaPocsOverflow(u32),
+}
+
+impl std::fmt::Display for RefRpsIdxError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RefRpsIdxError::Invalid {
+                curr_rps_idx,
+                delta_idx_minus1,
+            } => {
+                write!(
+                    f,
+                    "inline st_ref_pic_set predicts from a nonexistent candidate \
+                     (CurrRpsIdx {curr_rps_idx}, delta_idx_minus1 {delta_idx_minus1})"
+                )
+            }
+            RefRpsIdxError::NumDeltaPocsOverflow(count) => {
+                write!(f, "candidate NumDeltaPocs {count} exceeds u8")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RefRpsIdxError {}
+
 /// `NumDeltaPocsOfRefRpsIdx`: when the first slice's inline `st_ref_pic_set()`
 /// uses inter-RPS prediction, hardware re-parses those slice bits and needs
 /// `NumDeltaPocs[RefRpsIdx]` of the source candidate to size the
 /// `used_by_curr_pic_flag`/`use_delta_flag` loop (7.4.8); otherwise 0.
-fn num_delta_pocs_of_ref_rps_idx(plan: &AuPlan) -> Result<u8, PlanToVkH265Error> {
+///
+/// `pf_dxvadec` derives `ucNumDeltaPocsOfRefRpsIdx` from this same call, so the
+/// inter-RPS test in this module covers both backends.
+pub fn num_delta_pocs_of_ref_rps_idx(plan: &AuPlan) -> Result<u8, RefRpsIdxError> {
     let hdr = &plan
         .slices
         .first()
@@ -237,14 +265,14 @@ fn num_delta_pocs_of_ref_rps_idx(plan: &AuPlan) -> Result<u8, PlanToVkH265Error>
     let source = u16::from(hdr.curr_rps_idx)
         .checked_sub(u16::from(delta) + 1)
         .and_then(|idx| plan.sps.short_term_ref_pic_set.get(usize::from(idx)))
-        .ok_or(PlanToVkH265Error::InvalidRefRpsIdx {
+        .ok_or(RefRpsIdxError::Invalid {
             curr_rps_idx: hdr.curr_rps_idx,
             delta_idx_minus1: delta,
         })?;
     // Real parses have NumDeltaPocs ≤ 32 (u8). A clamp would misparse the slice
     // header on hardware, so a constructed plan that exceeds it is an error.
     u8::try_from(source.num_delta_pocs)
-        .map_err(|_| PlanToVkH265Error::NumDeltaPocsOverflow(source.num_delta_pocs))
+        .map_err(|_| RefRpsIdxError::NumDeltaPocsOverflow(source.num_delta_pocs))
 }
 
 /// Convert one planned AU, driving `slots` through the AU's slot lifecycle.
@@ -1106,10 +1134,10 @@ mod tests {
         broken.dpb.stored = Some(3);
         assert_eq!(
             plan_to_vk_h265(&broken, &mut slots).unwrap_err(),
-            PlanToVkH265Error::InvalidRefRpsIdx {
+            PlanToVkH265Error::RefRpsIdx(RefRpsIdxError::Invalid {
                 curr_rps_idx: 2,
                 delta_idx_minus1: 2
-            }
+            })
         );
     }
 

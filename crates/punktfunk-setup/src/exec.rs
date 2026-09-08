@@ -288,7 +288,7 @@ impl Executor<'_> {
         if std::fs::write(&path, body).is_ok() {
             self.ui.ok(&format!("{key}={value} → {shown}"));
         } else {
-            self.ui.warn(&format!("could not write {shown}"));
+            self.ui.warn(&format!("couldn't write {shown}"));
         }
     }
 

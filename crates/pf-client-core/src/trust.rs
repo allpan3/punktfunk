@@ -208,7 +208,7 @@ pub mod store_health {
 
     pub(crate) fn record(path: &Path, err: &std::io::Error) {
         let msg = format!("{}: {err}", path.display());
-        tracing::error!(store = %path.display(), error = %err, "cannot persist client config");
+        tracing::error!(store = %path.display(), error = %err, "client config not saved");
         if let Ok(mut slot) = LAST_ERROR.lock() {
             *slot = Some(msg);
         }
@@ -840,7 +840,10 @@ pub fn pair_error_message(err: &punktfunk_core::PunktfunkError) -> String {
              network (no VPN on this device, no guest-Wi-Fi / AP isolation)."
                 .into()
         }
-        other => format!("Pairing failed: {other:?}"),
+        other => {
+            tracing::warn!(error = %other, "pairing failed");
+            "Pairing didn't finish — try again from the host's Pairing page.".to_string()
+        }
     }
 }
 

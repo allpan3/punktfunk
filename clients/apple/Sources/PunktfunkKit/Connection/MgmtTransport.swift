@@ -48,7 +48,7 @@ enum MgmtTransport {
     ///
     /// Runs over a pooled keep-alive connection. A connection the host has since dropped is
     /// indistinguishable from a live one until we write to it, so a REUSED connection that fails
-    /// is retried once on a fresh one; a fresh connection that fails is a real error.
+    /// is retried, up to once per pooled socket; a fresh connection that fails is a real error.
     static func get(
         host: String,
         port: UInt16,
@@ -99,7 +99,12 @@ enum MgmtTransport {
         let key = "\(unbracketed(host)):\(port):\(pin.map(hex) ?? "tofu")"
         var lastError: Error = MgmtTransportError.connection("no attempt made")
 
-        for attempt in 0..<2 {
+        // The pool holds up to `maxPerHost` sockets and the host can have half-closed all of
+        // them while idle, so one retry is not enough: an idle library screen would otherwise
+        // report an unreachable host that a manual refresh immediately reaches. A FRESH
+        // connection still gets exactly one attempt — retrying that only doubles a real
+        // failure's latency.
+        for attempt in 0...MgmtConnectionPool.maxPerHost {
             let connection = await MgmtConnectionPool.shared.acquire(key: key) {
                 MgmtConnection(host: unbracketed(host), port: nwPort, identity: identity, pin: pin)
             }
@@ -113,9 +118,7 @@ enum MgmtTransport {
             } catch {
                 await MgmtConnectionPool.shared.release(connection, key: key)
                 lastError = error
-                // Only a reused connection earns a second try, and only once: retrying a fresh
-                // connection would just double every genuine failure's latency.
-                if !wasReused || attempt == 1 { throw error }
+                if !wasReused || attempt == MgmtConnectionPool.maxPerHost { throw error }
             }
         }
         throw lastError
@@ -143,7 +146,8 @@ actor MgmtConnectionPool {
     /// Connections created and not yet closed, per host — the cap this pool enforces.
     private var live: [String: Int] = [:]
     private var waiters: [String: [CheckedContinuation<Void, Never>]] = [:]
-    private let maxPerHost = 4
+    /// Also the retry budget: every pooled socket may be a stale keep-alive.
+    static let maxPerHost = 4
 
     func acquire(key: String, make: () -> MgmtConnection) async -> MgmtConnection {
         while true {
@@ -154,7 +158,7 @@ actor MgmtConnectionPool {
                 live[key] = max(0, (live[key] ?? 1) - 1)
                 continue
             }
-            if (live[key] ?? 0) < maxPerHost {
+            if (live[key] ?? 0) < Self.maxPerHost {
                 live[key] = (live[key] ?? 0) + 1
                 return make()
             }
@@ -167,7 +171,7 @@ actor MgmtConnectionPool {
     /// Always call this, on success AND on failure: a connection that is never returned leaks a
     /// slot, and enough leaked slots would hang every later request on the waiter queue.
     func release(_ connection: MgmtConnection, key: String) {
-        if connection.isHealthy, (available[key]?.count ?? 0) < maxPerHost {
+        if connection.isHealthy, (available[key]?.count ?? 0) < Self.maxPerHost {
             available[key, default: []].append(connection)
         } else {
             connection.close()
@@ -286,6 +290,12 @@ final class MgmtConnection: @unchecked Sendable {
                 self.buffer.removeAll(keepingCapacity: true)
                 self.queue.asyncAfter(deadline: .now() + timeout) { [weak self] in
                     guard let self, self.operation == op else { return }
+                    // Retire the socket, never pool it: the request we gave up on is still in
+                    // flight with a receive armed, so a reused connection would parse that late
+                    // response as the NEXT request's — a poster answering a /library call.
+                    self.phase = .dead
+                    self.isHealthy = false
+                    self.connection.cancel()
                     self.finish(.failure(MgmtTransportError.timedOut))
                 }
                 switch self.phase {

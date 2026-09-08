@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Regenerate THIRD-PARTY-NOTICES.txt for the Rust workspace.
 #
-# Prefers `cargo about` (full, network-augmented license harvest; see about.toml) and falls back to
-# the dependency-free offline generator (scripts/gen-third-party-notices.py, reads the cargo registry
-# cache). Run this when the dependency tree changes; CI also runs it before packaging.
+# Goes through the dependency-free offline generator (scripts/gen-third-party-notices.py, reads
+# `cargo metadata` plus the cargo registry cache) — see the ⚠ note below for why NOT `cargo about`.
+# Run it when the dependency tree changes. Nothing regenerates this during packaging: the deb, rpm
+# and Windows installer scripts all ship the committed file verbatim. What holds it honest is the
+# THIRD-PARTY-NOTICES drift gate in ci.yml's rust job, which runs this and diffs the result.
 #
 # Usage: scripts/gen-third-party-notices.sh [output-file]
 set -euo pipefail
@@ -49,7 +51,7 @@ echo "==> wrote $OUT" >&2
 # link FFmpeg.
 #
 # Only the offline generator can scope a file (cargo-about renders the whole workspace), so these
-# always go through it — the root file above still prefers cargo-about when installed.
+# always go through it, and so does the root file — see the ⚠ note above.
 if [ "$OUT" = "THIRD-PARTY-NOTICES.txt" ]; then
     # <in-tree path> <workspace members whose closure it must state>
     while read -r dest packages; do

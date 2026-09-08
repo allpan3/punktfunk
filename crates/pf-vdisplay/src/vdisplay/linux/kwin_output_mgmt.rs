@@ -1235,7 +1235,7 @@ pub(crate) fn enable_disabled_output(prefix: &str) -> Option<String> {
         tracing::warn!(
             %name,
             reason = ?sess.state.failure_reason,
-            "KWin output management: could not enable the virtual output KWin created disabled"
+            "KWin output management: virtual output not enabled (KWin created it disabled)"
         );
         return None;
     }

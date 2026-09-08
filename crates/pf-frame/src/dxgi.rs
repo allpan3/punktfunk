@@ -210,7 +210,7 @@ fn enable_inc_base_priority() {
                 )
             };
             if adjusted.is_err() {
-                tracing::warn!("could not enable SE_INC_BASE_PRIORITY for GPU priority");
+                tracing::warn!("AdjustTokenPrivileges(SE_INC_BASE_PRIORITY) failed (run as admin/SYSTEM for GPU priority)");
             }
         }
         // SAFETY: `token` was opened above, is owned here, and is closed exactly once on this path.

@@ -291,9 +291,8 @@ mod caps_tests {
     }
 }
 
-/// `NativeBridge.nativeConnect(host, port, w, h, hz, certPem, keyPem, pinHex, bitrateKbps,
-/// compositorPref, gamepadPref, hdrEnabled, tenBitSdr, audioChannels, audioRateHz, audioBits,
-/// preferredCodec, timeoutMs, launch, deviceName): Long`.
+/// `NativeBridge.nativeConnect(…): Long`. The Kotlin `external fun` mirrors the parameter list
+/// below name for name and in order; only the arguments whose encoding is not obvious follow.
 /// `launch` (empty ⇒ none) is a store-qualified library id to boot straight into a game.
 /// `deviceName` (empty ⇒ none) rides the Hello as `name` — what the host's pending-approval list
 /// and trust store show for this device (Kotlin passes `Build.MODEL`, its `nativePair` convention).

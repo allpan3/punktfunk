@@ -153,7 +153,7 @@ enum HTTPResponseParser {
                     j = end + 2
                 }
             }
-            guard i + size + 2 <= b.count else { return nil }
+            guard spanFits(i, size + 2, within: b.count) else { return nil }
             i += size + 2 // payload plus its trailing CRLF
         }
     }
@@ -169,7 +169,7 @@ enum HTTPResponseParser {
             guard let size = chunkSize(b, i, lineEnd) else { throw HTTPParseError.malformedChunk }
             i = lineEnd + 2
             if size == 0 { return out } // terminal chunk; trailers are ignored
-            guard i + size <= b.count else { throw HTTPParseError.malformedChunk }
+            guard spanFits(i, size, within: b.count) else { throw HTTPParseError.malformedChunk }
             out.append(contentsOf: b[i..<(i + size)])
             i += size
             guard i + 1 < b.count, b[i] == 0x0D, b[i + 1] == 0x0A else {
@@ -177,6 +177,14 @@ enum HTTPResponseParser {
             }
             i += 2
         }
+    }
+
+    /// `i + n <= count`, without trapping. A host can name a chunk of `Int.max`, and Swift's `+`
+    /// crashes on overflow rather than throwing — the same trap `messageLength` guards for
+    /// Content-Length.
+    private static func spanFits(_ i: Int, _ n: Int, within count: Int) -> Bool {
+        let (end, overflow) = i.addingReportingOverflow(n)
+        return !overflow && end <= count
     }
 
     /// "1a" or "1a;ext=value" → 26. Nil if it isn't a hex size.

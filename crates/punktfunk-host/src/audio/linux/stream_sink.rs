@@ -102,7 +102,7 @@ pub(super) fn claim(sink_name: &str) {
                 ledger.note_previous(None);
             }
             tracing::warn!(error = %format!("{e:#}"),
-                "could not claim the default sink — host apps may keep playing to the previous output");
+                "default sink not claimed — host apps may keep playing to the previous output");
         }
     }
 }
@@ -123,7 +123,7 @@ pub(super) fn release() {
             "restored default sink after the stream session"
         ),
         Err(e) => tracing::warn!(error = %format!("{e:#}"),
-            "could not restore the default sink — set it manually (wpctl set-default)"),
+            "default sink not restored — set it manually (wpctl set-default)"),
     }
 }
 

@@ -22,6 +22,10 @@ actor ArtCache {
     private let maxBytes: Int
     private let maxAge: TimeInterval
     private let fileManager = FileManager.default
+    /// Bytes written since the last prune. Pruning walks the whole directory and stats every
+    /// entry, so doing it per store made a cold 500-title library quadratic — and every poster
+    /// waits behind it on this actor.
+    private var writtenSincePrune = 0
 
     /// `directory` is created on demand. Defaults: 128 MB — a 200-title library of 600×900
     /// capsules lands far under that — and 30 days, which only matters for art a host later
@@ -64,8 +68,19 @@ actor ArtCache {
         } catch {
             return // a cache that can't write is a slow cache, not a broken app
         }
-        prune()
+        // Amortised: prune once per budget's worth of new bytes. The budget is a ceiling on
+        // steady-state size, not a per-write invariant, so overshooting it between prunes by at
+        // most one pruneInterval is the whole cost.
+        writtenSincePrune += data.count
+        if writtenSincePrune >= pruneInterval {
+            writtenSincePrune = 0
+            prune()
+        }
     }
+
+    /// New bytes that earn a full directory walk. An eighth of the budget: eight walks to turn
+    /// the cache over, against one per poster.
+    private var pruneInterval: Int { max(1, maxBytes / 8) }
 
     /// Drop the oldest entries until the directory fits the budget. Also removes anything past
     /// `maxAge` so a cache that is under budget still doesn't hoard stale art forever.

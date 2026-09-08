@@ -140,17 +140,6 @@ final class AudioRing: @unchecked Sendable {
     /// Still the right unit for `AvSync`'s EWMA weight, which core also leaves on the constant: it
     /// is a time constant on a loop with a 100-observation settling gate, so a shorter real frame
     /// only makes it settle sooner.
-    ///
-    /// ⚠ **`DroughtConceal` below is a different story, and it is now BEHIND core.** Core moved its
-    /// drought policy onto the resolved frame (`DroughtConceal::new_at_frame_us`) after this file
-    /// was last touched: it charges one `frame_us` per concealed frame and triggers at two of them,
-    /// where this leg still charges a flat 5 ms. The frame COUNT stays right either way — the drain
-    /// thread writes one real frame per `conceal()` — so nothing plays wrong; what is wrong is the
-    /// BUDGET and the REPORT. On a 2 ms lossless frame `plcMaxMS` is spent after two fifths of the
-    /// wall clock it promises and `plc_ms` over-reports by 2.5×, and a 1 ms surround frame makes
-    /// that a factor of five. Fixing it means giving this type the frame the same way the ring gets
-    /// it; it is deliberately NOT part of the rate/surround change, and it is the next thing this
-    /// file owes core.
     static let frameMS = 5
     /// Depth average must exceed target by this before drift correction fires — the middle of the
     /// headroom band, so the smooth shed always gets its chance BEFORE the hard cap trims.
@@ -338,6 +327,17 @@ final class AudioRing: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         frameUs = max(us, 1)
+    }
+
+    /// Forget the largest render callback seen. The quantum belongs to the OUTPUT DEVICE, and the
+    /// ring deliberately outlives an engine rebuild, so a one-off large grant (iOS hands out an
+    /// 85 ms buffer while another app owns the hardware) would otherwise pin the target floor for
+    /// the rest of the session — the cap in `write` is `target + renderQuantum`, so nothing could
+    /// trim it back. Call it wherever the engine is rebuilt onto a live ring.
+    func forgetRenderQuantum() {
+        lock.lock()
+        defer { lock.unlock() }
+        renderQuantum = 0
     }
 
     /// One frame in interleaved samples. Computed in µs so a sub-millisecond frame does not
@@ -1052,13 +1052,9 @@ struct DroughtConceal {
     /// At an explicitly negotiated frame length (`punktfunk_connection_audio_frame_us`).
     ///
     /// This type charges one frame per concealed frame and bounds itself in WALL-CLOCK
-    /// milliseconds, so the two have to agree about how long a frame is. They did not: the frame was
-    /// assumed to be 5 ms, and on a 2 ms lossless frame that made the `maxMS` budget run out after
-    /// two fifths of the time it is meant to buy, with the reported `plc_ms` two and a half times
-    /// too high — and on the 1 ms frame a 5.1 session negotiates, a fifth and five times. The frame
-    /// COUNT was always right (it charged 5 and divided by 5), which is exactly why this went
-    /// unnoticed: the load-bearing number was fine and only the two human-facing ones were wrong.
-    /// Mirrors `DroughtConceal::new_at_frame_us`.
+    /// milliseconds, so both must agree how long a frame is: a 2 ms lossless frame costed at 5 ms
+    /// spends the budget in two fifths of the time it promises and over-reports `plc_ms` by the
+    /// same factor. Mirrors `DroughtConceal::new_at_frame_us`.
     init(maxMS: Int, frameUs: Int) {
         self.maxMS = maxMS
         self.frameUs = max(frameUs, 1)

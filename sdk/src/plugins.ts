@@ -275,7 +275,7 @@ export const reconcileSharedSdk = (
 		log(`[plugins] @punktfunk/host is now ${SDK_VERSION}`);
 	} catch (e) {
 		log(
-			`[plugins] WARNING: could not refresh @punktfunk/host (${
+			`[plugins] WARNING: @punktfunk/host refresh (${
 				e instanceof Error ? e.message : e
 			}) — plugins keep running against ${have}`,
 		);

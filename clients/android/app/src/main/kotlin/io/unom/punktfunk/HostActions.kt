@@ -112,10 +112,10 @@ object HostActions {
                     // only when there isn't one.
                     runCatching {
                         JSONObject(resp.body?.string().orEmpty()).optString("error")
-                    }.getOrNull()?.takeIf { it.isNotEmpty() } ?: "the host answered HTTP ${resp.code}"
+                    }.getOrNull()?.takeIf { it.isNotEmpty() } ?: "the host refused (${resp.code})"
                 }
             }
-        }.getOrElse { it.message ?: "the host could not be reached" }
+        }.getOrElse { it.message ?: "the request didn't go through" }
         return if (err.isEmpty()) "$hostName: $label — on its way" else "$label failed — $err"
     }
 }

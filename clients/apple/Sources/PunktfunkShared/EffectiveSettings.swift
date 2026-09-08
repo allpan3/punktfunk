@@ -135,9 +135,10 @@ public struct EffectiveSettings: Equatable, Sendable {
         pointerCapture = bool(DefaultsKey.pointerCapture, pointerCapture)
     }
 
-    /// The stats tier as stored, with the pre-tier `hudEnabled` migration `StatsVerbosity.current`
-    /// performs — duplicated in one line here so this module needn't reach into PunktfunkKit.
-    private static func storedStatsVerbosity(_ defaults: UserDefaults) -> String {
+    /// The stats tier as stored, migrating the pre-tier `hudEnabled` bool: written once, here,
+    /// because the tier and the resolved settings disagreeing about a legacy install is a bug
+    /// nobody would see until an old device upgraded.
+    public static func storedStatsVerbosity(_ defaults: UserDefaults) -> String {
         if let raw = defaults.string(forKey: DefaultsKey.statsVerbosity) { return raw }
         if let legacy = defaults.object(forKey: DefaultsKey.hudEnabled) as? Bool, !legacy {
             return "off"

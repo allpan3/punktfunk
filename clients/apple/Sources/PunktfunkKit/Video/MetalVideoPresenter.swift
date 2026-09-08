@@ -720,7 +720,23 @@ public final class MetalVideoPresenter {
         stagingLock.lock()
         windowedPresentStaged = mode
         stagingLock.unlock()
+        // Leaving `surface` means somebody is about to clear the layer's contents. A swap already
+        // committed would otherwise land afterwards and put a stale frame back on an opaque layer
+        // that sits ABOVE the metal one, covering the live stream for the rest of the session.
+        if mode != .surface { surfaceEpoch.bump() }
     }
+
+    /// Generation of the surface-present target, so a completion handler can tell whether the
+    /// layer it is about to write to is still the one it rendered for. Its own object because the
+    /// handler must not retain the presenter.
+    final class SurfaceEpoch: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: UInt64 = 0
+        func bump() { lock.lock(); value &+= 1; lock.unlock() }
+        func current() -> UInt64 { lock.lock(); defer { lock.unlock() }; return value }
+        func isCurrent(_ v: UInt64) -> Bool { current() == v }
+    }
+    let surfaceEpoch = SurfaceEpoch()
     #endif
 
     /// Deadline pacing only, RENDER THREAD: reconcile the layer with a decoded frame BEFORE a
@@ -735,19 +751,30 @@ public final class MetalVideoPresenter {
     /// applies size + HDR config, so the next vend always matches the frame about to present —
     /// this also makes a mid-session HDR flip cost at most one skipped vend instead of waiting
     /// for a paired present to retag the layer.
-    func reconcileLayer(decodedSize: CGSize, isHDR: Bool) {
+    /// Drain the staged HDR grade and apply it. RENDER THREAD (or `reconcileLayer`'s caller):
+    /// idempotent, so every present path can call it and the first one to run wins. Every path
+    /// must — a stream whose path skipped it tone-maps against the bare reference-white anchor
+    /// with no mastering volume for the whole session.
+    private func applyStagedHdrMeta() {
         stagingLock.lock()
-        let targetFromLayout = drawableTarget
         let newHdrMeta = pendingHdrMeta
         pendingHdrMeta = nil
         stagingLock.unlock()
+        guard let newHdrMeta else { return }
+        lastHdrMeta = newHdrMeta
+        // tvOS has no edrMetadata — the cached grade still matters for a later flip's
+        // configureColor. macOS/iOS refine the live tone-map now.
+        #if !os(tvOS)
+        if hdrActive { layer.edrMetadata = makeEDR(newHdrMeta) }
+        #endif
+    }
+
+    func reconcileLayer(decodedSize: CGSize, isHDR: Bool) {
+        stagingLock.lock()
+        let targetFromLayout = drawableTarget
+        stagingLock.unlock()
         configure(hdr: isHDR)
-        if let newHdrMeta {
-            self.lastHdrMeta = newHdrMeta
-            #if !os(tvOS)
-            if hdrActive { layer.edrMetadata = makeEDR(newHdrMeta) }
-            #endif
-        }
+        applyStagedHdrMeta()
         let targetSize = (targetFromLayout.width > 0 && targetFromLayout.height > 0)
             ? targetFromLayout : decodedSize
         if layer.drawableSize != targetSize { layer.drawableSize = targetSize }
@@ -783,20 +810,11 @@ public final class MetalVideoPresenter {
         // any freshly-arrived HDR grade, both applied from this thread.
         stagingLock.lock()
         let targetFromLayout = drawableTarget
-        let newHdrMeta = pendingHdrMeta
-        pendingHdrMeta = nil
         stagingLock.unlock()
 
         // Reconcile the layer with the decoded frame's HDR-ness (handles a mid-session SDR↔HDR flip).
         configure(hdr: isHDR)
-        if let newHdrMeta {
-            self.lastHdrMeta = newHdrMeta
-            // tvOS has no edrMetadata — the cached grade is still kept (a later HDR flip's
-            // configureColor is where it matters there). macOS/iOS refine the live tone-map now.
-            #if !os(tvOS)
-            if hdrActive { layer.edrMetadata = makeEDR(newHdrMeta) }
-            #endif
-        }
+        applyStagedHdrMeta()
 
         // P010/x444 store 10-bit luma/chroma in 16-bit samples → R16/RG16; NV12/444v is 8-bit → R8/RG8.
         // Derived from the actual decoded buffer so a 4:4:4 (full chroma plane) frame just works.
@@ -817,6 +835,11 @@ public final class MetalVideoPresenter {
               let chroma = makeTexture(
                 pixelBuffer, plane: 1, format: tenBit ? .rg16Unorm : .rg8Unorm, cache: textureCache)
         else { return false }
+        // The cache holds a reference to every IOSurface it has wrapped until asked not to, which
+        // pins the decoder pool's buffers — including the previous mode's full-size ones across a
+        // mid-stream resize. The two textures above are retained locally, so flushing now only
+        // drops what nothing is using.
+        CVMetalTextureCacheFlush(textureCache, 0)
 
         #if os(tvOS)
         // HDR splits by the display's headroom (kept in step with the layer by `configure` above):
@@ -860,6 +883,7 @@ public final class MetalVideoPresenter {
         // including macOS windowed sessions, which keep real HDR (the DCP mitigation is the
         // transactional present in `encodePresent`, not a colour downgrade).
         configure(hdr: planes.pq)
+        applyStagedHdrMeta()
         var csc = planes.csc
         // PQ passthrough needs the HDR drawable; a PQ frame while the drawable is (still)
         // 8-bit — tvOS without display headroom, or a not-yet-flipped layer — tone-maps
@@ -1097,9 +1121,14 @@ public final class MetalVideoPresenter {
         let surface = slot.surface
         let surfaceLayer = surfaceLayer // captured directly — the handler must not retain self
         let diag = windowedDiag
+        let epoch = surfaceEpoch
+        let epochAtCommit = epoch.current()
         let commitStamp = CACurrentMediaTime()
         commandBuffer.addCompletedHandler { _ in
             _ = keepAlive // sources pinned until the GPU finished sampling
+            // The present target moved on while this was in flight (fullscreen entry clears the
+            // layer) — writing now would restore a frame nobody is going to replace.
+            guard epoch.isCurrent(epochAtCommit) else { return }
             let completedAt = CACurrentMediaTime()
             // Swap on THIS Metal completion thread: explicit transaction + flush, so the commit
             // reaches the render server now, independent of main (completion handlers for one
@@ -1126,8 +1155,6 @@ public final class MetalVideoPresenter {
     private func ensureSurfacePool(size: CGSize, hdr: Bool) {
         guard size != surfacePoolSize || hdr != surfacePoolHDR else { return }
         surfacePool.removeAll()
-        surfacePoolSize = size
-        surfacePoolHDR = hdr
         lastHandedOff = nil
         let w = Int(size.width)
         let h = Int(size.height)
@@ -1152,6 +1179,10 @@ public final class MetalVideoPresenter {
             guard let surface = IOSurfaceCreate(props as CFDictionary),
                   let texture = device.makeTexture(descriptor: desc, iosurface: surface, plane: 0)
             else {
+                // Leave the key UNSET so the next frame retries. Recording it up front latched a
+                // single failed allocation (memory pressure at 5K) as "this size is built", and
+                // every later frame short-circuited on the guard above — the picture froze for the
+                // session while audio and input stayed live.
                 surfacePool.removeAll()
                 return
             }
@@ -1163,6 +1194,9 @@ public final class MetalVideoPresenter {
             }
             surfacePool.append(SurfaceSlot(surface: surface, texture: texture))
         }
+        // Only now is this size actually built.
+        surfacePoolSize = size
+        surfacePoolHDR = hdr
         // The EDR request rides the SURFACE layer too (its contents are what composite); the
         // metal layer underneath keeps its own from configureColor as the anchor. Layer flags
         // are committed by the next swap's transaction flush.

@@ -220,7 +220,7 @@ impl WinExecutor<'_> {
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                             self.ui.detail(&format!("{path} — already gone"));
                         }
-                        Err(e) => self.ui.warn(&format!("could not delete {path}: {e}")),
+                        Err(e) => self.ui.warn(&format!("couldn't delete {path}: {e}")),
                     }
                 }
                 Ok(())
@@ -287,7 +287,7 @@ impl WinExecutor<'_> {
                 }
                 match sys::create_shortcut(&self.sub(link), &self.sub(target)) {
                     Ok(()) => self.ui.ok(&format!("created {link}")),
-                    Err(e) => self.ui.warn(&format!("could not create {link}: {e}")),
+                    Err(e) => self.ui.warn(&format!("couldn't create {link}: {e}")),
                 }
                 Ok(())
             }
@@ -301,7 +301,7 @@ impl WinExecutor<'_> {
                     self.ui.ok(&format!("network '{network}' is now Private"));
                 } else {
                     self.ui.warn(&format!(
-                        "could not change '{network}' — set it to Private in Windows Settings, or re-run and open the public firewall"
+                        "couldn't change '{network}' — set it to Private in Windows Settings, or re-run and open the public firewall"
                     ));
                 }
                 Ok(())
@@ -354,8 +354,7 @@ impl WinExecutor<'_> {
         }
         let existing = std::fs::read_to_string(&path).unwrap_or_default();
         let body = upsert_env(&existing, key, value);
-        std::fs::write(&path, body)
-            .map_err(|e| Failed(format!("could not write host.env: {e}")))?;
+        std::fs::write(&path, body).map_err(|e| Failed(format!("couldn't write host.env: {e}")))?;
         self.ui.ok(&format!(
             r"{key}={value} → %ProgramData%\punktfunk\host.env"
         ));
@@ -534,7 +533,7 @@ impl WinExecutor<'_> {
             };
             let file = format!("{}\\webpw.txt", self.subst.temp);
             std::fs::write(&file, format!("{password}\n"))
-                .map_err(|e| Failed(format!("could not stage the password file: {e}")))?;
+                .map_err(|e| Failed(format!("couldn't stage the password file: {e}")))?;
             argv.push("--password-file".into());
             argv.push(file.clone());
             pw_file = Some(file);
@@ -553,7 +552,7 @@ impl WinExecutor<'_> {
             let xml = scripting_task_xml(app_dir);
             let file = format!("{}\\pf-scripting-task.xml", self.subst.temp);
             std::fs::write(&file, to_utf16le_bom(&xml))
-                .map_err(|e| Failed(format!("could not stage the task XML: {e}")))?;
+                .map_err(|e| Failed(format!("couldn't stage the task XML: {e}")))?;
             let outcome = self.spawn_quiet(
                 &[
                     "schtasks",
@@ -628,7 +627,7 @@ impl WinExecutor<'_> {
         for argv in steps {
             if self.spawn_quiet(&argv, false).is_err() {
                 self.ui.warn(&format!(
-                    "could not install the Windows App Runtime — install it manually: {url}"
+                    "couldn't install the Windows App Runtime — install it manually: {url}"
                 ));
                 return Ok(());
             }

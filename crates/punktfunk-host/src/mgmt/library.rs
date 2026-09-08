@@ -187,7 +187,7 @@ pub(crate) struct HiddenState {
         (status = OK, description = "Stored; the entry's visibility after the call", body = HiddenState),
         (status = BAD_REQUEST, description = "Empty entry id", body = ApiError),
         (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
-        (status = INTERNAL_SERVER_ERROR, description = "Could not persist the settings", body = ApiError),
+        (status = INTERNAL_SERVER_ERROR, description = "Couldn't save the settings", body = ApiError),
     )
 )]
 pub(crate) async fn set_library_entry_hidden(
@@ -246,7 +246,7 @@ pub(crate) async fn list_library_scanners() -> Json<Vec<crate::library::ScannerI
         (status = OK, description = "Toggle stored; the full scanner list", body = [crate::library::ScannerInfo]),
         (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
         (status = NOT_FOUND, description = "No such scanner on this platform", body = ApiError),
-        (status = INTERNAL_SERVER_ERROR, description = "Could not persist the settings", body = ApiError),
+        (status = INTERNAL_SERVER_ERROR, description = "Couldn't save the settings", body = ApiError),
     )
 )]
 pub(crate) async fn set_library_scanner(
@@ -280,7 +280,7 @@ pub(crate) async fn set_library_scanner(
         (status = CREATED, description = "Entry created", body = crate::library::CustomEntry),
         (status = BAD_REQUEST, description = "Empty title", body = ApiError),
         (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
-        (status = INTERNAL_SERVER_ERROR, description = "Could not persist the catalog", body = ApiError),
+        (status = INTERNAL_SERVER_ERROR, description = "Couldn't save the catalog", body = ApiError),
     )
 )]
 pub(crate) async fn create_custom_game(
@@ -317,7 +317,7 @@ pub(crate) async fn create_custom_game(
         (status = BAD_REQUEST, description = "Empty title", body = ApiError),
         (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
         (status = NOT_FOUND, description = "No custom entry with that id", body = ApiError),
-        (status = INTERNAL_SERVER_ERROR, description = "Could not persist the catalog", body = ApiError),
+        (status = INTERNAL_SERVER_ERROR, description = "Couldn't save the catalog", body = ApiError),
     )
 )]
 pub(crate) async fn update_custom_game(
@@ -350,7 +350,7 @@ pub(crate) async fn update_custom_game(
         // Manual CRUD never requests a store claim; this arm is a programming error.
         Ok(MutateOutcome::StoreClaimed { .. }) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "unexpected claim outcome",
+            "The entry wasn't updated — the host hit an unexpected state",
         ),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
@@ -366,7 +366,7 @@ pub(crate) async fn update_custom_game(
         (status = NO_CONTENT, description = "Entry deleted"),
         (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
         (status = NOT_FOUND, description = "No custom entry with that id", body = ApiError),
-        (status = INTERNAL_SERVER_ERROR, description = "Could not persist the catalog", body = ApiError),
+        (status = INTERNAL_SERVER_ERROR, description = "Couldn't save the catalog", body = ApiError),
     )
 )]
 pub(crate) async fn delete_custom_game(Path(id): Path<String>) -> Response {
@@ -385,7 +385,7 @@ pub(crate) async fn delete_custom_game(Path(id): Path<String>) -> Response {
         // Manual CRUD never requests a store claim; this arm is a programming error.
         Ok(MutateOutcome::StoreClaimed { .. }) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "unexpected claim outcome",
+            "The entry wasn't deleted — the host hit an unexpected state",
         ),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
@@ -426,7 +426,7 @@ pub(crate) struct ReconcileQuery {
         (status = BAD_REQUEST, description = "Invalid provider id, store id, or payload", body = ApiError),
         (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
         (status = CONFLICT, description = "That store is already claimed by another provider", body = ApiError),
-        (status = INTERNAL_SERVER_ERROR, description = "Could not persist the catalog", body = ApiError),
+        (status = INTERNAL_SERVER_ERROR, description = "Couldn't save the catalog", body = ApiError),
     )
 )]
 pub(crate) async fn reconcile_provider_entries(
@@ -512,7 +512,7 @@ pub(crate) async fn reconcile_provider_entries(
         ),
         Ok(_) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "unexpected reconcile outcome",
+            "The library wasn't updated — the host hit an unexpected state",
         ),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
@@ -532,7 +532,7 @@ pub(crate) async fn reconcile_provider_entries(
         (status = OK, description = "How many entries were removed", body = ProviderRemoved),
         (status = BAD_REQUEST, description = "Invalid provider id", body = ApiError),
         (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
-        (status = INTERNAL_SERVER_ERROR, description = "Could not persist the catalog", body = ApiError),
+        (status = INTERNAL_SERVER_ERROR, description = "Couldn't save the catalog", body = ApiError),
     )
 )]
 pub(crate) async fn delete_provider_entries(Path(provider): Path<String>) -> Response {

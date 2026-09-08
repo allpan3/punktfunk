@@ -405,7 +405,7 @@ export async function checkForUpdatesNow(
     body =
       res.client_error === "client-outdated"
         ? "Couldn’t check the client — it predates update checks. Update it once by hand."
-        : "Couldn’t check the client for updates.";
+        : "Couldn’t check the client for updates";
   } else if (res.error === "update-channel-unknown") {
     body = "Development build — plugin updates are disabled; the client is up to date.";
   } else {
@@ -426,10 +426,11 @@ function clientUpdateResultBody(r: Awaited<ReturnType<typeof updateClient>>): st
       ? `This client updates outside Punktfunk. Run: ${r.command}`
       : "This client updates outside Punktfunk — use the way you installed it.";
   }
-  if (r.error === "timeout") return "Client update timed out — check the box and try again.";
+  if (r.error === "timeout") return "Client update timed out — check the box and try again";
   if (r.error === "client-unavailable")
     return "Couldn’t reach the client to update it — is it still installed?";
-  return `Client update failed${r.detail ? `: ${r.detail}` : r.error ? ` (${r.error})` : ""}.`;
+  const why = r.detail || r.error;
+  return `Client update failed${why ? ` — ${why}` : ""}`;
 }
 
 /**
@@ -461,7 +462,7 @@ export async function applyUpdate(
       const r = await updateClient();
       toaster.toast({ title: "Punktfunk", body: clientUpdateResultBody(r) });
     } catch {
-      toaster.toast({ title: "Punktfunk", body: "Client update failed." });
+      toaster.toast({ title: "Punktfunk", body: "Client update failed" });
     }
   } else if (info.client_update_available) {
     // Nothing here can install it — hand over the one line that does, rather than a button

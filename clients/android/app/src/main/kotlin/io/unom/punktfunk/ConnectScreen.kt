@@ -295,7 +295,7 @@ fun ConnectScreen(
     LaunchedEffect(Unit) {
         runCatching { withContext(Dispatchers.IO) { obtainIdentity(identityStore) } }
             .onSuccess { identity = it }
-            .onFailure { status = "Identity unavailable: ${it.message} — re-pair may be required" }
+            .onFailure { status = "Identity unavailable — re-pair may be required" }
     }
     // A trust decision awaiting the user (first-connect TOFU / fp changed / PIN pairing / the
     // request-access-or-PIN choice).

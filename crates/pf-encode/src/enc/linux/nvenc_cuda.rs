@@ -1036,7 +1036,7 @@ impl NvencCudaEncoder {
             ),
             Err(e) => tracing::error!(
                 error = %format!("{e:#}"),
-                "NVENC self-diagnosis: could not create a fresh CUDA context — CUDA itself is \
+                "NVENC self-diagnosis: no fresh CUDA context — CUDA itself is \
                  unhealthy in this process (GPU reset/fell off the bus, or a poisoned driver \
                  state); a host restart should clear it"
             ),

@@ -3,13 +3,12 @@
 A one-file, signed `setup.exe` for the punktfunk streaming **host** on Windows, published to Gitea's
 generic package registry (`punktfunk-host-windows`) by `.gitea/workflows/windows-host.yml`.
 
-> **M5 (2026-09):** the published artifact is the engine exe — `crates/punktfunk-setup-win`
-> packed by `pack-host-installer.ps1 -Engine` (design: `installer-v2-windows.md` in the planning
-> repo). `punktfunk-host.iss` stays buildable for one release as the revert path (a stable tag
-> still packs it, unpublished); the Inno-specific text below describes that script and goes with
-> it in WP5.3. The silent flags, the ARP key and `unins000.exe` are the same either way.
+> The published artifact is the `crates/punktfunk-setup-win` engine exe, packed by
+> `pack-host-installer.ps1 -Engine`. `punktfunk-host.iss` stays buildable as the revert path; the
+> silent flags, the ARP key and `unins000.exe` are the same either way.
 
-> Full picture (drivers-from-source, toolchain, CI, dev loop): **punktfunk-planning: `windows-build-and-packaging.md`** (internal planning repo). This README is the `packaging/windows/` file index.
+> Toolchain, drivers-from-source and the dev loop in full: punktfunk-planning
+> `windows-build-and-packaging.md`. This README is the `packaging/windows/` file index.
 
 ## Windows 11 22H2+ only (no Windows 10)
 
@@ -56,74 +55,35 @@ parse breakage that silently failed installs on non-English boxes.
 
 ## What the installer does
 
-- Installs `punktfunk-host.exe` (+ `host.env.example`, this README) to `{app}` (`C:\Program Files\punktfunk`).
-- **Optional task** *Install the pf-vdisplay virtual display driver* — `punktfunk-host.exe driver install`
-  imports the driver's self-signed cert (machine `Root` + `TrustedPublisher`), creates the
-  `root\pf_vdisplay` device node (only if absent, via nefconc — never devgen), and stages the driver with
-  `pnputil /add-driver /install`.
-  Best-effort: a driver failure warns but never aborts the install (the host degrades to a physical
-  display without it).
-- Runs `punktfunk-host service install` (idempotent; writes a default `host.env` only if absent, so
-  user config survives upgrades) and, by the *Start service now* task, `service start`.
-- **Web management console** (bundled when packed with `-WebDir`/`-BunExe`, which the CI always is):
-  lays down the built **self-contained** `.output` server (Nitro `noExternals` — deps bundled +
-  tree-shaken, ~75 files, no `node_modules`) + a portable **bun**, prompts for a console login
-  password (pre-filled with a secure random default, shown again on the final page; kept on upgrade),
-  then `punktfunk-host.exe web setup` writes the ACL'd `%ProgramData%\punktfunk\web-password`, opens
-  TCP 47992, and deletes any legacy `PunktfunkWeb` scheduled task. The console itself runs as a
-  **supervised child of the `PunktfunkHost` service** (`bun` on `:47992`, restarted on any exit,
-  stdout in `logs\web.log`), started the moment the host has written its mgmt token + identity cert.
-  It proxies the host's loopback mgmt API with the host's own `%ProgramData%\punktfunk\mgmt-token`.
-- **GameStream (Moonlight) compatibility is a wizard task** (**unchecked** by default — it pairs over
-  plain HTTP, so it is opt-in like the Public-firewall task): the choice is passed to
-  `service install --gamestream=on|off`, which writes `PUNKTFUNK_HOST_CMD=serve --gamestream` (or
-  `serve`, the secure native-only host) into `host.env`. Unattended, add it with
-  `/MERGETASKS=gamestream`. Upgrade-safe: a hand-customized `PUNKTFUNK_HOST_CMD` is never
-  overwritten, and on an upgrade the task is inert entirely (the flag is omitted, so `host.env`
-  keeps whatever it already says) — change an existing host with
-  `punktfunk-host service install --gamestream=on|off` plus a service restart.
-- **Branded, modern wizard**: `WizardStyle=modern dynamic windows11` (Inno ≥ 6.6 — Windows-11-style
-  controls following the system light/dark theme; pre-6.6 compilers fall back to plain `modern`), with
-  the punktfunk lens mark on the side panel / header tile and a multi-size `punktfunk.ico`
-  (`SetupIconFile` + the Apps & features entry). Assets are generated **and committed** by
-  `branding/gen-branding.ps1` from the canonical brand geometry (`web/src/components/brand-mark.tsx`);
-  re-run it only when the brand changes.
-- **Upgrade:** stops a running `PunktfunkHost` service and waits for `STOPPED` before replacing files
-  (otherwise the locked exe / respawning supervisor would block the copy), then re-points the service;
-  the existing console password is kept (the wizard page is skipped).
-- **Uninstall** (Add/Remove Programs): runs `service uninstall` (stop + delete service + remove
-  firewall rules), removes the `PunktfunkWeb` task + its firewall rule, then `driver uninstall` (+
-  `--gamepad`) removes the punktfunk virtual-device drivers — the pf-vdisplay device node(s) and the
-  pf-vdisplay / pf-gamepad / pf-xusb driver-store packages (the field report was that they survived
-  uninstall). **A VB-CABLE from an older punktfunk install is intentionally NOT removed** (a
-  third-party shared component the user may use elsewhere — its own uninstaller is
-  `VBCABLE_Setup_x64.exe -u -h`); the `%ProgramData%\punktfunk`
-  config (incl. `web-password`) is also left in place.
+The task list, the silent-install flags and the uninstall behaviour are on the
+[docs site](https://docs.punktfunk.unom.io/docs/windows-host). Three decisions behind them belong
+here, because nothing else records them:
 
-Silent install: `punktfunk-host-setup-<ver>.exe /VERYSILENT` (omit the driver with
-`/MERGETASKS="!installdriver"`; disable Moonlight compat with `/MERGETASKS="!gamestream"`). A silent
-fresh install uses the generated random console password — read it from
-`%ProgramData%\punktfunk\web-password`.
+- **Upgrades never overwrite `host.env`.** A default is written only if absent, and a hand-edited
+  `PUNKTFUNK_HOST_CMD` survives — on an upgrade the GameStream task is inert entirely (the flag is
+  omitted), so change an installed host with `punktfunk-host service install --gamestream=on|off`
+  plus a restart, not by re-running the wizard.
+- **A driver failure warns, never aborts.** The host degrades to a physical display without
+  pf-vdisplay, so a partial install is better than none.
+- **A VB-CABLE from an older install is deliberately not removed.** It is a third-party shared
+  component the user may rely on elsewhere; its own uninstaller is `VBCABLE_Setup_x64.exe -u -h`.
+  `%ProgramData%\punktfunk` is left in place too, so a reinstall keeps the console password.
+
+Wizard branding assets are generated **and committed** by `branding/gen-branding.ps1` from the
+canonical brand geometry in `web/src/components/brand-mark.tsx`. Re-run it only on a brand change.
 
 ## Prerequisites on the target box
 
-- A **GPU for hardware encode**: an NVIDIA GPU + driver (NVENC), an AMD GPU (native AMF), or an
-  Intel GPU (native QSV via the statically linked VPL dispatcher; the runtime ships in the Intel
-  driver) — the CI exe is built `--features nvenc,qsv`. Software H.264 is the GPU-less
-  fallback.
-- **Virtual gamepads need no prerequisite.** The DualSense / DualShock 4 / Xbox 360 (XUSB) UMDF drivers
-  are **bundled** in the installer (the *Install the virtual gamepad drivers* task) and
-  `pnputil`-installed. **ViGEmBus is no longer used.**
-- **Audio uses Steam's streaming drivers — nothing is bundled.** A Windows audio device can only
-  be created by a **kernel-mode** driver (no UMDF path exists), so unlike our self-signed UMDF
-  drivers we cannot ship our own. The host instead mints its OWN devnode instances of Valve's
-  vendor-signed streaming-audio drivers on the target box: **"Punktfunk Speakers"** (the
-  client-only desktop-audio sink, from `SteamStreamingSpeakers.inf`) and **"Punktfunk
-  Microphone"** (mic passthrough, from `SteamStreamingMicrophone.inf`). Audio therefore requires
-  **Steam installed — never running**; the installer shows a suppressible notice when Steam is
-  absent, and the host re-checks live, so installing Steam later just works. VB-CABLE was
-  bundled for the mic until the audio-substrate change (2026-08) — a cable from an older install
-  (or one the user installs) keeps working as a fallback mic target.
+The CI exe is built `--features nvenc,qsv`; AMD uses native AMF and a GPU-less box falls back to
+software H.264. Virtual gamepads need no prerequisite — the DualSense / DualShock 4 / Xbox 360 UMDF
+drivers are bundled and `pnputil`-installed, and ViGEmBus is no longer used.
+
+**Audio is the exception, and it is structural.** A Windows audio device can only be created by a
+**kernel-mode** driver — no UMDF path exists — so unlike our own drivers we cannot ship one. The
+host instead mints its own devnode instances of Valve's vendor-signed streaming-audio drivers on the
+target box. Audio therefore needs **Steam installed, never running**; the installer shows a
+suppressible notice when it is absent and the host re-checks live, so installing Steam later just
+works.
 
 ## Files here
 

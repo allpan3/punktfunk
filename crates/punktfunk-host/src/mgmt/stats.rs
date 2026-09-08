@@ -41,7 +41,7 @@ pub(crate) async fn stats_capture_start(State(st): State<Arc<MgmtState>>) -> Jso
     responses(
         (status = OK, description = "Capture stopped and saved", body = CaptureMeta),
         (status = NO_CONTENT, description = "Nothing was recording"),
-        (status = INTERNAL_SERVER_ERROR, description = "Could not write the recording to disk", body = ApiError),
+        (status = INTERNAL_SERVER_ERROR, description = "Couldn't save the recording", body = ApiError),
         (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
     )
 )]
@@ -54,7 +54,7 @@ pub(crate) async fn stats_capture_stop(State(st): State<Arc<MgmtState>>) -> Resp
         Ok(None) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("could not save capture: {e}"),
+            &format!("Couldn't save the recording — {e}"),
         ),
     }
 }
@@ -134,7 +134,7 @@ pub(crate) async fn stats_recording_get(
         }
         Err(e) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("could not read recording: {e}"),
+            &format!("Couldn't read the recording — {e}"),
         ),
     }
 }
@@ -149,7 +149,7 @@ pub(crate) async fn stats_recording_get(
         (status = NO_CONTENT, description = "Recording deleted"),
         (status = NOT_FOUND, description = "No recording with that id", body = ApiError),
         (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
-        (status = INTERNAL_SERVER_ERROR, description = "Could not delete the recording", body = ApiError),
+        (status = INTERNAL_SERVER_ERROR, description = "Couldn't delete the recording", body = ApiError),
     )
 )]
 pub(crate) async fn stats_recording_delete(
@@ -166,7 +166,7 @@ pub(crate) async fn stats_recording_delete(
         }
         Err(e) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("could not delete recording: {e}"),
+            &format!("Couldn't delete the recording — {e}"),
         ),
     }
 }

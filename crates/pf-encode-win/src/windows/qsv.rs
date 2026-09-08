@@ -14,11 +14,14 @@
 
 use super::policy::{intra_refresh_requested, ltr_test_force_at};
 use super::{ChromaFormat, Codec, EncodedFrame, Encoder, EncoderCaps};
+use crate::retrieve::Ready;
 use anyhow::{anyhow, bail, Context, Result};
 use libvpl_sys as vpl;
 use pf_frame::{CapturedFrame, FramePayload, PixelFormat};
 use std::collections::VecDeque;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use windows::core::Interface;
 use windows::Win32::Foundation::LUID;
 use windows::Win32::Graphics::Direct3D11::ID3D11Device;
@@ -547,18 +550,184 @@ const IN_FLIGHT_MAX: usize = 4;
 /// under the session watchdog's ~2 s floor.
 const BUSY_BUDGET: std::time::Duration = std::time::Duration::from_millis(200);
 
-struct Inner {
-    /// Session must Close before the loader unloads the runtime (declaration drop order).
-    session: Session,
-    _loader: Loader,
-    _device: ID3D11Device,
-    dctx: ID3D11DeviceContext,
-    /// In-flight FIFO. `GopRefDist=1` so AUs complete in submit order.
+/// What the retrieve thread and the encode thread share. The session is not in here: only this
+/// thread calls `SyncOperation` on it, and the lock is never held across that call.
+#[derive(Default)]
+struct Out {
+    /// In-flight FIFO. `GopRefDist=1` so AUs complete in submit order — `submit` pushes the back,
+    /// the retrieve thread pops the front, and nothing else touches either end.
     pending: VecDeque<Pending>,
     ready: VecDeque<EncodedFrame>,
     /// Recycled bitstream boxes. `mfxBitstream` address must stay stable while in flight.
     #[allow(clippy::vec_box)]
     bs_pool: Vec<Box<BsBuf>>,
+    /// First `SyncOperation` failure; `poll` surfaces it so the caller resets.
+    err: Option<String>,
+}
+
+// SAFETY: `Pending` carries raw VPL allocations — a sync point, the boxed bitstream the runtime
+// writes into, and the frame-control ext buffers. None is thread-affine (they are process-global
+// runtime memory, like the session itself, which is why `QsvEncoder` is `Send` at all), and the
+// mutex is what gives exactly one thread access at a time: `submit` pushes an entry and never
+// looks at it again, and only the sync thread pops one.
+unsafe impl Send for Out {}
+
+/// The sync thread and its signal. It owns every `MFXVideoCORE_SyncOperation`, so the encode
+/// thread never blocks on the fixed function — it takes finished AUs off a queue, and a caller
+/// that parks on handles takes [`Ready`] instead.
+///
+/// Dropping this stops and joins, which must happen before the session is closed under it:
+/// [`Inner`] declares it first, and [`QsvEncoder::reset`] stops it by hand around the re-Init.
+struct Retrieve {
+    out: Arc<Mutex<Out>>,
+    have: Arc<Ready>,
+    stop: Arc<AtomicBool>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Retrieve {
+    fn start(session: vpl::mfxSession) -> Result<Self> {
+        let out: Arc<Mutex<Out>> = Arc::default();
+        let have = Arc::new(Ready::new().ok_or_else(|| anyhow!("QSV: no completion event"))?);
+        let stop = Arc::new(AtomicBool::new(false));
+        let (s, t_out, t_have, t_stop) =
+            (session as usize, out.clone(), have.clone(), stop.clone());
+        let join = std::thread::Builder::new()
+            .name("punktfunk-qsv-out".into())
+            .spawn(move || sync_loop(s, t_out, t_have, t_stop))
+            .context("spawn QSV sync thread")?;
+        Ok(Self {
+            out,
+            have,
+            stop,
+            join: Some(join),
+        })
+    }
+
+    /// Frames the runtime still owes an AU for — the back-pressure reading.
+    fn in_flight(&self) -> usize {
+        lock(&self.out).pending.len()
+    }
+
+    /// Retire the thread and wait for it to leave `SyncOperation`. Idempotent.
+    fn stop_and_join(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(j) = self.join.take() {
+            let _ = j.join();
+        }
+    }
+
+    /// Forfeit everything owed. Only legal after `Close`, which aborts the writes the runtime
+    /// still has outstanding into these buffers.
+    fn reset_queues(&self) {
+        let mut g = lock(&self.out);
+        g.pending.clear();
+        g.ready.clear();
+        g.err = None;
+        self.have.clear();
+    }
+}
+
+impl Drop for Retrieve {
+    fn drop(&mut self) {
+        self.stop_and_join();
+    }
+}
+
+/// How long one `SyncOperation` may block before the loop looks at the stop flag.
+const SYNC_WAIT_MS: u32 = 50;
+
+/// Sync finished frames and hand their AUs to the encode thread. The session travels as `usize`;
+/// the thread is joined before anything closes it.
+fn sync_loop(session: usize, out: Arc<Mutex<Out>>, have: Arc<Ready>, stop: Arc<AtomicBool>) {
+    pf_frame::thread_qos::boost_thread_priority(false);
+    let session = session as vpl::mfxSession;
+    while !stop.load(Ordering::Acquire) {
+        // The front's sync point, copied out so the lock is not held across the wait. Only this
+        // thread pops, so the entry it names is still the front when the lock comes back.
+        let Some(syncp) = lock(&out).pending.front().map(|p| p.syncp) else {
+            // Nothing owed: wait for `submit` rather than spin on an empty queue.
+            std::thread::sleep(std::time::Duration::from_micros(250));
+            continue;
+        };
+        // SAFETY: `session` is live until this thread is joined, and `syncp` belongs to an
+        // operation submitted on it that has not been synced (entries leave `pending` once,
+        // below, on this thread alone).
+        let sts = unsafe { vpl::MFXVideoCORE_SyncOperation(session, syncp, SYNC_WAIT_MS) };
+        if sts == vpl::MFX_WRN_IN_EXECUTION {
+            continue;
+        }
+        let mut g = lock(&out);
+        if sts < vpl::MFX_ERR_NONE {
+            g.err.get_or_insert_with(|| {
+                format!(
+                    "MFXVideoCORE_SyncOperation failed: {} ({sts})",
+                    sts_name(sts)
+                )
+            });
+            have.set();
+            return;
+        }
+        let done = match g.pending.pop_front() {
+            Some(d) => d,
+            None => continue,
+        };
+        match au_from(done) {
+            Ok((au, bs)) => {
+                g.bs_pool.push(bs);
+                g.ready.push_back(au);
+                // Under the lock, so it cannot race the clear `poll` does when it empties.
+                have.set();
+            }
+            Err(e) => {
+                g.err.get_or_insert_with(|| format!("{e:#}"));
+                have.set();
+                return;
+            }
+        }
+    }
+}
+
+/// A synced [`Pending`] as its access unit plus the bitstream box to recycle.
+fn au_from(done: Pending) -> Result<(EncodedFrame, Box<BsBuf>)> {
+    let bs = &done.bs.mfx;
+    let off = bs.DataOffset as usize;
+    let len = bs.DataLength as usize;
+    if off + len > done.bs.buf.len() {
+        bail!(
+            "QSV bitstream out of bounds: offset {off} + length {len} > buffer {}",
+            done.bs.buf.len()
+        );
+    }
+    let data = done.bs.buf[off..off + len].to_vec();
+    let key_flag =
+        bs.FrameType & (vpl::MFX_FRAMETYPE_IDR as u16 | vpl::MFX_FRAMETYPE_I as u16) != 0;
+    let au = EncodedFrame {
+        data,
+        pts_ns: done.pts_ns,
+        keyframe: key_flag || done.forced,
+        recovery_anchor: done.recovery_anchor,
+        chunk_aligned: false,
+    };
+    let mut bs_box = done.bs;
+    bs_box.recycle();
+    Ok((au, bs_box))
+}
+
+/// The queue lock, poison-tolerant: a sync thread that panicked leaves what it already handed
+/// over readable, and its error field is what tells `poll` to reset.
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+struct Inner {
+    /// Joined before `session` closes under it.
+    retrieve: Retrieve,
+    /// Session must Close before the loader unloads the runtime (declaration drop order).
+    session: Session,
+    _loader: Loader,
+    _device: ID3D11Device,
+    dctx: ID3D11DeviceContext,
     bs_bytes: usize,
     frames_submitted: u64,
     first_au_logged: bool,
@@ -580,13 +749,39 @@ impl Inner {
 
     fn take_bs(&mut self) -> Box<BsBuf> {
         // A bitrate retarget can raise worst-case AU size; drop pooled buffers that are now short.
-        while let Some(mut b) = self.bs_pool.pop() {
+        let mut g = lock(&self.retrieve.out);
+        while let Some(mut b) = g.bs_pool.pop() {
             if b.mfx.MaxLength as usize >= self.bs_bytes {
                 b.recycle();
                 return b;
             }
         }
         BsBuf::new(self.bs_bytes)
+    }
+
+    /// The oldest finished AU, or the sync thread's failure. Clears the signal as the queue
+    /// empties — under the same lock the thread sets it under, so the two cannot cross.
+    fn pop_ready(&mut self) -> Result<Option<EncodedFrame>> {
+        let mut g = lock(&self.retrieve.out);
+        if let Some(e) = g.err.take() {
+            bail!("{e}");
+        }
+        let au = g.ready.pop_front();
+        if g.ready.is_empty() {
+            self.retrieve.have.clear();
+        }
+        Ok(au)
+    }
+
+    /// [`Self::pop_ready`], waiting up to `wait_ms` for the thread to produce one.
+    fn take_ready(&mut self, wait_ms: u32) -> Result<Option<EncodedFrame>> {
+        if let Some(au) = self.pop_ready()? {
+            return Ok(Some(au));
+        }
+        if !self.retrieve.have.wait(wait_ms) {
+            return Ok(None);
+        }
+        self.pop_ready()
     }
 }
 
@@ -786,7 +981,7 @@ impl QsvEncoder {
                 if sts < vpl::MFX_ERR_NONE {
                     tracing::debug!(
                         status = sts_name(sts),
-                        "QSV: could not read back CodingOption2 — trusting the intra-refresh request"
+                        "QSV: CodingOption2 did not read back — trusting the intra-refresh request"
                     );
                     true
                 } else {
@@ -858,62 +1053,21 @@ impl QsvEncoder {
             device = %format_args!("{:#x}", dev_raw as usize),
             "native QSV encode active (VPL, zero-copy D3D11)"
         );
+        // The sync thread starts against the initialized session and is joined before anything
+        // closes it (`Inner` drops it first; `reset` stops it by hand).
+        let retrieve = Retrieve::start(session.0)?;
         self.inner = Some(Inner {
+            retrieve,
             session,
             _loader: loader,
             _device: device.clone(),
             dctx,
-            pending: VecDeque::new(),
-            ready: VecDeque::new(),
-            bs_pool: Vec::new(),
             bs_bytes,
             frames_submitted: 0,
             first_au_logged: false,
             array_warned: false,
         });
         Ok(())
-    }
-}
-
-/// Sync the oldest in-flight frame. `None` = not ready; `Err` = typed failure (caller resets).
-fn sync_one(inner: &mut Inner, wait_ms: u32) -> Result<Option<EncodedFrame>> {
-    let Some(front) = inner.pending.front() else {
-        return Ok(None);
-    };
-    // SAFETY: `session` is live and `syncp` belongs to an operation submitted on it that has
-    // not been synced yet (entries leave `pending` exactly once, below).
-    let sts = unsafe { vpl::MFXVideoCORE_SyncOperation(inner.session.0, front.syncp, wait_ms) };
-    match sts {
-        vpl::MFX_WRN_IN_EXECUTION => Ok(None),
-        s if s < vpl::MFX_ERR_NONE => {
-            bail!("MFXVideoCORE_SyncOperation failed: {} ({s})", sts_name(s))
-        }
-        _ => {
-            let done = inner.pending.pop_front().expect("front checked above");
-            let bs = &done.bs.mfx;
-            let off = bs.DataOffset as usize;
-            let len = bs.DataLength as usize;
-            if off + len > done.bs.buf.len() {
-                bail!(
-                    "QSV bitstream out of bounds: offset {off} + length {len} > buffer {}",
-                    done.bs.buf.len()
-                );
-            }
-            let data = done.bs.buf[off..off + len].to_vec();
-            let key_flag =
-                bs.FrameType & (vpl::MFX_FRAMETYPE_IDR as u16 | vpl::MFX_FRAMETYPE_I as u16) != 0;
-            let au = EncodedFrame {
-                data,
-                pts_ns: done.pts_ns,
-                keyframe: key_flag || done.forced,
-                recovery_anchor: done.recovery_anchor,
-                chunk_aligned: false,
-            };
-            let mut bs_box = done.bs;
-            bs_box.recycle();
-            inner.bs_pool.push(bs_box);
-            Ok(Some(au))
-        }
     }
 }
 
@@ -996,25 +1150,25 @@ impl Encoder for QsvEncoder {
         let ltr_slots = self.ltr_slots;
         let reject_ok = self.codec != Codec::Av1;
         let inner = self.inner.as_mut().expect("ensure_inner succeeded");
-        // Drain finished AUs into `ready` before submit so the queue cannot grow under overload.
-        if inner.pending.len() >= IN_FLIGHT_MAX {
+        // Wait for the sync thread to free a slot before submitting: the runtime keeps writing a
+        // bitstream until its frame is synced, so the queue must not grow under overload.
+        if inner.retrieve.in_flight() >= IN_FLIGHT_MAX {
             let deadline = std::time::Instant::now() + BUSY_BUDGET;
-            while inner.pending.len() >= IN_FLIGHT_MAX {
-                match sync_one(inner, 1)? {
-                    Some(au) => inner.ready.push_back(au),
-                    None => {
-                        if std::time::Instant::now() >= deadline {
-                            self.force_kf = true;
-                            bail!(
-                                "QSV produced no output for {} ms with {} frame(s) in flight — \
-                                 wedged (escalating to reset)",
-                                BUSY_BUDGET.as_millis(),
-                                inner.pending.len()
-                            );
-                        }
-                        std::thread::sleep(std::time::Duration::from_micros(250));
-                    }
+            while inner.retrieve.in_flight() >= IN_FLIGHT_MAX {
+                if let Some(e) = lock(&inner.retrieve.out).err.take() {
+                    self.force_kf = true;
+                    bail!("{e}");
                 }
+                if std::time::Instant::now() >= deadline {
+                    self.force_kf = true;
+                    bail!(
+                        "QSV produced no output for {} ms with {} frame(s) in flight — \
+                         wedged (escalating to reset)",
+                        BUSY_BUDGET.as_millis(),
+                        inner.retrieve.in_flight()
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_micros(250));
             }
         }
         // SAFETY: the whole block runs on the single encode thread against the live session.
@@ -1156,9 +1310,7 @@ impl Encoder for QsvEncoder {
                     if sts != vpl::MFX_WRN_DEVICE_BUSY {
                         break sts;
                     }
-                    if let Some(au) = sync_one(inner, 1)? {
-                        inner.ready.push_back(au);
-                    }
+                    // The sync thread is what frees the runtime; this only re-offers the frame.
                     if std::time::Instant::now() >= deadline {
                         break sts;
                     }
@@ -1184,7 +1336,7 @@ impl Encoder for QsvEncoder {
                     self.force_kf = true;
                     bail!("QSV EncodeFrameAsync returned no sync point");
                 }
-                inner.pending.push_back(Pending {
+                lock(&inner.retrieve.out).pending.push_back(Pending {
                     syncp,
                     bs,
                     pts_ns: captured.pts_ns,
@@ -1308,24 +1460,25 @@ impl Encoder for QsvEncoder {
             let Some(inner) = self.inner.as_mut() else {
                 return Ok(None);
             };
-            if let Some(au) = inner.ready.pop_front() {
-                inner.note_first_au(&au);
-                Some(au)
-            } else {
-                let budget_ms = (750 / self.fps.max(1)).clamp(1, 12);
-                match sync_one(inner, budget_ms)? {
-                    Some(au) => {
-                        inner.note_first_au(&au);
-                        Some(au)
-                    }
-                    None => None,
-                }
+            // The same bound as before, now spent on the sync thread's event rather than inside
+            // `SyncOperation`, so nothing else on this thread waits behind it.
+            let budget_ms = (750 / self.fps.max(1)).clamp(1, 12);
+            let au = inner.take_ready(budget_ms)?;
+            if let Some(au) = &au {
+                inner.note_first_au(au);
             }
+            au
         };
         if au.is_some() {
             self.resets_without_output = 0;
         }
         Ok(au)
+    }
+
+    /// The sync thread's signal, once a session exists. Before the lazy open there is nothing to
+    /// wait on, which a caller reads as "no completion signal" and polls instead.
+    fn ready_event(&self) -> Option<isize> {
+        self.inner.as_ref().map(|i| i.retrieve.have.raw())
     }
 
     /// Stall recovery: Close+Init in place. A second reset with no AU drops the whole session.
@@ -1349,18 +1502,19 @@ impl Encoder for QsvEncoder {
         }
         let rebuilt = {
             let inner = self.inner.as_mut().expect("checked above");
-            // Best-effort settle (Close aborts them anyway).
-            while sync_one(inner, 5).ok().flatten().is_some() {}
-            // Close before dropping `pending`: each entry owns the BsBuf/FrameCtrl
-            // the runtime still writes. Drain bails on Err — Close aborts, then drop is safe.
+            // Stop and join first: the sync thread is inside `SyncOperation` on this very
+            // session, and Close under it would abort the operation it is waiting on.
+            inner.retrieve.stop_and_join();
+            // Close before dropping `pending`: each entry owns the BsBuf/FrameCtrl the runtime
+            // still writes, and Close is what aborts those writes.
 
-            // SAFETY: the session is live on this thread; Close on a wedged encoder is legal
-            // (result deliberately ignored) and re-Init happens through `init_encode`.
+            // SAFETY: the session is live on this thread with its sync thread joined; Close on a
+            // wedged encoder is legal (result deliberately ignored) and re-Init happens through
+            // `init_encode`.
             unsafe {
                 let _ = vpl::MFXVideoENCODE_Close(inner.session.0);
             }
-            inner.pending.clear();
-            inner.ready.clear();
+            inner.retrieve.reset_queues();
             inner.frames_submitted = 0;
             inner.first_au_logged = false;
             inner.session.0
@@ -1373,11 +1527,37 @@ impl Encoder for QsvEncoder {
                 self.ltr_tainted = [false; NUM_LTR_SLOTS];
                 self.next_ltr_slot = 0;
                 self.pending_force = None;
-                if let Some(inner) = self.inner.as_mut() {
-                    inner.bs_bytes = bs_bytes;
-                    inner.bs_pool.clear(); // BufferSizeInKB may have changed
+                let restarted = match self.inner.as_mut() {
+                    Some(inner) => {
+                        inner.bs_bytes = bs_bytes;
+                        // BufferSizeInKB may have changed; a pooled buffer sized for the old rate
+                        // would be short.
+                        lock(&inner.retrieve.out).bs_pool.clear();
+                        // The session encodes again, so it needs its sync thread back — without
+                        // one nothing would ever take an AU off it.
+                        match Retrieve::start(inner.session.0) {
+                            Ok(r) => {
+                                inner.retrieve = r;
+                                true
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %format!("{e:#}"),
+                                    "QSV rebuilt but its sync thread would not start — reopening \
+                                     lazily"
+                                );
+                                false
+                            }
+                        }
+                    }
+                    None => false,
+                };
+                if restarted {
+                    tracing::info!("QSV encoder rebuilt in place (Close + re-Init on the session)");
+                } else {
+                    self.inner = None;
+                    self.bound_device = 0;
                 }
-                tracing::info!("QSV encoder rebuilt in place (Close + re-Init on the session)");
             }
             Err(e) => {
                 tracing::warn!(
@@ -1402,25 +1582,22 @@ impl Encoder for QsvEncoder {
                 self.bitrate_bps = bps;
                 return true;
             };
+            // Reset needs every sync completed; the sync thread is what completes them, so this
+            // waits for the queue to empty rather than draining it here.
             let deadline = std::time::Instant::now() + BUSY_BUDGET;
-            while !inner.pending.is_empty() {
-                match sync_one(inner, 5) {
-                    Ok(Some(au)) => inner.ready.push_back(au),
-                    Ok(None) => {
-                        if std::time::Instant::now() >= deadline {
-                            tracing::warn!(
-                                "QSV bitrate retarget: in-flight frames didn't settle — falling \
-                                 back to a rebuild"
-                            );
-                            return false;
-                        }
-                        std::thread::sleep(std::time::Duration::from_micros(250));
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %format!("{e:#}"), "QSV retarget drain failed");
-                        return false;
-                    }
+            while inner.retrieve.in_flight() > 0 {
+                if let Some(e) = lock(&inner.retrieve.out).err.take() {
+                    tracing::warn!(error = %e, "QSV retarget drain failed");
+                    return false;
                 }
+                if std::time::Instant::now() >= deadline {
+                    tracing::warn!(
+                        "QSV bitrate retarget: in-flight frames didn't settle — falling back to a \
+                         rebuild"
+                    );
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_micros(250));
             }
             inner.session.0
         };
@@ -1504,7 +1681,7 @@ impl Encoder for QsvEncoder {
                 if sts < vpl::MFX_ERR_NONE || syncp.is_null() {
                     break; // MFX_ERR_MORE_DATA = drained
                 }
-                inner.pending.push_back(Pending {
+                lock(&inner.retrieve.out).pending.push_back(Pending {
                     syncp,
                     bs,
                     pts_ns: 0,

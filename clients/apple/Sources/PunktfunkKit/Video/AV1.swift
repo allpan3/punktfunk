@@ -481,63 +481,26 @@ public enum AV1 {
         // than hand the decoder an empty sample.
         guard total > 0 else { return nil }
 
-        var blockBuffer: CMBlockBuffer?
-        guard CMBlockBufferCreateWithMemoryBlock(
-            allocator: kCFAllocatorDefault, memoryBlock: nil,
-            blockLength: total, blockAllocator: kCFAllocatorDefault,
-            customBlockSource: nil, offsetToData: 0, dataLength: total,
-            flags: kCMBlockBufferAssureMemoryNowFlag, blockBufferOut: &blockBuffer) == noErr,
-            let block = blockBuffer
-        else { return nil }
-        var dstLen = 0
-        var dstPtr: UnsafeMutablePointer<CChar>?
-        guard CMBlockBufferGetDataPointer(
-            block, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &dstLen,
-            dataPointerOut: &dstPtr) == noErr,
-            dstLen == total, let dstPtr
-        else { return nil }
-        // Pass 2: the single copy — header (+extension) byte, size field, payload per OBU.
-        let dst = UnsafeMutableRawPointer(dstPtr)
-        var off = 0
-        forEachOBU(in: au.data) { base, header, payload, type in
-            if type == OBUType.temporalDelimiter || type == OBUType.padding { return true }
-            dst.storeBytes(
-                of: base[header.lowerBound] | 0x02, toByteOffset: off, as: UInt8.self)
-            off += 1
-            if base[header.lowerBound] & 0x04 != 0 {
+        return SamplePack.sample(total: total, ptsNs: au.ptsNs, format: format) { dst in
+            // Header (+extension) byte, size field, payload per OBU.
+            var off = 0
+            forEachOBU(in: au.data) { base, header, payload, type in
+                if type == OBUType.temporalDelimiter || type == OBUType.padding { return true }
                 dst.storeBytes(
-                    of: base[header.lowerBound + 1], toByteOffset: off, as: UInt8.self)
+                    of: base[header.lowerBound] | 0x02, toByteOffset: off, as: UInt8.self)
                 off += 1
+                if base[header.lowerBound] & 0x04 != 0 {
+                    dst.storeBytes(
+                        of: base[header.lowerBound + 1], toByteOffset: off, as: UInt8.self)
+                    off += 1
+                }
+                off += putLeb128(payload.count, into: dst.advanced(by: off))
+                dst.advanced(by: off)
+                    .copyMemory(from: base + payload.lowerBound, byteCount: payload.count)
+                off += payload.count
+                return true
             }
-            off += putLeb128(payload.count, into: dst.advanced(by: off))
-            dst.advanced(by: off)
-                .copyMemory(from: base + payload.lowerBound, byteCount: payload.count)
-            off += payload.count
-            return true
         }
-
-        var timing = CMSampleTimingInfo(
-            duration: .invalid,
-            presentationTimeStamp: CMTime(value: Int64(au.ptsNs), timescale: 1_000_000_000),
-            decodeTimeStamp: .invalid)
-        var sampleSize = total
-        var sample: CMSampleBuffer?
-        guard CMSampleBufferCreate(
-            allocator: kCFAllocatorDefault, dataBuffer: block, dataReady: true,
-            makeDataReadyCallback: nil, refcon: nil, formatDescription: format,
-            sampleCount: 1, sampleTimingEntryCount: 1, sampleTimingArray: &timing,
-            sampleSizeEntryCount: 1, sampleSizeArray: &sampleSize,
-            sampleBufferOut: &sample) == noErr
-        else { return nil }
-        // Low-latency display: render on arrival, don't wait for a clock.
-        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sample!, createIfNecessary: true) {
-            let dict = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
-            CFDictionarySetValue(
-                dict,
-                Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
-                Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
-        }
-        return sample
     }
 }
 

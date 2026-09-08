@@ -106,7 +106,7 @@ impl ClientLogStore {
     /// `BUILTIN\Users` an inheritable read, and every stored bundle would inherit it.
     pub fn new(dir: PathBuf) -> std::sync::Arc<Self> {
         if let Err(e) = pf_paths::create_secret_dir(&dir) {
-            tracing::warn!(dir = %dir.display(), error = %e, "could not create client-logs dir");
+            tracing::warn!(dir = %dir.display(), error = %e, "client-logs dir not created");
         }
         std::sync::Arc::new(ClientLogStore { dir })
     }

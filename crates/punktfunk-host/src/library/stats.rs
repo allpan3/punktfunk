@@ -83,7 +83,7 @@ fn update(id: &str, f: impl FnOnce(&mut GameStats)) {
     let mut file = load_file();
     f(file.games.entry(id.to_string()).or_default());
     if let Err(e) = save_file(&file) {
-        tracing::warn!(error = %e, id, "could not write library-stats.json");
+        tracing::warn!(error = %e, id, "library-stats.json not written");
     }
 }
 

@@ -1215,7 +1215,7 @@ pub(crate) fn spawn(
     std::thread::Builder::new()
         .name("pf-pad-audio".into())
         .spawn(move || run(&connector, &stop, haptics, speaker))
-        .map_err(|e| tracing::warn!(error = %e, "pad-audio thread failed to start"))
+        .map_err(|e| tracing::warn!(error = %e, "pad-audio thread start failed"))
         .ok()
 }
 

@@ -49,6 +49,12 @@ extension HostDiscovery {
 
 @MainActor
 final class HostStore: ObservableObject {
+    /// The one store per process. Every mutation rewrites the whole array from THIS instance's
+    /// copy, so a second instance (macOS opens a window per Cmd+N) would persist its own stale
+    /// view over the first's — a host paired in one window loses its pin the moment the other
+    /// window writes, and the user has to pair again.
+    static let shared = HostStore()
+
     private static let key = DefaultsKey.hosts
 
     @Published var hosts: [StoredHost] {
@@ -67,12 +73,10 @@ final class HostStore: ObservableObject {
 
     init() {
         Self.migrateToAppGroupIfNeeded()
-        if let data = defaults.data(forKey: Self.key),
-           let decoded = try? JSONDecoder().decode([StoredHost].self, from: data) {
-            hosts = decoded
-        } else {
-            hosts = []
-        }
+        // Per-element (see `StoredHost.loadAll`): decoding the array as a whole meant one
+        // unreadable record lost every saved host, and the first `markConnected` after that
+        // persisted the empty array straight over the user's real store.
+        hosts = StoredHost.loadAll(from: defaults, recentFirst: false)
     }
 
     /// One-time move of the saved-host JSON from `UserDefaults.standard` (where every build before
@@ -262,8 +266,8 @@ final class HostStore: ObservableObject {
     /// `.never`-refresh entries and rely on this push.
     private func reloadHostsWidget() {
         #if canImport(WidgetKit) && os(iOS)
-        WidgetCenter.shared.reloadTimelines(ofKind: "PunktfunkHosts")
-        WidgetCenter.shared.reloadTimelines(ofKind: "PunktfunkLibrary")
+        WidgetCenter.shared.reloadTimelines(ofKind: WidgetKind.hosts)
+        WidgetCenter.shared.reloadTimelines(ofKind: WidgetKind.library)
         #endif
     }
 }

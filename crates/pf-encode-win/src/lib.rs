@@ -15,6 +15,11 @@ pub use codec::*;
 #[cfg(target_os = "windows")]
 pub mod convert;
 
+// The manual-reset completion event AMF, QSV and Media Foundation hand out through
+// `Encoder::ready_event`. Private: it is how those three answer the trait, not an API.
+#[cfg(target_os = "windows")]
+#[path = "windows/retrieve.rs"]
+mod retrieve;
 // `#[path]` keeps `crate::*` names flat. Native AMF is unconditional on
 // Windows — `amfrt64.dll` at runtime, like NVENC. See `design/native-amf-encoder.md`.
 #[cfg(target_os = "windows")]

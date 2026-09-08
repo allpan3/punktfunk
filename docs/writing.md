@@ -172,11 +172,13 @@ CI length caps are a backstop, not the style. A four-line war story is still wro
 - `//` : at most four lines (CI fails at six).
 - `//!` / `///` module map: what it is, the contract, how to pin it, where evidence lives.
   8–20 lines (CI fails at 24).
+- Swift has no `//!`, so a `.swift` file's OPENING `//` block is its module map and gets the
+  same budget. Every comment below the header is on the `//` cap.
 - Keep `// SAFETY:` and FFI/lifetime proofs exact.
 - A comment never enforces a trust boundary — a type, a test or an assertion does.
 
 CI counts comments this diff opened (the comment itself, or the comment above an item
-whose body changed). If it fails: shorten. Do not add `writing-ok` unless the extra
+whose body changed), in `.rs` and `.swift` alike. If it fails: shorten. Do not add `writing-ok` unless the extra
 lines are a SAFETY/lifetime trap.
 
 ### When you touch a function, rewrite its comment
@@ -204,7 +206,67 @@ Keep proofs exact:
 
 ---
 
-## 4. Checklist (every PR)
+## 4. Error messages
+
+Two registers. Pick by who reads the line, never by which language you are in.
+
+### Operator register
+
+`anyhow` context, `bail!`, `expect`, `panic!`, `tracing::error!` / `warn!`,
+`#[error(…)]`.
+
+A lowercase noun or verb phrase naming the operation that did not happen.
+No `failed to` / `could not` / `unable to` prefix — the surface already frames
+it as a failure and the chain then says so twice. No trailing period. API,
+type and env-var names keep their own case.
+
+```rust
+.context("open {path}")?;
+bail!("adapter exposes no {kind} decode profile");
+```
+
+Bad: `.context("Failed to open the config file")` — framing, no subject.
+
+A `tracing` event is read on its own line, not appended to a chain, so it takes
+the noun phrase instead of the bare operation: `"hook command did not launch"`,
+`"client log upload failed"`, `"launch rejected"`. Put the cause in a field
+(`error = %e`), not in the message.
+
+Bad: `tracing::error!(error = %e, "launch the hook command")` — reads as an
+instruction in the log.
+
+### User register
+
+The web console, the TUI, the tray, the setup wizard, every client app, and
+every `api_error` string a client puts on screen.
+
+Sentence case. One sentence saying what did not happen, in the words of
+someone who streams games — no crate, symbol, protocol, hex code or errno
+(`docs/releases/README.md` voice). Then, only when the reader can act, one
+more sentence naming the move. No trailing period on a lone first sentence.
+
+```
+Couldn't reach the host — it may be asleep.
+Check its power settings, then try again.
+```
+
+Bad: `Error: mgmt API request failed (os error 61)`
+
+### Both registers
+
+- Append the cause once, after ` — ` in prose or `: ` in the operator
+  register. Never both, never twice.
+- `Couldn't`, `can't`. Not `Could not`, `cannot`, `unable to`, `failed to`.
+- Name the subject the reader knows — `the client key`, not `SecItemAdd`.
+- Never a bare code, errno or enum discriminant with no words around it.
+- No apology, no exclamation mark, no `Oops`, no `Please`.
+
+A message that only a maintainer can act on is operator register, whatever
+window it renders in.
+
+---
+
+## 5. Checklist (every PR)
 
 - [ ] Subject is `type(scope): summary`, ≤ 72 characters, imperative, no period
 - [ ] Subject names a subsystem a newcomer would grep
@@ -217,11 +279,14 @@ Keep proofs exact:
 - [ ] Module rustdoc still fits on one screen (CI fails a touched `//!` / `///` at 24 lines)
 - [ ] Touched `//` blocks are at most four lines (CI fails at six), except SAFETY proofs
 - [ ] No new comment that is the only enforcement of a trust boundary
+- [ ] New error messages pick a register: operator lines are lowercase phrases,
+      user lines are one plain sentence with the next move
+- [ ] No `failed to` / `could not` / `unable to` framing, and no doubled cause
 - [ ] `scripts/ci/check-writing.sh` is green
 
 ---
 
-## 5. Adoption
+## 6. Adoption
 
 Do not rewrite old `CHANGELOG.md` sections. Do not sweep existing module rustdoc.
 New sections and files follow this file. Rewrite a comment when you already open that function.

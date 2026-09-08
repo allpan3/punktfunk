@@ -160,6 +160,15 @@ impl Console {
         self.shell.take_action()
     }
 
+    /// What a screen reader should speak for the focused row: its label, then its value.
+    ///
+    /// Poll it and speak only when the string changes — a reader that repeats itself is
+    /// worse than silence. `None` is a focus this driver does not describe (or a takeover
+    /// holding the input), and the host then says nothing at all.
+    pub fn focus_announcement(&mut self) -> Option<String> {
+        self.shell.focus_announcement()
+    }
+
     /// Console is off screen; the shell keeps its stack for return.
     pub fn in_stream(&self) -> bool {
         self.shell.in_stream

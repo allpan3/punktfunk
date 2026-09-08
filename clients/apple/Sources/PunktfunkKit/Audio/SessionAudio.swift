@@ -169,6 +169,9 @@ public final class SessionAudio {
         if let mediaResetObserver {
             NotificationCenter.default.removeObserver(mediaResetObserver)
         }
+        if let interruptionObserver {
+            NotificationCenter.default.removeObserver(interruptionObserver)
+        }
         #endif
     }
 
@@ -369,7 +372,7 @@ public final class SessionAudio {
         do {
             try session.overrideOutputAudioPort(.speaker)
         } catch {
-            log.warning("could not move audio off the earpiece: \(error.localizedDescription)")
+            log.warning("speaker override refused: \(error.localizedDescription)")
         }
     }
 
@@ -997,6 +1000,9 @@ public final class SessionAudio {
         // and fades across a whole one. Idempotent, so the rebuild path that reuses this very ring
         // simply sets it again.
         ring.setFrameUs(wireFrameUs)
+        // The device behind this engine may be a different one, or the same one with a different
+        // buffer grant. The largest callback the PREVIOUS engine saw is not a floor for this one.
+        ring.forgetRenderQuantum()
 
         // Engine-native deinterleaved float; the render block deinterleaves from the ring. Surround
         // uses an explicit wire-order channel layout; the mixer downmixes to the output device when
@@ -1018,7 +1024,7 @@ public final class SessionAudio {
         }
         guard let format else {
             log.error(
-                "could not build \(channels)-channel \(rateHz) Hz audio format — audio disabled")
+                "no \(channels)-channel \(rateHz) Hz audio format — audio disabled")
             return nil
         }
         let scratch = ScratchBuffer() // block-owned; freed with the closure
@@ -1077,7 +1083,7 @@ public final class SessionAudio {
             if let dev = AudioDevices.deviceID(forUID: speakerUID),
                let unit = engine.outputNode.audioUnit {
                 if !Self.setDevice(dev, on: unit) {
-                    log.error("could not select speaker \(speakerUID) — using default")
+                    log.error("speaker \(speakerUID) not selectable — using default")
                 }
             } else {
                 log.warning("speaker \(speakerUID) not present — using default")
@@ -1136,124 +1142,10 @@ public final class SessionAudio {
         // `deinit`), so anything derived from the connection has to be resolved out here.
         let frameUs = wireFrameUs
         let frameMS = wireFrameMS
-        let thread = Thread { [connection, flag, drainDone] in
-            defer { drainDone.signal() }
-            var drained = 0
-            var av = AvSync(channels: channels, rateHz: rateHz)
-            // WP-C1 — the drought half of concealment. Core heals a SEQ GAP, but only when a later
-            // packet arrives to reveal it; when the wire simply goes quiet nothing arrives to
-            // reveal anything, and the ring drains into an underrun and a de-prime whose re-prime
-            // is a longer artifact than the audio that was missing.
-            //
-            // Given the SESSION's frame, like the ring: this type spends a wall-clock budget one
-            // frame at a time, and each `conceal()` that says yes costs exactly one `audioPlc()`
-            // frame below — so if it assumed 5 ms, a 2 ms lossless session would spend the budget
-            // in two fifths of the time it promises and report `plc_ms` two and a half times too
-            // high. A 5.1 session, whose frame drops to ~1 ms, would be five times out.
-            var drought = DroughtConceal(maxMS: AudioRing.plcMaxMS, frameUs: frameUs)
-            var lastPacketNs = DispatchTime.now().uptimeNanoseconds
-            // Something has decoded, so there is both state to conceal from and continuity to
-            // hold. Until then a session whose host never sends audio keeps the long timeout below
-            // rather than waking two hundred times a second to do nothing.
-            var decoded = false
-            // Decode happens IN-CORE (libopus multistream) — AudioToolbox's Opus path is
-            // stereo-only — and is handed back as interleaved f32 PCM in wire channel order.
-            // Per-iteration autorelease pool: no runloop on this thread (see Stage2Pipeline).
-            var alive = true
-            while alive, !flag.isStopped {
-                alive = autoreleasepool { () -> Bool in
-                let pcm: PunktfunkConnection.AudioPCM?
-                do {
-                    // Wait at most one frame WHILE there is a stream to protect: the drought
-                    // decision has to be made on the wire's schedule, not whenever the next packet
-                    // happens to turn up. The SESSION's frame, so a lossless plane sending every
-                    // 2 ms is not judged on a 5 ms clock.
-                    pcm = try connection.nextAudioPcm(
-                        timeoutMs: decoded ? UInt32(frameMS) : 100)
-                } catch {
-                    return false // session closed
-                }
-                guard let pcm, pcm.frameCount > 0 else {
-                    // Nothing on the wire. If the ring is draining with it, conceal from the
-                    // decoder's own state — the same libopus interpolation the loss path uses,
-                    // bounded by this ring's de-prime fuse so a genuinely dead stream is not
-                    // papered over. ONE frame per tick, not a burst: this arm runs every frame,
-                    // which is the rate the callback drains at, so concealment keeps pace with
-                    // playout instead of racing ahead of a depth reading it has already
-                    // invalidated.
-                    guard decoded else { return true }
-                    let quietMS = Int(
-                        (DispatchTime.now().uptimeNanoseconds &- lastPacketNs) / 1_000_000)
-                    guard drought.conceal(sinceLastPacketMS: quietMS, depthMS: ring.bufferedMS)
-                    else {
-                        return true
-                    }
-                    let plc: PunktfunkConnection.AudioPCM?
-                    do {
-                        plc = try connection.audioPlc()
-                    } catch {
-                        return false // session closed
-                    }
-                    if let plc {
-                        plc.samples.withUnsafeBufferPointer { p in
-                            if let base = p.baseAddress {
-                                ring.write(base, count: plc.frameCount * plc.channels)
-                            }
-                        }
-                    }
-                    ring.notePlcMS(drought.totalMS)
-                    return true
-                }
-                decoded = true
-                lastPacketNs = DispatchTime.now().uptimeNanoseconds
-                drought.packet()
-                // Place this frame against the picture it belongs with BEFORE queueing it: the
-                // depth read here is everything that must still play first, which is exactly what
-                // delays it. Skipped wholesale when no meter was wired, so an un-armed session
-                // does not even read the ring.
-                if let videoLatency {
-                    let depth = ring.bufferedSamples
-                    var ts = timespec()
-                    clock_gettime(CLOCK_REALTIME, &ts)
-                    let nowNs = Int64(ts.tv_sec) * 1_000_000_000 + Int64(ts.tv_nsec)
-                    // Half a second of tolerance on the reference: long enough to ride out a
-                    // stalled or hitching present path, short enough that a backgrounded session
-                    // (video decode dropped, audio still playing) stops steering almost at once.
-                    av.observe(AvSync.Observation(
-                        ptsNs: pcm.ptsNs, nowLocalNs: nowNs,
-                        clockOffsetNs: connection.clockOffsetNs, bufferedAhead: depth,
-                        videoE2eNs: videoLatency.latestSample(asOfNs: nowNs, maxAgeMs: 500)))
-                    ring.setSyncTarget(av.desiredDepth(currentDepth: depth))
-                    ring.noteAvOffset(av.offsetMS)
-                }
-                pcm.samples.withUnsafeBufferPointer { p in
-                    if let base = p.baseAddress {
-                        ring.write(base, count: pcm.frameCount * pcm.channels)
-                    }
-                }
-                // Periodic vitals (~10 s at the protocol's 5 ms frames; proportionally sooner on a
-                // lossless plane, whose frames are 2–4 ms). The other three clients log buffer
-                // depth and underruns; without this an Apple audio report — latency or dropout —
-                // arrives with no numbers at all, which is the position every platform was in
-                // before the 2026-08 audio work. `plc_ms` rides along because a healthy
-                // `underruns` bought with a climbing `plc_ms` is a link in trouble, not a link
-                // that is fine. `rate_hz`/`frame_us` lead it so a field log says which plane the
-                // session was on, and on what frame the shed and target floor were sized, without
-                // needing the connect lines above it.
-                drained += 1
-                if drained % 2_000 == 0 {
-                    let s = ring.stats
-                    log.info(
-                        "audio: rate_hz=\(rateHz) frame_us=\(frameUs) buffer_ms=\(s.bufferedMS) target_ms=\(s.targetMS) underruns=\(s.underruns) drift_sheds=\(s.sheds) drift_inserts=\(s.inserts) av_offset_ms=\(s.avOffsetMS) plc_ms=\(s.plcMS)"
-                    )
-                }
-                return true
-                }
-            }
-        }
-        thread.name = "punktfunk-audio"
-        thread.qualityOfService = .userInteractive
-        thread.start()
+        AudioDrain.start(
+            connection: connection, flag: flag, done: drainDone, ring: ring,
+            videoLatency: videoLatency, channels: channels, rateHz: rateHz,
+            frameUs: frameUs, frameMS: frameMS)
     }
 
     // MARK: - Mic (mic → host)
@@ -1335,12 +1227,9 @@ public final class SessionAudio {
         // the chain is built against what the voice processor will actually emit.
         engine.prepare()
         guard installMicTap(on: engine.inputNode, micUID: micUID, micChannel: micChannel) else {
-            // Mic chain unavailable on the VOICE-PROCESSED engine (logged). The mic outranks the
-            // echo cancellation, so fall back to the split path — its own engine, no voice
-            // processor, the topology that shipped before AEC existed — rather than dropping the
-            // uplink for the rest of the session. (The sibling failure above, where the voice
-            // processor won't engage at all, already does exactly this; this arm used to give up
-            // on the mic instead, which is how a whole session could go silent uplink-only.)
+            // Mic chain unavailable on the voice-processed engine (logged). The mic outranks
+            // echo cancellation: fall back to the split path — own engine, no voice processor —
+            // rather than dropping the uplink for the session.
             engine.stop()
             noteCombinedFailure()
             startPlayback(speakerUID: speakerUID)
@@ -1391,7 +1280,7 @@ public final class SessionAudio {
         if !micUID.isEmpty {
             if let dev = AudioDevices.deviceID(forUID: micUID), let unit = input.audioUnit {
                 if !Self.setDevice(dev, on: unit) {
-                    log.error("could not select microphone \(micUID) — using default")
+                    log.error("microphone \(micUID) not selectable — using default")
                 }
             } else {
                 log.warning("microphone \(micUID) not present — using default")
@@ -1651,8 +1540,10 @@ public final class SessionAudio {
     static func micChain(
         rate: Double, frames: AVAudioFrameCount, to pcmFormat: AVAudioFormat
     ) -> MicChain? {
-        // `staging` holds the resampled 48 kHz mono, so it must fit the UPWARD ratio from `rate`
-        // (a 44.1 kHz quantum grows by ~1.088); +64 covers the converter's own slack.
+        // `staging` holds the resampled mono at the DESTINATION rate, so it must fit the upward
+        // ratio from `rate` (a 44.1 kHz quantum grows by ~1.088 into 48 kHz); +64 covers the
+        // converter's own slack. Sized from `pcmFormat`, never a literal: a destination rate the
+        // buffer was not sized for truncates silently and drifts the uplink's pitch.
         guard rate > 0, frames > 0,
               let monoFormat = AVAudioFormat(
                   commonFormat: .pcmFormatFloat32, sampleRate: rate, channels: 1,
@@ -1662,7 +1553,7 @@ public final class SessionAudio {
               let staging = AVAudioPCMBuffer(
                   pcmFormat: pcmFormat,
                   frameCapacity: AVAudioFrameCount(
-                      (Double(frames) * 48_000 / rate).rounded(.up)) + 64)
+                      (Double(frames) * pcmFormat.sampleRate / rate).rounded(.up)) + 64)
         else { return nil }
         return MicChain(
             monoFormat: monoFormat, resampler: resampler, mono: mono, staging: staging)

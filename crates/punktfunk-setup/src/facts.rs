@@ -388,11 +388,11 @@ pub fn floors(os: &OsRelease, family: Family) -> (Option<String>, Option<Floor>)
             os.version_id
         ))),
         "ubuntu" if (20..=25).contains(&os.major()) => Some(Floor::Confirm(format!(
-            "Ubuntu {} installs the package but cannot host — its desktop is too old to create a virtual display ({DOCS}/requirements#the-floor-for-a-working-host). Use 26.04+.",
+            "Ubuntu {} installs the package but can't host — its desktop is too old to create a virtual display ({DOCS}/requirements#the-floor-for-a-working-host). Use 26.04+.",
             os.version_id
         ))),
         "linuxmint" if (20..=22).contains(&os.major()) => Some(Floor::Confirm(format!(
-            "Linux Mint {} (Ubuntu 24.04 base) installs the package but cannot host — {DOCS}/requirements#cinnamon-linux-mint-and-lmde. LMDE 7 and Mint 23 can.",
+            "Linux Mint {} (Ubuntu 24.04 base) installs the package but can't host — {DOCS}/requirements#cinnamon-linux-mint-and-lmde. LMDE 7 and Mint 23 can.",
             os.version_id
         ))),
         _ => None,

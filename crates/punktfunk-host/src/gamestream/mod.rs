@@ -124,7 +124,7 @@ pub fn learn_client_endpoint(
             tracing::warn!(
                 %src,
                 bytes = %hex::encode(&head),
-                "{label}: first datagram did not carry this session's ping payload — adopting it                  anyway (source-IP-bound only). Report these bytes: they pin the wire encoding."
+                "{label}: first datagram did not carry this session's ping payload — adopting it anyway (source-IP-bound only); report these bytes, they pin the wire encoding"
             );
             Ok(src)
         }

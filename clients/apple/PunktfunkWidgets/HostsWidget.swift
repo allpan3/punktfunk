@@ -35,22 +35,15 @@ struct HostsProvider: TimelineProvider {
         completion(Timeline(entries: [entry], policy: .never))
     }
 
-    /// Decode the shared-suite host JSON (same wire format the app writes), most-recent first.
-    static func loadHosts() -> [StoredHost] {
-        guard let data = AppGroup.defaults.data(forKey: DefaultsKey.hosts),
-              let hosts = try? JSONDecoder().decode([StoredHost].self, from: data)
-        else { return [] }
-        return hosts.sorted {
-            ($0.lastConnected ?? .distantPast) > ($1.lastConnected ?? .distantPast)
-        }
-    }
+    /// The shared-suite host JSON, most-recent first — see `StoredHost.loadAll`.
+    static func loadHosts() -> [StoredHost] { StoredHost.loadAll(recentFirst: true) }
 }
 
 // MARK: - Widget
 
 struct HostsWidget: Widget {
     var body: some WidgetConfiguration {
-        StaticConfiguration(kind: "PunktfunkHosts", provider: HostsProvider()) { entry in
+        StaticConfiguration(kind: WidgetKind.hosts, provider: HostsProvider()) { entry in
             HostsWidgetView(entry: entry)
                 .containerBackground(.fill.tertiary, for: .widget)
         }
@@ -100,7 +93,7 @@ private struct SmallHostView: View {
                     .font(.headline)
                     .lineLimit(2)
                 if let last = host.lastConnected {
-                    Text(last, format: .relative(presentation: .named))
+                    Text("\(last, style: .relative) ago")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -133,7 +126,7 @@ private struct MediumHostsView: View {
                                 .lineLimit(1)
                             Spacer()
                             if let last = host.lastConnected {
-                                Text(last, format: .relative(presentation: .named))
+                                Text("\(last, style: .relative) ago")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                             }

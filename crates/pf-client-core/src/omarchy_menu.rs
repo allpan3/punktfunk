@@ -78,7 +78,7 @@ fn write_rows(path: &Path, rows: Option<&str>) -> Result<(), String> {
     let stripped = strip_block(&text);
     let next = match rows {
         Some(r) => insert_block(&stripped, r)
-            .ok_or_else(|| format!("could not find the closing brace in {}", path.display()))?,
+            .ok_or_else(|| format!("no closing brace in {}", path.display()))?,
         None => stripped,
     };
     if !jsonc_valid(&next) {

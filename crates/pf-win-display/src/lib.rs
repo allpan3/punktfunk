@@ -61,7 +61,7 @@ pub fn seats_addon_reserves_display_slots() -> bool {
             if rc != ERROR_FILE_NOT_FOUND && rc != ERROR_PATH_NOT_FOUND {
                 tracing::warn!(
                     error = rc.0,
-                    r"could not read HKLM\SOFTWARE\Punktfunk\Seats; seat display-slot reservation stays disabled"
+                    r"HKLM\SOFTWARE\Punktfunk\Seats not read — seat display-slot reservation stays disabled"
                 );
             }
             false

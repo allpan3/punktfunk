@@ -127,28 +127,24 @@ public enum LibraryError: LocalizedError {
     case pinMismatch
     case http(Int)
     case unreachable(String)
+    /// A library entry's art URL is not something we will fetch (only http/https).
+    case badArtURL
 
+    /// A phrase, never a sentence. Every caller supplies the frame — the library
+    /// screen's "Couldn't load the library — ", `SendLogs`' "Couldn't send logs — ",
+    /// `HostPower`'s "\(label) failed — ". A sentence here reads as a second headline.
     public var errorDescription: String? {
         switch self {
         case .unauthorized:
-            return "The host didn't recognize this device. Pair with the host first — it "
-                + "authorizes paired clients by their certificate (no token needed)."
+            return "the host doesn't recognize this device — pair with it first"
         case .pinMismatch:
-            return "The host's certificate doesn't match the one this device paired with. "
-                + "If the host was reinstalled, forget it here and pair again."
+            return "the host's certificate isn't the one you paired with — pair again"
         case .http(let code):
-            return "The management API returned HTTP \(code)."
+            return "the host refused it (\(code))"
+        case .badArtURL:
+            return "that title's artwork address isn't a web address"
         case .unreachable(let why):
-            // The library rides a DIFFERENT port than the stream (the management API, 47990 by
-            // default; the stream is QUIC on 9777), so it can fail while streaming to the same
-            // host works perfectly — say that first, because the opposite assumption has sent
-            // more than one person hunting the wrong layer. Opening that URL in a browser is the
-            // fastest way to tell "port unreachable" apart from anything client-side.
-            return "Couldn't reach the host's management API: \(why). The library uses a "
-                + "different port than the stream (47990 by default), so streaming can work "
-                + "while this doesn't. Check that port is reachable from this device, and that "
-                + "the host isn't pinned to `--mgmt-bind 127.0.0.1`, which serves it to the "
-                + "host itself only."
+            return "couldn't reach the host — \(why)"
         }
     }
 }
@@ -413,8 +409,7 @@ public enum LibraryClient {
 
     /// `https://addr:port`, IPv6 literals bracketed — the mirror of the Rust client's `base_url`.
     static func baseURL(address: String, port: UInt16) -> String {
-        let bare = address.hasPrefix("[") && address.hasSuffix("]")
-            ? String(address.dropFirst().dropLast()) : address
+        let bare = MgmtTransport.unbracketed(address)
         return bare.contains(":") ? "https://[\(bare)]:\(port)" : "https://\(bare):\(port)"
     }
 
@@ -539,9 +534,25 @@ public final class LibraryArtLoader: LibraryArtSource, @unchecked Sendable {
     }
 
     private func fetch(_ url: URL) async throws -> Data {
-        guard isHostOrigin(url) else { return try await cdn.data(from: url).0 }
-        var path = url.path.isEmpty ? "/" : url.path
-        if let query = url.query { path += "?\(query)" }
+        guard isHostOrigin(url) else {
+            // A library entry names its own art URL, so this is host-supplied. Web schemes only —
+            // a `file:` URL would make the client read its own container and cache the result as a
+            // poster — and the same ceiling the pinned path enforces, since nothing else bounds a
+            // CDN body.
+            guard let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http"
+            else { throw LibraryError.badArtURL }
+            let data = try await cdn.data(from: url).0
+            guard data.count <= MgmtTransport.maxResponseBytes else { throw MgmtTransportError.tooLarge }
+            return data
+        }
+        // The ENCODED components: `url.path` and `url.query` hand back percent-DECODED text, and
+        // writing that straight into the request line breaks any id that needed encoding (a space
+        // in a custom entry's id makes the line unparseable, so that tile silently never gets
+        // art) — and a decoded CRLF would split the request outright.
+        let parts = URLComponents(url: url, resolvingAgainstBaseURL: true)
+        var path = parts?.percentEncodedPath ?? ""
+        if path.isEmpty { path = "/" }
+        if let query = parts?.percentEncodedQuery { path += "?\(query)" }
         let response = try await LibraryClient.send(
             path: path, address: address, port: port,
             identity: identity, hostFingerprint: hostFingerprint)
@@ -553,8 +564,7 @@ public final class LibraryArtLoader: LibraryArtSource, @unchecked Sendable {
     /// string prefix, so a differently-spelled but equivalent URL still takes the pinned path.
     private func isHostOrigin(_ url: URL) -> Bool {
         guard let host = url.host else { return false }
-        let bare = address.hasPrefix("[") && address.hasSuffix("]")
-            ? String(address.dropFirst().dropLast()) : address
+        let bare = MgmtTransport.unbracketed(address)
         let scheme = url.scheme?.lowercased()
         return host.caseInsensitiveCompare(bare) == .orderedSame
             && (url.port ?? (scheme == "http" ? 80 : 443)) == Int(port)

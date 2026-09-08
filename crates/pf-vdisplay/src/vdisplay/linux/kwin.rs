@@ -598,8 +598,8 @@ fn reenable_outputs_kscreen(outputs: &[(String, String)]) {
             tracing::error!(
                 outputs = ?outputs,
                 args = ?enable_args,
-                "KWin: could NOT re-enable the physical/bootstrap outputs (kscreen-doctor refused \
-                 the config, or could not be run, after the in-process restore already declined) — \
+                "KWin: the physical/bootstrap outputs did not re-enable (kscreen-doctor refused \
+                 the config or would not run, after the in-process restore already declined) — \
                  a monitor may be left dark"
             );
             return;
@@ -1137,7 +1137,7 @@ fn apply_virtual_primary(ours: &str) -> Vec<(String, String)> {
     if sole {
         if !kscreen(&[format!("output.{ours}.primary")]) {
             tracing::warn!(
-                "KWin: could not set the virtual output primary; client may see only the wallpaper"
+                "KWin: virtual output not made primary — the client may see only the wallpaper"
             );
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -1180,7 +1180,7 @@ fn apply_virtual_primary_only(ours: &str) {
     if ok {
         tracing::info!("KWin: streamed output set primary (physical outputs kept)");
     } else {
-        tracing::warn!("KWin: could not set the virtual output primary");
+        tracing::warn!("KWin: virtual output not made primary");
     }
 }
 

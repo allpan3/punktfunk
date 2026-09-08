@@ -217,7 +217,7 @@ struct HomeView: View {
             #endif
         }
         .alert(
-            sendLogsResult?.ok == true ? "Logs Sent" : "Couldn't Send Logs",
+            sendLogsResult?.ok == true ? "Logs sent" : "Couldn't send logs",
             isPresented: Binding(
                 get: { sendLogsResult != nil },
                 set: { if !$0 { sendLogsResult = nil } })
@@ -250,7 +250,7 @@ struct HomeView: View {
                 } ?? "")
         }
         .alert(
-            hostActionResult?.ok == true ? "On Its Way" : "Couldn't Do That",
+            hostActionResult?.ok == true ? "On its way" : "Couldn't do that",
             isPresented: Binding(
                 get: { hostActionResult != nil },
                 set: { if !$0 { hostActionResult = nil } })
@@ -352,7 +352,8 @@ struct HomeView: View {
             isBusy: model.isBusy,
             onConnect: { connect(host, selection) },
             onPair: { if !model.isBusy { pairingTarget = host } },
-            onSpeedTest: { if !model.isBusy { speedTestTarget = host } },
+            onSpeedTest: host.pinnedSHA256 != nil
+                ? { if !model.isBusy { speedTestTarget = host } } : nil,
             onForget: { store.forgetIdentity(host) },
             onRemove: { store.remove(host) },
             onBrowseLibrary: onBrowseLibrary,
@@ -375,7 +376,7 @@ struct HomeView: View {
         guard action.available else {
             hostActionResult = (
                 false,
-                action.unavailableReason ?? "\(action.label) isn't available right now.")
+                action.unavailableReason ?? "\(action.label) isn't available right now")
             return
         }
         if action.danger {

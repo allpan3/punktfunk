@@ -280,7 +280,13 @@ const RESOLUTIONS: [(u32, u32); 6] = [
     (2560, 1440),
     (3840, 2160),
 ];
-const REFRESH: [u32; 5] = [0, 30, 60, 90, 120];
+/// `0` = the panel's native refresh, resolved at connect. Must cover every value the desktop
+/// shells can write: on Linux both write the same client-gtk-settings.json, so a box that set
+/// 144 Hz there opens this screen holding it. A value missing from this table has no index, and
+/// `step_option` answers a missing index with 0 — one nudge on the row would silently snap the
+/// setting to Automatic. Keep in step with clients/linux/src/ui_settings.rs and
+/// clients/windows/src/app/settings.rs.
+const REFRESH: [u32; 8] = [0, 30, 60, 90, 120, 144, 165, 240];
 /// Must stay in sync with [`punktfunk_core::render_scale::PRESETS`].
 const RENDER_SCALES: [f64; 9] = [0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0];
 /// Left/right rungs in kbps. Denser below ~20 Mbps; ceiling 2 Gbps. Off-ladder
@@ -298,7 +304,7 @@ const CUSTOM_MAX_MBPS: u32 = 2_000;
 /// webOS is the one platform with a real ceiling: the TV client bounds its own slider at
 /// 200 Mbps and clamps the document to it, so a shell offering more would write a number the
 /// classic menus take straight back off again. Everywhere else the ladder's own top stands.
-fn bitrate_ceiling_kbps(platform: crate::platform::Platform) -> u32 {
+pub(crate) fn bitrate_ceiling_kbps(platform: crate::platform::Platform) -> u32 {
     match platform {
         crate::platform::Platform::WebOS => 200_000,
         crate::platform::Platform::Desktop
@@ -768,6 +774,23 @@ impl SettingsScreen {
             }
             ListMsg::None => pulse,
         }
+    }
+
+    /// What a screen reader speaks: the section while the strip holds focus, otherwise the
+    /// focused row's label and the value drawn beside it.
+    pub(crate) fn announcement(&self, ctx: &Ctx) -> Option<String> {
+        if self.strip_focus {
+            return Some(format!("{} section", TABS[self.tab].0));
+        }
+        let row = row_spec(
+            *self.row_ids(ctx).get(self.list.cursor)?,
+            ctx,
+            &self.profiles,
+        );
+        Some(match row.value {
+            Some(value) => format!("{}, {}", row.label, value),
+            None => row.label,
+        })
     }
 
     pub(crate) fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
@@ -1895,6 +1918,25 @@ pub(crate) mod tests {
         assert_eq!(got, want, "the desktop console's tab names and order");
     }
 
+    /// Every refresh rate the desktop shells can persist must have an index here.
+    /// `step_option` answers a missing index with 0, and `REFRESH[0]` is Automatic, so a rate
+    /// this table lacks is silently discarded the first time the user nudges the row. On Linux
+    /// both desktop shells write the same client-gtk-settings.json this screen reads, so 144,
+    /// 165 and 240 arrive here whether or not this table offers them.
+    #[test]
+    fn refresh_table_covers_every_rate_the_desktop_shells_write() {
+        // clients/linux/src/ui_settings.rs and clients/windows/src/app/settings.rs.
+        for hz in [0u32, 30, 60, 90, 120, 144, 165, 240] {
+            assert!(
+                REFRESH.contains(&hz),
+                "{hz} Hz is offered by the desktop shells but has no index in REFRESH"
+            );
+        }
+        // The mechanism this pins: no index means index 0, which is Automatic.
+        assert_eq!(step_option(None, REFRESH.len(), 1, false), Some(0));
+        assert_eq!(REFRESH[0], 0, "index 0 must stay Automatic");
+    }
+
     fn ctx_parts() -> (Settings, Vec<pf_client_core::menu_nav::PadInfo>) {
         (Settings::default(), Vec::new())
     }
@@ -2521,6 +2563,7 @@ pub(crate) mod tests {
                 id: "p1".into(),
                 name: "Work".into(),
                 accent: None,
+                bitrate_kbps: None,
             }),
             bound_profile: None,
             running: String::new(),

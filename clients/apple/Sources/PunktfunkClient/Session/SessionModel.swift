@@ -43,25 +43,23 @@ final class FrameMeter: @unchecked Sendable {
     private let lock = NSLock()
     private var frames = 0
     private var bytes = 0
-    private var totalFrames = 0
 
     func note(byteCount: Int) {
         lock.lock()
         frames += 1
         bytes += byteCount
-        totalFrames += 1
         lock.unlock()
     }
 
-    /// Returns and resets the per-interval counters (the running total stays).
-    func drain() -> (frames: Int, bytes: Int, total: Int) {
+    /// Returns and resets the per-interval counters.
+    func drain() -> (frames: Int, bytes: Int) {
         lock.lock()
         defer {
             frames = 0
             bytes = 0
             lock.unlock()
         }
-        return (frames, bytes, totalFrames)
+        return (frames, bytes)
     }
 }
 
@@ -128,6 +126,10 @@ final class SessionModel: ObservableObject {
     private var launchWatch: Task<Void, Never>?
     /// Counts launches, so each hold is a view of its own — see `LaunchHoldTarget.seq`.
     private var launchSeq = 0
+    /// Counts connect ATTEMPTS. The handshake runs off-main and identifies itself on the way back;
+    /// phase plus host id is not enough, because cancelling a dial and re-dialling the same host
+    /// satisfies both and the abandoned attempt can land first.
+    private var connectSeq = 0
     /// The host this session is for (a value copy; identity = id).
     @Published private(set) var activeHost: StoredHost?
     /// The library entry this session was launched with (`connect(launchID:)`), or nil if the user
@@ -154,7 +156,6 @@ final class SessionModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var fps = 0
     @Published var mbps = 0.0
-    @Published var totalFrames = 0
     /// The unified latency stages (design/stats-unification.md), ms per 1 s window. `host+network`
     /// = capture→received, skew-corrected across machines via the connect-time clock offset: the
     /// stage-2 HUD shows its p50 in the equation line; the stage-1 fallback shows p50/p95 as its
@@ -509,6 +510,8 @@ final class SessionModel: ObservableObject {
                  requestAccess: Bool = false,
                  onUnreachable: (@MainActor () -> Void)? = nil) {
         guard phase == .idle else { return }
+        connectSeq += 1
+        let attempt = connectSeq
         phase = .connecting
         activeHost = host
         launchedTitleID = launchID
@@ -672,8 +675,11 @@ final class SessionModel: ObservableObject {
                 guard let self else { return }
                 // The user may have abandoned this attempt (window closed, another host
                 // clicked) while the handshake was in flight — don't resurrect a session
-                // for a dead window, and especially don't start its mic uplink.
-                guard self.phase == .connecting, self.activeHost?.id == host.id else {
+                // for a dead window, and especially don't start its mic uplink. Matched on the
+                // ATTEMPT, not just phase and host: cancel a slow dial and re-dial the same host
+                // and both attempts pass that pair, so the abandoned one could be adopted.
+                guard self.connectSeq == attempt, self.phase == .connecting,
+                      self.activeHost?.id == host.id else {
                     if case .success(let conn) = result {
                         Task.detached { conn.close() } // joins Rust threads — off-main
                     }
@@ -712,6 +718,7 @@ final class SessionModel: ObservableObject {
                         Task.detached { conn.close() } // joins Rust threads — off-main
                         self.phase = .idle
                         self.activeHost = nil
+                        self.revealStream() // no stream is coming; the hold must not outlive the dial
                         SessionSettings.end() // no session, so nothing may keep its settings latched
                         self.errorMessage = "\(host.displayName) is not paired yet. "
                             + "Pair with its PIN before streaming."
@@ -721,6 +728,10 @@ final class SessionModel: ObservableObject {
                         "connect \(host.displayName, privacy: .public) failed: \(String(describing: error), privacy: .public)")
                     self.phase = .idle
                     self.activeHost = nil
+                    // The launch hold is an OPAQUE cover; only `revealStream` drops it, and
+                    // otherwise nothing here does. It would sit over the home screen until the
+                    // next session, and on tvOS it makes the host grid unfocusable behind it.
+                    self.revealStream()
                     SessionSettings.end() // the dial failed — back to the plain globals
                     if case PunktfunkClientError.rejected(let rejection) = error {
                         // The host answered and stated its reason (declined / approval timed
@@ -740,15 +751,11 @@ final class SessionModel: ObservableObject {
                             + "request access again — the request expires after a few minutes."
                     } else {
                         self.errorMessage = pin != nil
-                            ? "Could not connect to \(host.displayName) — host unreachable, "
-                                + "not running, its identity no longer matches the pinned "
-                                + "fingerprint, or it requires pairing and no longer "
-                                + "recognizes this Mac (right-click the host card to pair "
-                                + "again)."
-                            : "Could not connect to \(host.displayName) — is punktfunk-host "
-                                + "running on \(host.address):\(host.port)? If it requires "
-                                + "pairing, right-click the host card and pair with its PIN "
-                                + "first."
+                            ? "Couldn't reach \(host.displayName) — it may be asleep, or its "
+                                + "identity changed since you paired. Pair with it again from "
+                                + "its host card."
+                            : "Couldn't reach \(host.displayName) — it may be asleep, or not "
+                                + "paired yet. Wake it, or pair with it from its host card."
                     }
                 }
             }
@@ -990,6 +997,9 @@ final class SessionModel: ObservableObject {
         }
         statsTimer?.invalidate()
         statsTimer = nil
+        // What this host has up is about to change, so the cards must ask again rather than wait
+        // out the cache's TTL naming the game the user just left.
+        if let host = activeHost { NowPlayingStore.shared.invalidate(host) }
         // Release the session's resolved settings: from here every reader falls back to the plain
         // globals, which is exactly what they saw before profiles existed.
         SessionSettings.end()
@@ -1157,15 +1167,15 @@ final class SessionModel: ObservableObject {
         case .hostEnded, .local:
             // Someone asked for this: an operator "End" on the host, or our own close racing in.
             // Say it plainly, without the error framing.
-            errorMessage = "\(name) ended the session."
+            errorMessage = "\(name) ended the session"
         case .hostError:
-            errorMessage = "\(name) ended the session with an error."
+            errorMessage = "\(name) ended the session with an error"
         case .lost:
-            errorMessage = "Lost the connection to \(name)."
+            errorMessage = "Lost the connection to \(name)"
         case .none:
             // No verdict (an older core, or the close raced the read): keep the wording this path
             // has always used rather than inventing one.
-            errorMessage = "Session ended by \(name)."
+            errorMessage = "Session ended by \(name)"
         }
     }
 
@@ -1174,7 +1184,7 @@ final class SessionModel: ObservableObject {
     /// imminent. Show the blur+spinner immediately, before the debounced request even leaves.
     func resizeTargeted(width: UInt32, height: UInt32) {
         resizeIndicator.steering(
-            width: width, height: height, now: Date().timeIntervalSinceReferenceDate)
+            width: width, height: height, now: ProcessInfo.processInfo.systemUptime)
         resizing = resizeIndicator.active
     }
 
@@ -1378,21 +1388,26 @@ final class SessionModel: ObservableObject {
     private func startStatsTimer() {
         lastFramesDropped = 0 // a fresh connection's cumulative drop counter starts at 0
         latencySplit.reset() // no stale receipts/samples from a previous session
+        // The meters outlive the session: the HUD holds them, and the pump can deliver a frame
+        // after disconnect, so a new session's first window would otherwise publish the dead
+        // session's percentiles.
+        for meter in [latency, endToEnd, decodeStage, displayStage, clientQueue, presentFloor] {
+            meter.reset()
+        }
         let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in
                 // Resize-overlay safety net: clear a stuck overlay when a targeted size never
                 // decodes (a rejected/capped switch). The decoded-frame END clears it promptly on
                 // success; this only fires after the timeout.
-                self.resizeIndicator.tick(now: Date().timeIntervalSinceReferenceDate)
+                self.resizeIndicator.tick(now: ProcessInfo.processInfo.systemUptime)
                 self.resizing = self.resizeIndicator.active
                 // Access chip + expiry warnings: the same tick that drives every other live
                 // readout also walks the countdown and picks up mid-session grant edits.
                 self.updateAccessState()
-                let (frames, bytes, total) = self.meter.drain()
+                let (frames, bytes) = self.meter.drain()
                 self.fps = frames
                 self.mbps = Double(bytes) * 8 / 1_000_000
-                self.totalFrames = total
                 // Per-window `lost` = the delta of the connector's cumulative reassembler-drop
                 // counter (0 after close — treat a rewind as no loss rather than underflowing).
                 let dropped = self.connection?.framesDropped() ?? 0

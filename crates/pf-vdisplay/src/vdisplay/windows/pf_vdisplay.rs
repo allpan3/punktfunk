@@ -135,7 +135,7 @@ fn reap_ghost_monitors() -> u32 {
                 tracing::warn!(
                     found,
                     removed,
-                    "pf-vdisplay: ghost-monitor reap could NOT remove every ghost node — the leftovers keep pinning IddCx monitor slots toward the 0x80070490 wedge"
+                    "pf-vdisplay: ghost-monitor reap left ghost nodes behind — the leftovers keep pinning IddCx monitor slots toward the 0x80070490 wedge"
                 );
             } else {
                 tracing::warn!(
@@ -227,7 +227,7 @@ fn reload_vdisplay_adapter() -> AdapterCycle {
         Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         Err(e) => {
             tracing::warn!(error = %e, "pf-vdisplay: adapter reload could not spawn powershell");
-            return AdapterCycle::Refused(format!("could not spawn powershell: {e}"));
+            return AdapterCycle::Refused(format!("powershell did not spawn: {e}"));
         }
     };
     let outcome = classify_reload_output(&out);
@@ -242,8 +242,8 @@ fn reload_vdisplay_adapter() -> AdapterCycle {
         ),
         AdapterCycle::Refused(why) => tracing::warn!(
             reason = %why,
-            "pf-vdisplay: the adapter devnode exists but could NOT be reloaded — a session cannot \
-             recover from this without a host-service restart or a reboot"
+            "pf-vdisplay: the adapter devnode exists but the reload was refused — a session \
+             recovers only after a host-service restart or a reboot"
         ),
     }
     outcome
@@ -1126,7 +1126,7 @@ pub fn force_driver_cycle() -> Result<()> {
             )
         }
         AdapterCycle::Refused(why) => {
-            anyhow::bail!("driver cycle: the adapter devnode could not be reloaded ({why})")
+            anyhow::bail!("driver cycle: adapter devnode reload refused ({why})")
         }
     }
 }
@@ -1193,7 +1193,7 @@ fn wait_for_interface(not_ready_grace: Duration, reload: bool) -> (Result<OwnedH
                 }
                 AdapterCycle::Refused(why) => {
                     let e = Err(probe.into_error()).context(format!(
-                        "the pf-vdisplay adapter devnode could not be reloaded ({why})"
+                        "pf-vdisplay adapter devnode reload refused ({why})"
                     ));
                     return (e, reloaded);
                 }
@@ -1584,7 +1584,7 @@ mod tests {
     impl Drop for ExclusiveTopology {
         fn drop(&mut self) {
             if let Err(e) = crate::policy::prefs().set(self.0.clone()) {
-                eprintln!("WARNING: could not restore the display policy: {e}");
+                eprintln!("WARNING: display policy not restored: {e}");
             }
         }
     }

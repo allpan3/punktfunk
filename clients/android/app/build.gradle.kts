@@ -165,4 +165,14 @@ dependencies {
 // images, not to diff goldens, so always capture rather than verify.
 tasks.withType<Test>().configureEach {
     systemProperty("roborazzi.test.record", "true")
+    // -PexcludeScreenshots drops the Roborazzi scenes so the PR gate can run the whole suite.
+    // They share this source set but are a release-artifact job (android-screenshots.yml, v* tags):
+    // 24 @Test that write PNGs and assert nothing, and a minute nobody owes on every push.
+    // Without this the gate had to be an allowlist, which silently rotted in both directions —
+    // five patterns naming classes deleted with the Compose console, and six live classes that
+    // gated nothing. Gradle only fails when the WHOLE filter set matches nothing, so neither
+    // half was ever reported.
+    if (project.hasProperty("excludeScreenshots")) {
+        filter { excludeTestsMatching("io.unom.punktfunk.screenshots.*") }
+    }
 }

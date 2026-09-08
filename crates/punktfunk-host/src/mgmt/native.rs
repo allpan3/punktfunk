@@ -365,7 +365,7 @@ pub(crate) async fn unpair_native_client(
         ),
         Err(e) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("could not persist trust store: {e}"),
+            &format!("Couldn't save the paired-device list — {e}"),
         ),
     }
 }
@@ -390,7 +390,7 @@ pub(crate) async fn unpair_native_client(
         (status = BAD_REQUEST, description = "Reserved grant bits set, or expires_in_secs together with clear_expiry", body = ApiError),
         (status = NOT_FOUND, description = "No paired native client with that fingerprint", body = ApiError),
         (status = SERVICE_UNAVAILABLE, description = "Native host not enabled", body = ApiError),
-        (status = INTERNAL_SERVER_ERROR, description = "Could not persist the trust store", body = ApiError),
+        (status = INTERNAL_SERVER_ERROR, description = "Couldn't save the paired-device list", body = ApiError),
         (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
     )
 )]
@@ -468,7 +468,7 @@ pub(crate) async fn update_native_client_access(
         ),
         Err(e) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("could not persist trust store: {e}"),
+            &format!("Couldn't save the paired-device list — {e}"),
         ),
     }
 }
@@ -488,7 +488,7 @@ pub(crate) async fn update_native_client_access(
         (status = OK, description = "Every native client unpaired (possibly none)", body = UnpairAllResult),
         (status = SERVICE_UNAVAILABLE, description = "Native host not enabled", body = ApiError),
         (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
-        (status = INTERNAL_SERVER_ERROR, description = "Could not persist the trust store", body = ApiError),
+        (status = INTERNAL_SERVER_ERROR, description = "Couldn't save the paired-device list", body = ApiError),
     )
 )]
 pub(crate) async fn unpair_all_native_clients(State(st): State<Arc<MgmtState>>) -> Response {
@@ -511,7 +511,7 @@ pub(crate) async fn unpair_all_native_clients(State(st): State<Arc<MgmtState>>) 
         }
         Err(e) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("could not persist trust store: {e}"),
+            &format!("Couldn't save the paired-device list — {e}"),
         ),
     }
 }
@@ -579,7 +579,7 @@ pub(crate) async fn list_pending_devices(
         (status = BAD_REQUEST, description = "Reserved grant bits set", body = ApiError),
         (status = NOT_FOUND, description = "No pending request with that id (expired?)", body = ApiError),
         (status = SERVICE_UNAVAILABLE, description = "Native host not enabled", body = ApiError),
-        (status = INTERNAL_SERVER_ERROR, description = "Could not persist the trust store", body = ApiError),
+        (status = INTERNAL_SERVER_ERROR, description = "Couldn't save the paired-device list", body = ApiError),
         (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
     )
 )]
@@ -609,7 +609,7 @@ pub(crate) async fn approve_pending_device(
         ),
         Err(e) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("could not persist trust store: {e}"),
+            &format!("Couldn't save the paired-device list — {e}"),
         ),
     }
 }

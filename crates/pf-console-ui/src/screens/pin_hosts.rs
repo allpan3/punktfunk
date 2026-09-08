@@ -213,6 +213,7 @@ mod tests {
                 id: id.into(),
                 name: "Work".into(),
                 accent: None,
+                bitrate_kbps: None,
             }),
             bound_profile: None,
             running: String::new(),

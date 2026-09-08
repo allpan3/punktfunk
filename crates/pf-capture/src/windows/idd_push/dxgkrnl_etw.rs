@@ -271,7 +271,7 @@ impl EtwWatch {
                 tracing::debug!(rc = rc.0, "DxgKrnl ETW consumer exited");
             })
         {
-            tracing::debug!(error = %e, "DxgKrnl ETW consumer thread failed to spawn");
+            tracing::debug!(error = %e, "DxgKrnl ETW consumer thread not spawned");
             let (mut buf, _) = properties_buffer();
             // SAFETY: live handles + valid properties allocation, released exactly once on this path.
             unsafe {

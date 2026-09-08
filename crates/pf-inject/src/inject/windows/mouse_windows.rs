@@ -366,7 +366,7 @@ pub fn channel_proof_probe() -> Result<()> {
     })?;
     let _sw = super::gamepad_raii::SwDevice::new(hsw);
     let Some(instance_id) = instance_id else {
-        anyhow::bail!("SwDeviceCreate reported no instance id — cannot look the devnode up");
+        anyhow::bail!("SwDeviceCreate reported no instance id to look the devnode up by");
     };
 
     // Poll: PnP + hidclass publish in tens of ms; a fixed sleep would miss a slow box.

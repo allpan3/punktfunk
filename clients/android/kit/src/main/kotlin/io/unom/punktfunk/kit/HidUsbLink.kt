@@ -225,7 +225,7 @@ class HidUsbLink(
             if (conn.claimInterface(iface, true)) {
                 out.add(Claim(iface, inEp, outEp))
             } else {
-                Log.w(config.tag, "could not claim iface ${iface.id}")
+                Log.w(config.tag, "claimInterface(iface ${iface.id}) failed")
             }
         }
         return out

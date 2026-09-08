@@ -795,8 +795,9 @@ object NativeBridge {
 
     /**
      * Block up to ~100 ms for the next event: `{"action": <OverlayAction>}`, `{"pulse": "move" |
-     * "confirm" | "boundary"}`, `{"editing": bool}`, `{"settings": <Settings>}` (persist it),
-     * `{"gles": 2 | 3}`, `{"dead": "<why>"}`. `""` on timeout. Call from a dedicated poll thread.
+     * "confirm" | "boundary"}`, `{"editing": bool}`, `{"announce": "<focused row>"}` (speak it),
+     * `{"settings": <Settings>}` (persist it), `{"gles": 2 | 3}`, `{"dead": "<why>"}`. `""` on
+     * timeout. Call from a dedicated poll thread.
      */
     external fun nativeConsoleNextEvent(handle: Long): String
 
@@ -811,6 +812,14 @@ object NativeBridge {
 
     /** The wake card's status (`WakeStatus` JSON) or `null` to clear it. */
     external fun nativeConsoleSetWake(handle: Long, json: String)
+
+    /**
+     * A new phase for the speed test the console already raised: `"Connecting"`, `"Measuring"`,
+     * `{"Failed": "why"}`, or `{"Done": {"throughput_kbps": …, "loss_pct": …,
+     * "recommended_kbps": …}}`. There is no setter for the test itself — the shell owns that
+     * slot, so a phase for a dismissed test, or for a host other than [key], is dropped.
+     */
+    external fun nativeConsoleAdvanceSpeed(handle: Long, key: String, json: String)
 
     /** A one-shot toast from a service worker. */
     external fun nativeConsoleNotice(handle: Long, text: String)

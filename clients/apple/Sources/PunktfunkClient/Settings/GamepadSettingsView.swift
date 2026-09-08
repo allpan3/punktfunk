@@ -520,6 +520,14 @@ struct GamepadSettingsView: View {
                     .lineLimit(1)
                 Spacer(minLength: 12)
                 HStack(spacing: 9) {
+                    if isOverridden(row) {
+                        // Same meaning as the pointer shell's override marker: a profile decides
+                        // this one, so the value here is not what the session will use.
+                        Image(systemName: "person.crop.circle.badge.checkmark")
+                            .font(.system(size: m.chevronFont, weight: .semibold))
+                            .foregroundStyle(ink.accent.opacity(0.85))
+                            .accessibilityLabel("Set by a profile")
+                    }
                     Image(systemName: "chevron.left")
                         .font(.system(size: m.chevronFont, weight: .semibold))
                         .foregroundStyle(
@@ -575,8 +583,23 @@ struct GamepadSettingsView: View {
     }
 
     private var focusedDetail: String {
-        rows.first { $0.id == focusID }?.detail ?? " "
+        guard let row = rows.first(where: { $0.id == focusID }) else { return " " }
+        guard let note = overrideNote(row) else { return row.detail }
+        return "\(row.detail) \(note)"
     }
+
+    /// The sentence a row adds when the start-screen host's profile overrides it. Named rather
+    /// than implied: this screen edits the defaults, so a row showing one value while the session
+    /// streams another is the whole confusion this closes.
+    private func overrideNote(_ row: Row) -> String? {
+        guard let field = row.field, let bound = landingProfile,
+              OverlayField.isOverridden(field, in: bound.profile.overrides)
+        else { return nil }
+        return "“\(bound.profile.name)” overrides this for \(bound.host)."
+    }
+
+    /// Does a profile override this row? Drives the marker beside the value.
+    private func isOverridden(_ row: Row) -> Bool { overrideNote(row) != nil }
 
     /// The option band's fixed stage. A portrait phone is the one place the full 240 pt starves
     /// the row's label (everywhere else the 620 pt row cap leaves room to spare), so it alone
@@ -606,6 +629,10 @@ struct GamepadSettingsView: View {
         /// actions, profiles — a two-position switch is not a drum; see GamepadOptionBand).
         var optionLabels: [String]?
         var selectedIndex: Int?
+        /// The `SettingsOverlay` field this row edits, when it is profileable. The rows write
+        /// GLOBALS — profiles are edited in the standard interface (design §5.4) — so this is
+        /// what lets a row say that a bound host's profile will win over what it shows.
+        var field: String?
         /// Whether left/right means anything here — false hides the value's chevrons (the
         /// Profiles rows navigate, and the placeholder rows do nothing at all).
         var adjustable = true
@@ -783,15 +810,43 @@ struct GamepadSettingsView: View {
 
     /// Every row on the screen, tagged with its section. Built as one list (not per tab) so the
     /// platform-conditional insertions below can still place a row RELATIVE to another by id.
+    /// The profile the start-screen host streams with, if it is bound to one. These rows edit the
+    /// GLOBAL defaults — profiles are made and edited in the standard interface (design §5.4) — so
+    /// a bound host would otherwise show one value here and stream with another, with nothing on
+    /// screen saying which one wins.
+    /// The session will stream PyroWave: the codec is selected AND this device can decode it.
+    private var pyroWaveSelected: Bool {
+        codec == "pyrowave" && MetalWaveletDecoder.supported
+    }
+
+    private var landingProfile: (host: String, profile: StreamProfile)? {
+        let stored = UserDefaults.standard.string(forKey: DefaultsKey.defaultHost) ?? ""
+        guard let host = store.hosts.first(where: {
+            $0.id.uuidString.lowercased() == stored.lowercased()
+        }), let profile = profiles.profile(id: host.profileID) else { return nil }
+        return (host.displayName, profile)
+    }
+
     private var allRows: [Row] {
         let resolution = resolutionOptions
         let refresh = SettingsOptions.refreshRates(including: hz)
             .map { (label: "\($0) Hz", tag: $0) }
         let bitrate = SettingsOptions.bitrateOptions(current: bitrateKbps)
         let controllers = SettingsOptions.controllerOptions(gamepads)
-        var list: [Row] = [
+        var list: [Row] = []
+        if let bound = landingProfile {
+            list.append(Row(
+                id: "profileNotice", tab: .stream, icon: "person.crop.circle.badge.checkmark",
+                label: "\(bound.host) uses “\(bound.profile.name)”",
+                value: "",
+                detail: "These are the defaults. Where that profile sets a value, it wins for "
+                    + "that host — edit it in the standard settings.",
+                adjustable: false,
+                adjust: { _ in false }, activate: {}))
+        }
+        list += [
             choiceRow(
-                id: "resolution", tab: .stream, icon: "aspectratio",
+                id: "resolution", tab: .stream, field: "resolution", icon: "aspectratio",
                 label: "Resolution",
                 detail: "The host creates a real display at exactly this size.",
                 options: resolution, current: "\(width)x\(height)"
@@ -802,47 +857,51 @@ struct GamepadSettingsView: View {
                 height = parts[1]
             },
             choiceRow(
-                id: "refresh", tab: .stream, icon: "gauge.with.needle", label: "Refresh rate",
+                id: "refresh", tab: .stream, field: "refresh_hz", icon: "gauge.with.needle", label: "Refresh rate",
                 detail: "Rates this display can actually show.",
                 options: refresh, current: hz
             ) { hz = $0 },
             choiceRow(
-                id: "bitrate", tab: .stream, icon: "speedometer", label: "Bitrate",
-                detail: "Automatic uses the host's default, 20 Mbps.",
-                options: bitrate, current: bitrateKbps
+                id: "bitrate", tab: .stream, field: "bitrate_kbps", icon: "speedometer", label: "Bitrate",
+                // PyroWave pins the rate per mode, so the host ignores whatever is set here —
+                // the same reason both other shells replace this row under that codec.
+                detail: pyroWaveSelected
+                    ? "PyroWave sets its own rate per mode; this is ignored."
+                    : "Automatic uses the host's default, 20 Mbps.",
+                options: bitrate, current: bitrateKbps, enabled: !pyroWaveSelected
             ) { bitrateKbps = $0 },
             choiceRow(
-                id: "compositor", tab: .stream, icon: "macwindow", label: "Compositor",
+                id: "compositor", tab: .stream, field: "compositor", icon: "macwindow", label: "Compositor",
                 detail: "Which compositor drives the virtual output — honored only if available.",
                 options: SettingsOptions.compositors, current: compositor
             ) { compositor = $0 },
             choiceRow(
-                id: "codec", tab: .video, icon: "film", label: "Video codec",
+                id: "codec", tab: .video, field: "codec", icon: "film", label: "Video codec",
                 detail: "A preference — the host falls back if it can't encode it.",
                 options: SettingsOptions.codecs, current: codec
             ) { codec = $0 },
             toggleRow(
-                id: "hdr", tab: .video, icon: "sun.max", label: "10-bit HDR",
+                id: "hdr", tab: .video, field: "hdr_enabled", icon: "sun.max", label: "10-bit HDR",
                 detail: "HDR10 when the host sends it and this display supports it. HEVC only.",
                 value: $hdrEnabled),
             toggleRow(
-                id: "chroma", tab: .video, icon: "textformat", label: "Full chroma (4:4:4)",
+                id: "chroma", tab: .video, field: "enable_444", icon: "textformat", label: "Full chroma (4:4:4)",
                 detail: "Sharper text and UI, at more bandwidth. For desktop work; HEVC only.",
                 value: $enable444),
             choiceRow(
-                id: "presentPriority", tab: .video, icon: "rectangle.stack", label: "Prioritize",
+                id: "presentPriority", tab: .video, field: "present_priority", icon: "rectangle.stack", label: "Prioritize",
                 detail: "Lowest latency shows each frame immediately; Smoothness buffers a few.",
                 options: SettingsOptions.presentPriorities, current: presentPriority
             ) { presentPriority = $0 },
             choiceRow(
-                id: "smoothBuffer", tab: .video, icon: "square.stack.3d.up",
+                id: "smoothBuffer", tab: .video, field: "smooth_buffer", icon: "square.stack.3d.up",
                 label: "Smoothness buffer",
                 detail: "Each frame held costs one refresh of latency and absorbs one of jitter.",
                 options: SettingsOptions.smoothBuffers(refreshHz: hz), current: smoothBuffer
             ) { smoothBuffer = $0 },
 
             choiceRow(
-                id: "audio", tab: .audio, icon: "speaker.wave.2", label: "Audio channels",
+                id: "audio", tab: .audio, field: "audio_channels", icon: "speaker.wave.2", label: "Audio channels",
                 detail: "The speaker layout requested from the host.",
                 options: SettingsOptions.audioChannels, current: audioChannels
             ) { audioChannels = $0 },
@@ -851,23 +910,23 @@ struct GamepadSettingsView: View {
             // count, so 5.1/7.1 negotiate a SHORTER frame instead — a higher packet rate, not an
             // impossibility — and only the top of the rate ladder genuinely has nowhere to go.
             choiceRow(
-                id: "audioFormat", tab: .audio, icon: "waveform.badge.magnifyingglass",
+                id: "audioFormat", tab: .audio, field: "audio_format", icon: "waveform.badge.magnifyingglass",
                 label: "Audio quality",
                 detail: "Bit-exact PCM — 2.3 Mbps at 48 kHz, up to 8.5 at 176.4. Falls back to "
                     + "Standard if the host or this device declines it.",
                 options: SettingsOptions.audioFormats, current: audioFormat
             ) { audioFormat = $0 },
             toggleRow(
-                id: "mic", tab: .audio, icon: "mic", label: "Microphone",
+                id: "mic", tab: .audio, field: "mic_enabled", icon: "mic", label: "Microphone",
                 detail: "Send this device's microphone to the host's virtual mic.",
                 value: $micEnabled),
             toggleRow(
-                id: "echoCancel", tab: .audio, icon: "waveform", label: "Echo cancellation",
+                id: "echoCancel", tab: .audio, field: "echo_cancel", icon: "waveform", label: "Echo cancellation",
                 detail: "Filters the stream's own audio out of the mic pickup.",
-                value: $echoCancel),
+                value: $echoCancel, enabled: micEnabled),
 
             toggleRow(
-                id: "padForward", tab: .controller, icon: "gamecontroller",
+                id: "padForward", tab: .controller, field: "gamepad_forwarding", icon: "gamecontroller",
                 label: "Forward controllers",
                 detail: "Sends this device's controllers to the host. Off if they already reach "
                     + "it another way.",
@@ -883,20 +942,20 @@ struct GamepadSettingsView: View {
                 enabled: gamepadForwarding
             ) { gamepads.preferredID = $0 },
             choiceRow(
-                id: "padType", tab: .controller, icon: "dpad", label: "Controller type",
+                id: "padType", tab: .controller, field: "gamepad", icon: "dpad", label: "Controller type",
                 detail: "The virtual pad the host creates — Automatic matches this controller.",
                 options: SettingsOptions.padTypes, current: gamepadType,
                 enabled: gamepadForwarding
             ) { gamepadType = $0 },
             choiceRow(
-                id: "systemButtons", tab: .controller, icon: "house.circle",
+                id: "systemButtons", tab: .controller, field: "system_buttons", icon: "house.circle",
                 label: "Guide button",
                 detail: "Where guide and share presses go while streaming.",
                 options: SettingsOptions.systemButtons, current: systemButtons,
                 enabled: gamepadForwarding
             ) { systemButtons = $0 },
             choiceRow(
-                id: "guideGesture", tab: .controller, icon: "hand.point.up.left",
+                id: "guideGesture", tab: .controller, field: "guide_gesture", icon: "hand.point.up.left",
                 label: "Hold Select for guide",
                 detail: "Hold Select for the host's guide button; keep holding for its "
                     + "quick-access menu.",
@@ -915,7 +974,7 @@ struct GamepadSettingsView: View {
                 detail: "Sends Wake-on-LAN to a sleeping saved host and waits for it.",
                 value: $autoWakeEnabled),
             choiceRow(
-                id: "hud", tab: .interface, icon: "chart.bar", label: "Statistics overlay",
+                id: "hud", tab: .interface, field: "stats_verbosity", icon: "chart.bar", label: "Statistics overlay",
                 detail: "Compact is a one-line pill; Detailed adds the latency breakdown.",
                 options: SettingsOptions.statsVerbosities, current: statsVerbosityRaw
             ) { statsVerbosityRaw = $0 },
@@ -923,7 +982,8 @@ struct GamepadSettingsView: View {
                 id: "hudPlacement", tab: .interface, icon: "rectangle.inset.topright.filled",
                 label: "Overlay position",
                 detail: "Which corner the statistics overlay sits in.",
-                options: SettingsOptions.hudPlacements, current: hudPlacement
+                options: SettingsOptions.hudPlacements, current: hudPlacement,
+                enabled: statsVerbosityRaw != StatsVerbosity.off.rawValue
             ) { hudPlacement = $0 },
             // The two console-parity library rows (the desktop's `library_view` and
             // `library_collections`). Always live: pairing is the only thing that decides
@@ -975,7 +1035,7 @@ struct GamepadSettingsView: View {
         if let at = list.firstIndex(where: { $0.id == "smoothBuffer" }) {
             list.insert(
                 toggleRow(
-                    id: "windowedSafePresent", tab: .video, icon: "macwindow.badge.plus",
+                    id: "windowedSafePresent", tab: .video, field: "windowed_safe_present", icon: "macwindow.badge.plus",
                     label: "Safe windowed presentation",
                     detail: "Windowed streams present in step with the compositor — avoids a "
                         + "macOS display-driver crash, at a small latency cost.",
@@ -1163,7 +1223,8 @@ struct GamepadSettingsView: View {
     }
 
     private func choiceRow<T: Equatable>(
-        id: String, tab: GpSettingsTab, icon: String, label: String, detail: String,
+        id: String, tab: GpSettingsTab, field: String? = nil,
+        icon: String, label: String, detail: String,
         options: [(label: String, tag: T)], current: T, enabled: Bool = true,
         write: @escaping (T) -> Void
     ) -> Row {
@@ -1176,6 +1237,7 @@ struct GamepadSettingsView: View {
             // current renders flat, and the first step's snap-to-first seats the drum.
             optionLabels: index != nil ? options.map(\.label) : nil,
             selectedIndex: index,
+            field: field,
             enabled: enabled,
             adjust: { delta in
                 // Unknown current value: snap to the first option on any step.
@@ -1196,7 +1258,8 @@ struct GamepadSettingsView: View {
     }
 
     private func toggleRow(
-        id: String, tab: GpSettingsTab, icon: String, label: String, detail: String,
+        id: String, tab: GpSettingsTab, field: String? = nil,
+        icon: String, label: String, detail: String,
         value: Binding<Bool>, enabled: Bool = true
     ) -> Row {
         Row(
@@ -1207,6 +1270,7 @@ struct GamepadSettingsView: View {
             // directional semantics below, so a right-step slides On in from the right.
             optionLabels: ["Off", "On"],
             selectedIndex: value.wrappedValue ? 1 : 0,
+            field: field,
             enabled: enabled,
             adjust: { delta in
                 // Directional semantics: left = off, right = on; a no-op reads as a boundary.

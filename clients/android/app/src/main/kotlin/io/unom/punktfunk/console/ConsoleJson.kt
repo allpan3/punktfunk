@@ -34,6 +34,9 @@ internal object ConsoleJson {
         .put("id", p.id)
         .put("name", p.name)
         .put("accent", p.accent ?: JSONObject.NULL)
+        // Read by the speed test alone: a profile that PINS bitrate is the layer its host
+        // streams at, so the console must not offer to write the global default instead.
+        .put("bitrate_kbps", p.overrides.bitrateKbps ?: JSONObject.NULL)
 
     /** A host's advertised actions in the console model's shape (`HostRow.actions`). */
     private fun actionRows(actions: List<HostActions.Action>?): JSONArray {

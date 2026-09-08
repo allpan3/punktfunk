@@ -263,7 +263,7 @@ const windowsFileIsSafe = (file: string, log: LogSink): boolean => {
 	);
 	const sddl = res.status === 0 ? (res.stdout ?? "").trim() : "";
 	if (!sddl) {
-		log(`[runner] REFUSING ${file} — could not read its ACL`, "error");
+		log(`[runner] REFUSING ${file} — its ACL is unreadable`, "error");
 		return false;
 	}
 	const reason = windowsSddlUnsafeReason(sddl, processSid());

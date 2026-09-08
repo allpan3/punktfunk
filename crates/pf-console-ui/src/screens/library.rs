@@ -1074,6 +1074,24 @@ impl LibraryScreen {
         self.focused().is_some_and(|g| g.launcher)
     }
 
+    /// What a screen reader speaks: the bar names both its pills, a tile its detail-band
+    /// title. Nothing while the shelf is still loading — there is no focus to name yet.
+    pub(crate) fn announcement(&self) -> Option<String> {
+        if !matches!(self.phase, LibraryPhase::Ready) {
+            return None;
+        }
+        if self.bar.focus && self.bar_shown() {
+            let (sort, view) = (self.sort.label(), self.view_mode.label());
+            return Some(format!("Sort {sort}, view {view}"));
+        }
+        let game = self.focused()?;
+        Some(if game.id == crate::library::DESKTOP_ID {
+            self.desktop_caption()
+        } else {
+            game.title.clone()
+        })
+    }
+
     pub(crate) fn hints(&self, _ctx: &Ctx) -> Vec<Hint> {
         // Replace the field legend; extending it advertises Play/Options that go nowhere.
         if self.bar.focus && self.bar_shown() {
@@ -1849,6 +1867,33 @@ mod tests {
         assert!(fx.nav.is_none(), "and pushed a screen");
         assert!(!s.bar.focus, "A means done");
         assert_eq!(s.cursor, cursor, "and the field never moved under it");
+    }
+
+    /// A screen reader hears the tile it stepped onto, and the bar's own pills once the
+    /// bar takes focus — the shelf title underneath would be a lie there.
+    #[test]
+    fn the_announcement_names_the_tile_then_the_bar() {
+        let (mut s, library) = live_shelf();
+        let mut settings = pf_client_core::trust::Settings::default();
+        // The leading tile is the desktop, and it speaks the caption it draws.
+        assert_eq!(s.announcement().as_deref(), Some("Desktop"));
+        press(
+            &mut s,
+            &library,
+            &mut settings,
+            MenuEvent::Move(MenuDir::Right),
+        );
+        assert_eq!(s.announcement().as_deref(), Some("Zeta"));
+        press(
+            &mut s,
+            &library,
+            &mut settings,
+            MenuEvent::Move(MenuDir::Up),
+        );
+        assert_eq!(
+            s.announcement().as_deref(),
+            Some("Sort Default, view Shelf")
+        );
     }
 
     #[test]

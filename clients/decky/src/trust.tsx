@@ -27,11 +27,11 @@ function trustErrorBody(error: string | undefined, name: string): string {
     case "refused":
       return `${name} is already saved under a different identity. Forget it in the Punktfunk app before trusting it again.`;
     case "client-outdated":
-      return "Update the Punktfunk client to use request access.";
+      return "Update the Punktfunk client to use request access";
     case "client-unavailable":
       return "Couldn’t reach the Punktfunk client — is it still installed?";
     default:
-      return `Couldn’t save ${name}.`;
+      return `Couldn’t save ${name}`;
   }
 }
 

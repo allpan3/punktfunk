@@ -20,236 +20,61 @@
 //! pointer UI (`webos-pointer-ui-overhaul.md` D3). No stability promise; a
 //! kit change there is a re-pin plus a compile fix, by design.
 
-#[cfg(any(
+// The shell runs on Linux, Windows, Android and wasm. Cargo.toml gates every
+// dependency on the same list, so macOS gets an empty crate — the Mac client is
+// clients/apple.
+#![cfg(any(
     target_os = "linux",
     windows,
     target_os = "android",
     target_family = "wasm"
 ))]
+
 pub mod anim;
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 pub mod art_stats;
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 pub mod brand;
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 mod collate;
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 pub mod console;
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 pub mod glyphs;
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 pub mod icons;
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 pub mod input;
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 pub mod launcher_icons;
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 pub mod library;
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 pub mod model;
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 pub mod os_marks;
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 pub mod os_theme;
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 pub mod platform;
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 pub mod pointer;
 // In-stream ring is the desktop shell's (Android has Compose). Android
 // draws this module only as the settings editor; the host-action cache
 // is desktop-gated and is not consulted there.
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 mod ring;
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 mod screens;
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 mod shell;
 #[cfg(all(any(target_os = "linux", windows), feature = "vulkan-overlay"))]
 mod skia_overlay;
 /// The settings rows' engine — ids, platform gate, spec, step — for a shell that lays the
 /// same rows out its own way (the webOS pointer UI's page map). Same kit terms as
 /// [`widgets`]: one consumer, no stability promise.
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 pub mod settings_rows {
     pub use crate::screens::settings::{adjust, detail, row_applies, row_on, row_spec, RowId};
     pub use crate::screens::Ctx;
 }
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 pub mod store;
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 pub mod theme;
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 pub mod widgets;
 
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 pub use art_stats::{art_stats, ArtStats};
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 pub use console::{Console, ConsoleEntry, ConsoleHandles, InputSource, Insets, Viewport};
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 pub use input::Key;
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 pub use library::decode_poster_off_thread;
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 pub use library::{DecodedPoster, LibraryGame, LibraryPhase, LibraryShared, Stale};
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 pub use model::{
-    ConsoleBus, ConsoleCmd, ConsoleShared, HostAction, HostRow, PairPhase, ProfileChip, WakeStatus,
+    ConsoleBus, ConsoleCmd, ConsoleShared, HostAction, HostRow, PairPhase, ProfileChip, SpeedPhase,
+    SpeedStatus, WakeStatus,
 };
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 pub use platform::{Platform, PlatformScreen};
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 pub use shell::{ConsoleOptions, DEFAULT_GPU_CACHE_BYTES};
 #[cfg(all(any(target_os = "linux", windows), feature = "vulkan-overlay"))]
 pub use skia_overlay::SkiaOverlay;
-#[cfg(any(
-    target_os = "linux",
-    windows,
-    target_os = "android",
-    target_family = "wasm"
-))]
 pub use store::{SettingsStore, SnapshotStore};

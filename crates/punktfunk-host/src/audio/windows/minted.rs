@@ -278,7 +278,7 @@ pub(crate) fn provision_at_startup() {
     if let Err(e) = spawned {
         PROVISIONING.store(false, Ordering::SeqCst);
         tracing::warn!(seat = identity.label(), error = %e,
-            "could not spawn the minted-audio provisioning thread");
+            "minted-audio provisioning thread not spawned");
     }
 }
 

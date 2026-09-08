@@ -112,12 +112,14 @@ impl Drop for VaFrameGuard {
 }
 
 /// Facts of the PICTURE, recorded at decode. A later display AU can disagree:
-/// `keyframe` is the pump's re-anchor; `color` is the active SPS/VUI (HDR can
-/// flip in-band); AV1 `display` is per-frame (5.9.6) and must not take the newest
-/// crop.
+/// `keyframe` is the pump's re-anchor; `references_clean` corroborates a host
+/// recovery anchor; `color` is the active SPS/VUI (HDR can flip in-band); AV1
+/// `display` is per-frame (5.9.6) and must not take the newest crop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PictureFacts {
     keyframe: bool,
+    /// Whole prediction chain was fully available — see [`DmabufFrame::references_clean`].
+    references_clean: bool,
     color: ColorDesc,
     display: (u32, u32),
 }
@@ -548,7 +550,7 @@ impl NativeVaapiDecoder {
                 Err(e) => tracing::warn!(
                     error = %e,
                     id = picture.id,
-                    "native VAAPI: a flushed picture could not be exported"
+                    "native VAAPI: flushed-picture export failed"
                 ),
             }
         }
@@ -597,6 +599,7 @@ impl NativeVaapiDecoder {
         // This picture's facts, not the later display AU's ([`PictureFacts`]).
         let facts = PictureFacts {
             keyframe: plan.picture.is_idr,
+            references_clean: plan.picture.references_clean,
             color: colour_of(&plan.picture.colour),
             display: (s.shape.display_width, s.shape.display_height),
         };
@@ -670,6 +673,7 @@ impl NativeVaapiDecoder {
 
         let facts = PictureFacts {
             keyframe: plan.picture.is_idr,
+            references_clean: plan.picture.references_clean,
             color: colour_of(&plan.picture.colour),
             display: (s.shape.display_width, s.shape.display_height),
         };
@@ -759,6 +763,7 @@ impl NativeVaapiDecoder {
         // same as the other native rungs, unlike libavcodec.
         let facts = PictureFacts {
             keyframe: plan.picture.is_key,
+            references_clean: plan.picture.references_clean,
             color: colour_of(&plan.picture.colour),
             display: (
                 plan.picture.render_width.min(plan.picture.upscaled_width),
@@ -1239,6 +1244,7 @@ fn ship(
         planes,
         color: picture.facts.color,
         keyframe: picture.facts.keyframe,
+        references_clean: picture.facts.references_clean,
         guard: DrmFrameGuard(VaFrameGuard {
             _fds: fds,
             tx: tx.clone(),
@@ -1355,6 +1361,7 @@ mod tests {
     /// Tests that care about facts build their own so this default cannot pass them.
     const PLAIN: PictureFacts = PictureFacts {
         keyframe: false,
+        references_clean: false,
         color: ColorDesc {
             primaries: 1,
             transfer: 1,
@@ -1652,6 +1659,7 @@ mod tests {
         let mut s = session(4, 3);
         let idr = PictureFacts {
             keyframe: true,
+            references_clean: true,
             color: ColorDesc {
                 primaries: 9,
                 transfer: 16,
@@ -1662,6 +1670,7 @@ mod tests {
         };
         let trail = PictureFacts {
             keyframe: false,
+            references_clean: false,
             color: ColorDesc {
                 primaries: 1,
                 transfer: 1,
@@ -1720,7 +1729,8 @@ mod tests {
             modifier: 0,
             planes: Vec::new(),
             color: PLAIN.color,
-            keyframe: false,
+            keyframe: PLAIN.keyframe,
+            references_clean: PLAIN.references_clean,
             guard: DrmFrameGuard(VaFrameGuard {
                 _fds: Vec::new(),
                 tx: tx.clone(),

@@ -226,7 +226,7 @@ export const UpdateCard: FC<{
 							)}
 							{!inFlight && s.last_error && (
 								<p className="text-sm text-destructive">
-									{m.update_error()} {s.last_error}
+									{m.update_error()} — {s.last_error}
 								</p>
 							)}
 							{s.check_disabled ? (

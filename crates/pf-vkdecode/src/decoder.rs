@@ -256,7 +256,7 @@ impl std::fmt::Display for VkDecodeError {
             VkDecodeError::Device(e) => write!(f, "device handles rejected: {e}"),
             VkDecodeError::Unsupported(what) => write!(f, "outside device caps: {what}"),
             VkDecodeError::Vk(r) => write!(f, "Vulkan call failed: {r:?}"),
-            VkDecodeError::DeviceLost => write!(f, "VK_ERROR_DEVICE_LOST"),
+            VkDecodeError::DeviceLost => write!(f, "GPU device lost (VK_ERROR_DEVICE_LOST)"),
             VkDecodeError::Timeout(what) => {
                 write!(f, "GPU wait expired after {DECODE_TIMEOUT_NS} ns: {what}")
             }

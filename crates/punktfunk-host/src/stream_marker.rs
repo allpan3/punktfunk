@@ -165,7 +165,7 @@ mod imp {
         );
 
         if let Err(e) = write_atomic(path, body.as_bytes()) {
-            tracing::debug!(error = %e, path = %path.display(), "could not write stream marker");
+            tracing::debug!(error = %e, path = %path.display(), "stream marker not written");
         }
     }
 

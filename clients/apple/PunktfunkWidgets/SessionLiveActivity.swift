@@ -130,6 +130,17 @@ private struct ElapsedClock: View {
     }
 }
 
+/// The keep-alive countdown. The lower bound is clamped because `Date()...deadline` traps once
+/// the deadline is past, and an Activity outlives the app's `.ending` update whenever the app is
+/// suspended first — the widget process would fatal-error instead of rendering.
+private struct CountdownClock: View {
+    let deadline: Date
+    var body: some View {
+        Text(timerInterval: min(Date(), deadline)...deadline, countsDown: true)
+            .monospacedDigit()
+    }
+}
+
 /// The session's state as a colored dot + label; while backgrounded with a deadline, the label
 /// IS the countdown. One shared truth for the island bottom and the Lock Screen banner.
 private struct StatusLine: View {
@@ -164,8 +175,7 @@ private struct StatusLine: View {
             if let deadline = state.backgroundDeadline {
                 HStack(spacing: 3) {
                     Text("Background · ends in")
-                    Text(timerInterval: Date()...deadline, countsDown: true)
-                        .monospacedDigit()
+                    CountdownClock(deadline: deadline)
                 }
             } else {
                 Text("Running in background")
@@ -235,9 +245,8 @@ private struct CompactReadout: View {
             }
         case .background:
             if let deadline = state.backgroundDeadline {
-                Text(timerInterval: Date()...deadline, countsDown: true)
+                CountdownClock(deadline: deadline)
                     .font(.caption2)
-                    .monospacedDigit()
                     .multilineTextAlignment(.trailing)
                     .frame(maxWidth: 48)
                     .foregroundStyle(.orange)

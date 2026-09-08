@@ -98,9 +98,3 @@ public enum GamepadWire {
         (v.0, v.2, -v.1)
     }
 }
-
-extension Float {
-    fileprivate func clamped(to range: ClosedRange<Float>) -> Float {
-        Swift.min(Swift.max(self, range.lowerBound), range.upperBound)
-    }
-}

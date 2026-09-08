@@ -47,7 +47,9 @@ sleep 1
 pin_from_log() {
     local log="$1" pin=""
     for _ in $(seq 50); do
-        pin="$(grep -oE 'pair: [0-9]+' "$log" | head -1 | cut -d' ' -f2 || true)"
+        # The host prints "pairing PIN: 1234"; the older "pair: 1234" is still accepted so this
+        # harness works against a host either side of that change.
+        pin="$(grep -oE '(pairing PIN|pair): *[0-9]+' "$log" | head -1 | grep -oE '[0-9]+' || true)"
         [ -n "$pin" ] && break
         sleep 0.2
     done

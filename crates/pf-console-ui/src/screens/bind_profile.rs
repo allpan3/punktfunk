@@ -280,6 +280,7 @@ mod tests {
                 id: id.into(),
                 name: "Work".into(),
                 accent: None,
+                bitrate_kbps: None,
             }),
             running: String::new(),
             game_profiles: Default::default(),

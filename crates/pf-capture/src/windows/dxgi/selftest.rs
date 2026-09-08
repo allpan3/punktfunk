@@ -494,7 +494,7 @@ pub fn hdr_p010_selftest_at(w: u32, h: u32, vendor: Option<u32>) -> Result<()> {
         } else {
             println!("FAIL");
             bail!(
-                "HDR P010 self-test FAILED (Y={max_y_err:.2} Cb={max_u_err:.2} Cr={max_v_err:.2})"
+                "HDR P010 self-test out of tolerance (Y={max_y_err:.2} Cb={max_u_err:.2} Cr={max_v_err:.2})"
             );
         }
     }

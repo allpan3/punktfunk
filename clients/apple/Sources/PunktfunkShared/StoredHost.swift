@@ -85,3 +85,41 @@ public struct StoredHost: Identifiable, Codable, Hashable, Sendable {
     /// Wake-capable, in a form the wake helper accepts (empty when none learned yet).
     public var wakeMacs: [String] { macAddresses ?? [] }
 }
+
+public extension StoredHost {
+    /// Every saved host from the shared suite.
+    ///
+    /// One decoder for the app, its intents and both widgets: the same four lines existed in four
+    /// places. `recentFirst` is explicit at every call site because two of those copies sorted and
+    /// two did not — the STORE must keep its own order, which is card order, while a widget picking
+    /// "the last host you used" wants recency.
+    ///
+    /// Decoded PER ELEMENT: one unreadable record would otherwise lose the whole array, and the
+    /// caller that reacts by persisting an empty one erases every saved host permanently.
+    static func loadAll(
+        from defaults: UserDefaults = AppGroup.defaults, recentFirst: Bool
+    ) -> [StoredHost] {
+        guard let data = defaults.data(forKey: DefaultsKey.hosts) else { return [] }
+        let decoder = JSONDecoder()
+        let hosts: [StoredHost]
+        if let all = try? decoder.decode([StoredHost].self, from: data) {
+            hosts = all
+        } else if let raw = try? decoder.decode([FailableHost].self, from: data) {
+            hosts = raw.compactMap(\.host)
+        } else {
+            return []
+        }
+        guard recentFirst else { return hosts }
+        return hosts.sorted {
+            ($0.lastConnected ?? .distantPast) > ($1.lastConnected ?? .distantPast)
+        }
+    }
+}
+
+/// Decodes a host, or nothing, without failing its container — see `loadAll`.
+private struct FailableHost: Decodable {
+    let host: StoredHost?
+    init(from decoder: Decoder) throws {
+        host = try? StoredHost(from: decoder)
+    }
+}

@@ -347,8 +347,8 @@ fn restrict_to_system_admins(path: &std::path::Path) -> std::io::Result<()> {
         return Ok(());
     }
     Err(std::io::Error::other(format!(
-        "icacls could not restrict {} to SYSTEM/Administrators ({status}) — it would be readable \
-         by other local users",
+        "icacls restrict {} to SYSTEM/Administrators ({status}) — it stays readable by other \
+         local users",
         path.display()
     )))
 }

@@ -204,7 +204,7 @@ fn remove_devnode(instance_id: &str) -> bool {
             false
         }
         Err(e) => {
-            eprintln!("warning: could not run pnputil for {instance_id}: {e}");
+            eprintln!("warning: pnputil did not run for {instance_id}: {e}");
             false
         }
     }

@@ -128,7 +128,7 @@ async fn actor(
     ) {
         (Ok(o), Ok(t)) => (o, t),
         _ => {
-            tracing::warn!("Mutter clipboard: could not subscribe to selection signals");
+            tracing::warn!("Mutter clipboard: selection signals not subscribed");
             let _ = event_tx.send(ClipEvent::Closed);
             return;
         }

@@ -15,14 +15,16 @@
 //! Evidence: `design/media-foundation-encoder.md`.
 
 use super::{ChromaFormat, Codec, EncodedFrame, Encoder, EncoderCaps};
+use crate::retrieve::Ready;
 use anyhow::{anyhow, bail, Context, Result};
 use pf_frame::{CapturedFrame, FramePayload, PixelFormat};
 use std::collections::VecDeque;
 use std::mem::ManuallyDrop;
 use std::ptr;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use windows::core::{Interface, GUID};
-use windows::Win32::Foundation::{LUID, S_OK};
+use windows::core::{implement, Interface, GUID};
+use windows::Win32::Foundation::{E_NOTIMPL, LUID, S_OK};
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Resource, ID3D11Texture2D,
     D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC,
@@ -35,19 +37,19 @@ use windows::Win32::Media::MediaFoundation::{
     CODECAPI_AVEncCommonMeanBitRate, CODECAPI_AVEncCommonRateControlMode,
     CODECAPI_AVEncH264CABACEnable, CODECAPI_AVEncMPVDefaultBPictureCount, CODECAPI_AVEncMPVGOPSize,
     CODECAPI_AVEncVideoForceKeyFrame, CODECAPI_AVLowLatencyMode, CODECAPI_AVScenarioInfo,
-    ICodecAPI, IMF2DBuffer, IMFActivate, IMFAttributes, IMFDXGIDeviceManager,
-    IMFMediaEventGenerator, IMFMediaType, IMFSample, IMFShutdown, IMFTransform,
-    METransformHaveOutput, METransformNeedInput, MFCreateAttributes, MFCreateDXGIDeviceManager,
-    MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateSample, MFMediaType_Video,
-    MFSampleExtension_CleanPoint, MFStartup, MFTEnum2, MFT_FRIENDLY_NAME_Attribute,
-    MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoInterlace_Progressive,
-    MFSTARTUP_LITE, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_ADAPTER_LUID, MFT_ENUM_FLAG_HARDWARE,
-    MFT_ENUM_FLAG_SORTANDFILTER, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH,
-    MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
-    MFT_MESSAGE_NOTIFY_END_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
-    MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES,
-    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MF_EVENT_FLAG_NO_WAIT,
-    MF_E_NO_EVENTS_AVAILABLE, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
+    ICodecAPI, IMF2DBuffer, IMFActivate, IMFAsyncCallback, IMFAsyncCallback_Impl, IMFAsyncResult,
+    IMFAttributes, IMFDXGIDeviceManager, IMFMediaEventGenerator, IMFMediaType, IMFSample,
+    IMFShutdown, IMFTransform, METransformHaveOutput, METransformNeedInput, MFCreateAttributes,
+    MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateSample,
+    MFMediaType_Video, MFSampleExtension_CleanPoint, MFStartup, MFTEnum2,
+    MFT_FRIENDLY_NAME_Attribute, MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12,
+    MFVideoInterlace_Progressive, MFSTARTUP_LITE, MFT_CATEGORY_VIDEO_ENCODER,
+    MFT_ENUM_ADAPTER_LUID, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
+    MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+    MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_END_STREAMING,
+    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
+    MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
+    MFT_REGISTER_TYPE_INFO, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
     MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE, MF_MT_PIXEL_ASPECT_RATIO,
     MF_MT_SUBTYPE, MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION,
 };
@@ -381,11 +383,113 @@ struct PendingMeta {
 
 /// Live MFT session. Field order is drop order: the transform releases before the device
 /// manager and the ring textures it was reading.
+/// What the MFT's event callback and the encode thread share.
+///
+/// An async MFT announces input credit and finished output through its event generator, and
+/// `IMFMediaEventGenerator` refuses to mix `GetEvent` with `BeginGetEvent` — so once the callback
+/// is armed it is the only reader, and everything it touches lives behind this lock.
+#[derive(Default)]
+struct Out {
+    /// `METransformNeedInput` events not yet spent on a `ProcessInput`.
+    need_input: u32,
+    pending: VecDeque<PendingMeta>,
+    ready: VecDeque<EncodedFrame>,
+    /// VPS/SPS/PPS from the first IDR that carried them, prepended to any later IDR that
+    /// does not. Empty until such an IDR is seen.
+    param_sets: Vec<u8>,
+    headers_warned: bool,
+    /// First failure the callback hit; `poll` surfaces it so the caller resets.
+    err: Option<String>,
+}
+
+/// What the callback keeps alive on its own. It outlives [`Inner`] on purpose: an `Invoke` can
+/// still be running on an MF worker thread while the encode thread tears the session down, and
+/// it must find live objects rather than freed ones. A shut-down MFT simply fails its calls,
+/// which is what stops the re-arm.
+struct Shared {
+    mft: IMFTransform,
+    events: IMFMediaEventGenerator,
+    codec: Codec,
+    out: Mutex<Out>,
+    have: Ready,
+}
+
+// SAFETY: the MFT and its event generator are the free-threaded objects the async MFT model
+// requires — that model is precisely "ProcessInput on the caller's thread, ProcessOutput from the
+// event callback". Everything mutable is behind `out`.
+unsafe impl Send for Shared {}
+// SAFETY: as above — every field is either immutable or behind the mutex.
+unsafe impl Sync for Shared {}
+
+/// The event sink an async MFT calls back on. Re-arms itself until the generator says the MFT is
+/// gone, which is what ends the chain at teardown.
+#[implement(IMFAsyncCallback)]
+struct EventSink(Arc<Shared>);
+
+impl IMFAsyncCallback_Impl for EventSink_Impl {
+    fn GetParameters(&self, _flags: *mut u32, _queue: *mut u32) -> windows::core::Result<()> {
+        // "Use the defaults" — the documented answer for a callback with no queue preference.
+        Err(E_NOTIMPL.into())
+    }
+
+    fn Invoke(&self, result: windows::core::Ref<IMFAsyncResult>) -> windows::core::Result<()> {
+        let shared = &self.0;
+        let Some(result) = result.as_ref() else {
+            return Ok(());
+        };
+        // SAFETY: `result` is the generator's own completion for the `BeginGetEvent` below, and
+        // `EndGetEvent` is the only legal way to take its event.
+        let event = match unsafe { shared.events.EndGetEvent(result) } {
+            Ok(e) => e,
+            // The MFT shut down under us: stop, and do not re-arm.
+            Err(_) => return Ok(()),
+        };
+        // SAFETY: plain accessor on the owned event.
+        let kind = unsafe { event.GetType() }.unwrap_or(0) as i32;
+        if kind == METransformNeedInput.0 {
+            lock(&shared.out).need_input += 1;
+        } else if kind == METransformHaveOutput.0 {
+            match process_output(shared) {
+                Ok(au) => {
+                    let mut g = lock(&shared.out);
+                    g.ready.push_back(au);
+                    // Under the lock, so it cannot race the clear `poll` does when it empties.
+                    shared.have.set();
+                }
+                Err(e) => {
+                    let mut g = lock(&shared.out);
+                    g.err.get_or_insert_with(|| format!("{e:#}"));
+                    shared.have.set();
+                }
+            }
+        }
+        // SAFETY: re-arming with the same callback is the documented loop; a shut-down generator
+        // refuses, which is how the chain ends.
+        unsafe {
+            let _ = shared
+                .events
+                .BeginGetEvent(&IMFAsyncCallback::from(EventSink(shared.clone())), None);
+        }
+        Ok(())
+    }
+}
+
+/// The shared-state lock, poison-tolerant: a callback that panicked leaves what it already
+/// produced readable, and its error field is what tells `poll` to reset.
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 struct Inner {
+    /// Everything the callback touches. Dropping `Inner` shuts the MFT down, after which a late
+    /// `Invoke` finds live-but-shut-down objects here rather than freed memory.
+    shared: Arc<Shared>,
+    /// Our own reference to the armed sink. The generator holds one too; this keeps the object
+    /// alive across the gap between two `BeginGetEvent`s.
+    _sink: IMFAsyncCallback,
     mft: IMFTransform,
     /// The activation object that created `mft`: it owns the shutdown, so it outlives it.
     activate: IMFActivate,
-    events: IMFMediaEventGenerator,
     /// `None` when the MFT exposes no `ICodecAPI` — then bitrate and GOP are whatever the
     /// output media type carried, and `reconfigure_bitrate` declines.
     codec_api: Option<ICodecAPI>,
@@ -395,14 +499,6 @@ struct Inner {
     dctx: ID3D11DeviceContext,
     ring: Vec<ID3D11Texture2D>,
     next: usize,
-    /// `METransformNeedInput` events not yet spent on a `ProcessInput`.
-    need_input: u32,
-    pending: VecDeque<PendingMeta>,
-    ready: VecDeque<EncodedFrame>,
-    /// VPS/SPS/PPS from the first IDR that carried them, prepended to any later IDR that
-    /// does not. Empty until such an IDR is seen.
-    param_sets: Vec<u8>,
-    headers_warned: bool,
     frames_submitted: u64,
     first_au_logged: bool,
 }
@@ -435,15 +531,40 @@ impl Inner {
             );
         }
     }
+
+    /// The oldest finished AU, or the callback's failure. Clears the signal as the queue empties
+    /// — under the same lock the callback sets it under, so the two cannot cross.
+    fn pop_ready(&mut self) -> Result<Option<EncodedFrame>> {
+        let mut g = lock(&self.shared.out);
+        if let Some(e) = g.err.take() {
+            bail!("{e}");
+        }
+        let au = g.ready.pop_front();
+        if g.ready.is_empty() {
+            self.shared.have.clear();
+        }
+        Ok(au)
+    }
+
+    /// [`Self::pop_ready`], waiting up to `wait_ms` for the callback to produce one.
+    fn take_ready(&mut self, wait_ms: u32) -> Result<Option<EncodedFrame>> {
+        if let Some(au) = self.pop_ready()? {
+            return Ok(Some(au));
+        }
+        if !self.shared.have.wait(wait_ms) {
+            return Ok(None);
+        }
+        self.pop_ready()
+    }
 }
 
 /// Drain one `METransformHaveOutput`: `ProcessOutput`, copy the bitstream out, pair it with
 /// the oldest submitted frame.
-fn process_output(inner: &mut Inner, codec: Codec) -> Result<EncodedFrame> {
+fn process_output(shared: &Shared) -> Result<EncodedFrame> {
     // The MFT has handed this frame over, so its entry is spent whatever the payload turns
     // out to be — a failed ProcessOutput included. Popping only on the success path would pair
     // every later AU with the wrong frame's timestamp for the rest of the session.
-    let meta = inner.pending.pop_front();
+    let meta = lock(&shared.out).pending.pop_front();
     // SAFETY: the MFT is live on this thread and owes exactly one output per HaveOutput
     // event. `MFT_OUTPUT_DATA_BUFFER`'s `ManuallyDrop` members are reclaimed with
     // `ManuallyDrop::take` on every path, so the sample and the event collection the MFT
@@ -456,7 +577,7 @@ fn process_output(inner: &mut Inner, codec: Codec) -> Result<EncodedFrame> {
             pEvents: ManuallyDrop::new(None),
         }];
         let mut status = 0u32;
-        let call = inner.mft.ProcessOutput(0, &mut out, &mut status);
+        let call = shared.mft.ProcessOutput(0, &mut out, &mut status);
         let sample: Option<IMFSample> = ManuallyDrop::take(&mut out[0].pSample);
         let _events = ManuallyDrop::take(&mut out[0].pEvents);
         call.context("IMFTransform::ProcessOutput")?;
@@ -486,7 +607,7 @@ fn process_output(inner: &mut Inner, codec: Codec) -> Result<EncodedFrame> {
         bail!("Media Foundation returned an empty access unit");
     }
     let data = if keyframe {
-        repeat_parameter_sets(inner, codec, data)
+        repeat_parameter_sets(shared, data)
     } else {
         data
     };
@@ -501,74 +622,52 @@ fn process_output(inner: &mut Inner, codec: Codec) -> Result<EncodedFrame> {
 
 /// Cache the first IDR's parameter-set run and re-attach it to any later IDR that arrives
 /// without one. A no-op on every MFT that already repeats them (all three x64 vendors).
-fn repeat_parameter_sets(inner: &mut Inner, codec: Codec, au: Vec<u8>) -> Vec<u8> {
-    if let Some(prefix) = parameter_set_prefix(codec, &au) {
-        if inner.param_sets != prefix {
-            inner.param_sets = prefix.to_vec();
+fn repeat_parameter_sets(shared: &Shared, au: Vec<u8>) -> Vec<u8> {
+    let mut g = lock(&shared.out);
+    if let Some(prefix) = parameter_set_prefix(shared.codec, &au) {
+        if g.param_sets != prefix {
+            g.param_sets = prefix.to_vec();
         }
         return au;
     }
-    if inner.param_sets.is_empty() {
+    if g.param_sets.is_empty() {
         return au;
     }
-    if !inner.headers_warned {
-        inner.headers_warned = true;
+    if !g.headers_warned {
+        g.headers_warned = true;
         tracing::warn!(
             "this MFT does not repeat VPS/SPS/PPS on every IDR — prepending the cached \
              sequence header so a client that joins late can decode"
         );
     }
-    let mut out = Vec::with_capacity(inner.param_sets.len() + au.len());
-    out.extend_from_slice(&inner.param_sets);
+    let mut out = Vec::with_capacity(g.param_sets.len() + au.len());
+    out.extend_from_slice(&g.param_sets);
     out.extend_from_slice(&au);
     out
 }
 
-/// Drain every queued MFT event. Non-blocking: `MF_E_NO_EVENTS_AVAILABLE` is the exit.
-fn pump(inner: &mut Inner, codec: Codec) -> Result<()> {
-    loop {
-        // SAFETY: `events` is the live MFT's own generator on this thread; the NO_WAIT
-        // flag makes this a poll, and the returned event is an owned interface.
-        let event = unsafe { inner.events.GetEvent(MF_EVENT_FLAG_NO_WAIT) };
-        let event = match event {
-            Ok(e) => e,
-            Err(e) if e.code() == MF_E_NO_EVENTS_AVAILABLE => return Ok(()),
-            Err(e) => bail!("IMFMediaEventGenerator::GetEvent: {e}"),
-        };
-        // SAFETY: plain accessor on the owned event.
-        let kind = unsafe { event.GetType() }.unwrap_or(0) as i32;
-        if kind == METransformNeedInput.0 {
-            inner.need_input += 1;
-        } else if kind == METransformHaveOutput.0 {
-            let au = process_output(inner, codec)?;
-            inner.ready.push_back(au);
-        }
-        // Drain-complete and format-change events need no action: the drain is observed
-        // through `pending` emptying, and the output type is fixed for the session.
-    }
-}
-
-/// Pump until `ready` holds or the budget expires. The one wait in this backend — both
-/// back-pressure and input credit go through it, so neither can grow its own timeout.
-fn wait_until(
-    inner: &mut Inner,
-    codec: Codec,
-    what: &str,
-    ready: impl Fn(&Inner) -> bool,
-) -> Result<()> {
+/// Wait until the callback has made `ready` true, or the budget expires. The one wait in this
+/// backend — both back-pressure and input credit go through it, so neither can grow its own
+/// timeout. The callback is what makes progress now; this only watches for it.
+fn wait_until(inner: &Inner, what: &str, ready: impl Fn(&Out) -> bool) -> Result<()> {
     let deadline = Instant::now() + BUSY_BUDGET;
     loop {
-        pump(inner, codec)?;
-        if ready(inner) {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            bail!(
-                "Media Foundation {what} stalled for {} ms with {} frame(s) in flight — wedged \
-                 (escalating to reset)",
-                BUSY_BUDGET.as_millis(),
-                inner.pending.len()
-            );
+        {
+            let mut g = lock(&inner.shared.out);
+            if let Some(e) = g.err.take() {
+                bail!("{e}");
+            }
+            if ready(&g) {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                bail!(
+                    "Media Foundation {what} stalled for {} ms with {} frame(s) in flight — \
+                     wedged (escalating to reset)",
+                    BUSY_BUDGET.as_millis(),
+                    g.pending.len()
+                );
+            }
         }
         std::thread::sleep(Duration::from_micros(250));
     }
@@ -813,21 +912,31 @@ impl MfEncoder {
             device = %format_args!("{:#x}", dev_raw as usize),
             "Media Foundation encode active (async MFT, zero-copy D3D11 NV12)"
         );
+        let shared = Arc::new(Shared {
+            mft: mft.clone(),
+            events,
+            codec: self.codec,
+            out: Mutex::new(Out::default()),
+            have: Ready::new().context("Media Foundation: no completion event")?,
+        });
+        // Arm the event sink. From here the callback is the only reader of the generator, so
+        // every `NeedInput` and `HaveOutput` lands in `shared.out` rather than in a pump.
+        let sink = IMFAsyncCallback::from(EventSink(shared.clone()));
+        // SAFETY: `shared.events` is the live MFT's generator and `sink` is a callback that
+        // outlives the request (both this `Inner` and the generator hold a reference).
+        unsafe { shared.events.BeginGetEvent(&sink, None) }
+            .context("IMFMediaEventGenerator::BeginGetEvent")?;
         self.inner = Some(Inner {
+            shared,
+            _sink: sink,
             mft,
             activate,
-            events,
             codec_api,
             _manager: manager,
             _device: device.clone(),
             dctx,
             ring,
             next: 0,
-            need_input: 0,
-            pending: VecDeque::new(),
-            ready: VecDeque::new(),
-            param_sets: Vec::new(),
-            headers_warned: false,
             frames_submitted: 0,
             first_au_logged: false,
         });
@@ -860,18 +969,13 @@ impl Encoder for MfEncoder {
         self.ensure_inner(&frame.device)?;
         let opening = self.inner.as_ref().is_none_or(|i| i.frames_submitted == 0);
         let forced = std::mem::take(&mut self.force_kf) || opening;
-        let codec = self.codec;
         let fps = self.fps.max(1);
         let inner = self.inner.as_mut().expect("ensure_inner succeeded");
-        // Back-pressure before input credit: an AU drained here frees the ring slot below.
-        if inner.pending.len() >= IN_FLIGHT_MAX {
-            wait_until(inner, codec, "output", |i| i.pending.len() < IN_FLIGHT_MAX)
-                .inspect_err(|_| self.force_kf = true)?;
-        }
-        if inner.need_input == 0 {
-            wait_until(inner, codec, "input credit", |i| i.need_input > 0)
-                .inspect_err(|_| self.force_kf = true)?;
-        }
+        // Back-pressure before input credit: the AU the callback takes here frees the ring slot.
+        wait_until(inner, "output", |o| o.pending.len() < IN_FLIGHT_MAX)
+            .inspect_err(|_| self.force_kf = true)?;
+        wait_until(inner, "input credit", |o| o.need_input > 0)
+            .inspect_err(|_| self.force_kf = true)?;
         let slot = inner.next;
         inner.next = (inner.next + 1) % RING;
         // SAFETY: single encode thread against the live MFT. The ring texture is owned
@@ -915,18 +1019,14 @@ impl Encoder for MfEncoder {
             self.force_kf = true;
             bail!("IMFTransform::ProcessInput: {e}");
         }
-        inner.need_input -= 1;
         inner.frames_submitted += 1;
-        inner.pending.push_back(PendingMeta {
+        // Both under one lock: the credit this submit spent, and the entry the callback pairs
+        // its next output with. The MFT owns the frame from here.
+        let mut g = lock(&inner.shared.out);
+        g.need_input = g.need_input.saturating_sub(1);
+        g.pending.push_back(PendingMeta {
             pts_ns: captured.pts_ns,
         });
-        // Collect whatever the MFT already finished; `poll` then has no wait to do. The MFT
-        // owns the frame from here, so a failure must not report the submit as failed: the
-        // driver would drop its in-flight entry and mis-stamp every later AU. `poll` raises
-        // the same error on its next call.
-        if let Err(e) = pump(inner, codec) {
-            tracing::debug!(error = %e, "MF event pump failed after the frame was accepted");
-        }
         Ok(())
     }
 
@@ -951,29 +1051,29 @@ impl Encoder for MfEncoder {
 
     /// Wait up to `min(3/4 frame interval, 12 ms)` for the oldest AU. Expiry is `Ok(None)`.
     fn poll(&mut self) -> Result<Option<EncodedFrame>> {
-        let codec = self.codec;
-        let budget = Duration::from_millis(u64::from((750 / self.fps.max(1)).clamp(1, 12)));
+        let budget_ms = (750 / self.fps.max(1)).clamp(1, 12);
         let au = {
             let Some(inner) = self.inner.as_mut() else {
                 return Ok(None);
             };
-            let deadline = Instant::now() + budget;
-            loop {
-                pump(inner, codec)?;
-                if let Some(au) = inner.ready.pop_front() {
-                    inner.note_first_au(&au);
-                    break Some(au);
-                }
-                if inner.pending.is_empty() || Instant::now() >= deadline {
-                    break None;
-                }
-                std::thread::sleep(Duration::from_micros(250));
+            // The same bound as before, now spent on the callback's event rather than on a
+            // sample loop, so nothing else on this thread waits behind it.
+            let au = inner.take_ready(budget_ms)?;
+            if let Some(au) = &au {
+                inner.note_first_au(au);
             }
+            au
         };
         if au.is_some() {
             self.resets_without_output = 0;
         }
         Ok(au)
+    }
+
+    /// The event sink's signal, once an MFT exists. Before the lazy open there is nothing to
+    /// wait on, which a caller reads as "no completion signal" and polls instead.
+    fn ready_event(&self) -> Option<isize> {
+        self.inner.as_ref().map(|i| i.shared.have.raw())
     }
 
     /// Stall recovery: flush and restart streaming in place. A second reset with no AU
@@ -1016,10 +1116,16 @@ impl Encoder for MfEncoder {
                         .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
                 })
         };
-        // The flush voided every in-flight frame and the queued events that named them.
-        inner.pending.clear();
-        inner.ready.clear();
-        inner.need_input = 0;
+        // The flush voided every in-flight frame and the queued events that named them. The
+        // callback stays armed across it — the generator is the MFT's, not the stream's.
+        {
+            let mut g = lock(&inner.shared.out);
+            g.pending.clear();
+            g.ready.clear();
+            g.need_input = 0;
+            g.err = None;
+        }
+        inner.shared.have.clear();
         inner.frames_submitted = 0;
         inner.first_au_logged = false;
         if let Err(e) = restarted {
@@ -1057,7 +1163,6 @@ impl Encoder for MfEncoder {
     }
 
     fn flush(&mut self) -> Result<()> {
-        let codec = self.codec;
         let Some(inner) = self.inner.as_mut() else {
             return Ok(());
         };
@@ -1071,7 +1176,7 @@ impl Encoder for MfEncoder {
                 .context("Media Foundation drain")?;
         }
         // Owed AUs arrive as HaveOutput events; surface them through `poll`.
-        let _ = wait_until(inner, codec, "drain", |i| i.pending.is_empty());
+        let _ = wait_until(inner, "drain", |o| o.pending.is_empty());
         // End-of-stream zeroed the MFT's input credit and it issues no more until a fresh
         // start-of-stream, so without this a later submit stalls out its whole budget.
         // SAFETY: the MFT is live on this thread; a synchronous no-argument message.
@@ -1080,7 +1185,7 @@ impl Encoder for MfEncoder {
                 .mft
                 .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
         }
-        inner.need_input = 0;
+        lock(&inner.shared.out).need_input = 0;
         Ok(())
     }
 }

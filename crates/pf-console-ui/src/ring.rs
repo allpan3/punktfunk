@@ -470,7 +470,7 @@ impl Ring {
                     reason: act
                         .as_ref()
                         .and_then(|a| a.unavailable_reason.clone())
-                        .unwrap_or_else(|| "This host does not offer it".into()),
+                        .unwrap_or_else(|| "This host doesn't offer it".into()),
                     armed: act.as_ref().is_none_or(|a| a.danger),
                     ..plain(
                         &format!("host:{id}"),

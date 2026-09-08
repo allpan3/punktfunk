@@ -882,7 +882,7 @@ extension SettingsView {
                 // opening clause is Android's word-for-word, the rider is the Apple-only cost —
                 // Input Monitoring on macOS (the lizard keyboard rides the same interface),
                 // Bluetooth elsewhere. See sc2CaptureCaption.
-                described(Self.sc2CaptureCaption, field: "sc2_capture") {
+                described(Self.sc2CaptureCaption) {
                     Toggle("Steam Controller 2 passthrough", isOn: $sc2Capture)
                         .disabled(!effective.gamepadForwarding)
                 }

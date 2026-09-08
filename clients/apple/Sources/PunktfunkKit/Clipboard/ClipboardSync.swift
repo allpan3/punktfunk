@@ -33,6 +33,11 @@ public final class ClipboardSync: NSObject {
     /// Ceiling on what `resolvePendingOffer` will pull. Text and modest images are worth having on
     /// the chance the user pastes them after the session ends; a 200 MB screenshot is not.
     private static let resolveBudget = 8 << 20
+    /// Hard ceiling on ANY single transfer, either direction. Without it an inbound transfer grew
+    /// a `Data` for whatever the host streamed, bounded only by the fetch deadline, and an
+    /// outbound serve read the whole pasteboard however large it was. The resolve budget above is
+    /// a policy about what is worth KEEPING past a session; this is the memory bound.
+    private static let maxTransferBytes = 64 << 20
     /// And how long that may hold up teardown. Short on purpose — it sits between the user
     /// leaving and the connection closing, and a LAN round-trip for a few KB of text is
     /// milliseconds. An offer that cannot be had in this long is one the user does without.
@@ -254,10 +259,17 @@ public final class ClipboardSync: NSObject {
             serves.async { [weak self] in self?.serveFetch(reqId: reqId, seq: seq, mime: mime) }
         case let .data(xferId, chunk, last):
             fetchLock.lock()
-            let pending = pendingFetches[xferId]
-            pending?.buffer.append(chunk)
-            let finished = last ? pendingFetches.removeValue(forKey: xferId) : nil
+            pendingFetches[xferId]?.buffer.append(chunk)
+            let overrun = (pendingFetches[xferId]?.buffer.count ?? 0) > Self.maxTransferBytes
+            // Past the ceiling this is not a clipboard item any more — drop it rather than let
+            // the host decide how much of this device's memory to take.
+            let finished = (last || overrun) ? pendingFetches.removeValue(forKey: xferId) : nil
             fetchLock.unlock()
+            if overrun {
+                connection.clipCancel(id: xferId)
+                finished?.completion(Data())
+                return
+            }
             // Outside the lock: a completion may start the next fetch (or wake a thread that will).
             if let finished {
                 finished.completion(finished.buffer)
@@ -408,9 +420,15 @@ public final class ClipboardSync: NSObject {
     /// (iOS's paste permission alert), and the drain thread has to stay live throughout.
     private func serveFetch(reqId: UInt32, seq: UInt32, mime: String) {
         stateLock.lock()
+        // `installedRemote == nil` matters: installing the HOST's offer on our own pasteboard
+        // updates the change count too, so without it a fetch for our promise would be served by
+        // reading that promise — which fetches back from the host and blocks this queue on it.
         let fresh = seq == offerSeq && pasteboard.changeCount == lastSeenChangeCount
+            && installedRemote == nil
         stateLock.unlock()
-        guard fresh, !stopped.isRaised, let data = pasteboard.read(wire: mime) else {
+        guard fresh, !stopped.isRaised, let data = pasteboard.read(wire: mime),
+              data.count <= Self.maxTransferBytes
+        else {
             connection.clipCancel(id: reqId)
             return
         }

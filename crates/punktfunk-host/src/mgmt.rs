@@ -90,7 +90,7 @@ pub fn publish_endpoint(bind: SocketAddr) {
     let _ = EFFECTIVE_PORT.set(bind.port());
     let dir = pf_paths::config_dir();
     if let Err(e) = pf_paths::create_private_dir(&dir) {
-        tracing::warn!(error = %e, "could not create the config dir to publish the mgmt endpoint");
+        tracing::warn!(error = %e, "config dir for the mgmt endpoint not created");
         return;
     }
     match write_endpoint(&dir, bind.port()) {
@@ -100,7 +100,7 @@ pub fn publish_endpoint(bind: SocketAddr) {
         Err(e) => tracing::warn!(
             dir = %dir.display(),
             error = %e,
-            "could not publish the mgmt endpoint — a console on another port will fall back to 47990"
+            "mgmt endpoint not published — a console on another port will fall back to 47990"
         ),
     }
 }

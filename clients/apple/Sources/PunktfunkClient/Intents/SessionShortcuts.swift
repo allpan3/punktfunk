@@ -20,10 +20,7 @@ import PunktfunkKit
 /// Load a full saved host (MACs, address) from the shared App-Group store by id — HostEntity only
 /// carries id + name.
 private func loadStoredHost(_ id: UUID) -> StoredHost? {
-    guard let data = AppGroup.defaults.data(forKey: DefaultsKey.hosts),
-          let hosts = try? JSONDecoder().decode([StoredHost].self, from: data)
-    else { return nil }
-    return hosts.first { $0.id == id }
+    StoredHost.loadAll(recentFirst: false).first { $0.id == id }
 }
 
 /// Start a session with a stored host (optionally launching a title, optionally with a settings

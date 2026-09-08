@@ -94,7 +94,7 @@ where
 
     if ok {
         if let Err(e) = np.add_with_access(&req.name, &fingerprint_hex(&client_fp), access) {
-            tracing::error!(error = %format!("{e:#}"), "could not persist paired clients");
+            tracing::error!(error = %format!("{e:#}"), "paired clients not saved");
         }
         tracing::info!(name = %name, "pairing complete — client trusted");
     } else {

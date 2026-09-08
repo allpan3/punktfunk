@@ -281,6 +281,10 @@ public final class Sc2Capture {
     /// BLE link it started with. Re-evaluate on an IOKit matching callback if that proves
     /// annoying on glass; a stream restart already picks the cable up today.
     private func startTransport() {
+        // The link being replaced never fires `onSourceClosed` from its own `stop()`, so its
+        // claimed slots would survive the switch: the host keeps a frozen virtual pad for the
+        // session and the GameController twin stays suppressed behind it.
+        releaseAll(reason: "transport switch")
         #if os(macOS)
         if Sc2UsbLink.attached() {
             // Exactly one link runs, so the other stops FIRST — re-picking after an
@@ -321,7 +325,7 @@ public final class Sc2Capture {
         stopped = true
         lock.unlock()
         guard !wasStopped else { return }
-        manager.steamController2Suppressed = false
+        manager.steamController2Claims = 0
         manager.holdSc2Hardware(false)
         observers.forEach { NotificationCenter.default.removeObserver($0) }
         observers.removeAll()
@@ -617,9 +621,9 @@ public final class Sc2Capture {
     @MainActor
     private func syncShadowSuppression() {
         lock.lock()
-        let owned = sources.values.contains { $0.padIndex != nil }
+        let owned = sources.values.filter { $0.padIndex != nil }.count
         lock.unlock()
-        manager.steamController2Suppressed = owned
+        manager.steamController2Claims = owned
     }
 
     /// Release every source — the stop/suspend teardown.

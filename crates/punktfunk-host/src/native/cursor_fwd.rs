@@ -3,7 +3,7 @@
 //! Armed when `CLIENT_CAP_CURSOR` met `HOST_CAP_CURSOR`. The encoder then
 //! stops blending (`SessionPlan::cursor_blend = false`) and this loop forwards
 //! the pointer out-of-band: `CursorShape` (bitmap + hotspot) on serial change
-//! via the control-task bridge (reliable); `CursorState` (hotspot position /
+//! via the control-task bridge (reliable, depth-1 latest-wins); `CursorState` (hotspot position /
 //! visibility, 14 B) as a `0xD0` datagram every encode tick (lossy, latest-wins;
 //! no refresh timer).
 //!
@@ -38,14 +38,15 @@ impl CursorForwarder {
         &mut self,
         cursor: Option<&pf_frame::CursorOverlay>,
         conn: &super::link::SessionLink,
-        shape_tx: &tokio::sync::mpsc::UnboundedSender<CursorShape>,
+        shape_tx: &tokio::sync::watch::Sender<Option<CursorShape>>,
     ) {
         let flags = match cursor {
             Some(ov) if ov.visible => {
                 if self.sent_serial != Some(ov.serial) {
                     if let Some(shape) = shape_from_overlay(ov) {
-                        // Unbounded send fail ⇒ receiver dropped; session is tearing down.
-                        let _ = shape_tx.send(shape);
+                        // Depth-1 slot: an undrained older bitmap is replaced, never queued.
+                        // Send fail ⇒ receiver dropped; session is tearing down.
+                        let _ = shape_tx.send(Some(shape));
                         self.sent_serial = Some(ov.serial);
                     }
                 }

@@ -231,6 +231,7 @@ fn a_pinned_cards_library_launches_with_its_profile() {
             id: "hdr".into(),
             name: "HDR".into(),
             accent: None,
+            bitrate_kbps: None,
         }),
         ..rows[0].clone()
     };
@@ -390,8 +391,9 @@ fn a_replace_carries_the_screen_it_replaced() {
     assert!(matches!(s.stack.last(), Some(Screen::HostOptions(_))));
     finish_motion(&mut s);
 
-    // First host's menu is [Send logs, Library, Copy link, Edit…, …] — three Downs.
-    // Pressed exactly so a menu reorder fails here, not on something destructive.
+    // First host's menu is [Send logs, Library, Test network speed…, Copy link, Edit…, …]
+    // — four Downs. Pressed exactly so a menu reorder fails here, not on something destructive.
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
     s.handle_menu(MenuEvent::Move(MenuDir::Down));
     s.handle_menu(MenuEvent::Move(MenuDir::Down));
     s.handle_menu(MenuEvent::Move(MenuDir::Down));
@@ -1775,4 +1777,171 @@ mod launch_hold {
         s.handle_menu(MenuEvent::Confirm);
         assert!(s.in_stream && !s.holds_stream());
     }
+}
+
+/// The console writes the GLOBAL bitrate and has no profile editor, so a measurement is only
+/// applicable when the tested host actually resolves bitrate from that layer. A profile that
+/// PINS one makes the answer read-only; a profile that inherits does not.
+#[test]
+fn apply_is_offered_only_when_the_default_is_the_layer_that_wins() {
+    let done = SpeedPhase::Done {
+        throughput_kbps: 100_000,
+        loss_pct: 0.3,
+        recommended_kbps: 70_000,
+    };
+    let chip = |bitrate_kbps| {
+        Some(crate::model::ProfileChip {
+            id: "work".into(),
+            name: "Work".into(),
+            accent: None,
+            bitrate_kbps,
+        })
+    };
+    for (bound, want) in [
+        (None, Some(70_000)),
+        // Inherits bitrate: the default is still what this host streams at.
+        (chip(None), Some(70_000)),
+        (chip(Some(20_000)), None),
+    ] {
+        let mut rows = hosts();
+        rows[0].bound_profile = bound;
+        let (mut s, console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
+        console.set_hosts(rows);
+        console.set_speed(Some(SpeedStatus {
+            key: "aa11".into(),
+            name: "Living Room PC".into(),
+            phase: done.clone(),
+        }));
+        s.sync();
+        assert_eq!(s.speed_recommendation(), want);
+    }
+}
+
+/// The burst outlives a dismiss: the host finishes it either way. Its report must not reopen
+/// the takeover over whatever the player moved on to.
+#[test]
+fn a_dismissed_speed_test_drops_its_late_result() {
+    let (mut s, console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    console.set_speed(Some(SpeedStatus {
+        key: "aa11".into(),
+        name: "Living Room PC".into(),
+        phase: SpeedPhase::Connecting,
+    }));
+    s.sync();
+    assert!(s.speed.is_some());
+
+    s.handle_menu(MenuEvent::Back);
+    assert!(s.speed.is_none());
+
+    console.advance_speed(
+        "aa11",
+        SpeedPhase::Done {
+            throughput_kbps: 100_000,
+            loss_pct: 0.0,
+            recommended_kbps: 70_000,
+        },
+    );
+    s.sync();
+    assert!(s.speed.is_none(), "a cleared slot must stay cleared");
+}
+
+/// Dismiss one test, start another, and the first burst still reports. Keyed, so it cannot
+/// land under the second host's name — the number would be measured against the wrong box.
+#[test]
+fn a_superseded_speed_test_cannot_report_under_the_new_host() {
+    let (mut s, console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    console.set_speed(Some(SpeedStatus {
+        key: "bb22".into(),
+        name: "Bedroom".into(),
+        phase: SpeedPhase::Connecting,
+    }));
+    s.sync();
+
+    console.advance_speed(
+        "aa11",
+        SpeedPhase::Done {
+            throughput_kbps: 100_000,
+            loss_pct: 0.0,
+            recommended_kbps: 70_000,
+        },
+    );
+    s.sync();
+    assert_eq!(
+        s.speed.as_ref().map(|sp| sp.phase.clone()),
+        Some(SpeedPhase::Connecting),
+        "the abandoned host's report must not land here"
+    );
+}
+
+/// A screen reader gets the focused tile, and a different string once focus moves — the whole
+/// point of the seam: a constant would announce the same host forever.
+#[test]
+fn the_announcement_follows_the_home_carousel() {
+    let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    s.sync();
+    let first = s.focus_announcement().expect("home names its focused tile");
+    assert!(first.starts_with("Living Room PC"), "{first}");
+    s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    let second = s
+        .focus_announcement()
+        .expect("…and the tile it stepped onto");
+    assert!(second.starts_with("Office Tower"), "{second}");
+    assert_ne!(first, second);
+}
+
+/// The trailing action tiles speak their own caption, not a host's.
+#[test]
+fn the_announcement_names_the_trailing_actions() {
+    let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    s.sync();
+    for _ in 0..hosts().len() {
+        s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    }
+    assert_eq!(
+        s.focus_announcement().as_deref(),
+        Some("Add Host, Register a host by address")
+    );
+    s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    assert_eq!(
+        s.focus_announcement().as_deref(),
+        Some("Rescan, Look for hosts on this network again")
+    );
+}
+
+/// A settings row is its label plus the value drawn beside it; the strip names the section.
+#[test]
+fn the_announcement_carries_a_settings_value() {
+    let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    s.sync();
+    s.handle_menu(MenuEvent::Tertiary);
+    finish_motion(&mut s);
+    let row = s.focus_announcement().expect("a settings row names itself");
+    assert!(row.starts_with("Resolution, "), "{row}");
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    let below = s.focus_announcement().expect("…and so does the row below");
+    assert!(below.starts_with("Refresh rate, "), "{below}");
+    assert_ne!(row, below);
+    s.handle_menu(MenuEvent::Move(MenuDir::Up));
+    s.handle_menu(MenuEvent::Move(MenuDir::Up));
+    assert_eq!(s.focus_announcement().as_deref(), Some("Stream section"));
+}
+
+/// Silence, not the wrong row: a screen this driver does not describe, and a takeover that
+/// owns the input, both say nothing.
+#[test]
+fn the_announcement_stays_quiet_where_it_cannot_name_the_focus() {
+    let (mut s, _console, _library) = shell(vec![Screen::AddHost(
+        crate::screens::add_host::AddHostScreen::new(),
+    )]);
+    s.sync();
+    assert!(s.focus_announcement().is_none());
+
+    let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    s.sync();
+    s.handle_menu(MenuEvent::Confirm);
+    assert!(s.connecting.is_some());
+    assert!(
+        s.focus_announcement().is_none(),
+        "a takeover owns the input"
+    );
 }

@@ -581,7 +581,7 @@ fn relight(d: Darkened) {
                     Some(false) => {
                         tracing::error!(
                             outputs = ?outputs,
-                            "KWin DPMS: could NOT re-light the desktop outputs (in-process \
+                            "KWin DPMS: the desktop outputs did not re-light (in-process \
                              restore and kscreen-doctor both declined) — the panel stays dark \
                              until local input wakes it"
                         );
@@ -592,7 +592,7 @@ fn relight(d: Darkened) {
         Darkened::Kscreen => {
             if kscreen_dpms("on") == Some(false) {
                 tracing::error!(
-                    "KWin DPMS: could NOT re-light the desktop outputs (kscreen-doctor refused \
+                    "KWin DPMS: the desktop outputs did not re-light (kscreen-doctor refused \
                      the --dpms on it earlier accepted the off for) — the panel stays dark until \
                      local input wakes it"
                 );
@@ -604,7 +604,7 @@ fn relight(d: Darkened) {
             if back.is_empty() {
                 tracing::error!(
                     ?outputs,
-                    "sway: could NOT re-light the desktop outputs — they stay dark until local \
+                    "sway: the desktop outputs did not re-light — they stay dark until local \
                      input or `swaymsg output '*' dpms on`"
                 );
             } else {
@@ -616,7 +616,7 @@ fn relight(d: Darkened) {
             if back.is_empty() {
                 tracing::error!(
                     ?outputs,
-                    "hyprland: could NOT re-light the desktop monitors — they stay dark until \
+                    "hyprland: the desktop monitors did not re-light — they stay dark until \
                      local input or `hyprctl dispatch dpms on`"
                 );
             } else {
@@ -624,7 +624,7 @@ fn relight(d: Darkened) {
             }
         }
         // Hold is the open fds: `drop` closes them and the kernel restores the
-        // console. No ioctl to refuse — no "could NOT re-light" line of its own.
+        // console. No ioctl to refuse — no "did not re-light" line of its own.
         Darkened::Drm(d) => {
             let cards = d.darkened.clone();
             drop(d);

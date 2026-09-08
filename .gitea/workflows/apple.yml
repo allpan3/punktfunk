@@ -167,6 +167,12 @@ jobs:
           RUSTUP="$(command -v rustup || echo "$HOME/.cargo/bin/rustup")"
           dirname "$RUSTUP" >> "$GITHUB_PATH"
           "$RUSTUP" target add aarch64-apple-darwin x86_64-apple-darwin
+          # The iOS/tvOS simulator slices the two scheme builds below link against.
+          "$RUSTUP" target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+          # tvOS is tier-3 (no prebuilt std) — build-xcframework.sh compiles it with nightly
+          # + -Zbuild-std, the same way the distribute and screenshots jobs do.
+          "$RUSTUP" toolchain install nightly --profile minimal
+          "$RUSTUP" component add rust-src --toolchain nightly
 
       # Shared compile cache. The script handles the macOS side (user-prefix install +
       # GITHUB_PATH, bsdtar globbing) — see scripts/ci/ensure-sccache.sh.
@@ -192,8 +198,11 @@ jobs:
           # inherits this from the env during the xcframework build).
           echo "CMAKE_POLICY_VERSION_MINIMUM=3.5" >> "$GITHUB_ENV"
 
-      - name: Build PunktfunkCore.xcframework
-        run: bash scripts/build-xcframework.sh
+      - name: Build PunktfunkCore.xcframework (mac + iOS + tvOS slices)
+        # iOS and tvOS slices on purpose: the two scheme builds below need them. A rebuild replaces
+        # the whole xcframework and drops any slice not asked for, so this must stay in step with
+        # them.
+        run: BUILD_IOS=1 BUILD_TVOS=1 bash scripts/build-xcframework.sh
 
       - name: Build (PunktfunkKit + PunktfunkClient app shell)
         working-directory: clients/apple
@@ -202,6 +211,30 @@ jobs:
       - name: Test (unit + real-codec round trip; remote tests self-skip)
         working-directory: clients/apple
         run: swift test
+
+      # `swift build`/`swift test` above compile for the HOST only, so nothing in an
+      # `#if os(iOS)` or `#if os(tvOS)` region is type-checked by them — about 8,600 lines across
+      # 93 files, including StreamViewIOS, TouchMouse, SiriRemotePointer and VirtualPadLayer. Both
+      # jobs that did build those platforms are gated off pull requests, so two of three shipping
+      # clients could be broken by a green PR, and were: 0a32f4eab and b5fe2a783 are post-merge
+      # repairs for exactly this, the second noting tvOS "couldn't be checked at all".
+      #
+      # Simulator destinations and CODE_SIGNING_ALLOWED=NO: this asks the type-checker the question,
+      # not the signing stack. The failure mode being caught is Swift's "unable to type-check this
+      # expression in reasonable time", which is expensive to bisect once it is on main.
+      - name: Build the iOS app (type-check the os(iOS) regions)
+        working-directory: clients/apple
+        run: |
+          xcodebuild -project Punktfunk.xcodeproj -scheme Punktfunk-iOS \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO build
+
+      - name: Build the tvOS app (type-check the os(tvOS) regions)
+        working-directory: clients/apple
+        run: |
+          xcodebuild -project Punktfunk.xcodeproj -scheme Punktfunk-tvOS \
+            -destination 'generic/platform=tvOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO build
 
       - name: sccache stats (visibility only)
         if: always()
@@ -264,10 +297,11 @@ jobs:
           dirname "$RUSTUP" >> "$GITHUB_PATH"
           "$RUSTUP" target add aarch64-apple-darwin x86_64-apple-darwin \
             aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
-          # tvOS targets are tier-3 (no prebuilt std) — build-xcframework.sh compiles them with
-          # nightly + -Zbuild-std, so ensure nightly + rust-src are present.
-          "$RUSTUP" toolchain install nightly --profile minimal
-          "$RUSTUP" component add rust-src --toolchain nightly
+          # tvOS targets are tier-3 (no prebuilt std) — build-xcframework.sh compiles them with a
+          # PINNED nightly + -Zbuild-std. Read the date from the script so it lives in one place.
+          NIGHTLY="$(sed -n 's/^NIGHTLY=//p' scripts/build-xcframework.sh)"
+          "$RUSTUP" toolchain install "$NIGHTLY" --profile minimal
+          "$RUSTUP" component add rust-src --toolchain "$NIGHTLY"
 
       # The in-core Opus decode (surround) pulls audiopus_sys, which builds a vendored static libopus
       # via CMake — keep the xcframework self-contained (no runtime libopus.dylib on end-user devices).
@@ -479,6 +513,8 @@ jobs:
       - name: iOS — archive + upload to TestFlight
         if: gitea.event_name != 'workflow_dispatch' || inputs.testflight == 'true'
         # Best-effort until the App Store Connect app record for io.unom.punktfunk exists.
+        # This covers the UPLOAD only: since the swift job builds the iOS scheme on every pull
+        # request, a compile break fails there first rather than being swallowed here.
         continue-on-error: true
         run: |
           # Archive with AUTOMATIC signing (development) — see the macOS App Store step for the full
@@ -617,7 +653,8 @@ jobs:
         # on every apple push (above), so this matches the iOS step's gate exactly.
         if: gitea.event_name != 'workflow_dispatch' || inputs.testflight == 'true'
         # Needs tvOS added to the App Store Connect app record + the tvOS platform installed
-        # on the runner (xcodebuild -downloadPlatform tvOS).
+        # on the runner (xcodebuild -downloadPlatform tvOS). Covers the UPLOAD only: the swift job
+        # builds the tvOS scheme on every pull request, so a compile break fails there first.
         continue-on-error: true
         run: |
           # Archive with AUTOMATIC signing (development) — see the macOS App Store step. The SwiftPM
@@ -702,10 +739,11 @@ jobs:
           dirname "$RUSTUP" >> "$GITHUB_PATH"
           "$RUSTUP" target add aarch64-apple-darwin x86_64-apple-darwin \
             aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
-          # tvOS targets are tier-3 (no prebuilt std) — build-xcframework.sh compiles them with
-          # nightly + -Zbuild-std, so ensure nightly + rust-src are present (see the swift job).
-          "$RUSTUP" toolchain install nightly --profile minimal
-          "$RUSTUP" component add rust-src --toolchain nightly
+          # tvOS targets are tier-3 (no prebuilt std) — build-xcframework.sh compiles them with a
+          # PINNED nightly + -Zbuild-std; the date comes from the script (see the swift job).
+          NIGHTLY="$(sed -n 's/^NIGHTLY=//p' scripts/build-xcframework.sh)"
+          "$RUSTUP" toolchain install "$NIGHTLY" --profile minimal
+          "$RUSTUP" component add rust-src --toolchain "$NIGHTLY"
 
       # Shared compile cache. The script handles the macOS side (user-prefix install +
       # GITHUB_PATH, bsdtar globbing) — see scripts/ci/ensure-sccache.sh.

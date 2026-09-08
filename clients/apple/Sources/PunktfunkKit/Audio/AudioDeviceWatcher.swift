@@ -88,7 +88,7 @@ final class AudioDeviceWatcher {
             AudioObjectID(kAudioObjectSystemObject), &address, DispatchQueue.main, block)
         guard status == noErr else {
             log.warning("""
-                could not watch the default output device (\(status)) — an output device change \
+                no listener on the default output device (\(status)) — an output device change \
                 mid-stream may need a reconnect
                 """)
             return

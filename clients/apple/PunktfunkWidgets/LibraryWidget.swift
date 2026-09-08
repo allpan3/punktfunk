@@ -70,7 +70,7 @@ struct LibraryProvider: AppIntentTimelineProvider {
 struct LibraryWidget: Widget {
     var body: some WidgetConfiguration {
         AppIntentConfiguration(
-            kind: "PunktfunkLibrary", intent: LibraryWidgetConfigIntent.self,
+            kind: WidgetKind.library, intent: LibraryWidgetConfigIntent.self,
             provider: LibraryProvider()
         ) { entry in
             LibraryWidgetView(entry: entry)

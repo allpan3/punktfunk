@@ -533,7 +533,7 @@ fn watch(
                     }
                 }
                 Some(Err(e)) => {
-                    tracing::debug!(error = %e, "could not poll the launched child — falling back to scanning");
+                    tracing::debug!(error = %e, "launched child not pollable — falling back to scanning");
                     child = None;
                     kind = fallback_kind();
                     if matches!(kind, LeaseKind::Untracked) {

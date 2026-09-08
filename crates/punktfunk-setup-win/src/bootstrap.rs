@@ -72,7 +72,7 @@ fn extract_and_run(exe: &Path, data: &[u8], payload: &[u8]) -> Result<ExitCode, 
         .args(std::env::args_os().skip(1))
         .env(ROOT_ENV, &root)
         .status()
-        .map_err(|e| format!("could not start {}: {e}", child.display()))?;
+        .map_err(|e| format!("couldn't start {}: {e}", child.display()))?;
     // The child is gone, so its exe is deletable: nothing of the ~300 MB extract stays under
     // %ProgramData% (the /LOG file lives elsewhere). Best effort — a locked file is not a
     // failed install.

@@ -124,7 +124,7 @@ mod linux_main {
         println!("pf-update: running {cmd:?}");
         let status = cmd
             .status()
-            .map_err(|e| format!("{what}: failed to launch: {e}"))?;
+            .map_err(|e| format!("{what}: launch failed: {e}"))?;
         if !status.success() {
             return Err(format!("{what}: exited {status}"));
         }
@@ -134,7 +134,7 @@ mod linux_main {
     fn run_capture(cmd: &mut Command, what: &str) -> Result<String, String> {
         let out = cmd
             .output()
-            .map_err(|e| format!("{what}: failed to launch: {e}"))?;
+            .map_err(|e| format!("{what}: launch failed: {e}"))?;
         if !out.status.success() {
             return Err(format!("{what}: exited {}", out.status));
         }

@@ -202,7 +202,7 @@ impl SwapChainProcessor {
         let dxgi_device = match device.device.cast::<IDXGIDevice>() {
             Ok(d) => d,
             Err(e) => {
-                dbglog!("[pf-vd] swap-chain: failed to cast ID3D11Device to IDXGIDevice: {e:?}");
+                dbglog!("[pf-vd] swap-chain: ID3D11Device is not an IDXGIDevice: {e:?}");
                 return;
             }
         };
@@ -351,7 +351,7 @@ impl SwapChainProcessor {
                 let display_qpc = buffer.MetaData.PresentDisplayQPCTime;
                 if !logged_frame {
                     dbglog!(
-                        "[pf-vd] swap-chain run_core: FIRST FRAME acquired (target={target_id}) — DWM IS compositing the virtual display!"
+                        "[pf-vd] swap-chain run_core: first frame acquired (target={target_id}) — DWM is compositing the virtual display"
                     );
                     logged_frame = true;
                 }

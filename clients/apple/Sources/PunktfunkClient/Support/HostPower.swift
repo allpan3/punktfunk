@@ -88,7 +88,7 @@ final class HostPowerStore: ObservableObject {
                 id: action.id, address: host.address, port: host.effectiveMgmtPort,
                 certPEM: identity.certPEM, keyPEM: identity.keyPEM, hostFingerprint: pin)
             log.info("host action \(action.id, privacy: .public) accepted by \(host.displayName, privacy: .public)")
-            return (true, "\(host.displayName): \(action.label) — on its way.")
+            return (true, "\(host.displayName): \(action.label) — on its way")
         } catch {
             let why = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             log.warning("host action \(action.id, privacy: .public) refused by \(host.displayName, privacy: .public): \(why, privacy: .public)")

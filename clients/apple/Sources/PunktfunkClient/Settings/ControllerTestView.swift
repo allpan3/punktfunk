@@ -146,6 +146,10 @@ struct ControllerTestView: View {
             heavyOn = false
             lightOn = false
             playerLED = -1
+            // Quiet the pad we are LEAVING first: `target` only swaps the rumble renderer, so a
+            // DualSense would keep its lightbar, its player LED and its trigger effect with no
+            // control left on screen that reaches it.
+            tester.stop()
             tester.target(gamepads.active?.controller)
         }
     }

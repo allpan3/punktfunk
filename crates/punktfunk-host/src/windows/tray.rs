@@ -132,7 +132,7 @@ fn ensure() {
     match start() {
         Ok((Some(pid), how)) => tracing::info!(pid, how, "status tray started"),
         Ok((None, _)) => tracing::trace!("status tray is already running"),
-        Err(e) => tracing::debug!(error = %e, "could not start the status tray"),
+        Err(e) => tracing::debug!(error = %e, "status tray not started"),
     }
 }
 

@@ -494,7 +494,7 @@ fn open_sealed_frame(key: &[u8; 16], frame: &[u8]) -> Result<Request> {
     let mut ct_tag = frame[ENC_RTSP_HEADER..].to_vec();
     ct_tag.extend_from_slice(&frame[8..ENC_RTSP_HEADER]);
     let pt = super::control::gcm_open(key, &rtsp_nonce(seq, b'C'), &ct_tag, &[])
-        .context("sealed RTSP message failed to authenticate")?;
+        .context("sealed RTSP message did not authenticate")?;
     // Ordinary RTSP inside. Frame length already bounds it; do not trust
     // Content-Length the way the plaintext path does.
     let Some(end) = find_subslice(&pt, b"\r\n\r\n") else {

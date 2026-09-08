@@ -54,10 +54,3 @@ extension View {
     }
 }
 #endif
-
-extension Double {
-    /// The log-scale slider mapping needs a bounded input (Automatic stores 0).
-    func clamped(_ lo: Double, _ hi: Double) -> Double {
-        Swift.min(Swift.max(self, lo), hi)
-    }
-}

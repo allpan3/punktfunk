@@ -189,14 +189,33 @@ where
 
 /// Tee every event into [`ring`]. Install with per-layer `LevelFilter::DEBUG`
 /// so the ring sees DEBUG even when `RUST_LOG` keeps stderr at `info`.
+/// Messages carry their span context (`session{id=7}: …`) so concurrent
+/// sessions stay separable in the console.
 pub struct RingLayer;
 
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RingLayer {
-    fn on_event(
+/// A span's fields, formatted at open. The registry keeps span metadata but not
+/// recorded values, so a layer that wants them stores its own copy.
+struct SpanFields(String);
+
+impl<S> tracing_subscriber::Layer<S> for RingLayer
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_new_span(
         &self,
-        event: &tracing::Event<'_>,
-        _ctx: tracing_subscriber::layer::Context<'_, S>,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
+        let mut fields = FieldFmt::default();
+        attrs.record(&mut fields);
+        if let Some(span) = ctx.span(id) {
+            span.extensions_mut()
+                .insert(SpanFields(fields.fields.trim_start().to_string()));
+        }
+    }
+
+    fn on_event(&self, event: &tracing::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
         // `log`-crate events arrive under the bridge shim target `"log"`;
         // normalize to the real module path so the noise gate sees `mdns_sd::…`.
         use tracing_log::NormalizeEvent;
@@ -207,7 +226,23 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RingLayer {
         }
         let mut fields = FieldFmt::default();
         event.record(&mut fields);
-        ring().push(meta.level(), meta.target(), fields.finish());
+        // Outermost span first, matching what the `fmt` layer prints to stderr.
+        let mut prefix = String::new();
+        if let Some(scope) = ctx.event_scope(event) {
+            use std::fmt::Write;
+            for span in scope.from_root() {
+                let ext = span.extensions();
+                let f = ext.get::<SpanFields>().map_or("", |s| s.0.as_str());
+                let _ = write!(prefix, "{}{{{f}}}: ", span.name());
+            }
+        }
+        let msg = fields.finish();
+        let msg = if prefix.is_empty() {
+            msg
+        } else {
+            truncate_msg(prefix + &msg)
+        };
+        ring().push(meta.level(), meta.target(), msg);
     }
 }
 
@@ -335,6 +370,27 @@ mod tests {
         );
         assert!(hit.target.contains("log_capture"), "target: {}", hit.target);
         assert!(hit.ts_ms > 0);
+    }
+
+    #[test]
+    fn events_inside_a_span_carry_its_fields() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let cur = tail_seq();
+
+        let subscriber = tracing_subscriber::registry().with(RingLayer);
+        tracing::subscriber::with_default(subscriber, || {
+            let _entered = tracing::info_span!("session", id = 7u64).entered();
+            tracing::warn!(dropped = 3, "capture loss");
+        });
+
+        let page = ring().since(cur, MAX_PAGE);
+        let hit = page
+            .entries
+            .iter()
+            .find(|e| e.msg.contains("capture loss"))
+            .expect("event captured");
+        assert_eq!(hit.msg, "session{id=7}: capture loss dropped=3");
     }
 
     #[test]

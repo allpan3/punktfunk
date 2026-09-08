@@ -809,6 +809,143 @@ impl PortalCapturer {
     }
 }
 
+/// Direct `ext-image-copy-capture-v1` capturer: the compositor fills buffers we
+/// allocate, and we re-arm the instant one is ready.
+///
+/// Shares the portal's one-deep mailbox and wakeup edge, so the encode loop's
+/// arrival wait is unchanged. What it does not share is any pacing: there is no
+/// portal round trip and no PipeWire graph, so the rate is the compositor's
+/// repaint rate (`design/linux-consumer-driven-capture.md` §8).
+pub struct WlCapturer {
+    slot: FrameSlot,
+    wake: Receiver<()>,
+    signals: CaptureSignals,
+    output_name: String,
+    quit: Arc<AtomicBool>,
+    join: Option<thread::JoinHandle<()>>,
+    /// Holds the compositor output; dropped after the thread is joined.
+    _keepalive: Box<dyn Send>,
+}
+
+impl WlCapturer {
+    /// `output_name` is the compositor's `wl_output.name` for the head the host
+    /// already created. Fails when the compositor lacks the protocol, the output
+    /// is gone, or no dmabuf format the consumer imports is on offer — every one
+    /// of which is a reason for the caller to keep the portal path.
+    pub fn open(
+        output_name: String,
+        keepalive: Box<dyn Send>,
+        policy: ZeroCopyPolicy,
+    ) -> Result<WlCapturer> {
+        let slot: FrameSlot = Arc::new(std::sync::Mutex::new(None));
+        let signals = CaptureSignals::new();
+        signals.active.store(true, Ordering::Relaxed);
+        let h = wl_capture::spawn(output_name.clone(), policy, slot, signals)?;
+        Ok(WlCapturer {
+            slot: h.slot,
+            wake: h.wake,
+            signals: h.signals,
+            output_name,
+            quit: h.quit,
+            join: Some(h.join),
+            _keepalive: keepalive,
+        })
+    }
+
+    fn take_frame(&self) -> Option<CapturedFrame> {
+        self.slot.lock().ok().and_then(|mut s| s.take())
+    }
+}
+
+impl Capturer for WlCapturer {
+    fn next_frame(&mut self) -> Result<CapturedFrame> {
+        self.next_frame_within(Duration::from_secs(10))
+    }
+
+    fn next_frame_within(&mut self, budget: Duration) -> Result<CapturedFrame> {
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            if let Some(f) = self.take_frame() {
+                return Ok(f);
+            }
+            if self.signals.broken.load(Ordering::Relaxed) {
+                return Err(anyhow!(
+                    "direct wayland capture failed on output {}",
+                    self.output_name
+                ));
+            }
+            let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                return Err(anyhow!(
+                    "no frame within {:.1}s from the direct wayland capture on output {} — the \
+                     compositor accepted the session but painted nothing",
+                    budget.as_secs_f32(),
+                    self.output_name
+                ));
+            };
+            if self
+                .wake
+                .recv_timeout(left.min(Duration::from_millis(500)))
+                .is_err()
+                && !self.signals.streaming.load(Ordering::Relaxed)
+            {
+                return Err(anyhow!("direct wayland capture thread ended"));
+            }
+        }
+    }
+
+    fn supports_arrival_wait(&self) -> bool {
+        true
+    }
+
+    fn wait_arrival(&mut self, deadline: std::time::Instant) {
+        // Must not consume: the frame stays for `try_latest`.
+        if self.signals.broken.load(Ordering::Relaxed) {
+            return;
+        }
+        loop {
+            if self.slot.lock().is_ok_and(|s| s.is_some()) {
+                return;
+            }
+            let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                return;
+            };
+            if self.wake.recv_timeout(left).is_err() {
+                return;
+            }
+        }
+    }
+
+    fn try_latest(&mut self) -> Result<Option<CapturedFrame>> {
+        if self.signals.broken.load(Ordering::Relaxed) {
+            return Err(anyhow!(
+                "direct wayland capture lost on output {} — rebuilding capture",
+                self.output_name
+            ));
+        }
+        // Drain stale edges so the next `wait_arrival` cannot return early.
+        while self.wake.try_recv().is_ok() {}
+        Ok(self.take_frame())
+    }
+
+    fn cursor(&mut self) -> Option<pf_frame::CursorOverlay> {
+        self.signals.cursor_live.lock().ok().and_then(|c| c.clone())
+    }
+
+    fn is_alive(&self) -> bool {
+        !self.signals.broken.load(Ordering::Relaxed)
+            && self.join.as_ref().is_some_and(|j| !j.is_finished())
+    }
+}
+
+impl Drop for WlCapturer {
+    fn drop(&mut self) {
+        self.quit.store(true, Ordering::Relaxed);
+        if let Some(j) = self.join.take() {
+            let _ = j.join();
+        }
+    }
+}
+
 impl Drop for PortalCapturer {
     fn drop(&mut self) {
         // Quit then join before keepalive drops: releases EGL/CUDA, then
@@ -832,6 +969,10 @@ use portal::{portal_thread, portal_thread_remote_desktop};
 // PipeWire consumer (`!Send`, owns its thread). Directory `mod pipewire`
 // resolves to `linux/pipewire.rs`; `super` inside still means `linux`.
 mod pipewire;
+// Client-allocated dmabufs for the direct capture path.
+mod gbm_pool;
+// Direct `ext-image-copy-capture-v1` capture, with no portal and no PipeWire.
+mod wl_capture;
 // Negotiation POD builders and cursor-meta parser + CPU blits. Pure enough
 // to unit-test without a compositor.
 mod pw_cursor;

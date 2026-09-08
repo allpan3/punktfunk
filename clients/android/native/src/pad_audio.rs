@@ -377,7 +377,7 @@ pub(crate) unsafe fn self_test(fd: i32, seconds: i32, hz: i32) -> i32 {
     let mut playback = match sink::open(&dev) {
         Ok(p) => p,
         Err(e) => {
-            log::warn!("pad audio self-test: could not open the stream: {e}");
+            log::warn!("pad audio self-test: open failed: {e}");
             return SelfTest::OPEN_FAILED;
         }
     };
@@ -522,7 +522,7 @@ pub(crate) fn spawn(
     std::thread::Builder::new()
         .name("pf-pad-audio".into())
         .spawn(move || run(&client, &stop, pad, fd, haptics, speaker))
-        .map_err(|e| log::warn!("pad-audio thread failed to start: {e}"))
+        .map_err(|e| log::warn!("pad-audio thread not started: {e}"))
         .ok()
 }
 

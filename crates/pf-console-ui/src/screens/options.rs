@@ -39,6 +39,9 @@ enum Action {
     /// Same gate as the carousel's Y (saved and paired). Here because a TV
     /// remote has no Y.
     Library,
+    /// Measure this host's link. Same gate as [`Action::SendLogs`]: the probe is a
+    /// second connect, so an unpaired or unreachable host has nothing to measure.
+    SpeedTest,
     CopyLink,
     Edit,
     /// [`Screen::BindProfile`] for the primary tile, or for a library title. Not on
@@ -176,6 +179,12 @@ impl OptionsScreen {
         if host.paired && host.saved {
             a.push(Action::Library);
         }
+        // A TV box on a powerline adapter is exactly the machine whose link is worth
+        // measuring, so the couch surface gets this row too — the touch home and both
+        // desktop shells have carried it for far longer.
+        if host.paired && host.online {
+            a.push(Action::SpeedTest);
+        }
         a.extend([
             Action::CopyLink,
             Action::Edit,
@@ -214,6 +223,7 @@ impl OptionsScreen {
                 title => format!("Resume {title}"),
             },
             Action::Library => "Library".into(),
+            Action::SpeedTest => "Test network speed\u{2026}".into(),
             Action::CopyLink => "Copy link".into(),
             Action::Edit => "Edit\u{2026}".into(),
             Action::BindProfile => match self.subject {
@@ -350,6 +360,19 @@ impl OptionsScreen {
                     host_name: host.name.clone(),
                 });
                 fx.toast = Some(format!("Sending logs to {}\u{2026}", host.name));
+                fx.pop();
+            }
+            Action::SpeedTest => {
+                let host = self.host();
+                fx.cmds.push(ConsoleCmd::SpeedTest {
+                    key,
+                    addr: host.addr.clone(),
+                    port: host.port,
+                    fp_hex: host.fp_hex.clone(),
+                    host_name: host.name.clone(),
+                });
+                // No toast: the takeover the service thread raises IS the feedback, and a
+                // notice under it would narrate the same thing twice.
                 fx.pop();
             }
             Action::CopyLink => {
@@ -642,6 +665,7 @@ mod tests {
                 id: "prof-1".into(),
                 name: "4K".into(),
                 accent: None,
+                bitrate_kbps: None,
             }),
             ..host()
         }
@@ -689,6 +713,54 @@ mod tests {
         assert!(asleep
             .actions(crate::platform::Platform::Desktop)
             .contains(&Action::Wake));
+    }
+
+    #[test]
+    fn speed_test_needs_a_paired_host_that_answers() {
+        let live = OptionsScreen::for_host(&HostRow {
+            paired: true,
+            online: true,
+            ..host()
+        });
+        assert!(live
+            .actions(crate::platform::Platform::Desktop)
+            .contains(&Action::SpeedTest));
+        // The probe is a second connect: an offline or unpaired host has nothing to measure.
+        for h in [
+            HostRow {
+                paired: true,
+                online: false,
+                ..host()
+            },
+            HostRow {
+                paired: false,
+                online: true,
+                ..host()
+            },
+        ] {
+            assert!(!OptionsScreen::for_host(&h)
+                .actions(crate::platform::Platform::Desktop)
+                .contains(&Action::SpeedTest));
+        }
+    }
+
+    #[test]
+    fn a_pinned_card_offers_no_speed_test() {
+        // A pin is a shortcut to one profile, not a second host — same rule as Send logs.
+        let pinned = OptionsScreen::for_host(&HostRow {
+            paired: true,
+            online: true,
+            pin: Some(ProfileChip {
+                id: "prof-1".into(),
+                name: "4K".into(),
+                accent: None,
+                bitrate_kbps: None,
+            }),
+            ..host()
+        });
+        assert!(!pinned
+            .actions(crate::platform::Platform::Desktop)
+            .contains(&Action::SpeedTest));
     }
 
     #[test]
@@ -1079,6 +1151,7 @@ mod tests {
                     id: "prof-1".into(),
                     name: "4K".into(),
                     accent: None,
+                    bitrate_kbps: None,
                 }),
                 ..saved.clone()
             },

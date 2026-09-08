@@ -260,7 +260,7 @@ fun LibraryScreen(
             if (id != null && loader != null) id to loader else null
         }
         if (prepared == null) {
-            state = LibState.Message("Identity unavailable — re-pair may be required.")
+            state = LibState.Message("Identity unavailable — re-pair may be required")
             return@LaunchedEffect
         }
         val (identity, loader) = prepared
@@ -331,11 +331,13 @@ fun LibraryScreen(
             else -> state = if (cached != null) {
                 LibState.Ready(cached, loader, identity, stale = Stale.Offline)
             } else {
+                // The fetch reports a phrase, not a sentence — this screen has no separate
+                // title to carry the frame, so it supplies one (SkiaConsole passes its own).
                 LibState.Message(
                     when (res) {
-                        is LibraryResult.Unauthorized -> res.message
-                        is LibraryResult.Error -> res.message
-                        else -> "Couldn't load the library."
+                        is LibraryResult.Unauthorized -> "Couldn't load the library — ${res.message}"
+                        is LibraryResult.Error -> "Couldn't load the library — ${res.message}"
+                        else -> "Couldn't load the library"
                     },
                 )
             }

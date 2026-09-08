@@ -904,9 +904,9 @@ fn pw_thread(
                         tracing::warn!(
                             res,
                             message,
-                            "the punktfunk stream sink could not be created — this host cannot \
-                             capture desktop audio until it can. Set PUNKTFUNK_STREAM_SINK=stream \
-                             for the 0.30 topology (no created sink) and please report it"
+                            "the punktfunk stream sink was not created — no desktop audio \
+                             capture until it is. Set PUNKTFUNK_STREAM_SINK=stream for the 0.30 \
+                             topology (no created sink)"
                         );
                     })
                     .register();

@@ -328,7 +328,7 @@ struct GamepadHostOptionsView: View {
             return "Upload this device's recent log to the host, for its web console's Logs page."
         case .remove:
             return armed
-                ? "Press again to remove — this cannot be undone."
+                ? "Press again to remove — this can't be undone."
                 : "Delete this host, its pairing and its pinned cards from this device."
         case .unpin:
             return "Remove this profile's card. The profile itself and the host are untouched."
@@ -365,7 +365,7 @@ struct GamepadHostOptionsView: View {
                 withAnimation(.smooth(duration: 0.2)) {
                     hostActionState = .done(
                         ok: false,
-                        message: a.unavailableReason ?? "\(a.label) isn't available right now.")
+                        message: a.unavailableReason ?? "\(a.label) isn't available right now")
                 }
                 return
             }

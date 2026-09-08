@@ -218,6 +218,10 @@ struct SpeedTestSheet: View {
 
     private func run() {
         phase = .connecting
+        // A fresh token per attempt, so abandoning one attempt cannot silence the next: any
+        // disappear/appear cycle (another presentation covering this sheet) cancels the old one,
+        // and re-running on it would wedge the sheet on "Connecting…" with only Cancel left.
+        token = ProbeToken()
         let token = token
         let address = host.address
         let port = host.port
@@ -241,8 +245,8 @@ struct SpeedTestSheet: View {
                 await MainActor.run {
                     guard !token.cancelled else { return }
                     phase = .failed(
-                        "Could not connect to \(address):\(port) — is punktfunk-host "
-                        + "running and not mid-session?")
+                        "Couldn't reach \(address) — it may be asleep, or already "
+                        + "streaming to something else")
                 }
                 return
             }

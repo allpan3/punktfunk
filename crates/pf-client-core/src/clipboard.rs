@@ -162,7 +162,7 @@ fn handle_event(client: &NativeClient, state: &mut State, ev: ClipEventCore) {
             }
             match client.clip_fetch(seq, kind.mime.clone(), CLIP_FILE_INDEX_NONE) {
                 Ok(xfer) => state.pending_fetch = Some((xfer, kind.mime.clone())),
-                Err(e) => tracing::warn!(error = %e, "clipboard: fetch failed to start"),
+                Err(e) => tracing::warn!(error = %e, "clipboard: fetch failed"),
             }
         }
         ClipEventCore::Data {

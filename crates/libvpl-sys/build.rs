@@ -82,5 +82,5 @@ fn main() {
         .expect("bindgen failed for vpl/mfx.h");
     bindings
         .write_to_file(&bindings_path)
-        .expect("failed to write libvpl bindings");
+        .expect("write the libvpl bindings");
 }

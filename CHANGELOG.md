@@ -62,6 +62,24 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Added
 
+- **`Console::focus_announcement` names the focused row for a screen reader.** The Skia console
+  has no accessibility node tree, so the driver hands the host a string for home, the library and
+  settings (`None` elsewhere) and Android speaks it through the new `{"announce": …}` event on
+  `nativeConsoleNextEvent`. An embedder should poll it and speak only when the string changes.
+- **`ConsoleCmd::SpeedTest` is the console shell's network speed test.** The gamepad host menu
+  grew a "Test network speed…" row on every surface `pf-console-ui` fronts — Android TV, the
+  Steam Deck and Linux console, webOS — reported back through the new
+  `ConsoleShared::advance_speed` and, on Android, `NativeBridge.nativeConsoleAdvanceSpeed`. An
+  embedder that drains the bus must handle the new variant, or the takeover the shell raises
+  never leaves "Connecting".
+- **`pf_client_core::speed` holds the one probe.** `run_speed_probe` and `recommended_kbps` are
+  now shared by the Windows shell and the session binary, so burst length and the 70 % headroom
+  cannot drift between two clients. `clients/windows`'s `probe::run_speed_probe` re-exports it;
+  nothing to change at a call site.
+- **`ProfileChip` carries `bitrate_kbps`.** The console reads it to tell a profile that *pins*
+  bitrate from one that inherits, because it writes the global default and applying there would
+  leave the tested host alone while retuning every other one. Producers that leave the field out
+  read as "inherits", so fill it in wherever a chip is built from a real profile.
 - **`virtual stream complete` carries the driver's source counters.** `source_seq`, `published`
   and `dropped` sit next to `sent`, so a Windows host log says whether a stream under its refresh
   rate was starved by the desktop or lost frames in the encode pool. Nothing to configure.
@@ -297,6 +315,14 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Changed
 
+- **Error messages follow one register rule across the stack (`docs/writing.md` §4).** Operator
+  lines name the operation, screen text is a plain sentence with the next move, and the
+  management API's `error` field is now screen text because the console shows it verbatim —
+  re-read any string your code matches on, since none of them are a stable API.
+- **`LibraryError`'s text is a phrase, not a sentence, in all three clients.** Callers already
+  supply the frame (a "Couldn't load the library" title, a "Shut down failed — " lead), so the
+  sentence read as a second headline; a 4xx from a host action also reported itself as
+  unreachable and now uses `Http`. Compose it under your own title rather than showing it alone.
 - **Adaptive FEC on the native plane floors at 5 % and two parity shards per block.** The
   old 1 % floor left one shard per frame, so a clean link lost a frame to a two-packet burst;
   nothing to do, `PUNKTFUNK_FEC_PCT` still pins a percent.
@@ -377,6 +403,45 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
 
 ### Fixed
 
+- **Trackpad scrolling on a KDE host moves the page as far as the fingers went.** KWin's
+  `fake_input` carries a bare axis with no source, which every toolkit reads as ten units per
+  wheel click, so injecting a measured distance there spent one click per 10 px and scrolled
+  roughly ten times too far; a precise delta now converts to clicks and a real detent sends one
+  instead of one and a half. Nothing to do — wlroots, libei and Windows hosts are unchanged.
+- **Headless gamescope spawn enables the punktfunk WSI layer.** Nested games
+  get HDR10 swapchains from that layer. Nothing to configure.
+- **`THIRD-PARTY-NOTICES.txt` states every crate the host links.** The committed file recorded 564
+  crates against the generator's 600, and the .deb, three RPM subpackages and the signed Windows
+  host installer ship it verbatim as their licence file, so each under-attributed 36 permissively
+  licensed crates. Packagers need do nothing; a CI gate now regenerates and diffs it, the way the
+  OpenAPI spec and the generated C header are already gated.
+- **The console's refresh row keeps 144, 165 and 240 Hz.** Its table offered five rates where both
+  desktop shells offer eight, and a rate outside it has no index, so the first nudge of the row
+  snapped a 144 Hz setting back to Automatic with no message. Nothing to do; the console, Linux and
+  Windows tables now agree, and Apple's virtual-pad picker gains the Steam Deck type it was missing.
+- **Intel Arc, Linux iGPU, and older Windows GPUs check a recovery anchor before lifting the
+  freeze.** Only the Vulkan decode rung corroborated the host's anchor against its own reference
+  chain; the VAAPI and D3D11 rungs stayed silent, which the re-anchor gate reads as no objection,
+  so those clients could lift onto a grey picture and show 0.5 to 2 seconds of moving artifacts.
+  Nothing to do; all three native rungs now answer.
+- **A host-side setup failure reads as one on iOS and Android.** Both clients had no arm for the
+  `setup-failed` rejection, so "no encoder for this codec", "pf-vdisplay not installed" and
+  "capture open failed" all arrived as a generic network error — and on iOS the app answered a host
+  that had just explained itself by sending it Wake-on-LAN. Nothing to do; both now print the
+  desktop sentence and point at the host's log.
+- **A GameStream capture-loss rebuild no longer takes the SteamOS seat back.** The native plane
+  already held an attach-only probe for four seconds after a loss, because session detection can
+  still be stale and a rebuild acting on a stale answer restarts `gamescope-session.target`; the
+  GameStream plane never got it, nor the longer budget a gamescope relaunch needs. Nothing to do;
+  a Moonlight client switching Desktop to Game on SteamOS keeps its seat.
+- **Windows NVENC sub-frame split arbitration reaches a verdict.** The chunked poll path is how a
+  sub-frame session finishes and it never fed the arbiter, so on Windows the experiment the arbiter
+  exists to run never concluded and the HEVC sub-frame incumbent was invisible to it. Nothing to do.
+- **The Nix packages carry every dlopen'd library in their RUNPATH.** A `buildInputs` entry only
+  reaches RUNPATH when something links it, and nothing links `libvulkan.so.1` or `libva.so.2`, so
+  on NixOS all Vulkan died at `Entry::load()` and native VAAPI was about to follow it the moment
+  the host stopped linking FFmpeg, which had been pulling libva in by accident. Rebuild the
+  packages; `/run/opengl-driver` carries the vendor ICD and the NVIDIA libraries, neither of these.
 - **A failed save says so.** Pairing wrote the host store and reported success whatever
   happened, so a read-only config dir or a sandbox denial announced "Paired" for a pairing that
   was gone at the next launch; the console and the hosts page swallowed the same failure on
@@ -428,6 +493,12 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   repaired the picture with a `USER_FLAG_RECOVERY_ANCHOR` P-frame was forced into a full IDR
   230 ms later, and its burst on Wi-Fi cost the next frame — a ~250 ms hitch per loss. Update
   the client; loss now goes through the shared re-anchor gate like the desktop client.
+- **A Hyprland session captures the compositor directly.** The screen-share portal
+  re-requested every frame on a millisecond timer with a 6 ms floor, which halved the rate
+  above about 140 Hz and left each frame ~3 ms older than the copy needed; the host now
+  drives `ext-image-copy-capture-v1` itself, measuring 165 fps at 165 Hz where the portal
+  gave 82. Nothing to do; `PUNKTFUNK_DIRECT_CAPTURE=0` restores the portal, and any
+  compositor without the protocol keeps using it.
 - **A GNOME 49+ virtual monitor paints when the host asks.** The capture stream now drives the
   PipeWire graph as a lazy driver, so Mutter composites a frame on a client's commit instead of
   on its own vblank timer, one paint per wire interval at most: no beat against the host's
@@ -647,6 +718,27 @@ The guided Linux installer is now a binary. Wire and C ABI unchanged.
   client asked for now warns with the rates the OS listed, where it used to be an info line.
   Nothing to do; grep `host.log` for `not advertised` when a client streams below the rate it
   asked for.
+- **The Windows driver's encode loop waits on the encoder, not on a sampler.** It sampled every
+  200 µs and took its access units inside a blocking lock with the frame pool unwatched; it now
+  parks on NVENC's own completion events, and on an RTX 4090 at 4K120 HEVC no published AU was
+  older than 6.2 ms, where the sampling path reached 48 ms. Install the new driver;
+  `PFVD_NVENC_EVENTS=0` restores the sampling path, and a backend with no completion signal keeps
+  the timing it had until it grows one.
+- **The Windows driver's frame pool keeps the newest composed frame under back-pressure.** A full
+  pool with a live encoder dropped the arriving surface and kept the queued one, and a contended
+  state lock counted a drop of its own; the pass now waits for the lock and recycles the oldest
+  queued slot instead. Install the new driver; `dropped_total` then counts only frames a consumer
+  really lost.
+- **The Windows driver copies 256 square per blended pointer, not the whole frame.** Keeping a
+  pointer-free plate cost one full-frame `CopyResource` on every composed frame in both cursor
+  modes, and it was read only when a blended pointer moved over a still desktop. Install the new
+  driver; a client that draws its own pointer is back to one GPU pass per composed frame.
+- **AMF, QSV and Media Foundation retrieve their output off the encode thread.** All three
+  sampled for finished access units in a 250 µs loop that blocked the thread feeding them for up
+  to three quarters of a frame period; AMF and QSV now have a retrieve thread and Media
+  Foundation an `IMFAsyncCallback`, and each hands its completion event to callers that park on
+  handles. Nothing to do — `poll` keeps the bound it always had, spent on a handle instead of a
+  sampler.
 
 ### Fixed
 

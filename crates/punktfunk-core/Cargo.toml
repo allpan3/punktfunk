@@ -20,7 +20,7 @@ default = []
 # Cert-fingerprint pinning shared across the clients (the one `PinVerify` in `tls.rs`). Light:
 # rustls + sha2 only, no QUIC runtime — so a lean consumer (the tray's loopback status poll) can
 # pin the host cert without pulling tokio/quinn. The heavier `quic` feature builds on top of it.
-tls = ["dep:rustls", "dep:sha2", "dep:rustls-pki-types"]
+tls = ["dep:rustls", "dep:sha2"]
 # Control-plane QUIC (pairing, config, reverse audio). tokio is permitted ONLY here,
 # never on the per-frame hot path. Off by default so the core stays runtime-free.
 # The SPAKE2 pairing ceremony on its own, so a client that pairs over a transport quinn does
@@ -87,7 +87,6 @@ quinn = { version = "0.11", optional = true, default-features = false, features 
 rustls = { version = "0.23", optional = true, default-features = false, features = ["aws_lc_rs", "prefer-post-quantum", "std"] }
 # `generate_simple_self_signed` is backend-agnostic, so the swap is transparent here.
 rcgen = { version = "0.14", optional = true, default-features = false, features = ["aws_lc_rs", "pem"] }
-rustls-pki-types = { version = "1", optional = true }
 # `rustls-no-provider`, NOT the default `rustls` feature — ureq's `rustls` feature body pulls
 # `_ring`, which would drag the whole ring backend back into a tree that has deliberately moved to
 # aws-lc-rs. `rustls-webpki-roots` supplies the CA set for the non-pinned origins (cover-art CDNs).

@@ -246,36 +246,40 @@ struct GamepadHomeView: View {
         // shell's layers above ARE the presentation.
         #if os(macOS)
         .sheet(isPresented: $showSettings) {
-            GamepadSettingsView(store: store, micAvailable: model.micAvailable)
+            GamepadSettingsView(
+                store: store, controllerActive: !promptActive,
+                micAvailable: model.micAvailable)
                 .frame(width: 720, height: 640)
         }
         .sheet(isPresented: $showAddHost) {
-            GamepadAddHostView { store.add($0) }
+            GamepadAddHostView(onAdd: { store.add($0) }, controllerActive: !promptActive)
                 .frame(width: 660, height: 620)
         }
         // Shorter than the forms above: a menu is five rows, and a sheet sized for a settings
         // screen would be mostly empty field under them.
         .sheet(item: $hostOptionsTarget) { target in
-            hostOptionsView(target, active: true)
+            hostOptionsView(target, active: !promptActive)
                 .frame(width: 620, height: 460)
         }
         .sheet(item: $editTarget) { host in
-            editHostView(host, active: true)
+            editHostView(host, active: !promptActive)
                 .frame(width: 660, height: 620)
         }
         .frame(minWidth: 640, minHeight: 420)
         #elseif os(tvOS)
         .fullScreenCover(isPresented: $showSettings) {
-            GamepadSettingsView(store: store, micAvailable: model.micAvailable)
+            GamepadSettingsView(
+                store: store, controllerActive: !promptActive,
+                micAvailable: model.micAvailable)
         }
         .fullScreenCover(isPresented: $showAddHost) {
-            GamepadAddHostView { store.add($0) }
+            GamepadAddHostView(onAdd: { store.add($0) }, controllerActive: !promptActive)
         }
         .fullScreenCover(item: $hostOptionsTarget) { target in
-            hostOptionsView(target, active: true)
+            hostOptionsView(target, active: !promptActive)
         }
         .fullScreenCover(item: $editTarget) { host in
-            editHostView(host, active: true)
+            editHostView(host, active: !promptActive)
         }
         #endif
     }
@@ -336,8 +340,11 @@ struct GamepadHomeView: View {
 
     @ViewBuilder private func screenLayer(_ screen: GamepadScreen) -> some View {
         // The layer owns the controller only once the push settles and nothing rides over the
-        // shell (the connect/wake takeover is an overlay in ContentView, above these layers).
-        let active = !transitioning && waker.waking == nil && model.phase != .connecting
+        // shell: the connect/wake takeover and the console prompt are both overlays in
+        // ContentView, ABOVE these layers, and a prompt runs its own poll on the same pad — so
+        // without `promptActive` one press both works the focused row and answers the prompt.
+        let active = !transitioning && !promptActive
+            && waker.waking == nil && model.phase != .connecting
         Group {
             switch screen {
             case .settings:
@@ -429,10 +436,12 @@ struct GamepadHomeView: View {
         topScreen == nil && !transitioning && !promptActive
             && waker.waking == nil && model.phase != .connecting
         #else
-        // `pairingTarget` too: macOS presents the pair screen as a sheet and tvOS as a cover, and
-        // either way the launcher underneath must stop consuming the pad — the pair screen's own
-        // list is polling the same controller.
+        // Every presentation that mounts its own poll, not just the ones with their own screen
+        // enum: macOS presents these as sheets and tvOS as covers, and either way the launcher
+        // underneath must stop consuming the pad, or an A press works the presented menu's row
+        // AND the tile behind it — starting a connect under an open menu.
         libraryTarget == nil && pairingTarget == nil && !showSettings && !showAddHost
+            && hostOptionsTarget == nil && editTarget == nil
             && !promptActive && waker.waking == nil && model.phase != .connecting
         #endif
     }

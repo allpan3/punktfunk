@@ -292,10 +292,4 @@ final class PencilStream: NSObject, UIPencilInteractionDelegate {
             _reserved: (0, 0, 0))
     }
 }
-
-extension Comparable {
-    fileprivate func clamped(to range: ClosedRange<Self>) -> Self {
-        min(max(self, range.lowerBound), range.upperBound)
-    }
-}
 #endif

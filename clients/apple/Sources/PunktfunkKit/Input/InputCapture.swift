@@ -76,6 +76,8 @@ public final class InputCapture {
     /// One-shot: the left click that engaged capture belongs to the local UI — GC sees
     /// it at the HID layer regardless, so its press AND release are dropped here.
     private var suppressedButton: UInt32?
+    /// Whether the suppressed button's press has already been eaten — see `sendButton`.
+    private var suppressedDownSeen = false
 
     /// Throttle for the PUNKTFUNK_INPUT_DEBUG motion counter (motion is high-rate — we log
     /// a rolling count + the last delta once per second, never per event). Main-queue only.
@@ -199,6 +201,7 @@ public final class InputCapture {
         if on {
             forwarding = true
             suppressedButton = suppressClick ? 1 : nil
+            suppressedDownSeen = false
             #if os(macOS)
             installSystemKeyTap()
             #endif
@@ -209,6 +212,7 @@ public final class InputCapture {
             releaseAll()
             forwarding = false
             suppressedButton = nil
+            suppressedDownSeen = false
         }
     }
 
@@ -217,6 +221,7 @@ public final class InputCapture {
     /// before mouseDown armed the latch, which would otherwise eat the next real click.
     public func endClickSuppression() {
         suppressedButton = nil
+        suppressedDownSeen = false
     }
 
     /// Begin forwarding the current (and future) mouse/keyboard to the host. Steals the
@@ -418,7 +423,11 @@ public final class InputCapture {
         stopAutoRepeat() // before the releases below, so the ticker can't outlive the key-up
         #endif
         cmdKeysDown.removeAll()
-        chordModifiersDown.removeAll()
+        // Rebuilt from what is still PHYSICALLY down rather than cleared. On iOS these sets are
+        // the only source for the release chord, and the chord itself calls this — so clearing
+        // them left the user holding three modifiers the client no longer knew about, with no way
+        // back out until every one of them was lifted and pressed again.
+        chordModifiersDown = chordModifiersDown.intersection(pressedVKs)
         suppressedVK = nil
         #if os(macOS)
         commandChordVKs.removeAll() // their releases are in `pressedVKs`, flushed just below
@@ -512,7 +521,21 @@ public final class InputCapture {
     private func sendButton(_ button: UInt32, pressed: Bool) {
         guard forwarding else { return }
         if button == suppressedButton {
-            if !pressed { suppressedButton = nil } // capture click over — stop suppressing
+            // The latch is worth exactly ONE press and its release. A second press means the
+            // release never reached us — the pointer lock can be granted between the engaging
+            // click's down and its up, gating off the handler that would have carried the up —
+            // and staying armed would swallow this genuine click too.
+            if pressed, suppressedDownSeen {
+                suppressedButton = nil
+                suppressedDownSeen = false
+            }
+        }
+        if button == suppressedButton {
+            if pressed { suppressedDownSeen = true }
+            if !pressed { // capture click over — stop suppressing
+                suppressedButton = nil
+                suppressedDownSeen = false
+            }
             if inputDebug {
                 inputLog.debug(
                     "button \(button, privacy: .public) \(pressed ? "down" : "up", privacy: .public) SUPPRESSED (engage click)")

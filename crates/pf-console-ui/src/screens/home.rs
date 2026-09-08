@@ -264,6 +264,20 @@ impl HomeScreen {
         }
     }
 
+    /// The focused tile as a screen reader speaks it: the name, then the line under it.
+    pub(crate) fn announcement(&self, hosts: &[HostRow]) -> Option<String> {
+        let say = |(title, sub): (&str, &str)| format!("{title}, {sub}");
+        Some(match self.slot(hosts) {
+            Slot::Host(h) => match (&h.pin, &h.bound_profile) {
+                (Some(p), _) => format!("{}, {}", h.name, p.name),
+                (None, Some(b)) => format!("{}, {}:{} · {}", h.name, h.addr, h.port, b.name),
+                (None, None) => format!("{}, {}:{}", h.name, h.addr, h.port),
+            },
+            Slot::AddHost => say(action_text(ActionTile::AddHost)),
+            Slot::Rescan => say(action_text(ActionTile::Rescan)),
+        })
+    }
+
     pub(crate) fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
         let mut hints = Vec::new();
         match self.slot(ctx.hosts) {
@@ -591,6 +605,14 @@ enum ActionTile {
     Rescan,
 }
 
+/// The tile's title and the line under it. Drawn and spoken from the same pair.
+fn action_text(kind: ActionTile) -> (&'static str, &'static str) {
+    match kind {
+        ActionTile::AddHost => ("Add Host", "Register a host by address"),
+        ActionTile::Rescan => ("Rescan", "Look for hosts on this network again"),
+    }
+}
+
 fn draw_action_tile(canvas: &Canvas, fonts: &Fonts, rect: Rect, k: f64, kind: ActionTile) {
     crate::theme::panel(
         canvas,
@@ -654,10 +676,7 @@ fn draw_action_tile(canvas: &Canvas, fonts: &Fonts, rect: Rect, k: f64, kind: Ac
         }
     }
 
-    let (title, sub) = match kind {
-        ActionTile::AddHost => ("Add Host", "Register a host by address"),
-        ActionTile::Rescan => ("Rescan", "Look for hosts on this network again"),
-    };
+    let (title, sub) = action_text(kind);
     let max_w = f64::from(rect.width()) - 2.0 * pad;
     let sub_base = f64::from(rect.bottom) - pad;
     fonts.draw_clipped(
@@ -943,6 +962,7 @@ mod tests {
             id: "p1".into(),
             name: "Work".into(),
             accent: None,
+            bitrate_kbps: None,
         });
         let hosts = [pinned];
         let pads: Vec<pf_client_core::menu_nav::PadInfo> = Vec::new();

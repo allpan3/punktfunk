@@ -144,7 +144,7 @@ impl Drop for ClockGuard {
                 Err(e) => tracing::warn!(
                     card = %pin.path.display(),
                     error = %e,
-                    "could not restore amdgpu performance level"
+                    "amdgpu performance level not restored"
                 ),
             }
         }
@@ -386,6 +386,6 @@ fn ensure_cuda_perf_profile() {
              for NVENC/CUDA; read when the driver next initializes — PUNKTFUNK_NV_PROFILE=0 opts \
              out)"
         ),
-        Err(e) => tracing::debug!(error = %e, "could not install the NVIDIA application profile"),
+        Err(e) => tracing::debug!(error = %e, "NVIDIA application profile not installed"),
     }
 }

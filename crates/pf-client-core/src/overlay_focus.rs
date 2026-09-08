@@ -52,7 +52,7 @@ impl OverlayFocus {
         std::thread::Builder::new()
             .name("punktfunk-overlay-focus".into())
             .spawn(move || watch(&flag))
-            .map_err(|e| tracing::warn!(error = %e, "overlay focus watcher failed to start"))
+            .map_err(|e| tracing::warn!(error = %e, "overlay focus watcher start failed"))
             .ok()?;
         Some(OverlayFocus { open })
     }

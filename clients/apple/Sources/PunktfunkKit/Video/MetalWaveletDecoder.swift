@@ -378,6 +378,8 @@ public final class MetalWaveletDecoder {
 
     private var slots: [Slot] = []
     private var nextSlot = 0
+    /// One permit per ring slot — see the wait in `decode`.
+    private let ringSlots = DispatchSemaphore(value: MetalWaveletDecoder.ringDepth)
     /// The ring's plane format facts (from the last SOF): PQ ⇒ 16-bit UNORM planes.
     private var hdr16 = false
 
@@ -443,6 +445,15 @@ public final class MetalWaveletDecoder {
             guard rebuild(layout: frame.layout, hdr16: frame.pq) else { return false }
         }
         guard let layout, !slots.isEmpty else { return false }
+
+        // Bound in-flight decodes to the ring's depth. The slot buffers are `.storageModeShared`
+        // and re-filled by the CPU below, and Metal's hazard tracking orders GPU work against GPU
+        // work only — it does not stop this memcpy landing while an earlier dispatch is still
+        // reading the same slot. Upstream's Vulkan twin is fence-synchronous for this reason.
+        // Timed, so a wedged GPU drops a frame instead of parking the pump thread forever.
+        guard ringSlots.wait(timeout: .now() + .milliseconds(250)) == .success else { return false }
+        var committed = false
+        defer { if !committed { ringSlots.signal() } }
 
         var slot = slots[nextSlot]
         // Grow the payload buffer to the frame (+16-byte zeroed guard: the kernel's 64-bit
@@ -551,10 +562,13 @@ public final class MetalWaveletDecoder {
             csc: CscRows.rows(
                 frame.cscSignal, depth: frame.pq ? 10 : 8, msbPacked: frame.pq),
             pq: frame.pq)
+        let slotReleased = ringSlots // captured directly: the handler must not retain the decoder
         cmd.addCompletedHandler { buffer in
+            slotReleased.signal()
             completion(buffer.error == nil ? planes : nil)
         }
         cmd.commit()
+        committed = true
         nextSlot = (nextSlot + 1) % Self.ringDepth
         return true
     }

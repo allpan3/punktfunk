@@ -331,10 +331,9 @@ pub fn note_raw_dmabuf_import_failure(reason: &str) {
         tracing::error!(
             streak,
             reason,
-            "zero-copy raw-dmabuf passthrough disabled: the encoder failed to import the \
+            "zero-copy raw-dmabuf passthrough disabled: the encoder did not import the \
              compositor's dmabuf {streak} times in a row — captures fall back to the CPU path \
-             (slower, but this host could not stream at all otherwise). A new capture (different \
-             node / compositor) clears this."
+             until a new capture (different node / compositor) clears this"
         );
     }
 }

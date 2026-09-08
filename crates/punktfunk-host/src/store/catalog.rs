@@ -145,7 +145,7 @@ pub(crate) fn read_cache(dir: &Path, source: &str) -> Option<(Index, CacheMeta)>
 
 pub(crate) fn write_cache(dir: &Path, source: &str, index: &Index, meta: &CacheMeta) {
     if let Err(e) = pf_paths::create_private_dir(dir) {
-        tracing::warn!("could not create the store cache dir: {e}");
+        tracing::warn!("store cache dir not created: {e}");
         return;
     }
     let write = |path: PathBuf, bytes: Vec<u8>| {
@@ -156,7 +156,7 @@ pub(crate) fn write_cache(dir: &Path, source: &str, index: &Index, meta: &CacheM
     };
     match serde_json::to_vec_pretty(index) {
         Ok(b) => write(body_path(dir, source), b),
-        Err(e) => tracing::warn!("could not serialize the catalog cache: {e}"),
+        Err(e) => tracing::warn!("catalog cache not serialized: {e}"),
     }
     if let Ok(b) = serde_json::to_vec_pretty(meta) {
         write(meta_path(dir, source), b);

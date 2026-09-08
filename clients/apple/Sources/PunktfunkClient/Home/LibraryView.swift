@@ -314,11 +314,14 @@ struct LibraryView: View {
         case "store": groupBy = .store
         default: groupBy = nil
         }
-        return LibraryCollation.collate(ordered, sort: LibrarySortKey(stored: sortRaw), groupBy: groupBy)
+        // One `ordered` for the whole build: it is a computed property that re-sorts the catalog
+        // on every read, and the group map below reads it once per entry.
+        let items = ordered
+        return LibraryCollation.collate(items, sort: LibrarySortKey(stored: sortRaw), groupBy: groupBy)
             .map { group in
                 // The ungrouped bucket names itself "All"; on this grid it has always been "Games".
                 let label = (groupBy == nil && group.key != .launchers) ? "Games" : group.label
-                return (label, group.indices.map { ordered[$0] })
+                return (label, group.indices.map { items[$0] })
             }
     }
 
@@ -495,7 +498,7 @@ struct LibraryView: View {
             Image(systemName: "square.grid.2x2")
                 .font(.largeTitle)
                 .foregroundStyle(.secondary)
-            Text("No games found on this host.")
+            Text("No games found on this host")
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -628,8 +631,11 @@ struct LibraryView: View {
                     // is asleep is precisely what this cache exists to prevent. The staleness note
                     // carries the situation instead.
                     if games.isEmpty {
-                        errorText = (error as? LibraryError)?.errorDescription
+                        // `LibraryError` reports a phrase; this state has no title of its
+                        // own, so it supplies the frame the console shells get for free.
+                        let why = (error as? LibraryError)?.errorDescription
                             ?? error.localizedDescription
+                        errorText = "Couldn't load the library — \(why)"
                     }
                     break
                 }

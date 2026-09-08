@@ -437,7 +437,7 @@ fn restart_runner(id: &str) {
             id,
             "the plugin runner is not enabled — enable it to start this plugin".into(),
         ),
-        Err(e) => log_line(id, format!("could not restart the plugin runner: {e:#}")),
+        Err(e) => log_line(id, format!("restart the plugin runner: {e:#}")),
     }
 }
 

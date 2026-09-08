@@ -44,13 +44,6 @@ public struct HostEntityQuery: EntityQuery {
         Self.loadHosts().map(HostEntity.init)
     }
 
-    static func loadHosts() -> [StoredHost] {
-        guard let data = AppGroup.defaults.data(forKey: DefaultsKey.hosts),
-              let hosts = try? JSONDecoder().decode([StoredHost].self, from: data)
-        else { return [] }
-        return hosts.sorted {
-            ($0.lastConnected ?? .distantPast) > ($1.lastConnected ?? .distantPast)
-        }
-    }
+    static func loadHosts() -> [StoredHost] { StoredHost.loadAll(recentFirst: true) }
 }
 #endif

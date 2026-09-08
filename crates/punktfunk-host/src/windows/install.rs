@@ -536,7 +536,7 @@ fn delete_store_drivers(needles: &[&str]) {
     let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into());
     let inf_dir = Path::new(&windir).join("INF");
     let Ok(entries) = std::fs::read_dir(&inf_dir) else {
-        eprintln!("warning: cannot read {}", inf_dir.display());
+        eprintln!("warning: {} is unreadable", inf_dir.display());
         return;
     };
     for path in entries.flatten().map(|e| e.path()) {
@@ -691,7 +691,7 @@ fn web_setup(args: &[String]) -> Result<()> {
             program,
             fw_profile,
         )) {
-            eprintln!("warning: could not add the firewall rule for TCP {port}");
+            eprintln!("warning: firewall rule for TCP {port} not added");
         }
     }
     println!(
@@ -733,7 +733,7 @@ fn set_web_password(pw_path: &Path, pw_file: Option<&str>) {
         // Empty file, lock DACL, then write: the secret must not sit on the inherited
         // `%ProgramData%` (Users-readable) ACL even for the window before icacls.
         if std::fs::write(pw_path, b"").is_err() {
-            eprintln!("warning: could not create {}", pw_path.display());
+            eprintln!("warning: {} not created", pw_path.display());
             return;
         }
         // Drop inheritance; Administrators (S-1-5-32-544) + SYSTEM (S-1-5-18) only.
@@ -750,7 +750,7 @@ fn set_web_password(pw_path: &Path, pw_file: Option<&str>) {
         );
         // Truncate keeps the explicit DACL; write the secret into the already-locked file.
         if std::fs::write(pw_path, format!("PUNKTFUNK_UI_PASSWORD={pw}\n")).is_err() {
-            eprintln!("warning: could not write {}", pw_path.display());
+            eprintln!("warning: {} not written", pw_path.display());
         }
     }
 }

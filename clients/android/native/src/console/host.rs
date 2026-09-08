@@ -71,6 +71,9 @@ pub(super) enum HostEvent {
     Action(OverlayAction),
     Pulse(MenuPulse),
     Editing(bool),
+    /// What the console's focus now reads as. Raised only when it changes; Kotlin speaks it
+    /// through `announceForAccessibility`, which is a no-op with no screen reader running.
+    Announce(String),
     /// The shell saved settings: here is the whole snapshot to persist.
     Settings(Box<pf_client_core::trust::Settings>),
     /// The GLES generation the context came up with — Kotlin logs it, nothing more.
@@ -97,6 +100,10 @@ impl HostEvent {
                 }
             ),
             HostEvent::Editing(e) => format!("{{\"editing\":{e}}}"),
+            HostEvent::Announce(text) => format!(
+                "{{\"announce\":{}}}",
+                serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into())
+            ),
             HostEvent::Settings(s) => format!(
                 "{{\"settings\":{}}}",
                 serde_json::to_string(s).unwrap_or_else(|_| "null".into())
@@ -307,6 +314,8 @@ fn render_loop(mut console: Console, shared: Arc<Shared>, store: Arc<SnapshotSto
     let mut pad_pref: Option<GamepadPref> = None;
     let mut pads: Vec<PadInfo> = Vec::new();
     let mut was_editing = console.editing();
+    // Last string handed to the screen reader. Repeating one is worse than silence.
+    let mut spoken: Option<String> = None;
     let mut saved_gen = store.saved_gen();
     let mut menu_out: Vec<MenuEvent> = Vec::new();
     // When the last input arrived — the idle throttle's clock (see the draw site below).
@@ -569,6 +578,13 @@ fn render_loop(mut console: Console, shared: Arc<Shared>, store: Arc<SnapshotSto
         if editing != was_editing {
             was_editing = editing;
             shared.emit(HostEvent::Editing(editing));
+        }
+        let announce = console.focus_announcement();
+        if announce != spoken {
+            spoken = announce;
+            if let Some(text) = &spoken {
+                shared.emit(HostEvent::Announce(text.clone()));
+            }
         }
         if store.saved_gen() != saved_gen {
             let (settings, current_gen) = store.snapshot();

@@ -141,6 +141,11 @@ pub mod pad_audio;
 pub mod profiles;
 #[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub mod session;
+// One decode-less connect and one host burst — the shared half of every "Test network
+// speed…" row. Desktop-gated with `video`, whose codec advertisement the probe connect
+// sends; Android measures through its own JNI session instead.
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
+pub mod speed;
 #[cfg(any(
     target_os = "linux",
     windows,

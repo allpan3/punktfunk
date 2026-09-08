@@ -60,7 +60,7 @@ pub(crate) fn run_browse() -> ! {
     match run {
         Ok(st) => std::process::exit(st.code().unwrap_or(0)),
         Err(e) => {
-            eprintln!("could not start the console UI: {e}");
+            eprintln!("starting the console UI: {e}");
             std::process::exit(1);
         }
     }

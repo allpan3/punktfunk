@@ -1429,8 +1429,9 @@ pub(crate) async fn run_admitted(
     // Rebuild gap (ms) → `PipelineGap` so the client discards that ABR window as congestion.
     let (gap_tx, gap_rx) = tokio::sync::mpsc::unbounded_channel::<u32>();
     // Encode loop diffs cursor serial; control task is the sole writer. Wired even if unused.
+    // Depth-1 latest-wins: a shape a stalled peer never drained is stale, not a backlog.
     let (cursor_shape_tx, cursor_shape_rx) =
-        tokio::sync::mpsc::unbounded_channel::<punktfunk_core::quic::CursorShape>();
+        tokio::sync::watch::channel::<Option<punktfunk_core::quic::CursorShape>>(None);
     // Channels always wired. Driver only if `Hello::max_shard_payload` and not PyroWave
     // (PyroWave pins the Welcome value for the session; mid-stream re-key would desync).
     let (shard_change_tx, shard_change_rx) = tokio::sync::mpsc::unbounded_channel::<u16>();

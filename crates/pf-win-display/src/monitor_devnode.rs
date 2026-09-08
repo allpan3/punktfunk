@@ -142,7 +142,7 @@ fn write_journal(leases: &[Lease]) {
         let _ = pf_paths::create_private_dir(dir);
     }
     if let Err(e) = std::fs::write(&path, encode_journal(leases)) {
-        tracing::warn!(error = %e, "PnP-disable: could not write the crash-recovery journal");
+        tracing::warn!(error = %e, "PnP-disable: crash-recovery journal not written");
     }
 }
 

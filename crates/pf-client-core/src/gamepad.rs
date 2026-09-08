@@ -190,7 +190,7 @@ impl GamepadService {
                 }
             })
         {
-            tracing::warn!(error = %e, "gamepad service failed to start");
+            tracing::warn!(error = %e, "gamepad service start failed");
         }
         GamepadService {
             pads,

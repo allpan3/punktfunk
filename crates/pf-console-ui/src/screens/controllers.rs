@@ -268,7 +268,7 @@ fn detail(row: Row, ctx: &Ctx) -> String {
         Row::Pad(i) => pad_detail(&ctx.pads[i]),
         Row::Passthrough(i) => match PASSTHROUGH[i].0 {
             PadAction::Sc2Bluetooth => {
-                "A Steam Controller 2 paired over Bluetooth cannot be detected at all without \
+                "A Steam Controller 2 paired over Bluetooth can't be detected at all without \
                  Bluetooth access. Wired and Puck-dongle controllers need no permission."
                     .into()
             }
@@ -284,7 +284,7 @@ fn detail(row: Row, ctx: &Ctx) -> String {
             }
             PadAction::DsHaptics => {
                 "Play a short tone through a wired DualSense's audio endpoint, to tell a pad \
-                 that cannot do haptics from a stream that is not sending them."
+                 that can't do haptics from a stream that is not sending them."
                     .into()
             }
             // Not a passthrough row; pads carry rumble.

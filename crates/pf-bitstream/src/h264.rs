@@ -615,7 +615,7 @@ impl H264Planner {
     /// Map a missing-PPS parse string to [`PlanError::NoActiveParamSet`].
     /// Prefix match is best-effort: a reworded upstream message becomes `Parse`.
     fn slice_parse_error(err: String) -> PlanError {
-        match err.strip_prefix("Could not get PPS for pic_parameter_set_id ") {
+        match err.strip_prefix("no PPS for pic_parameter_set_id ") {
             Some(id) => PlanError::NoActiveParamSet {
                 pps_id: id.trim().parse().unwrap_or(0),
             },

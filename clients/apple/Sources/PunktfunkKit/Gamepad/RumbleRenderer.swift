@@ -213,6 +213,10 @@ final class RumbleRenderer: @unchecked Sendable {
         queue.async {
             self.teardown()
             self.closeHID()
+            // A RELEASE clears the level; a swap keeps it (see `render` below). `updateTicker`
+            // keys off `target`, so a non-zero one left behind here spins a 50 ms timer against
+            // no controller for the rest of the process, and deallocates an active source.
+            if c == nil { self.target = (0, 0, 0, 0) }
             self.controller = c
             self.broken = false
             self.preferCombined = false
@@ -223,9 +227,8 @@ final class RumbleRenderer: @unchecked Sendable {
             self.healthSink?(nil)
             _ = self.openHIDIfDualSense(c)
             onBackend?(self.backendNote(for: c))
-            // The target survives the swap: render replays the current level onto the new pad
-            // right away (a mid-rumble controller change keeps rumbling, like moving a real pad
-            // between hands mid-effect).
+            // The target survives a SWAP: render replays the current level onto the new pad right
+            // away, so a mid-rumble controller change keeps rumbling.
             self.render()
         }
     }

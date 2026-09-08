@@ -18,7 +18,7 @@ UPDATE=""
 [[ "${3:-}" == "--update" || "${2:-}" == "--update" ]] && UPDATE=1
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
-BASELINE="scripts/bench/gpu-baseline.json"
+BASELINE="scripts/bench/gpu-baseline.json" # not in the repo — mint it on the GPU runner with --update
 
 # Compositor session: reuse one if present, else bring up a headless KWin (dev-box KDE pattern).
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
@@ -74,7 +74,20 @@ vals = {k: v for k, (v, _) in cur.items()}
 if update:
     json.dump(vals, open(baseline_path, "w"), indent=2); open(baseline_path,"a").write("\n")
     print("wrote GPU baseline ->", baseline_path); sys.exit(0)
-base = json.load(open(baseline_path)) if os.path.exists(baseline_path) else {}
+if not os.path.exists(baseline_path):
+    # The baseline is not in the repo, so this is the normal state: report the run and say the
+    # comparison is missing, instead of a table whose every row reads _new_.
+    rows = ["## Tier-3 GPU stream benchmark ($MODE) — measured, no baseline", "",
+            "| metric | current |", "|---|---:|"]
+    rows += [f"| {k} | {v} |" for k, v in vals.items()]
+    rows += ["", "To compare future runs, write a baseline on this runner:",
+             "scripts/bench/gpu-stream.sh $MODE $SECS --update"]
+    out = "\n".join(rows)
+    print(out)
+    s = os.environ.get("GITHUB_STEP_SUMMARY")
+    if s: open(s, "a").write(out + "\n")
+    sys.exit(0)
+base = json.load(open(baseline_path))
 THRESH = 0.20  # 20% on a dedicated runner
 rows = ["## Tier-3 GPU stream benchmark ($MODE)", "", "| metric | baseline | current | Δ |", "|---|---:|---:|---:|"]
 regr = []

@@ -64,7 +64,7 @@ impl DescriptorPoller {
             })
             .map_err(|e| {
                 // Not fatal: `seq` stays 0, so the capture loop never follows a mid-session flip.
-                tracing::warn!(error = %e, "IDD push: descriptor-poller thread failed to spawn — mid-session HDR/mode changes won't be followed");
+                tracing::warn!(error = %e, "IDD push: descriptor-poller thread did not spawn — mid-session HDR/mode changes won't be followed");
             })
             .ok();
         Self { snap, stop, thread }

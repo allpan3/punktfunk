@@ -273,6 +273,17 @@ impl Screen {
         }
     }
 
+    /// What a screen reader should speak for whatever this screen has focused.
+    /// `None` where a screen does not answer: silence beats naming the wrong row.
+    pub(crate) fn announcement(&self, ctx: &Ctx) -> Option<String> {
+        match self {
+            Screen::Home(s) => s.announcement(ctx.hosts),
+            Screen::Library(s) => s.announcement(),
+            Screen::Settings(s) => s.announcement(ctx),
+            _ => None,
+        }
+    }
+
     pub(crate) fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
         match self {
             Screen::Home(s) => s.hints(ctx),

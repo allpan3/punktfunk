@@ -1,8 +1,15 @@
 //! The encode thread's steady state ([`Drive`]): pool slot → `submit` → `poll` → heap + slot
 //! table → `latest` + event, with back-pressure taken on pool slots and the wedge state word
 //! kept for the host's classifier.
+//!
+//! The loop is frame-driven, not timed: submit while there is room and a frame, publish while an
+//! access unit is owed and ready, and otherwise park once on `{stop, pool, the backend's
+//! completion event, a high-resolution timer}`. So an AU leaves the encoder as soon as it is
+//! encoded rather than when the next frame is submitted, and a desktop that goes still still
+//! publishes its last picture.
 
 use std::collections::VecDeque;
+use std::ffi::c_void;
 use std::mem::offset_of;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -11,16 +18,27 @@ use pf_driver_proto::encode::FrameToken;
 use pf_driver_proto::encode::au::{self, AuHeader, AuSlot, HeapRing};
 use pf_encode_win::{AuChunk, Encoder};
 use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
-use windows::Win32::System::Threading::{WaitForMultipleObjects, WaitForSingleObject};
+use windows::Win32::System::Threading::{
+    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, INFINITE, SetWaitableTimer,
+    TIMER_ALL_ACCESS, WaitForMultipleObjects, WaitForSingleObject,
+};
+use windows::core::PCWSTR;
 
 use super::pool::{Offer, Pool};
 use super::section::{Ctl, EncodeSession};
 use super::thread::{hdr_meta, qpc_frequency, qpc_now, qpc_to_ns};
+use crate::worker::OwnedHandle;
 
-/// Submits allowed ahead of the oldest AU — the host's pipeline depth.
-const MAX_INFLIGHT: usize = 2;
+/// Submits allowed ahead of the oldest AU — the host's pipeline depth. Also what the pool
+/// guarantees a backend that encodes an input texture where it lies: a slot handed to the
+/// encoder sits in `encoding` and no drain pass can take it back until the AU is published.
+pub(crate) const MAX_INFLIGHT: usize = 2;
 /// Polls that return nothing while an AU is owed, before the state word says WEDGED.
 const WEDGE_AFTER: Duration = Duration::from_secs(2);
+/// How often the loop re-enters `poll` for a backend with no completion event
+/// ([`Encoder::ready_event`]). Their poll is bounded-blocking or complete-at-submit, so this is
+/// the cadence of a re-entry, not a spin.
+const NO_EVENT_POLL: Duration = Duration::from_micros(200);
 /// How long a produced chunk waits for heap space or a free slot before the AU is dropped and
 /// a keyframe requested; longer would stall the encoder behind a host that stopped reading.
 const SLOT_WAIT: Duration = Duration::from_millis(250);
@@ -81,9 +99,17 @@ impl<'a> Drive<'a> {
             qpc_hz: qpc_frequency(),
             frame_interval: Duration::from_micros(1_000_000 / u64::from(fps.max(1))),
             last_cursor: None,
+            owed_since: None,
+            ready_latch: false,
+            timer: None,
+            report: Report::new(qpc_frequency()),
             state: au::ENCODER_OPEN,
             stop,
             live,
+            #[cfg(feature = "encode-probe")]
+            block_after: block_after(),
+            #[cfg(feature = "encode-probe")]
+            encoded: 0,
         }
     }
 
@@ -139,9 +165,22 @@ pub struct Drive<'a> {
     frame_interval: Duration,
     /// When the last cursor-only frame went out; `None` before the first.
     last_cursor: Option<Instant>,
+    /// Since when an AU has been owed with nothing produced; cleared by every chunk. The wedge
+    /// clock, kept across parks so a stream of composed frames cannot re-arm it forever.
+    owed_since: Option<Instant>,
+    /// The backend's completion event fired while the loop was parked on it. Auto-reset, so the
+    /// park consumed it: without this latch the AU would wait out [`WEDGE_AFTER`].
+    ready_latch: bool,
+    /// The one timed wake ([`Drive::park`]); built on first use, `None` if the OS refused one.
+    timer: Option<OwnedHandle>,
+    report: Report,
     state: u32,
     stop: HANDLE,
     live: &'a AtomicBool,
+    #[cfg(feature = "encode-probe")]
+    block_after: Option<u64>,
+    #[cfg(feature = "encode-probe")]
+    encoded: u64,
 }
 
 impl Drive<'_> {
@@ -160,67 +199,26 @@ impl Drive<'_> {
 
     pub fn run(&mut self) {
         self.pool.set_live(true);
-        #[cfg(feature = "encode-probe")]
-        let (block, mut encoded) = (block_after(), 0u64);
-        while !self.stopped() {
+        loop {
             self.drain_ctl();
-            // Nothing composed and a client is waiting on a keyframe: re-encode the stash, or
-            // the request sits on a frame that never arrives (an idle desktop under a client
-            // that draws its own pointer dirties nothing at all).
-            let next = self
-                .pool
-                .take_full()
-                .or_else(|| self.want_republish.then(|| self.pool.republish()).flatten())
-                .or_else(|| self.cursor_frame());
-            self.want_republish = false;
-            let Some((slot, qpc, seq)) = next else {
-                // Nothing to submit: drain what is owed now, or the last AU of a burst waits
-                // for the next compose, which an idle desktop never makes.
-                if !self.inflight.is_empty() {
-                    self.collect(1);
-                }
-                self.wait();
-                continue;
-            };
-            // Back-pressure lands here, where dropping is free: no free AU slot, no submit.
-            if !self.section_has_free() {
-                self.pool.release(slot);
-                self.count_drop();
-                continue;
+            if self.stopped() {
+                break;
             }
-            let pts = qpc_to_ns(if qpc == 0 { qpc_now() } else { qpc }, self.qpc_hz);
-            let frame = match self.pool.frame(slot, pts) {
-                Ok(f) => f,
-                Err(_) => {
-                    self.pool.release(slot);
-                    self.count_drop();
-                    continue;
-                }
-            };
-            #[cfg(feature = "encode-probe")]
+            // Room and a frame: submit it. Publishing comes second so a burst keeps the encoder
+            // fed, and the AU of the frame before it is retrieved on the very next turn.
+            if self.inflight.len() < MAX_INFLIGHT
+                && let Some(next) = self.take_next()
             {
-                encoded += 1;
-                block_if_armed(block, encoded);
-            }
-            let index = self.wire_seq.wrapping_add(self.inflight.len() as u32);
-            if let Err(e) = self.enc.submit_indexed(&frame, index) {
-                dbglog!("[pf-vd] encode: submit failed: {e:#}");
-                self.pool.release(slot);
-                self.set_state(au::ENCODER_WEDGED);
-                // A lazy backend re-runs its whole bring-up per submit; stop retrying at the
-                // compose rate and leave the session threadless for the host's reset rung.
-                self.submit_failures += 1;
-                if self.submit_failures >= MAX_SUBMIT_FAILURES {
-                    dbglog!(
-                        "[pf-vd] encode: {MAX_SUBMIT_FAILURES} submits failed in a row — leaving"
-                    );
+                if !self.submit_one(next) {
                     break;
                 }
                 continue;
             }
-            self.submit_failures = 0;
-            self.inflight.push_back((slot, qpc, seq));
-            self.collect(MAX_INFLIGHT);
+            // An AU is owed and the encoder has it: publish and free the slot.
+            if !self.inflight.is_empty() && self.au_ready() && self.publish_one() {
+                continue;
+            }
+            self.park();
         }
         // No flush on the way out: a stopped session has nowhere to send the last AUs. A
         // detached thread owns nothing in the pool any more — its successor reclaimed it.
@@ -261,29 +259,224 @@ impl Drive<'_> {
                     if let Err(e) = self.enc.flush() {
                         dbglog!("[pf-vd] encode: flush failed: {e:#}");
                     }
-                    self.collect(1);
+                    self.drain_all();
                 }
             }
         }
     }
 
-    /// One bounded wait on `{stop, pool event}`; a signal raised while nobody waited latches.
-    /// A cursor move held off by the refresh cap gets a short bound, so the pointer's resting
-    /// spot lands within one frame period instead of after the idle 1 s.
-    fn wait(&self) {
-        let ms = if self.pool.cursor_pending() {
-            let due = self
-                .last_cursor
-                .map(|t| self.frame_interval.saturating_sub(t.elapsed()))
-                .unwrap_or_default();
-            (due.as_millis() as u32).clamp(1, 1000)
-        } else {
-            1000
+    /// The next frame to submit: a composed one, else the stash for a keyframe request nothing
+    /// composed for, else a cursor-only re-encode. The request survives a turn that found the
+    /// stash slot busy — the AU owed on it is about to free it.
+    fn take_next(&mut self) -> Option<(usize, u64, u64)> {
+        let next = self
+            .pool
+            .take_full()
+            .or_else(|| self.want_republish.then(|| self.pool.republish()).flatten())
+            .or_else(|| self.cursor_frame());
+        if next.is_some() {
+            self.want_republish = false;
+        }
+        next
+    }
+
+    /// Submit one pool slot, or drop it where dropping is free. `false` means the backend has
+    /// failed [`MAX_SUBMIT_FAILURES`] times running and the thread leaves.
+    fn submit_one(&mut self, (slot, qpc, seq): (usize, u64, u64)) -> bool {
+        // Back-pressure lands here: no free AU slot, no submit.
+        if !self.section_has_free() {
+            self.pool.release(slot);
+            self.count_drop();
+            return true;
+        }
+        let pts = qpc_to_ns(if qpc == 0 { qpc_now() } else { qpc }, self.qpc_hz);
+        let frame = match self.pool.frame(slot, pts) {
+            Ok(f) => f,
+            Err(_) => {
+                self.pool.release(slot);
+                self.count_drop();
+                return true;
+            }
         };
-        let handles = [self.stop, self.pool.event()];
+        #[cfg(feature = "encode-probe")]
+        {
+            self.encoded += 1;
+            block_if_armed(self.block_after, self.encoded);
+        }
+        let index = self.wire_seq.wrapping_add(self.inflight.len() as u32);
+        if let Err(e) = self.enc.submit_indexed(&frame, index) {
+            dbglog!("[pf-vd] encode: submit failed: {e:#}");
+            self.pool.release(slot);
+            self.set_state(au::ENCODER_WEDGED);
+            // A lazy backend re-runs its whole bring-up per submit; stop retrying at the compose
+            // rate and leave the session threadless for the host's reset rung.
+            self.submit_failures += 1;
+            if self.submit_failures >= MAX_SUBMIT_FAILURES {
+                dbglog!("[pf-vd] encode: {MAX_SUBMIT_FAILURES} submits failed in a row — leaving");
+                return false;
+            }
+            return true;
+        }
+        self.submit_failures = 0;
+        self.report.submits += 1;
+        self.inflight.push_back((slot, qpc, seq));
+        true
+    }
+
+    /// The backend's completion signal for the oldest in-flight AU, in this crate's `windows`.
+    fn ready_handle(&self) -> Option<HANDLE> {
+        self.enc.ready_event().map(|h| HANDLE(h as *mut c_void))
+    }
+
+    /// Whether the oldest in-flight AU can be retrieved without blocking. An event backend
+    /// answers from its completion event — consumed here, or latched when a park woke on it. A
+    /// backend without one has no cheap answer, so its own bounded `poll` is the answer.
+    fn au_ready(&mut self) -> bool {
+        let Some(ev) = self.ready_handle() else {
+            return true;
+        };
+        if self.ready_latch {
+            return true;
+        }
+        // SAFETY: the backend's own completion event, alive while it holds the AU.
+        self.ready_latch = unsafe { WaitForSingleObject(ev, 0) == WAIT_OBJECT_0 };
+        self.ready_latch
+    }
+
+    /// One poll of the oldest in-flight AU. `false` means the backend produced nothing, so the
+    /// caller parks; a poll failure counts as progress — the AU is gone either way.
+    fn publish_one(&mut self) -> bool {
+        let chunked = self.mid_au || self.enc.supports_chunked_poll();
+        let next = if chunked {
+            self.enc.poll_chunk()
+        } else {
+            self.enc.poll().map(|au| au.map(AuChunk::whole))
+        };
+        self.ready_latch = false;
+        match next {
+            Ok(Some(chunk)) => {
+                self.owed_since = None;
+                self.set_state(au::ENCODER_ENCODING);
+                self.on_chunk(chunk);
+                true
+            }
+            Ok(None) => false,
+            Err(e) => {
+                dbglog!("[pf-vd] encode: poll failed: {e:#}");
+                self.set_state(au::ENCODER_WEDGED);
+                if let Some((slot, ..)) = self.inflight.pop_front() {
+                    self.pool.release(slot);
+                }
+                self.mid_au = false;
+                true
+            }
+        }
+    }
+
+    /// Every owed AU out — the `Ctl::Flush` tail, bounded by [`WEDGE_AFTER`] whether or not the
+    /// backend signals completion.
+    fn drain_all(&mut self) {
+        let deadline = Instant::now() + WEDGE_AFTER;
+        while !self.inflight.is_empty() && !self.stopped() && Instant::now() < deadline {
+            if self.au_ready() && self.publish_one() {
+                continue;
+            }
+            self.park();
+        }
+    }
+
+    /// When the loop must wake without a signal: what is left of the cursor-only re-encode's
+    /// refresh cap, or the re-entry cadence of a backend that owes an AU and signals nothing.
+    /// `None` = park on the handles alone.
+    fn timer_due(&self) -> Option<Duration> {
+        let cursor = self.pool.cursor_pending().then(|| {
+            self.last_cursor
+                .map(|t| self.frame_interval.saturating_sub(t.elapsed()))
+                .unwrap_or_default()
+        });
+        let poll = (!self.inflight.is_empty() && self.enc.ready_event().is_none())
+            .then_some(NO_EVENT_POLL);
+        match (cursor, poll) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// Arm the timer for `due`. `false` if the OS refused one: the park then runs on its handles
+    /// and the wedge timeout, which costs the cursor cap its precision, never a frame.
+    fn arm_timer(&mut self, due: Duration) -> bool {
+        if self.timer.is_none() {
+            // SAFETY: plain unnamed timer creation, twice at most. The high-resolution flag needs
+            // Windows 10 1803; an older host rejects it and the ordinary timer is the fallback.
+            let made = unsafe {
+                CreateWaitableTimerExW(
+                    None,
+                    PCWSTR::null(),
+                    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                    TIMER_ALL_ACCESS.0,
+                )
+                .or_else(|_| CreateWaitableTimerExW(None, PCWSTR::null(), 0, TIMER_ALL_ACCESS.0))
+            };
+            // SAFETY: the handle was just created here and nothing else can close it.
+            self.timer = made.ok().map(|h| unsafe { OwnedHandle::from_raw(h) });
+        }
+        let Some(timer) = &self.timer else {
+            return false;
+        };
+        // Negative is relative, in 100 ns units; one unit minimum so a due-now timer still fires.
+        let due_100ns = -((due.as_nanos() / 100).max(1).min(i64::MAX as u128) as i64);
+        // SAFETY: our own timer handle; `due_100ns` is a valid local read during the call, and
+        // there is no completion routine or resume.
+        unsafe { SetWaitableTimer(timer.as_raw(), &due_100ns, 0, None, None, false).is_ok() }
+    }
+
+    /// The loop's only wait: stop, a filled pool slot, the backend's completion event, and the
+    /// high-resolution timer for the two things that need a deadline instead of a signal. A
+    /// `WaitForMultipleObjects` timeout would quantise to WUDFHost's 15.6 ms tick, which caps
+    /// pointer re-encodes near 64 Hz.
+    ///
+    /// The timeout is [`WEDGE_AFTER`] while an AU is owed — expiry there is the wedge the host's
+    /// classifier reads — and infinite otherwise: every wake source signals a handle in this set.
+    fn park(&mut self) {
+        // Seeded with the stop event: only the first `n` entries are ever waited on.
+        let mut handles = [self.stop; 4];
+        let mut ready_at = usize::MAX;
+        let mut n = 1;
+        handles[n] = self.pool.event();
+        n += 1;
+        if let Some(ev) = self.ready_handle() {
+            ready_at = n;
+            handles[n] = ev;
+            n += 1;
+        }
+        if let Some(due) = self.timer_due()
+            && self.arm_timer(due)
+            && let Some(timer) = &self.timer
+        {
+            handles[n] = timer.as_raw();
+            n += 1;
+        }
+        let ms = if self.inflight.is_empty() {
+            // Nothing owed: the next AU starts its own wedge clock, not the last one's.
+            self.owed_since = None;
+            INFINITE
+        } else {
+            let since = *self.owed_since.get_or_insert_with(Instant::now);
+            if since.elapsed() > WEDGE_AFTER {
+                self.set_state(au::ENCODER_WEDGED);
+            }
+            WEDGE_AFTER.as_millis() as u32
+        };
+        self.report.parks += 1;
         // SAFETY: `stop` is the worker's stop event, alive until the worker joins or leaks; the
-        // pool event lives as long as the pool, which the session's thread borrows.
-        let _ = unsafe { WaitForMultipleObjects(&handles, false, ms) };
+        // pool event lives as long as the pool the session's thread borrows; the completion event
+        // belongs to the backend this loop owns; the timer is ours.
+        let woke = unsafe { WaitForMultipleObjects(&handles[..n], false, ms) };
+        // An auto-reset completion event this park consumed: without the latch its AU would sit
+        // out the wedge timeout.
+        if woke.0.wrapping_sub(WAIT_OBJECT_0.0) as usize == ready_at {
+            self.ready_latch = true;
+        }
     }
 
     fn states(&self) -> [u32; au::AU_SLOTS as usize] {
@@ -302,44 +495,6 @@ impl Drive<'_> {
             self.session
                 .section
                 .store_u64(offset_of!(AuHeader, dropped_total), n);
-        }
-    }
-
-    /// Poll until fewer than `keep` frames are in flight, publishing every chunk. A backend
-    /// that owes an AU and produces none for [`WEDGE_AFTER`] is reported wedged; the host's
-    /// reset is what ends that, not this loop.
-    fn collect(&mut self, keep: usize) {
-        let mut idle_since: Option<Instant> = None;
-        while self.inflight.len() >= keep && !self.stopped() {
-            let chunked = self.mid_au || self.enc.supports_chunked_poll();
-            let next = if chunked {
-                self.enc.poll_chunk()
-            } else {
-                self.enc.poll().map(|au| au.map(AuChunk::whole))
-            };
-            match next {
-                Ok(Some(chunk)) => {
-                    idle_since = None;
-                    self.set_state(au::ENCODER_ENCODING);
-                    self.on_chunk(chunk);
-                }
-                Ok(None) => {
-                    let since = *idle_since.get_or_insert_with(Instant::now);
-                    if since.elapsed() > WEDGE_AFTER {
-                        self.set_state(au::ENCODER_WEDGED);
-                    }
-                    std::thread::sleep(Duration::from_micros(200));
-                }
-                Err(e) => {
-                    dbglog!("[pf-vd] encode: poll failed: {e:#}");
-                    self.set_state(au::ENCODER_WEDGED);
-                    if let Some((slot, ..)) = self.inflight.pop_front() {
-                        self.pool.release(slot);
-                    }
-                    self.mid_au = false;
-                    return;
-                }
-            }
         }
     }
 
@@ -427,12 +582,80 @@ impl Drive<'_> {
             },
         );
         self.publish_seq = self.publish_seq.wrapping_add(1);
-        section.store_u64(offset_of!(AuHeader, last_au_qpc), qpc_now());
+        let now = qpc_now();
+        section.store_u64(offset_of!(AuHeader, last_au_qpc), now);
+        self.report.note_publish(qpc, now);
         section.publish_latest(FrameToken {
             generation: self.session.generation,
             seq: self.publish_seq,
             slot: slot as u8,
         });
         true
+    }
+}
+
+/// The loop's own ten-second line: how many access units went out, how old each was when it did,
+/// and how many submits and parks it took. AU age is `published_at − PresentDisplayQPCTime`, so
+/// it carries the compose-to-publish span the design pays for a frame — encode time once the
+/// loop stops fetching one AU on the next frame's submit.
+///
+/// `aged` is how many of `published` that span could be taken from, and reading it is not
+/// optional: a cursor-only re-encode carries no present stamp, and a head whose stamp names the
+/// vblank the frame is *for* rather than the one it came from puts it in the future, which is not
+/// an age at all. `aged=0` means no measurement, not a zero one.
+struct Report {
+    hz: u64,
+    since: u64,
+    n: u64,
+    aged: u64,
+    sum_us: u64,
+    max_us: u64,
+    submits: u64,
+    parks: u64,
+}
+
+impl Report {
+    const EVERY_MS: u64 = 10_000;
+
+    fn new(hz: u64) -> Self {
+        Self {
+            hz,
+            since: 0,
+            n: 0,
+            aged: 0,
+            sum_us: 0,
+            max_us: 0,
+            submits: 0,
+            parks: 0,
+        }
+    }
+
+    /// One published chunk, stamped `qpc` at compose and `now` at publish.
+    fn note_publish(&mut self, qpc: u64, now: u64) {
+        if self.since == 0 {
+            self.since = now;
+        }
+        self.n += 1;
+        if qpc != 0 && now > qpc {
+            let us = (now - qpc) * 1_000_000 / self.hz;
+            self.aged += 1;
+            self.sum_us += us;
+            self.max_us = self.max_us.max(us);
+        }
+        let window_ms = (now - self.since) * 1_000 / self.hz;
+        if window_ms < Self::EVERY_MS {
+            return;
+        }
+        dbglog!(
+            "[pf-vd] drive: win_ms={window_ms} published={} submits={} parks={} aged={} au_age_us mean={} max={}",
+            self.n,
+            self.submits,
+            self.parks,
+            self.aged,
+            self.sum_us / self.aged.max(1),
+            self.max_us
+        );
+        *self = Self::new(self.hz);
+        self.since = now;
     }
 }

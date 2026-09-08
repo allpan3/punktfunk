@@ -278,11 +278,9 @@ fn unknown_pin_error(v: &str) -> anyhow::Error {
         "cinnamon" | "muffin"
     ) {
         return anyhow::anyhow!(
-            "PUNKTFUNK_COMPOSITOR='{v}' is not a backend and cannot become one: Cinnamon's \
-             compositor Muffin has no virtual-output API (no `RecordVirtual`), so it cannot make a \
-             screen for a client. Do NOT substitute 'mutter' — Muffin is a Mutter fork but serves \
-             none of that interface. Use PUNKTFUNK_COMPOSITOR=gamescope to stream games through a \
-             headless gamescope, which needs no desktop compositor. See \
+            "PUNKTFUNK_COMPOSITOR='{v}' names no backend — Muffin has no virtual-output API and \
+             'mutter' does not substitute for it (Muffin is a Mutter fork that serves none of \
+             `RecordVirtual`). Use PUNKTFUNK_COMPOSITOR=gamescope. See \
              https://docs.punktfunk.unom.io/docs/debian#cinnamon-linux-mint-and-lmde"
         );
     }
@@ -299,11 +297,9 @@ fn compositor_from_xdg(desktop: &str) -> Result<Compositor> {
     // The more specific desktop wins.
     if desktop.contains("CINNAMON") {
         anyhow::bail!(
-            "Cinnamon (XDG_CURRENT_DESKTOP='{desktop}') cannot host a virtual display: its \
-             compositor Muffin has no virtual-output API, so Punktfunk cannot create a screen \
-             for a client on it. Stream games instead by setting PUNKTFUNK_COMPOSITOR=gamescope \
-             in host.env — the host then spawns its own headless gamescope per connect and needs \
-             no desktop session. See \
+            "Cinnamon (XDG_CURRENT_DESKTOP='{desktop}') has no virtual-output API — its \
+             compositor Muffin serves no `RecordVirtual`. Set PUNKTFUNK_COMPOSITOR=gamescope in \
+             host.env for a headless gamescope per connect. See \
              https://docs.punktfunk.unom.io/docs/debian#cinnamon-linux-mint-and-lmde"
         )
     } else if desktop.contains("KDE") {
@@ -316,7 +312,7 @@ fn compositor_from_xdg(desktop: &str) -> Result<Compositor> {
         Ok(Compositor::Wlroots)
     } else {
         anyhow::bail!(
-            "could not detect compositor: no live graphical session for this uid and \
+            "compositor not detected: no live graphical session for this uid and \
              XDG_CURRENT_DESKTOP='{desktop}'; set PUNKTFUNK_COMPOSITOR"
         )
     }

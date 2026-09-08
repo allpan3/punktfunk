@@ -513,10 +513,9 @@ impl PadChannel {
                 tracing::warn!(
                     mailbox = %self.boot_name,
                     reason = why,
-                    "cannot ask this pad's driver for a channel proof — REFUSING to deliver the \
-                     DATA section (the mailbox pid is not trustworthy: any local service can write \
-                     it). Set {TRUST_MAILBOX_ENV}=1 to accept the old, unverified handshake on a \
-                     driver bring-up box."
+                    "no channel proof for this pad's driver — refusing the DATA section, since \
+                     any local service can write the mailbox pid. Set {TRUST_MAILBOX_ENV}=1 to \
+                     accept the old, unverified handshake on a driver bring-up box"
                 );
             }
             return None;
@@ -899,11 +898,11 @@ fn devnode_status_line(instance_id: &str) -> String {
 fn cm_problem_hint(problem: u32) -> &'static str {
     match problem {
         1 => "not configured — no driver bound; install the drivers",
-        10 => "device failed to start — driver bound but its start failed; check the driver log",
+        10 => "device did not start — driver bound but the start failed; check the driver log",
         18 => "reinstall required — re-run driver install",
         24 => "device not present/working — PnP could not start the virtual devnode",
         28 => "drivers not installed — the pf driver package is missing from the store or its certificate is not trusted",
-        31 => "driver failed to load — binding found the package but loading it failed",
+        31 => "driver did not load — the package was found but the load failed",
         39 => "driver corrupt or missing — reinstall the drivers",
         43 => "reported failure after start — check the driver log",
         52 => "driver signature rejected — certificate not in Root/TrustedPublisher, or blocked by Memory Integrity",

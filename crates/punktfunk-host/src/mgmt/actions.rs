@@ -233,7 +233,7 @@ pub(crate) async fn invoke_action(
         if others_native || gamestream {
             return api_error(
                 StatusCode::CONFLICT,
-                "blocked: another device is streaming from this host right now",
+                "Another device is streaming from this host right now",
             );
         }
     }
@@ -244,10 +244,7 @@ pub(crate) async fn invoke_action(
     if !avail.available {
         return api_error(
             StatusCode::CONFLICT,
-            &format!(
-                "blocked: {}",
-                avail.reason.as_deref().unwrap_or("the platform said no")
-            ),
+            avail.reason.as_deref().unwrap_or("the platform said no"),
         );
     }
     if IN_FLIGHT.swap(true, Ordering::SeqCst) {

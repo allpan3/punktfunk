@@ -321,7 +321,7 @@ impl Av1Data {
         // buffer of `au.len()` bytes into it and returns its start, or returns null.
         let buf = unsafe { dav1d_data_create(NonNull::new(&mut data as *mut Dav1dData), au.len()) };
         if buf.is_null() {
-            bail!("rav1d: could not allocate {} bytes for an AU", au.len());
+            bail!("rav1d: {}-byte AU allocation failed", au.len());
         }
         // SAFETY: `buf` is the start of the `au.len()`-byte allocation just returned, and
         // `au` is a distinct live slice of exactly that length.

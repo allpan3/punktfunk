@@ -630,7 +630,7 @@ fn run_hook_process(
     let mut child = match c.spawn() {
         Ok(ch) => ch,
         Err(e) => {
-            tracing::error!(cmd = %label, error = %e, "hook command failed to launch");
+            tracing::error!(cmd = %label, error = %e, "hook command did not launch");
             return false;
         }
     };
@@ -697,7 +697,7 @@ fn run_hook_process(
     );
     let json_path = std::env::temp_dir().join(stamp);
     if std::fs::write(&json_path, event_json).is_err() {
-        tracing::warn!(cmd = %label, "hook: could not write event JSON temp file");
+        tracing::warn!(cmd = %label, "hook: event JSON temp file not written");
     }
     let cmdline = format!("{cmd} \"{}\"", json_path.display());
     match crate::interactive::spawn_as_current_session_user(&cmdline, None) {
@@ -755,7 +755,7 @@ fn run_hook_process(
                     }
                 }
                 Err(e) => {
-                    tracing::error!(cmd = %label, error = %e, "hook command failed to launch")
+                    tracing::error!(cmd = %label, error = %e, "hook command did not launch")
                 }
             }
             let _ = std::fs::remove_file(&json_path);

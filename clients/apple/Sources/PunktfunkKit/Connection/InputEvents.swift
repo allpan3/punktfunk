@@ -67,8 +67,8 @@ public extension PunktfunkInputEvent {
     }
 
     /// Declare a pad's controller KIND (`InputKind::GamepadArrival`): `pref` is the
-    /// `GamepadType` wire byte (Auto=0, Xbox360=1, DualSense=2, XboxOne=3, DualShock4=4,
-    /// SteamController=5, SteamDeck=6), `pad` the wire index. Sent once when a controller slot
+    /// `GamepadType` wire byte — `PunktfunkConnection.GamepadType` is the list, never restated
+    /// here — and `pad` the wire index. Sent once when a controller slot
     /// opens — BEFORE that pad's first input — so the host builds a matching virtual device and a
     /// session can mix types (pad 0 a DualSense, pad 1 an Xbox pad). The core re-sends it a few
     /// times against datagram loss and folds per-pad state behind it; a host that predates the tag

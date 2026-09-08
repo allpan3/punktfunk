@@ -1,9 +1,10 @@
 // The App-Group foundation shared by the app and its extensions (Widgets / Live Activity).
 //
-// PunktfunkShared is deliberately dependency-free: it links NEITHER PunktfunkKit (which drags in
-// the Rust staticlib + presentation layer) NOR any Apple UI framework. A widget process gets ~30 MB,
-// so everything an extension needs — the stored-host model + its JSON codec, the settings-key names,
-// the deep-link grammar, and (later) the Live Activity attributes — lives here and here only.
+// PunktfunkShared is deliberately dependency-free: it never links PunktfunkKit, which would drag
+// in the Rust staticlib and the presentation layer. A widget process gets ~30 MB, so everything an
+// extension needs — the stored-host model and its JSON codec, the settings-key names, the deep-link
+// grammar, the Live Activity attributes — lives here and here only. (A few files import SwiftUI for
+// a Color or an AppIntent; none import PunktfunkKit.)
 
 import Foundation
 
@@ -20,4 +21,12 @@ public enum AppGroup {
     public static var defaults: UserDefaults {
         UserDefaults(suiteName: suiteName) ?? .standard
     }
+}
+
+/// Widget kind strings. The extension declares them and the app reloads by them, so a rename that
+/// touches only one side leaves a widget nothing ever refreshes again (both timelines are
+/// `.never`).
+public enum WidgetKind {
+    public static let hosts = "PunktfunkHosts"
+    public static let library = "PunktfunkLibrary"
 }

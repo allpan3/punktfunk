@@ -192,7 +192,7 @@ impl StatsRecorder {
     /// Create `dir` owner-private (best-effort) if missing.
     pub fn new(dir: PathBuf) -> Arc<Self> {
         if let Err(e) = pf_paths::create_private_dir(&dir) {
-            tracing::warn!(dir = %dir.display(), error = %e, "could not create stats captures dir");
+            tracing::warn!(dir = %dir.display(), error = %e, "stats captures dir not created");
         }
         Arc::new(StatsRecorder {
             dir,

@@ -386,7 +386,7 @@ fn handshake(mut link: Link, p: &Params, bitrate_bps: u64) -> Result<Handshake> 
             })
         }
         FromWorker::InitErr { message } => {
-            bail!("encode worker could not open its encoder: {message}")
+            bail!("encode worker did not open its encoder: {message}")
         }
         other => bail!("unexpected encode worker handshake: {other:?}"),
     }
@@ -1016,7 +1016,7 @@ mod tests {
         assert!(format!("{err:#}").contains("punktfunk-encode-worker"));
     }
 
-    /// Ladder rung: the worker started, spoke, and could not open its encoder. An answer, not a
+    /// Ladder rung: the worker started, spoke, and did not open its encoder. An answer, not a
     /// death, so the host encodes in-process.
     #[test]
     fn an_init_error_fails_the_handshake_without_looking_like_a_death() {
@@ -1037,7 +1037,7 @@ mod tests {
         server.join().unwrap();
         let text = format!("{err:#}");
         assert!(
-            text.contains("could not open its encoder") && text.contains("Vulkan features"),
+            text.contains("did not open its encoder") && text.contains("Vulkan features"),
             "the rung must carry the worker's own diagnosis: {text}"
         );
     }

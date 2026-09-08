@@ -157,7 +157,14 @@ public final class GamepadMenuInput {
     /// Reads the live pad fresh every tick (no persistent binding to a specific controller
     /// needed) — a disconnect/reconnect or a controller switch is just picked up on the next poll.
     private func poll() {
-        guard isActive, let pad = livePad() else { return }
+        guard isActive else { return }
+        guard let pad = livePad() else {
+            // The controller went away mid-press. Returning here would leave a held direction's
+            // repeat timer running forever, walking the list to its end and bumping there every
+            // repeat interval — visible whenever the console UI stays up without a pad.
+            updateDirection(nil)
+            return
+        }
 
         if needsSnapshot {
             // Adopt whatever is held right now without firing (see `needsSnapshot`): a button
@@ -243,7 +250,10 @@ public final class GamepadMenuInput {
         // First repeat after a longer delay (so a quick tap doesn't double-move), then steady.
         let timer = Timer(timeInterval: initialRepeatDelay, repeats: false) { [weak self] _ in
             Task { @MainActor in
-                guard let self else { return }
+                // Re-checked after the hop: a `stop()` landing in this window has already
+                // invalidated the one-shot, and without this it would install a repeat on a
+                // stopped poller — which then drives a screen that is no longer on top.
+                guard let self, self.isActive else { return }
                 self.repeatTimer?.invalidate()
                 let repeating = Timer(timeInterval: self.repeatInterval, repeats: true) { [weak self] _ in
                     Task { @MainActor in self?.onMove?(direction) }

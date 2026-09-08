@@ -205,7 +205,8 @@ winreg = { version = "0.56", optional = true }
 sdl3 = { version = "0.18", features = ["hidapi", "build-from-source"], optional = true }
 # D3D11 decode-device plumbing (video_d3d11.rs): device/adapter selection, DXVA probes, and
 # the shared NT-handle hand-off ring `video_d3d11_native` fills. Same pinned rev as
-# clients/windows so the workspace builds ONE windows-rs.
+# clients/windows so `windows-core` unifies with windows-reactor's. Not the only windows-rs
+# here — `wasapi` pulls the crates.io copy too; clients/windows/Cargo.toml says why it stays.
 windows = { git = "https://github.com/microsoft/windows-rs", rev = "acb5a1a7441033d9312b16842af02eb0c2b403dc", optional = true, features = [
     # Features are header-named since windows-rs generates from the SDK headers directly
     # (#4689) — one feature per header, replacing the old `Win32_*` namespace features.

@@ -12,7 +12,12 @@ cd "$(dirname "$0")/.."
 
 TARGETS_MAC=(aarch64-apple-darwin x86_64-apple-darwin)
 BUILD_IOS="${BUILD_IOS:-0}" # BUILD_IOS=1 adds iOS device + simulator slices (rustup targets aarch64-apple-ios{,-sim})
-BUILD_TVOS="${BUILD_TVOS:-0}" # BUILD_TVOS=1 adds tvOS slices — TIER-3 Rust targets: needs `rustup toolchain install nightly` + `rustup component add rust-src --toolchain nightly`
+BUILD_TVOS="${BUILD_TVOS:-0}" # BUILD_TVOS=1 adds tvOS slices — TIER-3 Rust targets, built with $NIGHTLY
+
+# The one place the tvOS toolchain is named — .gitea/workflows/apple.yml reads this line, so keep
+# the shape. Pinned: a floating `nightly` swaps the compiler under a TestFlight build with no
+# commit. Install with: rustup toolchain install $NIGHTLY --profile minimal --component rust-src
+NIGHTLY=nightly-2026-08-11
 
 # Toolchain resolution. Cargo's HOST artifacts (proc-macros, build scripts) are loaded by
 # the RUNNING OS, so their linker must not be newer than it: a beta Xcode's ld emits
@@ -73,12 +78,12 @@ if [[ "$BUILD_IOS" == "1" ]]; then
     IPHONEOS_DEPLOYMENT_TARGET=17.0 cargo build --release -p punktfunk-core --features quic --target x86_64-apple-ios
 fi
 if [[ "$BUILD_TVOS" == "1" ]]; then
-    # Tier-3 targets: no prebuilt std — nightly + -Zbuild-std compiles it from rust-src.
-    TVOS_DEPLOYMENT_TARGET=17.0 cargo +nightly build --release -p punktfunk-core --features quic \
+    # Tier-3 targets: no prebuilt std — $NIGHTLY + -Zbuild-std compiles it from rust-src.
+    TVOS_DEPLOYMENT_TARGET=17.0 cargo "+$NIGHTLY" build --release -p punktfunk-core --features quic \
         -Z build-std=std,panic_abort --target aarch64-apple-tvos
-    TVOS_DEPLOYMENT_TARGET=17.0 cargo +nightly build --release -p punktfunk-core --features quic \
+    TVOS_DEPLOYMENT_TARGET=17.0 cargo "+$NIGHTLY" build --release -p punktfunk-core --features quic \
         -Z build-std=std,panic_abort --target aarch64-apple-tvos-sim
-    TVOS_DEPLOYMENT_TARGET=17.0 cargo +nightly build --release -p punktfunk-core --features quic \
+    TVOS_DEPLOYMENT_TARGET=17.0 cargo "+$NIGHTLY" build --release -p punktfunk-core --features quic \
         -Z build-std=std,panic_abort --target x86_64-apple-tvos
 fi
 

@@ -64,7 +64,8 @@ export const MoonlightPairingSection: FC = () => {
 		// one) — never to whichever handshake is parked at delivery time (security-review
 		// 2026-08-31 H-4).
 		const ceremonies = pairing.data?.pending ?? [];
-		const chosen = ceremonies.find((c) => ceremonyKey(c) === target) ?? ceremonies[0];
+		const chosen =
+			ceremonies.find((c) => ceremonyKey(c) === target) ?? ceremonies[0];
 		if (!chosen) return;
 		submit.mutate(
 			{
@@ -182,7 +183,9 @@ export const MoonlightPairing: FC<{
 								<div className="space-y-2">
 									<p className="text-sm">{m.pairing_ceremony_select()}</p>
 									<Select
-										value={target || (ceremonies[0] && ceremonyKey(ceremonies[0]))}
+										value={
+											target || (ceremonies[0] && ceremonyKey(ceremonies[0]))
+										}
 										onValueChange={onTargetChange}
 									>
 										<SelectTrigger id="pair-target">

@@ -114,7 +114,7 @@ pub fn spawn_once() {
         if let Err(e) = spawned {
             tracing::warn!(
                 error = %e,
-                "display-event listener thread failed to spawn — stall logs won't carry OS event attribution"
+                "display-event listener thread not spawned — stall logs won't carry OS event attribution"
             );
         }
     });

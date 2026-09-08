@@ -330,7 +330,9 @@ async fn run_outbound_fetch(
     }
 }
 
-#[cfg(test)]
+// Every test here drives a real connection pair, so it needs `quic` like the module it
+// borrows `connect_pair` from. The crate's own code above is feature-free.
+#[cfg(all(test, feature = "quic"))]
 mod tests {
     use super::*;
     use crate::quic::test_util::connect_pair;

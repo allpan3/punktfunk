@@ -108,7 +108,7 @@ mod ctl_socket {
                     }
                 });
             if let Err(e) = spawned {
-                tracing::debug!(error = %e, "session ctl thread failed to start");
+                tracing::debug!(error = %e, "spawning the session ctl thread");
             }
         });
     }
@@ -231,7 +231,7 @@ mod session_main {
                 0
             }
             Err(e) => {
-                eprintln!("pairing failed: {} ({e:?})", trust::pair_error_message(&e));
+                eprintln!("{}", trust::pair_error_message(&e));
                 EXIT_TRUST_REJECTED
             }
         }
@@ -392,10 +392,10 @@ mod session_main {
             settings.hdr_enabled && pf_client_core::video::hdr_presentable(vulkan.as_ref());
         if settings.hdr_enabled && !hdr_enabled {
             tracing::warn!(
-                "HDR requested but this device cannot present a PQ stream (no HDR10 \
+                "HDR requested but this device can't present a PQ stream (no HDR10 \
                  swapchain, and the video processor reports no PQ→sRGB conversion) — \
                  asking for SDR instead. Advertising it would paint the stream green: \
-                 the driver accepts the tonemap it cannot do and renders garbage."
+                 the driver accepts the tonemap it can't do and renders garbage."
             );
         }
         SessionParams {
@@ -1008,7 +1008,8 @@ mod session_main {
         let identity = match trust::load_or_create_identity() {
             Ok(i) => i,
             Err(e) => {
-                json_line("error", &format!("client identity: {e:#}"), None);
+                tracing::error!(error = %format!("{e:#}"), "loading the client identity");
+                json_line("error", "this device's client key didn't load", None);
                 return EXIT_CONNECT_FAILED;
             }
         };
@@ -1025,7 +1026,8 @@ mod session_main {
                     (s.settings, s.profile, Some(s.clipboard))
                 }
                 Err(e) => {
-                    json_line("error", &format!("resolved spec: {e}"), None);
+                    tracing::error!(error = %e, path = %path.display(), "reading the resolved spec");
+                    json_line("error", "this stream's settings didn't load", None);
                     return EXIT_CONNECT_FAILED;
                 }
             },
@@ -1055,10 +1057,7 @@ mod session_main {
         let Some(pin) = pin else {
             json_line(
                 "error",
-                &format!(
-                    "no pinned fingerprint for {addr}:{port} — pair first \
-                     (punktfunk-session --pair - --connect {addr}:{port}) or pass --fp HEX"
-                ),
+                &format!("{addr}:{port} isn't paired with this device yet. Pair it to continue."),
                 Some(true),
             );
             return EXIT_TRUST_REJECTED;
@@ -1151,7 +1150,8 @@ mod session_main {
                 }
             }
             Err(e) => {
-                json_line("error", &format!("presenter: {e:#}"), None);
+                tracing::error!(error = %format!("{e:#}"), "running the presenter");
+                json_line("error", "the stream window didn't start", None);
                 EXIT_PRESENTER_FAILED
             }
         }

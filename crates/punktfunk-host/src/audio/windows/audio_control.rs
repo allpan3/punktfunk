@@ -355,7 +355,7 @@ pub(crate) fn wire_now_full(park_defaults: bool) -> WiredPlan {
                         "default playback was the virtual-mic target — moved it so desktop \
                          audio no longer feeds the mic"),
                     Err(e) => tracing::warn!(device = %name, error = %format!("{e:#}"),
-                        "failed to move the default playback off the virtual-mic target"),
+                        "move the default playback off the virtual-mic target"),
                 },
                 None => {
                     if changed {
@@ -380,7 +380,7 @@ pub(crate) fn wire_now_full(park_defaults: bool) -> WiredPlan {
                             "default recording was left on the virtual mic outside a stream — \
                              moved it back to a real microphone"),
                         Err(e) => tracing::warn!(device = %name, error = %format!("{e:#}"),
-                            "failed to move the default recording off the virtual mic"),
+                            "move the default recording off the virtual mic"),
                     }
                 }
             }
@@ -467,7 +467,7 @@ fn recover_orphaned_default() {
                     "restored the default {what} device a previous host run left parked"
                 ),
                 Err(e) => tracing::warn!(error = %format!("{e:#}"),
-                    "failed to restore the default {what} device left by a previous run"),
+                    "restore the default {what} device left by a previous run"),
             }
         }
     });
@@ -523,7 +523,7 @@ fn park_default_playback(name: &str, id: &str, changed: bool, mic_id: Option<&st
             }
         }
         Err(e) => tracing::warn!(device = %name, error = %format!("{e:#}"),
-            "audio wiring: failed to set the default playback device"),
+            "audio wiring: set the default playback device"),
     }
 }
 
@@ -560,7 +560,7 @@ fn park_default_recording(name: &str, id: &str, changed: bool) {
                 }
             }
             Err(e) => tracing::warn!(device = %name, error = %format!("{e:#}"),
-                "audio wiring: failed to set the default recording device"),
+                "audio wiring: set the default recording device"),
         }
     }
 }
@@ -573,7 +573,7 @@ pub(crate) fn reassert_default_playback(id: &str) -> bool {
     match set_default_endpoint(id) {
         Ok(()) => true,
         Err(e) => {
-            tracing::debug!(error = %format!("{e:#}"), "failed to re-assert the default playback device");
+            tracing::debug!(error = %format!("{e:#}"), "re-assert the default playback device");
             false
         }
     }
@@ -592,7 +592,7 @@ pub(crate) fn restore_default_playback() {
     match set_default_endpoint(&prev) {
         Ok(()) => tracing::info!("default playback device restored after streaming"),
         Err(e) => tracing::warn!(error = %format!("{e:#}"),
-            "failed to restore the default playback device after streaming"),
+            "restore the default playback device after streaming"),
     }
 }
 
@@ -608,7 +608,7 @@ pub(crate) fn restore_default_recording() {
     match set_default_endpoint(&prev) {
         Ok(()) => tracing::info!("default recording device restored after streaming"),
         Err(e) => tracing::warn!(error = %format!("{e:#}"),
-            "failed to restore the default recording device after streaming"),
+            "restore the default recording device after streaming"),
     }
 }
 

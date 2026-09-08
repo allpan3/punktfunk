@@ -36,6 +36,18 @@ pub fn unpaced_capture() -> bool {
     !pf_host_config::env_on("PUNKTFUNK_KWIN_PACED").unwrap_or(false)
 }
 
+/// Whether to capture a compositor's output directly with `ext-image-copy-capture-v1`
+/// instead of going through the xdg ScreenCast portal.
+///
+/// The portal is a second clock in the path: xdg-desktop-portal-hyprland re-requests each
+/// frame on a millisecond timer with a 6 ms floor, which halves the rate at 165 Hz and
+/// adds ~3 ms to every frame's age. Capturing the protocol ourselves removes both.
+/// `PUNKTFUNK_DIRECT_CAPTURE=0` keeps the portal.
+#[cfg(target_os = "linux")]
+pub fn direct_capture() -> bool {
+    pf_host_config::env_on("PUNKTFUNK_DIRECT_CAPTURE").unwrap_or(true)
+}
+
 /// Whether a virtual output may be driven as a PipeWire lazy driver.
 ///
 /// A producer that emits RequestProcess (Mutter ≥ 49 virtual monitors) paints only in a
@@ -706,6 +718,22 @@ pub fn open_virtual_output(
         unpaced,
     )
     .map(|c| Box::new(c) as Box<dyn Capturer>)
+}
+
+/// Direct `ext-image-copy-capture-v1` capturer for a compositor output the host has
+/// already created, named by its `wl_output.name`.
+///
+/// Returns `Err` for every reason the caller should fall back to the portal: the
+/// compositor lacks the protocol, the output is gone, or nothing it offers can be
+/// imported by this session's encoder.
+#[cfg(target_os = "linux")]
+pub fn open_direct_output(
+    output_name: String,
+    keepalive: Box<dyn Send>,
+    policy: ZeroCopyPolicy,
+) -> Result<Box<dyn Capturer>> {
+    linux::WlCapturer::open(output_name, keepalive, policy)
+        .map(|c| Box::new(c) as Box<dyn Capturer>)
 }
 
 /// Windows IDD direct-push capturer on a pf-vdisplay target. `sender` delivers

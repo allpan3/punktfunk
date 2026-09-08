@@ -286,21 +286,24 @@ impl DecodedImage {
         }
     }
 
-    /// Corroboration for `USER_FLAG_RECOVERY_ANCHOR`. Only a rung that planned
-    /// the AU knows its references. Native Vulkan answers; everyone else reports
-    /// [`punktfunk_core::reanchor::AnchorEvidence::Unavailable`] — silence is not
-    /// refutation. The CPU H.264 frame carries no [`NativeVkFrame::references_clean`].
+    /// Corroboration for `USER_FLAG_RECOVERY_ANCHOR`. Only a rung that planned the
+    /// AU knows its references: native Vulkan, native VAAPI, and native D3D11 answer.
+    /// The CPU and PyroWave rungs report
+    /// [`punktfunk_core::reanchor::AnchorEvidence::Unavailable`] — silence is not refutation.
     pub fn anchor_evidence(&self) -> punktfunk_core::reanchor::AnchorEvidence {
         use punktfunk_core::reanchor::AnchorEvidence;
-        match self {
-            DecodedImage::NativeVk(f) => {
-                if f.references_clean {
-                    AnchorEvidence::ReferencesClean
-                } else {
-                    AnchorEvidence::ReferencesDamaged
-                }
-            }
-            _ => AnchorEvidence::Unavailable,
+        let clean = match self {
+            DecodedImage::NativeVk(f) => f.references_clean,
+            #[cfg(target_os = "linux")]
+            DecodedImage::NativeDmabuf(f) => f.references_clean,
+            #[cfg(windows)]
+            DecodedImage::D3d11(f) => f.references_clean,
+            _ => return AnchorEvidence::Unavailable,
+        };
+        if clean {
+            AnchorEvidence::ReferencesClean
+        } else {
+            AnchorEvidence::ReferencesDamaged
         }
     }
 
@@ -440,6 +443,9 @@ pub struct DmabufFrame {
     pub color: ColorDesc,
     /// Intra keyframe (IDR/I) — the pump's post-loss re-anchor. See [`DecodedImage::is_keyframe`].
     pub keyframe: bool,
+    /// Whole prediction chain was fully available. Corroborates a host
+    /// `USER_FLAG_RECOVERY_ANCHOR`: see [`DecodedImage::anchor_evidence`].
+    pub references_clean: bool,
     pub guard: DrmFrameGuard,
 }
 

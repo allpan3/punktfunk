@@ -69,7 +69,7 @@ impl TrayStatus {
             TrayStatus::Stopped => "punktfunk host — stopped".into(),
             TrayStatus::Starting => "punktfunk host — starting…".into(),
             TrayStatus::Degraded => "punktfunk host — running (status unavailable)".into(),
-            TrayStatus::Error(e) => format!("punktfunk host — failed ({e})"),
+            TrayStatus::Error(_) => "punktfunk host — stopped unexpectedly".into(),
             TrayStatus::Running(s) => match (&s.session, self.is_streaming()) {
                 (Some(sess), true) => format!(
                     "punktfunk host {} — streaming {}×{}@{}",
@@ -468,7 +468,7 @@ mod tests {
         );
         assert!(TrayStatus::Error("exit code 3".into())
             .headline()
-            .contains("exit code 3"));
+            .contains("stopped unexpectedly"));
         assert!(TrayStatus::Degraded
             .headline()
             .contains("status unavailable"));

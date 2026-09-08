@@ -100,7 +100,7 @@ pub fn ask_plugin_launch(plugin: &str, key: &str) -> Option<PluginLaunch> {
                 plugin,
                 entry = key,
                 error = %e,
-                "plugin launch: could not reach the plugin's launch surface"
+                "plugin launch: the plugin's launch surface is unreachable"
             );
             return None;
         }

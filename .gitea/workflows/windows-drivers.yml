@@ -137,9 +137,9 @@ jobs:
         run: |
           # Short target dir to dodge MAX_PATH inside the deep act host workdir (see windows-client.yml).
           $env:CARGO_TARGET_DIR = "C:\t\drv"
-          cargo build -p pf-driver-proto
-          cargo test  -p pf-driver-proto
-          cargo clippy -p pf-driver-proto --all-targets -- -D warnings
+          cargo build --locked -p pf-driver-proto
+          cargo test  --locked -p pf-driver-proto
+          cargo clippy --locked -p pf-driver-proto --all-targets -- -D warnings
           cargo fmt -p pf-driver-proto -- --check
 
   # Build the UMDF driver workspace on windows-drivers-rs: proves wdk-sys bindgen/link works on the
@@ -181,13 +181,13 @@ jobs:
         # (the real IddCx driver) + pf-umdf-util (the safe UMDF primitive layer) + the two gamepad
         # drivers. pf-vdisplay linking proves the IddCx call sites resolve against IddCxStub end-to-end
         # (M1 step 2 gate); the gamepad drivers prove pf-umdf-util's WDF dispatch links.
-        run: ../drivers-cargo.ps1 'build -v'
+        run: ../drivers-cargo.ps1 'build --locked -v'
       - name: cargo clippy the shipped drivers (-D warnings — enforces the unsafe-audit gates)
         # The gamepad drivers' business logic is 100% safe (it moved onto pf-umdf-util, the audited
         # unsafe layer); pf-vdisplay + wdk-iddcx are inherently FFI-bound but every `unsafe {}` carries a
         # `// SAFETY:` proof. Both invariants are lint-gated (`unsafe_op_in_unsafe_fn` +
         # `undocumented_unsafe_blocks`); this step keeps them from regressing.
-        run: ../drivers-cargo.ps1 'clippy -p pf-umdf-util -p pf-xusb -p pf-gamepad -p pf-mouse -p wdk-iddcx -p pf-vdisplay --all-targets -- -D warnings'
+        run: ../drivers-cargo.ps1 'clippy --locked -p pf-umdf-util -p pf-xusb -p pf-gamepad -p pf-mouse -p wdk-iddcx -p pf-vdisplay --all-targets -- -D warnings'
       - name: cargo fmt --check the driver workspace
         run: cargo fmt -p pf-umdf-util -p pf-xusb -p pf-gamepad -p pf-mouse -p wdk-iddcx -p pf-vdisplay --check
       - name: Inspect /INTEGRITYCHECK (before) — expect FORCE_INTEGRITY set by wdk-build
@@ -209,14 +209,14 @@ jobs:
         # of them still compiles under the WDK toolchain and the static CRT.
         # LAST on purpose: same profile and target dir, so it overwrites pf_vdisplay.dll and would
         # otherwise hand the PE-inspection steps above the probe DLL instead of the shipped one.
-        run: ../drivers-cargo.ps1 'build -p pf-vdisplay --features encode-probe -v'
+        run: ../drivers-cargo.ps1 'build --locked -p pf-vdisplay --features encode-probe -v'
       - name: cargo build + clippy the driver workspace for aarch64-pc-windows-msvc
         # The ARM64 host leg (#298). Same x64 runner: the MSVC ARM64 cross compiler and the WDK's
         # um\arm64 libs are provisioned above. Build + lint only, the DLLs cannot run here. Debug
         # profile like the x64 steps; the encoder features drop out via the driver's target table.
         run: |
-          ../drivers-cargo.ps1 'build --target aarch64-pc-windows-msvc -p pf-vdisplay -p pf-gamepad -p pf-mouse -p pf-xusb -v'
-          ../drivers-cargo.ps1 'clippy --target aarch64-pc-windows-msvc -p pf-umdf-util -p pf-xusb -p pf-gamepad -p pf-mouse -p wdk-iddcx -p pf-vdisplay --all-targets -- -D warnings'
+          ../drivers-cargo.ps1 'build --locked --target aarch64-pc-windows-msvc -p pf-vdisplay -p pf-gamepad -p pf-mouse -p pf-xusb -v'
+          ../drivers-cargo.ps1 'clippy --locked --target aarch64-pc-windows-msvc -p pf-umdf-util -p pf-xusb -p pf-gamepad -p pf-mouse -p wdk-iddcx -p pf-vdisplay --all-targets -- -D warnings'
           $dll = "target\aarch64-pc-windows-msvc\debug\pf_vdisplay.dll"
           if (-not (Test-Path $dll)) { throw "ARM64 pf_vdisplay.dll not produced at $dll" }
           $b = [IO.File]::ReadAllBytes($dll)

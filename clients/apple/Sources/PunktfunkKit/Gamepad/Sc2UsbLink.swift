@@ -231,6 +231,11 @@ final class Sc2UsbLink {
             if let mgr = manager {
                 // Dispatch-queue mode: Cancel, never Close/UnscheduleFromRunLoop — mixing the
                 // run-loop teardown API with a queue-scheduled manager is undefined and crashes.
+                // The matching/removal callbacks carry an UNRETAINED self, and the cancel is
+                // asynchronous, so both are held until IOKit says it is done with them: a device
+                // arriving inside that window would otherwise reach a freed link.
+                let held = Unmanaged.passRetained(self)
+                IOHIDManagerSetCancelHandler(mgr) { held.release() }
                 IOHIDManagerCancel(mgr)
             }
             manager = nil
@@ -303,7 +308,7 @@ final class Sc2UsbLink {
     private func adopt(_ matched: IOHIDDevice) {
         guard started else { return }
         guard let id = Self.registryID(matched) else {
-            log.error("SC2 USB: matched collection has no registry id — cannot key it")
+            log.error("SC2 USB: matched collection has no registry id — dropping it")
             return
         }
         guard open[id] == nil else { return }
@@ -311,7 +316,7 @@ final class Sc2UsbLink {
         guard service != MACH_PORT_NULL,
               let device = IOHIDDeviceCreate(kCFAllocatorDefault, service)
         else {
-            log.error("SC2 USB: could not mint a device from the matched service")
+            log.error("SC2 USB: no device from the matched service")
             return
         }
         let rc = IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone))
@@ -381,7 +386,10 @@ final class Sc2UsbLink {
     private func handle(
         device: IOHIDDevice, reportID: UInt32, report: UnsafeMutablePointer<UInt8>, len: CFIndex
     ) {
-        guard len > 0, let source = Self.registryID(device) else { return }
+        // `drop` removes the entry before IOKit stops delivering (the device cancel is
+        // asynchronous), so a report can still arrive for a collection we have retired. Acting on
+        // it resurrects the source downstream and claims a wire slot nothing will ever release.
+        guard len > 0, let source = Self.registryID(device), open[source] != nil else { return }
         let id = UInt8(truncatingIfNeeded: reportID)
         // The payload byte position follows the same id-in-band rule the framing below applies.
         let wirelessPayload: UInt8? = (id == Sc2Device.idWireless || id == Sc2Device.idWirelessX)

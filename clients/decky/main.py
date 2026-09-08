@@ -911,7 +911,7 @@ class Plugin:
         rc, _out, err = await _run_cli(args, timeout=20.0)
         if rc == 0:
             return {"ok": True}
-        detail = (err.strip().splitlines() or ["could not save the host"])[-1]
+        detail = (err.strip().splitlines() or ["saving the host failed"])[-1]
         decky.logger.warning("trust_host failed (rc=%s): %s", rc, detail)
         return {"ok": False, "error": _cli_error(rc, err), "detail": detail}
 

@@ -76,33 +76,14 @@ Two things make the one package serve both Debian 13 and Ubuntu 26.04:
 
 **Ubuntu 24.04 gets no gamescope package** and cannot: the wayland floor is a runtime one too.
 
-## Install on a host
+## Install, firewall, updates
 
-The user-facing walkthrough — repo key, sources line, `apt install`, first-run setup — lives on
-the docs pages ([Debian](https://docs.punktfunk.unom.io/docs/debian) /
-[Ubuntu](https://docs.punktfunk.unom.io/docs/ubuntu)), stated once so it can't drift (see "Where
-facts live" in [`CONTRIBUTING.md`](../../CONTRIBUTING.md)). Packager-relevant: the registry is
-public (no apt auth — only the repo's signing key), and `stable` / `canary` are separate apt
-distributions, so a stable box never jumps to a canary build.
-
-## Firewall
-
-Debian ships no firewall and Ubuntu's `ufw` is installed-but-inactive by default, so out of the
-box there is nothing to open. The package ships openers for both — ufw profiles at
-`/etc/ufw/applications.d/punktfunk` and firewalld service definitions at
-`/usr/lib/firewalld/services/` (neither auto-enabled). The commands, per-port breakdown and the
-data-plane hole-punch behavior are documented once:
-[Debian](https://docs.punktfunk.unom.io/docs/debian) for the openers, port facts in
-[`data/platforms.json`](../../data/platforms.json) and on
-[Moonlight](https://docs.punktfunk.unom.io/docs/moonlight), hole-punch mechanics in
-[Troubleshooting](https://docs.punktfunk.unom.io/docs/troubleshooting).
-
-## Updates
-
-```sh
-sudo apt update && sudo apt upgrade        # picks up the newest published build
-systemctl --user restart punktfunk-host    # if the unit was already running
-```
+All three live on the docs pages ([Debian](https://docs.punktfunk.unom.io/docs/debian) /
+[Ubuntu](https://docs.punktfunk.unom.io/docs/ubuntu)), stated once so they cannot drift. Packager
+notes: the registry is public, so there is no apt auth beyond the signing key, and `stable` and
+`canary` are separate apt distributions, so a stable box never jumps to a canary build. The package
+ships ufw profiles and firewalld service definitions, neither auto-enabled — Debian ships no
+firewall and Ubuntu's `ufw` is installed-but-inactive, so out of the box there is nothing to open.
 
 ## Build a `.deb` locally
 

@@ -230,8 +230,11 @@ struct LibraryGridView: View {
         let start = g.shape.rowStart(r)
         let n = g.shape.rowLen(r)
         return HStack(alignment: .top, spacing: g.gap) {
-            ForEach(start..<(start + n), id: \.self) { index in
-                let game = games[index]
+            // Keyed on the GAME, not the slot: a re-sort leaves each cell in place otherwise, so
+            // the titles change under posters that keep the art they already loaded (PosterImage
+            // reloads on its candidate index, which a positional key never moves).
+            ForEach(Array(games[start..<(start + n)].enumerated()), id: \.element.id) { offset, game in
+                let index = start + offset
                 #if os(tvOS)
                 // A focusable Button per cell: the focus engine does the navigating (remote
                 // swipes and pad dpad alike — a Siri Remote is no extended gamepad, so the poll

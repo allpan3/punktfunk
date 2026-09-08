@@ -28,7 +28,7 @@ enum ClientTLS {
         var errorDescription: String? {
             switch self {
             case .badKey(let why): return "Couldn't load the client key: \(why)"
-            case .badCert: return "Couldn't load the client certificate."
+            case .badCert: return "Couldn't load the client certificate"
             case .identity(let why): return "Couldn't build the client identity: \(why)"
             }
         }

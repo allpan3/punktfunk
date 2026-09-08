@@ -40,15 +40,7 @@ public enum StatsVerbosity: String, CaseIterable, Sendable {
     /// legacy `hudEnabled` bool the pre-tiered clients stored: absent-or-true → `.normal`
     /// (the old "on" look minus the equation lines), explicit false → `.off`.
     public static var current: StatsVerbosity {
-        let defaults = UserDefaults.standard
-        if let raw = defaults.string(forKey: DefaultsKey.statsVerbosity),
-           let tier = StatsVerbosity(rawValue: raw) {
-            return tier
-        }
-        if let legacy = defaults.object(forKey: DefaultsKey.hudEnabled) as? Bool, !legacy {
-            return .off
-        }
-        return .normal
+        StatsVerbosity(rawValue: EffectiveSettings.storedStatsVerbosity(.standard)) ?? .normal
     }
 
     /// Persist a tier (the cycle surfaces write through here; the Settings pickers write the

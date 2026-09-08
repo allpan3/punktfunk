@@ -14,6 +14,10 @@ import AppKit
 struct FullscreenController: NSViewRepresentable {
     let active: Bool
     @Binding var isFullscreen: Bool
+    /// True only while the window is in a fullscreen THIS controller drove it into. A window the
+    /// user fullscreened themselves is not ours to leave, and an alert deferred on "fullscreen"
+    /// alone would never show there, since nothing is going to flip it back.
+    @Binding var appDriven: Bool
 
     /// Holds the window's fullscreen-transition observers so they're rebound on a window change
     /// and removed on dismantle.
@@ -24,6 +28,8 @@ struct FullscreenController: NSViewRepresentable {
         /// changes (stream start/end) — never to correct a mismatch — so a deliberate mid-session
         /// toggle (⌃⌘F / the green button) isn't snapped back on the next SwiftUI update.
         var lastActive: Bool?
+        /// Did WE put this window into fullscreen? Only then may we take it out.
+        var droveEntry = false
         deinit { observers.forEach(NotificationCenter.default.removeObserver(_:)) }
     }
 
@@ -34,6 +40,7 @@ struct FullscreenController: NSViewRepresentable {
     func updateNSView(_ view: NSView, context: Context) {
         let want = active
         let isFullscreen = $isFullscreen
+        let appDriven = $appDriven
         let coordinator = context.coordinator
         DispatchQueue.main.async {
             guard let window = view.window else { return }
@@ -45,7 +52,19 @@ struct FullscreenController: NSViewRepresentable {
             // records the state without toggling, so mounting never yanks a window into fullscreen.
             if coordinator.lastActive != want {
                 coordinator.lastActive = want
-                if want != isFull { window.toggleFullScreen(nil) }
+                if want, !isFull {
+                    window.toggleFullScreen(nil)
+                    coordinator.droveEntry = true
+                } else if !want, isFull, coordinator.droveEntry {
+                    window.toggleFullScreen(nil)
+                    coordinator.droveEntry = false
+                } else if !want {
+                    // The session ended in a fullscreen the USER chose — leave the window in it.
+                    coordinator.droveEntry = false
+                }
+                if appDriven.wrappedValue != coordinator.droveEntry {
+                    appDriven.wrappedValue = coordinator.droveEntry
+                }
             }
         }
     }

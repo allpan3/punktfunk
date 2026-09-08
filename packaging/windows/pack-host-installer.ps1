@@ -259,8 +259,10 @@ Copy-Item (Join-Path $here 'branding\punktfunk.ico') $brandStage -Force
 
 # License/attribution payload bundled into {app}\licenses: the project's own MIT/Apache texts and the
 # generated third-party crate notices. The FFmpeg LGPL notice + license text are added to this same
-# dir below when the AMF/QSV FFmpeg DLLs are bundled. (THIRD-PARTY-NOTICES.txt is committed; CI may
-# regenerate it via scripts/gen-third-party-notices.sh before packaging.)
+# dir below when the AMF/QSV FFmpeg DLLs are bundled. THIRD-PARTY-NOTICES.txt is shipped verbatim
+# from the committed copy — nothing regenerates it here, and this installer is one of the artifacts
+# that under-attributed when it went stale. ci.yml's THIRD-PARTY-NOTICES drift gate is what keeps
+# the committed copy true.
 $licStage = Join-Path $OutDir 'licenses'
 New-Item -ItemType Directory -Force -Path $licStage | Out-Null
 foreach ($n in @('LICENSE-MIT', 'LICENSE-APACHE', 'THIRD-PARTY-NOTICES.txt')) {

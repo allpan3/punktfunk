@@ -70,5 +70,8 @@ pub use pen::*;
 // names them even without `quic`) and re-export here next to QUIT/APP_EXITED.
 pub use crate::reject::*;
 
-#[cfg(test)]
+// `quic` as well as `test`: this hands out `quinn` endpoints, and `endpoint` above is
+// feature-gated. Gated on `test` alone it broke `cargo test -p punktfunk-core`, which
+// resolves default features and has no quinn.
+#[cfg(all(test, feature = "quic"))]
 pub(crate) mod test_util;

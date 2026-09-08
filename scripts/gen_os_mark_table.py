@@ -59,37 +59,28 @@ banner = "\n".join(f"//! {line}".rstrip() for line in BANNER.splitlines())
 
 body = f"""{banner}
 //!
-//! The OS mark a host tile draws, resolved from the host's advertised OS-identity chain.
+//! Host-tile OS marks, fitted into a destination rect.
 //!
-//! The RESOLUTION is not ours: [`pf_client_core::os::os_icon_tokens`] walks the chain
-//! most-specific-first and applies the brand aliases (`macos` → `apple`, `steamos` →
-//! `steam`), and every front-end — GTK, WinUI, Swift, Kotlin, the web console — walks the
-//! same list. That is the whole point of it living in the shared crate: a Bazzite host must
-//! not draw Tux here and a Fedora hat there. All this module owns is which tokens it has
-//! art for, and how the art is fitted.
+//! Tokens come from [`pf_client_core::os::os_icon_tokens`] (most-specific-first,
+//! brand aliases included). This module only maps those tokens to path art and
+//! letterboxes them. `None` means no art — the tile keeps its monogram.
 
 use skia_safe::{{Matrix, Path, Rect}};
 use std::collections::HashMap;
 use std::sync::{{Mutex, OnceLock}};
 
-/// A parsed mark and the viewport its coordinates are in.
 type Glyph = (Path, f32, f32);
 
-/// Token → parsed mark, with `None` memoizing "no such token / did not parse" so a miss is not
-/// re-attempted every frame. Named because `clippy::type_complexity` rejects it inline, and this
-/// file is generated — an inline type would fail the `-D warnings` gate on every regeneration.
+/// Token → parsed mark. `None` caches a miss so a bad token is not reparsed every frame.
+/// Named: `clippy::type_complexity` rejects the inline form, and this file is generated.
 type GlyphCache = HashMap<String, Option<Glyph>>;
 
-/// `(token, viewport width, viewport height, path data)` — the masters, verbatim.
 const GLYPHS: &[(&str, f32, f32, &str)] = &[
 {rows}
 ];
 
-/// The parsed path for a token plus the viewport it was authored in, or `None` when the token is
-/// absent, unknown, or (defensively) unparseable.
-///
-/// Parsed once per token and cached: `Path::from_svg` on a 3 kB string is not free, and the home
-/// carousel re-renders every frame while the cursor springs.
+/// Parse once per token. `Path::from_svg` on a 3 kB string is not free, and the
+/// home carousel redraws every frame.
 fn glyph(token: &str) -> Option<Glyph> {{
     static CACHE: OnceLock<Mutex<GlyphCache>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -105,13 +96,9 @@ fn glyph(token: &str) -> Option<Glyph> {{
     built
 }}
 
-/// The mark for an OS-identity `chain` (`"linux/fedora/bazzite"`), scaled to fit `dst` and
-/// centred in it — aspect ratio preserved, because the masters' viewports are not all square.
-///
-/// `None` when the chain is empty, unknown, or made of tokens we ship no art for; the tile then
-/// draws its monogram, exactly as every tile did before OS marks existed. A chain we only
-/// partly know still resolves: `linux/fedora/bazzite` on a build shipping no Bazzite mark falls
-/// to Fedora, then to Tux, because that is the order the shared resolver hands back.
+/// Fitted mark for an OS-identity `chain`, aspect preserved — masters are not all square.
+/// `None` when no token has art; the tile then draws its monogram. Partial chains still
+/// resolve because the shared resolver walks most-specific-first.
 pub fn os_mark(chain: &str, dst: Rect) -> Option<Path> {{
     let (path, vw, vh) = pf_client_core::os::os_icon_tokens(chain)
         .into_iter()
@@ -130,8 +117,7 @@ pub fn os_mark(chain: &str, dst: Rect) -> Option<Path> {{
 mod tests {{
     use super::*;
 
-    /// Every shipped master parses. A mark that silently fails to parse is a tile that silently
-    /// loses its icon, which no other test in this crate would notice.
+    /// A master that fails to parse is a tile that silently loses its icon.
     #[test]
     fn every_glyph_parses() {{
         for (token, ..) in GLYPHS {{
@@ -139,8 +125,7 @@ mod tests {{
         }}
     }}
 
-    /// The chain resolves most-specific-first, through the shared resolver. `steamos` reaching
-    /// the Steam mark is the alias doing its job, not a coincidence of table order.
+    /// Most-specific-first through the shared resolver; `steamos` → Steam is the alias, not table order.
     #[test]
     fn chains_resolve_most_specific_first() {{
         let dst = Rect::from_wh(64.0, 64.0);
@@ -153,24 +138,22 @@ mod tests {{
         ] {{
             assert!(os_mark(chain, dst).is_some(), "{{chain}} resolved nothing");
         }}
-        // A distro we ship no art for still lands on its family's mark.
         let known = os_mark("linux/debian/raspbian", dst);
-        assert!(known.is_some(), "an unknown leaf must fall back to its family");
+        assert!(
+            known.is_some(),
+            "an unknown leaf must fall back to its family"
+        );
     }}
 
-    /// An unknown or empty chain draws NOTHING, so the tile keeps its monogram — older hosts
-    /// advertise no `os` at all, and they must look exactly as they did.
     #[test]
     fn unknown_chain_draws_nothing() {{
         let dst = Rect::from_wh(64.0, 64.0);
         assert!(os_mark("", dst).is_none());
         assert!(os_mark("plan9/glenda", dst).is_none());
-        // Untrusted mDNS input that sanitizes away entirely is the same case.
         assert!(os_mark("!!!/???", dst).is_none());
     }}
 
-    /// The mark is letterboxed into the destination, never stretched past it — the guarantee the
-    /// non-square viewports (apple is 384x512, windows 24x24) depend on.
+    /// Letterboxed, never stretched. Apple's master is 384×512; Windows is 24×24.
     #[test]
     fn mark_is_contained_and_centred() {{
         let dst = Rect::from_xywh(10.0, 20.0, 80.0, 40.0);

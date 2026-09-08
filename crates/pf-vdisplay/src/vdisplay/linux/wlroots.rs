@@ -375,7 +375,7 @@ fn disable_other_heads(ours: &str) -> Vec<String> {
             Ok(()) => disabled.push(name),
             Err(e) => tracing::warn!(
                 output = %name, error = %format!("{e:#}"),
-                "wlroots: could not disable this output for `topology: exclusive` — it stays lit"
+                "wlroots: output not disabled for `topology: exclusive` — it stays lit"
             ),
         }
     }
@@ -430,7 +430,7 @@ pub(crate) fn dpms_other_heads(on: bool) -> Vec<String> {
             Ok(_) => changed.push(name),
             Err(e) => tracing::warn!(
                 output = %name, error = %format!("{e:#}"),
-                "wlroots: could not DPMS this output for `topology: exclusive`"
+                "wlroots: output not blanked for `topology: exclusive`"
             ),
         }
     }
@@ -592,7 +592,7 @@ impl Drop for ChooserFile {
     fn drop(&mut self) {
         if let Err(e) = std::fs::remove_file(&self.0) {
             if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::debug!(path = %self.0, error = %e, "could not remove the xdpw chooser file");
+                tracing::debug!(path = %self.0, error = %e, "xdpw chooser file not removed");
             }
         }
     }

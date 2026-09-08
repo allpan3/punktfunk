@@ -52,6 +52,30 @@ const AXIS_HORIZONTAL: u32 = 1;
 /// GameStream `code` for a horizontal wheel (same as `gamestream::input`).
 const SCROLL_HORIZONTAL: u32 = 1;
 
+/// Axis units one wheel click is worth. `fake_input` carries a bare `axis` — no source, no
+/// v120 — and KWin forwards it as such, so every toolkit falls back to the legacy convention
+/// of ten units per click (Qt and Chromium multiply the value by 12 to get 120-space, GTK
+/// divides by 10). The value is therefore a CLICK COUNT, never a distance.
+const UNITS_PER_DETENT: f64 = 10.0;
+
+/// Pixels a client scrolls for one of those clicks: three text lines, the price the Windows
+/// injector puts on a detent too. A precise delta is a distance and clicks are all this
+/// channel has, so it converts through here — without that a 10 px flick buys a whole click
+/// and the page runs an order of magnitude too far. Only a source-carrying backend (libei,
+/// wlroots) scrolls a gesture by its true distance.
+const PRECISE_CLICK_PX: f64 = 60.0;
+
+/// Axis units for one scroll event: `x` is the wire's WHEEL_DELTA(120) delta, `precise` its
+/// [`SCROLL_FLAG_PRECISE`] bit. Vertical is negated by the caller, not here.
+fn axis_value(x: i32, precise: bool) -> f64 {
+    let detents = f64::from(x) / 120.0;
+    if precise {
+        detents * PRECISE_PX_PER_DETENT / PRECISE_CLICK_PX * UNITS_PER_DETENT
+    } else {
+        detents * UNITS_PER_DETENT
+    }
+}
+
 /// Physical mode (match streamed WxH) plus logical rectangle (abs coords).
 /// `logical_w == 0` until xdg-output reports size.
 struct OutputTrack {
@@ -353,25 +377,19 @@ impl InputInjector for KwinFakeInjector {
                 }
             }
             InputKind::MouseScroll => {
-                // Wire is WHEEL_DELTA(120); vertical flips the Wayland axis sign. `fake_input`
-                // has only a bare `axis` — no source, no discrete — so the px scale is the sole
-                // lever: 15 px per detent for a wheel, the measured distance for a precise
-                // delta. KWin still reads it as a wheel, so a trackpad cannot go fully smooth
-                // here the way it does on wlroots.
+                // Wire is WHEEL_DELTA(120); vertical flips the Wayland axis sign. The app
+                // reads this axis in clicks ([`UNITS_PER_DETENT`]), so a precise delta must be
+                // repriced from the wire's detent to what a click scrolls; it cannot travel as
+                // a distance the way it does on wlroots.
                 let horizontal = event.code == SCROLL_HORIZONTAL;
                 let axis = if horizontal {
                     AXIS_HORIZONTAL
                 } else {
                     AXIS_VERTICAL
                 };
-                let px_per_detent = if event.flags & SCROLL_FLAG_PRECISE != 0 {
-                    PRECISE_PX_PER_DETENT
-                } else {
-                    15.0
-                };
-                let notches = event.x as f64 / 120.0;
                 let sign = if horizontal { 1.0 } else { -1.0 };
-                self.fake.axis(axis, sign * notches * px_per_detent);
+                let precise = event.flags & SCROLL_FLAG_PRECISE != 0;
+                self.fake.axis(axis, sign * axis_value(event.x, precise));
             }
             InputKind::KeyDown | InputKind::KeyUp => {
                 // Evdev code; KWin owns the keymap and modifier state — no modifiers request.
@@ -419,5 +437,36 @@ impl InputInjector for KwinFakeInjector {
             .context("wayland dispatch")?;
         self.conn.flush().context("wayland flush")?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The app multiplies this axis back by 12 to reach 120-space, so a detent has to leave
+    /// as 10 units — 15 spent one and a half clicks per notch.
+    #[test]
+    fn a_wheel_detent_is_one_click() {
+        assert_eq!(axis_value(120, false), 10.0);
+        assert_eq!(axis_value(-240, false), -20.0);
+    }
+
+    /// A 60 px flick must move 60 px of content: 60 px is one click here, and one click is
+    /// 10 units. Sending the distance itself (the old `PRECISE_PX_PER_DETENT` scale) made it
+    /// six clicks.
+    #[test]
+    fn a_precise_flick_travels_its_own_distance() {
+        let px = 60.0;
+        let wire = (px * 12.0) as i32; // clients put a measured pixel into 120-space at 12
+        assert!((axis_value(wire, true) - UNITS_PER_DETENT).abs() < 1e-9);
+        assert!((axis_value(wire, false) - 60.0).abs() < 1e-9);
+    }
+
+    /// A precise delta never flips its own sign, and zero stays zero.
+    #[test]
+    fn precise_keeps_its_sign() {
+        assert!(axis_value(-120, true) < 0.0);
+        assert_eq!(axis_value(0, true), 0.0);
     }
 }

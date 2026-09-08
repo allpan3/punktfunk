@@ -123,7 +123,10 @@ struct HostCardView: View {
     let isBusy: Bool
     let onConnect: () -> Void
     let onPair: () -> Void
-    let onSpeedTest: () -> Void
+    /// Optional for the same reason `onBrowseLibrary` is: the probe dials with the device
+    /// identity and, on an unpinned host, accepts whatever certificate answers. Offered only
+    /// where a pin already exists.
+    var onSpeedTest: (() -> Void)?
     let onForget: () -> Void
     let onRemove: () -> Void
     /// Open this host's game library — a MENU action. `nil` — no library affordance at all — when
@@ -272,7 +275,9 @@ struct HostCardView: View {
                 }
             }
             Button("Pair with PIN…", action: onPair)
-            Button("Test Network Speed…", action: onSpeedTest)
+            if let onSpeedTest {
+                Button("Test Network Speed…", action: onSpeedTest)
+            }
             if let onBrowseLibrary {
                 Button("Browse Library…", action: onBrowseLibrary)
             }

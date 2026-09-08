@@ -493,7 +493,7 @@ fn reclaim_leftovers_once() {
                 Ok(()) => tracing::info!(output = %name, owner_pid = pid, "removed a headless \
                      output left behind by a host that is no longer running"),
                 Err(e) => tracing::warn!(output = %name, owner_pid = pid, error = %format!("{e:#}"),
-                    "could not remove a leftover headless output"),
+                    "leftover headless output not removed"),
             }
         }
     });
@@ -591,7 +591,7 @@ pub(crate) fn dpms_other_heads(on: bool) -> Vec<String> {
             Ok(false) => {}
             Err(e) => tracing::warn!(
                 output = %name, error = %format!("{e:#}"),
-                "hyprland: could not DPMS this monitor for `topology: exclusive`"
+                "hyprland: monitor not blanked for `topology: exclusive`"
             ),
         }
     }
@@ -777,7 +777,7 @@ fn disable_other_heads(ours: &str) -> Vec<String> {
             Ok(()) => disabled.push(name),
             Err(e) => tracing::warn!(
                 output = %name, error = %format!("{e:#}"),
-                "hyprland: could not disable this head for `topology: exclusive` — it stays lit"
+                "hyprland: head not disabled for `topology: exclusive` — it stays lit"
             ),
         }
     }
@@ -1001,7 +1001,7 @@ impl Drop for SelectionFile {
     fn drop(&mut self) {
         if let Err(e) = std::fs::remove_file(&self.0) {
             if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::debug!(path = %self.0, error = %e, "could not remove the xdph selection file");
+                tracing::debug!(path = %self.0, error = %e, "xdph selection file not removed");
             }
         }
     }
@@ -1430,7 +1430,7 @@ fn restore_xdph_config() {
         ),
         Err(e) => {
             tracing::warn!(path = %path.display(), error = %format!("{e:#}"),
-                "could not restore the previous screen-share picker");
+                "previous screen-share picker not restored");
             return;
         }
     }

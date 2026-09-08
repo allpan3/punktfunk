@@ -5,9 +5,9 @@
 use super::lucide;
 use super::style::*;
 use super::{Screen, Svc};
-use crate::probe::run_speed_probe;
 use crate::trust::KnownHosts;
 use pf_client_core::profiles::ProfilesFile;
+use pf_client_core::speed::run_speed_probe;
 use windows_reactor::*;
 
 /// Speed-test lifecycle. Held as ROOT state (the probe worker completes it via

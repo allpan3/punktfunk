@@ -370,7 +370,7 @@ fn session_thread(
                             ),
                             Err(e) => tracing::warn!(
                                 error = %format!("{e:#}"),
-                                "mutter: could not set the virtual output primary; streaming continues — the desktop may render on the physical monitor"
+                                "mutter: virtual output not made primary — streaming continues, but the desktop may render on the physical monitor"
                             ),
                         }
                     }

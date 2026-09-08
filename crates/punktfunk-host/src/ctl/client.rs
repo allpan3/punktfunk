@@ -207,7 +207,7 @@ impl Client {
             }
         }
         Failure::unreachable(format!(
-            "cannot reach the management API at {}{path}: {e}. Is the host running \
+            "can't reach the management API at {}{path}: {e}. Is the host running \
              (`systemctl --user status punktfunk-host`)?",
             self.base
         ))

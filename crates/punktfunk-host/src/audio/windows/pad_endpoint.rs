@@ -1215,7 +1215,7 @@ pub fn remove(pe: &PadEndpoint) {
             stderr = %String::from_utf8_lossy(&o.stderr).trim(),
             "pnputil could not remove the pad-audio devnode"),
         Err(e) => tracing::warn!(devnode = %pe.device_instance, error = %e,
-            "could not run pnputil to remove the pad-audio devnode"),
+            "pnputil did not run to remove the pad-audio devnode"),
     }
 }
 
@@ -1434,7 +1434,7 @@ pub(crate) fn provision_at_startup() {
         });
     if let Err(e) = spawned {
         PROVISIONING.store(false, std::sync::atomic::Ordering::SeqCst);
-        tracing::warn!(error = %e, "could not spawn the pad-audio provisioning thread");
+        tracing::warn!(error = %e, "pad-audio provisioning thread not spawned");
     }
 }
 
@@ -1488,7 +1488,7 @@ fn hide_leftover_endpoints() {
             }
         });
     if let Err(e) = spawned {
-        tracing::warn!(error = %e, "could not spawn the pad-endpoint hide sweep");
+        tracing::warn!(error = %e, "pad-endpoint hide sweep not spawned");
     }
 }
 

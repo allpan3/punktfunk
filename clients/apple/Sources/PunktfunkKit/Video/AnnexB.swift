@@ -99,7 +99,7 @@ public enum AnnexB {
     /// Split an Annex-B stream into NAL units (start codes stripped — see `forEachNAL` for
     /// the boundary policy). Materializes a Data per NAL; the streaming paths use
     /// `forEachNAL` directly instead.
-    public static func nalUnits(in data: Data) -> [Data] {
+    static func nalUnits(in data: Data) -> [Data] {
         var nals: [Data] = []
         forEachNAL(in: data) { base, range in
             nals.append(Data(bytes: base + range.lowerBound, count: range.count))
@@ -109,13 +109,13 @@ public enum AnnexB {
     }
 
     /// HEVC NAL unit type (bits 1..6 of the first byte).
-    public static func hevcNalType(_ nal: Data) -> UInt8 {
+    static func hevcNalType(_ nal: Data) -> UInt8 {
         guard let first = nal.first else { return 0xFF }
         return (first >> 1) & 0x3F
     }
 
     /// H.264 NAL unit type (bits 0..4 of the first byte).
-    public static func h264NalType(_ nal: Data) -> UInt8 {
+    static func h264NalType(_ nal: Data) -> UInt8 {
         guard let first = nal.first else { return 0xFF }
         return first & 0x1F
     }
@@ -128,31 +128,35 @@ public enum AnnexB {
     public static func formatDescription(
         fromIDR au: Data, codec: VideoCodec
     ) -> CMVideoFormatDescription? {
-        var vps: Data?, sps: Data?, pps: Data?
+        // ACCUMULATED, not last-wins: an AU may legally carry more than one of a kind (two PPS
+        // with different ids is what some encoders emit), and keeping only the last leaves every
+        // slice that references a dropped one undecodable — a permanent decode-error loop rather
+        // than a visible failure.
+        var vps: [Data] = [], sps: [Data] = [], pps: [Data] = []
         forEachNAL(in: au) { base, range in
             let first = base[range.lowerBound]
             switch codec.nalType(first) {
             case 32 where codec == .hevc:
-                vps = Data(bytes: base + range.lowerBound, count: range.count)
+                vps.append(Data(bytes: base + range.lowerBound, count: range.count))
             case 33 where codec == .hevc, 7 where codec == .h264:
-                sps = Data(bytes: base + range.lowerBound, count: range.count)
+                sps.append(Data(bytes: base + range.lowerBound, count: range.count))
             case 34 where codec == .hevc, 8 where codec == .h264:
-                pps = Data(bytes: base + range.lowerBound, count: range.count)
+                pps.append(Data(bytes: base + range.lowerBound, count: range.count))
             default:
                 if codec.isVCL(first) { return false } // no parameter sets can follow
                 // AUD/SEI/… may precede the slices; keep scanning.
             }
             return true
         }
-        guard let sps, let pps else { return nil }
+        guard !sps.isEmpty, !pps.isEmpty else { return nil }
         // In the order VideoToolbox wants them: HEVC VPS,SPS,PPS (VPS required); H.264 SPS,PPS.
         let sets: [Data]
         switch codec {
         case .hevc:
-            guard let vps else { return nil }
-            sets = [vps, sps, pps]
+            guard !vps.isEmpty else { return nil }
+            sets = vps + sps + pps
         case .h264:
-            sets = [sps, pps]
+            sets = sps + pps
         case .av1, .pyrowave:
             return nil // no parameter-set NALs — dispatched in AV1.swift, never reaches here
         }
@@ -199,7 +203,7 @@ public enum AnnexB {
 
     /// Re-pack an Annex-B AU as AVCC (4-byte big-endian length before each NAL), dropping
     /// the parameter-set NALs (they live in the format description).
-    public static func avcc(from au: Data, codec: VideoCodec) -> Data {
+    static func avcc(from au: Data, codec: VideoCodec) -> Data {
         var out = Data(capacity: au.count + 16)
         forEachNAL(in: au) { base, range in
             if codec.isParameterSet(base[range.lowerBound]) { return true }
@@ -226,57 +230,20 @@ public enum AnnexB {
         // rather than hand the decoder an empty sample.
         guard total > 0 else { return nil }
 
-        var blockBuffer: CMBlockBuffer?
-        guard CMBlockBufferCreateWithMemoryBlock(
-            allocator: kCFAllocatorDefault, memoryBlock: nil,
-            blockLength: total, blockAllocator: kCFAllocatorDefault,
-            customBlockSource: nil, offsetToData: 0, dataLength: total,
-            flags: kCMBlockBufferAssureMemoryNowFlag, blockBufferOut: &blockBuffer) == noErr,
-            let block = blockBuffer
-        else { return nil }
-        var dstLen = 0
-        var dstPtr: UnsafeMutablePointer<CChar>?
-        guard CMBlockBufferGetDataPointer(
-            block, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &dstLen,
-            dataPointerOut: &dstPtr) == noErr,
-            dstLen == total, let dstPtr
-        else { return nil }
-        // Pass 2: the single copy — length prefix + payload per NAL, straight into the block.
-        let dst = UnsafeMutableRawPointer(dstPtr)
-        var off = 0
-        forEachNAL(in: au.data) { base, range in
-            if codec.isParameterSet(base[range.lowerBound]) { return true }
-            var len = UInt32(range.count).bigEndian
-            withUnsafeBytes(of: &len) {
-                dst.advanced(by: off).copyMemory(from: $0.baseAddress!, byteCount: 4)
+        return SamplePack.sample(total: total, ptsNs: au.ptsNs, format: format) { dst in
+            // Length prefix + payload per NAL, straight into the block.
+            var off = 0
+            forEachNAL(in: au.data) { base, range in
+                if codec.isParameterSet(base[range.lowerBound]) { return true }
+                var len = UInt32(range.count).bigEndian
+                withUnsafeBytes(of: &len) {
+                    dst.advanced(by: off).copyMemory(from: $0.baseAddress!, byteCount: 4)
+                }
+                dst.advanced(by: off + 4)
+                    .copyMemory(from: base + range.lowerBound, byteCount: range.count)
+                off += 4 + range.count
+                return true
             }
-            dst.advanced(by: off + 4)
-                .copyMemory(from: base + range.lowerBound, byteCount: range.count)
-            off += 4 + range.count
-            return true
         }
-
-        var timing = CMSampleTimingInfo(
-            duration: .invalid,
-            presentationTimeStamp: CMTime(value: Int64(au.ptsNs), timescale: 1_000_000_000),
-            decodeTimeStamp: .invalid)
-        var sampleSize = total
-        var sample: CMSampleBuffer?
-        guard CMSampleBufferCreate(
-            allocator: kCFAllocatorDefault, dataBuffer: block, dataReady: true,
-            makeDataReadyCallback: nil, refcon: nil, formatDescription: format,
-            sampleCount: 1, sampleTimingEntryCount: 1, sampleTimingArray: &timing,
-            sampleSizeEntryCount: 1, sampleSizeArray: &sampleSize,
-            sampleBufferOut: &sample) == noErr
-        else { return nil }
-        // Low-latency display: render on arrival, don't wait for a clock.
-        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sample!, createIfNecessary: true) {
-            let dict = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
-            CFDictionarySetValue(
-                dict,
-                Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
-                Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
-        }
-        return sample
     }
 }

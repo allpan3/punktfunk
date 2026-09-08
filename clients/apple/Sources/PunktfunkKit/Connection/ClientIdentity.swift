@@ -53,7 +53,13 @@ public func pair(
     }
     switch rc {
     case PUNKTFUNK_STATUS_OK.rawValue: return Data(observed)
-    case PUNKTFUNK_STATUS_CRYPTO.rawValue: throw PunktfunkClientError.wrongPIN
+    // Both mean the SPAKE2 proof did not verify. The host answers a bad PIN with the typed
+    // REJECTED_SETUP_FAILED; CRYPTO is what an older one sent. Either way the user typed the
+    // wrong number, and saying "status -29" instead of that is the whole difference between an
+    // actionable message and a dead end.
+    case PUNKTFUNK_STATUS_CRYPTO.rawValue,
+         PUNKTFUNK_STATUS_REJECTED_SETUP_FAILED.rawValue:
+        throw PunktfunkClientError.wrongPIN
     default:
         // A typed host rejection (pairing not armed / rate-limited / armed for another
         // device) carries its own reason — never report it as a bad PIN or dead network.

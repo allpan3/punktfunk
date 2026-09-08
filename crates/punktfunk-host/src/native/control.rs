@@ -60,8 +60,10 @@ pub(super) struct Task {
     /// Client `ShardPayloadAck`s return on `shard_ack_tx` and gate a grow.
     pub(super) shard_change_rx: tokio::sync::mpsc::UnboundedReceiver<u16>,
     pub(super) shard_ack_tx: tokio::sync::mpsc::UnboundedSender<u16>,
+    /// Depth-1 latest-wins slot: the encode loop overwrites a shape this task
+    /// has not drained, so a stalled peer cannot grow the host.
     pub(super) cursor_shape_rx:
-        tokio::sync::mpsc::UnboundedReceiver<punktfunk_core::quic::CursorShape>,
+        tokio::sync::watch::Receiver<Option<punktfunk_core::quic::CursorShape>>,
     pub(super) cursor_client_draws: Arc<AtomicBool>,
     pub(super) clip_enabled: Arc<AtomicBool>,
     pub(super) clip: pf_clipboard::ClipCoord,
@@ -383,9 +385,14 @@ pub(super) async fn run(task: Task) {
                     break;
                 }
             }
-            shape = cursor_shape_rx.recv() => {
+            changed = cursor_shape_rx.changed() => {
+                // Err = encode loop gone, i.e. session end.
+                if changed.is_err() {
+                    break;
+                }
                 // ≤ ~58 KiB fits the u16 frame (`cursor_fwd` downscales).
-                let Some(shape) = shape else { break };
+                let shape = cursor_shape_rx.borrow_and_update().clone();
+                let Some(shape) = shape else { continue };
                 if io::write_msg(&mut ctrl_send, &shape.encode()).await.is_err() {
                     break;
                 }

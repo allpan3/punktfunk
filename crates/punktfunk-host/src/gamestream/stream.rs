@@ -293,7 +293,7 @@ fn run(
                         spawned_now = true;
                     }
                     Err(e) => {
-                        tracing::warn!(title = %t.game.title, error = %e, "gamestream: could not launch app")
+                        tracing::warn!(title = %t.game.title, error = %e, "gamestream: app not launched")
                     }
                 }
             }
@@ -320,7 +320,7 @@ fn run(
                     Some(spawned)
                 }
                 Err(e) => {
-                    tracing::warn!(command = %cmd, error = %e, "gamestream: could not launch app");
+                    tracing::warn!(command = %cmd, error = %e, "gamestream: app not launched");
                     None
                 }
             },
@@ -1199,8 +1199,28 @@ fn stream_body(
                 }
                 tracing::warn!(error = %format!("{e:#}"), rebuild = rebuilds,
                     "gamestream: capture lost — rebuilding source in place (following a session switch)");
-                let rebuild_deadline = Instant::now() + Duration::from_secs(40);
+                // Attach-only holdoff: right after a capture loss the session detection can still
+                // be STALE, and a rebuild acting on a stale "Gaming" answer restarts
+                // gamescope-session.target — on SteamOS that steals the seat back from the session
+                // the user just switched to. Until it lapses, builds attach to live outputs only.
+                const PROBE_HOLDOFF: Duration = Duration::from_secs(4);
+                // A managed/attach gamescope (re)launch legitimately takes up to 45 s (the Steam
+                // Big Picture cold start), so a flat 40 s expires INSIDE the first attempt — a
+                // single-shot failure where a second, warm attempt would have succeeded.
+                // `detect_active_session` answers `none` off Linux, where gamescope does not exist.
+                let loss_at = Instant::now();
+                let budget = if crate::vdisplay::compositor_for_kind(
+                    crate::vdisplay::detect_active_session().kind,
+                ) == Some(crate::vdisplay::Compositor::Gamescope)
+                {
+                    Duration::from_secs(100)
+                } else {
+                    Duration::from_secs(40)
+                };
+                let rebuild_deadline = loss_at + budget;
                 let new_cap = loop {
+                    let _probe = (loss_at.elapsed() < PROBE_HOLDOFF)
+                        .then(crate::vdisplay::rebuild_probe_scope);
                     match rebuild() {
                         Ok(c) => break c,
                         Err(e2) => {

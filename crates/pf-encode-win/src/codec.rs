@@ -246,6 +246,17 @@ pub trait Encoder: Send {
         false
     }
     fn poll(&mut self) -> Result<Option<EncodedFrame>>;
+    /// Raw OS handle, signalled while [`poll`](Self::poll) / [`poll_chunk`](Self::poll_chunk)
+    /// would return without blocking, so a caller can park on it instead of sampling. Auto-reset:
+    /// a caller that observes the signal owes the matching poll, and the handle names the oldest
+    /// in-flight access unit, so it changes as they retire.
+    ///
+    /// `None` means the backend has no completion signal: `poll` is then either
+    /// complete-at-submit or bounded-blocking, and the caller calls it when it has nothing else
+    /// to do. Default: none.
+    fn ready_event(&self) -> Option<isize> {
+        None
+    }
     /// Whether [`poll_chunk`](Self::poll_chunk) currently emits sub-AU chunks.
     /// Dynamic: a pipelined-retrieve escalation or rebuild can turn it off —
     /// re-query per AU, never cache. `false` (default) means `poll_chunk`
