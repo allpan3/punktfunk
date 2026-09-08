@@ -19,15 +19,12 @@ use std::time::{Duration, Instant};
 use super::display::{
     hdr_dataspace, install_render_callback, release_render_callback, DisplayTracker,
 };
-use super::latency::{note_decoded_pts, now_realtime_ns, take_flags};
+use super::latency::{note_decoded_pts, note_received_frame, now_realtime_ns, take_flags};
 use super::setup::{
     android_hdr_static_info, boost_hot_threads, boost_thread_priority, codec_mime,
     configure_low_latency, create_codec, try_set_frame_rate,
 };
-use super::{
-    DecodeOptions, IN_FLIGHT_CAP, NO_OUTPUT_PATIENCE, NO_VIDEO_PATIENCE, NO_VIDEO_RETRY,
-    PENDING_SPLIT_CAP,
-};
+use super::{DecodeOptions, IN_FLIGHT_CAP, NO_OUTPUT_PATIENCE, NO_VIDEO_PATIENCE, NO_VIDEO_RETRY};
 
 /// The synchronous poll loop — the original decode path: the only one when low-latency mode is off,
 /// and the [`USE_ASYNC_DECODE`] A/B fallback when it's on. Feeds and drains on this one thread; the
@@ -217,6 +214,9 @@ pub(super) fn run_sync(
     // where receipts are recorded and matched by pts; `network = hostnet − host` (saturating).
     // Only fed while the HUD is visible; an old host never sends a 0xCF, so entries just age out.
     let mut pending_split: VecDeque<(u64, u64)> = VecDeque::new();
+    // Last phase-lock hold the host reported on the 0xCF tail — logged on change by
+    // [`note_received_frame`], so `adb logcat -s pf.phase` reads the same on either loop.
+    let mut last_phase_ack: Option<i32> = None;
     // The dataspace we've signalled on the Surface so far (None = default/SDR). Set reactively once
     // the decoder reports an HDR stream (see `drain`); avoids re-applying every format event.
     let mut applied_ds: Option<DataSpace> = None;
@@ -262,50 +262,17 @@ pub(super) fn run_sync(
                     // samplers (`received` point, host/network split) stay gated on the overlay so
                     // the hidden steady state adds only a wall-clock read + the receipt push.
                     if stats.enabled() || measure_decode {
-                        // Core reassembly-completion stamp (ABI v9), not the pull instant — see
-                        // async_loop: a pull stamp folds hand-off queue wait into "network".
-                        let received_ns = if frame.received_ns > 0 {
-                            frame.received_ns as i128
-                        } else {
-                            now_realtime_ns()
-                        };
+                        let received_ns = note_received_frame(
+                            &client,
+                            &stats,
+                            &frame,
+                            clock_offset.load(Ordering::Relaxed),
+                            &mut pending_split,
+                            &mut last_phase_ack,
+                        );
                         in_flight.push_back((frame.pts_ns / 1000, received_ns));
                         if in_flight.len() > IN_FLIGHT_CAP {
                             in_flight.pop_front(); // stale — codec never echoed it back
-                        }
-                        // HUD stat, `received` point: host+network = client_now + (host−client) −
-                        // capture_pts.
-                        if stats.enabled() {
-                            let clock_offset = clock_offset.load(Ordering::Relaxed);
-                            let lat_ns = received_ns + clock_offset as i128 - frame.pts_ns as i128;
-                            let lat_us = (lat_ns > 0 && lat_ns < 10_000_000_000)
-                                .then_some((lat_ns / 1000) as u64);
-                            // On a parts stream the completing delivery carries only the AU's
-                            // suffix — its offset restores the full AU byte count for bitrate.
-                            let au_len =
-                                frame.part.map_or(0, |p| p.offset as usize) + frame.data.len();
-                            stats.note_received(au_len, lat_us, clock_offset != 0);
-                            // Phase-2 split: park this AU's capture→received sample, then match any
-                            // 0xCF host timings that have arrived — host = the host's own
-                            // capture→sent, network = our capture→received minus it (per-frame
-                            // tiling; saturating in case of clock jitter).
-                            if let Some(hostnet_us) = lat_us {
-                                pending_split.push_back((frame.pts_ns, hostnet_us));
-                                if pending_split.len() > PENDING_SPLIT_CAP {
-                                    pending_split.pop_front(); // 0xCF lost / old host — evict
-                                }
-                            }
-                            while let Ok(t) = client.next_host_timing(Duration::ZERO) {
-                                if let Some(i) =
-                                    pending_split.iter().position(|&(p, _)| p == t.pts_ns)
-                                {
-                                    let (_, hostnet_us) = pending_split.remove(i).unwrap();
-                                    stats.note_host_split(
-                                        t.host_us as u64,
-                                        hostnet_us.saturating_sub(t.host_us as u64),
-                                    );
-                                }
-                            }
                         }
                     }
                     pending = Some(frame);
