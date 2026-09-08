@@ -18,7 +18,9 @@ use super::display::{
     apply_hdr_dataspace, color_dataspace, hdr_dataspace, install_render_callback,
     release_render_callback, DisplayTracker,
 };
-use super::latency::{note_decoded_pts, now_realtime_ns, take_flags, take_stamp};
+use super::latency::{
+    note_decoded_pts, note_received_frame, now_realtime_ns, take_flags, take_stamp,
+};
 use super::presenter::{presenter_disabled_by_sysprop, PresentMeter, PresentPriority, Presenter};
 use super::setup::{
     android_hdr_static_info, boost_hot_threads, boost_thread_priority, codec_mime,
@@ -28,7 +30,7 @@ use super::surface_control::PresentComplete;
 use super::vsync::{now_monotonic_ns, VsyncClock};
 use super::{
     DecodeOptions, FRAME_PARK_CAP, IN_FLIGHT_CAP, NO_OUTPUT_PATIENCE, NO_VIDEO_PATIENCE,
-    NO_VIDEO_RETRY, PENDING_SPLIT_CAP,
+    NO_VIDEO_RETRY,
 };
 
 /// One decoded output buffer ready to release: its codec buffer index + the pts the codec echoed
@@ -885,59 +887,20 @@ fn feeder_loop(
                 // stage is consumed: the HUD, or the ABR decode signal (`measure_decode`). The
                 // HUD-only `received` point + host/network split stay gated on the overlay.
                 if (stats.enabled() || measure_decode) && frame.complete {
-                    // Core reassembly-completion stamp (ABI v9), NOT the pull instant: stamping
-                    // here would fold the hand-off queue wait into the network latency figure
-                    // (a client-side standing backlog masquerading as network). 0 = older core.
-                    let received_ns = if frame.received_ns > 0 {
-                        frame.received_ns as i128
-                    } else {
-                        now_realtime_ns()
-                    };
-                    {
-                        let mut g = in_flight
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        g.push_back((frame.pts_ns / 1000, received_ns));
-                        if g.len() > IN_FLIGHT_CAP {
-                            g.pop_front(); // stale — codec never echoed it back
-                        }
-                    }
-                    if stats.enabled() {
-                        let clock_offset = clock_offset.load(Ordering::Relaxed) as i128;
-                        let lat_ns = received_ns + clock_offset - frame.pts_ns as i128;
-                        let lat_us = (lat_ns > 0 && lat_ns < 10_000_000_000)
-                            .then_some((lat_ns / 1000) as u64);
-                        // On a parts stream the completing delivery carries only the AU's
-                        // suffix — its offset restores the full AU byte count for bitrate.
-                        let au_len = frame.part.map_or(0, |p| p.offset as usize) + frame.data.len();
-                        stats.note_received(au_len, lat_us, clock_offset != 0);
-                        if let Some(hostnet_us) = lat_us {
-                            pending_split.push_back((frame.pts_ns, hostnet_us));
-                            if pending_split.len() > PENDING_SPLIT_CAP {
-                                pending_split.pop_front();
-                            }
-                        }
-                        while let Ok(t) = client.next_host_timing(Duration::ZERO) {
-                            // Phase-lock closed-loop readout: the host's applied hold rides the
-                            // 0xCF tail; log transitions (~1 Hz worst case — the host updates it
-                            // once a second). None = a host without the tail (pre-phase-lock).
-                            if t.applied_phase_ns != last_phase_ack {
-                                log::info!(
-                                    target: "pf.phase",
-                                    "host applied_phase={:?}us",
-                                    t.applied_phase_ns.map(|n| n / 1000)
-                                );
-                                last_phase_ack = t.applied_phase_ns;
-                            }
-                            if let Some(i) = pending_split.iter().position(|&(p, _)| p == t.pts_ns)
-                            {
-                                let (_, hostnet_us) = pending_split.remove(i).unwrap();
-                                stats.note_host_split(
-                                    t.host_us as u64,
-                                    hostnet_us.saturating_sub(t.host_us as u64),
-                                );
-                            }
-                        }
+                    let received_ns = note_received_frame(
+                        &client,
+                        &stats,
+                        &frame,
+                        clock_offset.load(Ordering::Relaxed),
+                        &mut pending_split,
+                        &mut last_phase_ack,
+                    );
+                    let mut g = in_flight
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    g.push_back((frame.pts_ns / 1000, received_ns));
+                    if g.len() > IN_FLIGHT_CAP {
+                        g.pop_front(); // stale — codec never echoed it back
                     }
                 }
                 if ev_tx.send(DecodeEvent::Au(frame, gap)).is_err() {
