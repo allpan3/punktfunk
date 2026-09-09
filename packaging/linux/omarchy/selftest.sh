@@ -132,6 +132,29 @@ else
   printf "  FAIL rows lost in the merge\n"; fails=$((fails + 1))
 fi
 
+missing=
+for id in punktfunk-host.dedicated punktfunk-host.mirror punktfunk-host.pin \
+          punktfunk-host.unpair punktfunk-host.gamestream; do
+  grep -q "\"$id\"" "$f" || missing="$missing $id"
+done
+if [[ -z "$missing" ]]; then
+  printf '  ok   dedicated, mirror, pin, unpair and gamestream rows are present\n'
+else
+  printf '  FAIL menu missing ids:%s\n' "$missing"; fails=$((fails + 1))
+fi
+if grep -q 'punktfunk-omarchy mode --status | grep -qx dedicated' "$f" &&
+   grep -q 'punktfunk-omarchy mode --status | grep -qx mirror' "$f"; then
+  printf '  ok   dedicated and this-screen rows check mode --status\n'
+else
+  printf '  FAIL dedicated/mirror rows do not check mode --status\n'; fails=$((fails + 1))
+fi
+if grep -q '"punktfunk-host.dedicated".*aliases' "$f" ||
+   grep -q '"punktfunk-host.mirror".*aliases' "$f"; then
+  printf '  FAIL new host rows must not add aliases\n'; fails=$((fails + 1))
+else
+  printf '  ok   new host rows have no aliases\n'
+fi
+
 # Idempotent: a second run must not stack a second copy.
 XDG_CONFIG_HOME="$WORK/menu" setup_menu >/dev/null 2>&1
 n=$(grep -c '"punktfunk-host.console"' "$f")
@@ -242,11 +265,149 @@ check "lan_sources lists RFC1918 when tailscale0 is absent" "$WORK/expected-lan"
 PATH="$WORK/ip-yes:$PATH" lan_sources > "$WORK/actual-lan-ts"
 check "lan_sources adds tailscale0 when the iface exists" "$WORK/expected-lan-ts" "$WORK/actual-lan-ts"
 
+echo "mode / gamestream env"
+
+mod="$WORK/mode"
+mkdir -p "$mod"
+if got=$(XDG_CONFIG_HOME="$mod" "$SCRIPT" mode --status) && [[ "$got" == "dedicated" ]]; then
+  printf '  ok   mode --status is dedicated when the policy file is absent\n'
+else
+  printf '  FAIL mode --status without a file: %s\n' "${got:-<empty>}"; fails=$((fails + 1))
+fi
+
+mkdir -p "$mod/punktfunk"
+printf '{ "preset": "default", "capture_monitor": null, "max_displays": 4 }\n' \
+  > "$mod/punktfunk/display-settings.json"
+if got=$(XDG_CONFIG_HOME="$mod" "$SCRIPT" mode --status) && [[ "$got" == "dedicated" ]]; then
+  printf '  ok   mode --status is dedicated when capture_monitor is null\n'
+else
+  printf '  FAIL mode --status null pin: %s\n' "${got:-<empty>}"; fails=$((fails + 1))
+fi
+
+printf '{ "preset": "default", "capture_monitor": "DP-2", "max_displays": 4 }\n' \
+  > "$mod/punktfunk/display-settings.json"
+if got=$(XDG_CONFIG_HOME="$mod" "$SCRIPT" mode --status) && [[ "$got" == "mirror" ]]; then
+  printf '  ok   mode --status is mirror when capture_monitor is set\n'
+else
+  printf '  FAIL mode --status pinned: %s\n' "${got:-<empty>}"; fails=$((fails + 1))
+fi
+
+# Write helpers only — `mode dedicated` would try-restart the real user unit.
+XDG_CONFIG_HOME="$mod" write_capture_monitor "$mod/punktfunk/display-settings.json" "" >/dev/null
+if got=$(XDG_CONFIG_HOME="$mod" "$SCRIPT" mode --status) && [[ "$got" == "dedicated" ]] &&
+   python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["capture_monitor"] is None; assert d["preset"]=="default"; assert d["max_displays"]==4' \
+     "$mod/punktfunk/display-settings.json"; then
+  printf '  ok   dedicated clears capture_monitor and keeps the other axes\n'
+else
+  printf '  FAIL dedicated did not clear the pin in place\n'; fails=$((fails + 1))
+  cat "$mod/punktfunk/display-settings.json"
+fi
+
+mkdir -p "$WORK/bin"
+cat > "$WORK/bin/systemctl" <<'EOF'
+#!/bin/sh
+echo "systemctl $*" >> "${SYSTEMCTL_LOG:-/dev/null}"
+exit 0
+EOF
+cat > "$WORK/bin/punktfunk-host" <<'EOF'
+#!/bin/sh
+if [ "$1" = "list-monitors" ]; then
+  cat <<'MON'
+Hyprland:
+  eDP-1         1920x1080@60 at +0,+0  scale 1  Built-in  [primary]
+  HDMI-A-1      2560x1440@144 at +1920,+0  scale 1  Desk
+MON
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$WORK/bin/systemctl" "$WORK/bin/punktfunk-host"
+
+SYSTEMCTL_LOG="$WORK/systemctl.log"
+: > "$SYSTEMCTL_LOG"
+if PATH="$WORK/bin:$PATH" SYSTEMCTL_LOG="$SYSTEMCTL_LOG" XDG_CONFIG_HOME="$mod" \
+     "$SCRIPT" mode mirror >/dev/null &&
+   got=$(XDG_CONFIG_HOME="$mod" "$SCRIPT" mode --status) && [[ "$got" == "mirror" ]] &&
+   python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["capture_monitor"]=="eDP-1"' \
+     "$mod/punktfunk/display-settings.json"; then
+  printf '  ok   mode mirror pins the primary connector from list-monitors\n'
+else
+  printf '  FAIL mode mirror did not pin the primary\n'; fails=$((fails + 1))
+  cat "$mod/punktfunk/display-settings.json" 2>/dev/null || true
+fi
+if grep -q 'try-restart punktfunk-host' "$SYSTEMCTL_LOG"; then
+  printf '  ok   mode mirror reloads the host unit\n'
+else
+  printf '  FAIL mode mirror did not try-restart the host\n'; fails=$((fails + 1))
+fi
+
+if { printf '%s\n' 'Hyprland:' '  DP-1  1920x1080@60 at +0,+0  scale 1  Desk'
+   } | primary_connector > "$WORK/sole" && [[ "$(cat "$WORK/sole")" == "DP-1" ]]; then
+  printf '  ok   a sole head is the mirror pin even without a primary tag\n'
+else
+  printf '  FAIL sole-head primary_connector: %s\n' "$(cat "$WORK/sole" 2>/dev/null)"
+  fails=$((fails + 1))
+fi
+
+if printf '%s\n' 'Hyprland:' \
+     '  DP-1  1920x1080@60 at +0,+0  scale 1  A' \
+     '  DP-2  1920x1080@60 at +1920,+0  scale 1  B' \
+     | primary_connector >/dev/null 2>&1; then
+  printf '  FAIL two untagged heads were accepted as a pin\n'; fails=$((fails + 1))
+else
+  printf '  ok   two untagged heads are not a pin\n'
+fi
+
+gs="$WORK/gs/punktfunk"
+mkdir -p "$gs"
+printf 'PUNKTFUNK_MGMT_BIND=127.0.0.1:47990\n#PUNKTFUNK_GAMESTREAM=1\n' > "$gs/host.env"
+XDG_CONFIG_HOME="$WORK/gs" enable_gamestream_env
+if grep -qx 'PUNKTFUNK_GAMESTREAM=1' "$gs/host.env" &&
+   grep -qx 'PUNKTFUNK_MGMT_BIND=127.0.0.1:47990' "$gs/host.env"; then
+  printf '  ok   GameStream opt-in appends host.env and keeps other keys\n'
+else
+  printf '  FAIL GameStream opt-in clobbered host.env\n'; fails=$((fails + 1))
+  cat "$gs/host.env"
+fi
+printf 'PUNKTFUNK_GAMESTREAM=0\n' > "$gs/host.env"
+XDG_CONFIG_HOME="$WORK/gs" enable_gamestream_env
+if grep -qx 'PUNKTFUNK_GAMESTREAM=1' "$gs/host.env"; then
+  printf '  ok   GameStream opt-in flips an existing 0 to 1\n'
+else
+  printf '  FAIL GameStream opt-in did not replace PUNKTFUNK_GAMESTREAM=0\n'
+  fails=$((fails + 1))
+fi
+
+pin_json='{"v":1,"data":{"pin_pending":true,"pending":[{"uniqueid":"u1","fingerprint":"abc123def456","peer_ip":"10.0.0.8"}]}}'
+if rows=$(ctl_json_rows "$pin_json" pin) && [[ "$rows" == $'u1\tabc123def456\t10.0.0.8' ]]; then
+  printf '  ok   pin TUI reads the waiting ceremony from ctl pair --json\n'
+else
+  printf '  FAIL pin TUI parse: %s\n' "${rows:-<empty>}"; fails=$((fails + 1))
+fi
+clients_json='{"v":1,"data":{"native":[{"name":"Pad","fingerprint":"deadbeef0123"}],"gamestream":[{"label":"Moon","fingerprint":"cafebabef00d"}]}}'
+if rows=$(ctl_json_rows "$clients_json" unpair) &&
+   grep -qx $'native\tPad\tdeadbeef0123' <<<"$rows" &&
+   grep -qx $'gamestream\tMoon\tcafebabef00d' <<<"$rows"; then
+  printf '  ok   unpair TUI lists both planes from ctl clients --json\n'
+else
+  printf '  FAIL unpair TUI parse: %s\n' "${rows:-<empty>}"; fails=$((fails + 1))
+fi
+
 help_out="$("$SCRIPT" help)"
 if grep -q 'autostart, ufw' <<<"$help_out"; then
   printf '  ok   help names ufw as a setup step\n'
 else
   printf '  FAIL help dropped the ufw setup mention\n'; fails=$((fails + 1))
+fi
+if grep -q 'punktfunk-omarchy mode' <<<"$help_out"; then
+  printf '  ok   help names mode\n'
+else
+  printf '  FAIL help dropped mode\n'; fails=$((fails + 1))
+fi
+if grep -qE 'punktfunk-omarchy (pin|unpair|gamestream)[[:space:]]' <<<"$help_out"; then
+  printf '  FAIL hidden menu verbs leaked into public help\n'; fails=$((fails + 1))
+else
+  printf '  ok   pin, unpair and gamestream stay out of public help\n'
 fi
 if grep -qE 'punktfunk-omarchy ufw[[:space:]]' <<<"$help_out"; then
   printf '  FAIL hidden ufw verb leaked into public help\n'; fails=$((fails + 1))

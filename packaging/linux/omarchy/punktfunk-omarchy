@@ -2,9 +2,13 @@
 #
 # punktfunk-omarchy — wire a punktfunk host into an Omarchy 4.x box, the Omarchy way.
 #
-#   punktfunk-omarchy setup     enable, open the firewall, add the console to the app menu
-#   punktfunk-omarchy remove    reverse every one of those, leaving nothing behind
-#   punktfunk-omarchy status    what is on, what is not, and what to do next
+#   punktfunk-omarchy setup        enable, open the firewall, add the console to the app menu
+#   punktfunk-omarchy remove       reverse every one of those, leaving nothing behind
+#   punktfunk-omarchy status       what is on, what is not, and what to do next
+#   punktfunk-omarchy mode         dedicated | mirror | --status (virtual display vs this screen)
+#   punktfunk-omarchy pin          Moonlight PIN (menu TUI)
+#   punktfunk-omarchy unpair       unpair a device (menu TUI)
+#   punktfunk-omarchy gamestream   opt in GameStream (menu; hidden)
 #   punktfunk-omarchy ufw       re-apply the LAN-scoped ufw rules (hidden; path unit)
 #
 # Modelled on `omarchy-install-service-sunshine`, which is the shape an Omarchy user already knows:
@@ -342,9 +346,8 @@ setup_webapp() {
 
 # ── the Omarchy menu (Super+Space) ─────────────────────────────────────────────────────────────
 #
-# The rows we add, as JSONC lines. Dotted ids define the tree, so `punktfunk` is a root submenu and
-# `punktfunk.*` are its children. `when` hides a row the box cannot honour, which is what keeps the
-# menu honest on a machine where the host is not running.
+# The rows we add, as JSONC lines. Dotted ids define the tree: `punktfunk-host` is the
+# admin submenu (the client owns `punktfunk`). `when` hides a row the box cannot honour.
 # A function, not a `readonly` computed at load time: the rest of this script resolves config paths
 # where they are USED (see `write_hooks`), and a load-time constant silently ignores an
 # `XDG_CONFIG_HOME` set afterwards — which is exactly how the self-check ended up editing the real
@@ -353,20 +356,21 @@ menu_file() { printf '%s/omarchy/extensions/omarchy-menu.jsonc' "${XDG_CONFIG_HO
 readonly MENU_BEGIN="// >>> punktfunk (managed by punktfunk-omarchy — do not edit between these markers)"
 readonly MENU_END="// <<< punktfunk"
 
-# Root id `punktfunk-host`, NOT `punktfunk`: that one belongs to the CLIENT's block
-# (pf-client-core, omarchy_menu.rs — "Open Punktfunk", the game console, connect/wake rows). One
-# merged submenu made sense when only the host had rows; with the client installed by default it
-# was a grab bag, so the two directions split the way the desktop entries already name them —
-# the app is "Punktfunk", administration is "Punktfunk Host". Glyphs verified rendering on
-# 4.0.2's shell (the old set mixed semantics and gave Status an EMPTY icon).
+# Host rows live under `punktfunk-host`; the client owns `punktfunk`. Dedicated /
+# This screen check `mode --status`. New rows take no aliases.
 menu_rows() {
   cat <<'EOF'
   "punktfunk-host": {"icon":"󰒋","label":"Punktfunk Host","aliases":["streaming","hosting"]},
   "punktfunk-host.console": {"icon":"󰖟","label":"Open web console","description":"Pairing, devices, settings — opens already logged in","action":"sh -c 'omarchy-launch-webapp \"$(punktfunk-host ctl console-url || echo https://localhost:47992)\"'"},
+  "punktfunk-host.dedicated": {"icon":"󰍹","label":"Dedicated display","description":"Stream a virtual display at the client's size","checked":"punktfunk-omarchy mode --status | grep -qx dedicated","action":"punktfunk-omarchy mode dedicated"},
+  "punktfunk-host.mirror": {"icon":"󰹑","label":"This screen","description":"Stream the primary monitor on this box","checked":"punktfunk-omarchy mode --status | grep -qx mirror","action":"punktfunk-omarchy mode mirror"},
   "punktfunk-host.pair": {"icon":"󰐕","label":"Pair a device","description":"Open a pairing window and show the PIN","action":"omarchy-launch-or-focus-tui \"bash -c 'punktfunk-host ctl pair arm; echo; read -n1 -r -p \\\"Press any key…\\\"'\""},
   "punktfunk-host.pending": {"icon":"󰀦","label":"Devices waiting","description":"Approve or deny a device that is asking to pair","action":"omarchy-launch-or-focus-tui \"bash -c 'punktfunk-host ctl pending; echo; read -n1 -r -p \\\"Press any key…\\\"'\""},
+  "punktfunk-host.pin": {"icon":"󰌆","label":"Moonlight PIN","description":"Enter the PIN a Moonlight client is showing","action":"omarchy-launch-or-focus-tui \"punktfunk-omarchy pin\""},
   "punktfunk-host.devices": {"icon":"󰍺","label":"Paired devices","action":"omarchy-launch-or-focus-tui \"bash -c 'punktfunk-host ctl clients; echo; read -n1 -r -p \\\"Press any key…\\\"'\""},
+  "punktfunk-host.unpair": {"icon":"󰌪","label":"Unpair a device","description":"Remove a paired device","action":"omarchy-launch-or-focus-tui \"punktfunk-omarchy unpair\""},
   "punktfunk-host.stop": {"icon":"󰓛","label":"Stop the session","when":"punktfunk-host ctl status --json | grep -q '\"active_sessions\":[1-9]'","action":"punktfunk-host ctl stop-session"},
+  "punktfunk-host.gamestream": {"icon":"󰊖","label":"GameStream","description":"Let stock Moonlight clients pair — trusted LAN only","action":"omarchy-launch-or-focus-tui \"punktfunk-omarchy gamestream\""},
   "punktfunk-host.status": {"icon":"󰋼","label":"Status","action":"omarchy-launch-or-focus-tui \"bash -c 'punktfunk-omarchy status; echo; read -n1 -r -p \\\"Press any key…\\\"'\""},
   "punktfunk-host.restart": {"icon":"󰑓","label":"Restart the host","action":"systemctl --user restart punktfunk-host"},
 EOF
@@ -848,10 +852,320 @@ cmd_status() {
   say "  only if you want strict egress control (costs you concurrent sessions on that port)."
 }
 
+# ── capture mode / pairing TUIs (menu) ─────────────────────────────────────────────────────────
+
+display_settings_file() {
+  printf '%s/punktfunk/display-settings.json' "${XDG_CONFIG_HOME:-$HOME/.config}"
+}
+
+host_env_file() {
+  printf '%s/punktfunk/host.env' "${XDG_CONFIG_HOME:-$HOME/.config}"
+}
+
+# Keep the floating TUI up so the last line is readable.
+tui_pause() {
+  [[ -t 0 ]] || return 0
+  echo
+  read -n1 -r -p "Press any key…" _ || true
+  echo
+}
+
+# One word for the menu's checked guards. Reads the file only: a host
+# round-trip here would stall Super+Space.
+cmd_mode_status() {
+  python3 - "$(display_settings_file)" <<'PY'
+import json, sys
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+except (FileNotFoundError, OSError, json.JSONDecodeError):
+    print("dedicated")
+    raise SystemExit(0)
+cm = data.get("capture_monitor") if isinstance(data, dict) else None
+print("mirror" if isinstance(cm, str) and cm.strip() else "dedicated")
+PY
+}
+
+# Persist capture_monitor. Empty value is JSON null (virtual path).
+write_capture_monitor() {
+  local path="$1" val="${2:-}"
+  python3 - "$path" "$val" <<'PY' || die "Couldn't update the display settings"
+import json, os, sys, tempfile
+path, raw = sys.argv[1], sys.argv[2]
+try:
+    if os.path.isfile(path) and os.path.getsize(path) > 0:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            sys.stderr.write("display-settings.json is not an object\n")
+            sys.exit(1)
+    else:
+        data = {}
+except json.JSONDecodeError:
+    sys.stderr.write("display-settings.json is not valid JSON\n")
+    sys.exit(1)
+data["capture_monitor"] = raw if raw else None
+os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+fd, tmp = tempfile.mkstemp(
+    prefix="display-settings.", suffix=".tmp", dir=os.path.dirname(path) or "."
+)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    os.replace(tmp, path)
+except Exception as e:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    sys.stderr.write(f"write display-settings.json: {e}\n")
+    sys.exit(1)
+PY
+}
+
+reload_host() {
+  systemctl --user try-restart punktfunk-host >/dev/null 2>&1 || true
+}
+
+# First physical head tagged primary, else the sole remaining physical head.
+# Virtual and disabled heads are not a screen the operator can point at.
+# `-c` so list-monitors can occupy stdin; a heredoc would steal it.
+primary_connector() {
+  python3 -c '
+import sys
+physical, primary = [], None
+for line in sys.stdin:
+    if not line[:1].isspace():
+        continue
+    s = line.strip()
+    if not s:
+        continue
+    conn = s.split()[0]
+    if conn.endswith(":"):
+        continue
+    tags = ""
+    if "[" in s and s.rstrip().endswith("]"):
+        tags = s[s.rfind("[") + 1 : s.rfind("]")]
+    parts = [p.strip() for p in tags.split(",") if p.strip()]
+    if "punktfunk virtual display" in parts or "disabled" in parts:
+        continue
+    physical.append(conn)
+    if "primary" in parts:
+        primary = conn
+if primary:
+    print(primary)
+elif len(physical) == 1:
+    print(physical[0])
+else:
+    sys.exit(1)
+'
+}
+
+# dedicated = virtual path (capture_monitor null). mirror pins the primary
+# (or sole) connector. --status reads the file only — no host restart.
+cmd_mode() {
+  case "${1:-}" in
+    --status) cmd_mode_status ;;
+    dedicated)
+      write_capture_monitor "$(display_settings_file)" ""
+      reload_host
+      ;;
+    mirror)
+      have punktfunk-host || die "Couldn't list the screens. Install the host, then try again."
+      local out conn
+      out="$(punktfunk-host list-monitors 2>/dev/null)" \
+        || die "Couldn't list the screens. Run this from the desktop session."
+      conn="$(printf '%s\n' "$out" | primary_connector)" \
+        || die "Couldn't pick a screen to mirror. This box has no primary display."
+      write_capture_monitor "$(display_settings_file)" "$conn"
+      reload_host
+      ;;
+    *) die "unknown mode '${1:-}' (try: dedicated | mirror | --status)" ;;
+  esac
+}
+
+# The pin/unpair TUIs share one JSON envelope shape from `ctl --json`.
+ctl_json_rows() {
+  python3 - "$1" "$2" <<'PY'
+import json, sys
+raw, kind = sys.argv[1], sys.argv[2]
+try:
+    env = json.loads(raw) if raw else {}
+except json.JSONDecodeError:
+    sys.exit(2)
+if not isinstance(env, dict) or env.get("error"):
+    sys.exit(2)
+data = env.get("data") if "data" in env else env
+if not isinstance(data, dict):
+    sys.exit(2)
+if kind == "pin":
+    pending = data.get("pending") or []
+    if not data.get("pin_pending") or not pending:
+        sys.exit(3)
+    n = 0
+    for c in pending:
+        if not isinstance(c, dict):
+            continue
+        print("{}\t{}\t{}".format(
+            c.get("uniqueid") or "?",
+            c.get("fingerprint") or "?",
+            c.get("peer_ip") or "?",
+        ))
+        n += 1
+    sys.exit(0 if n else 3)
+# unpair
+n = 0
+for c in data.get("native") or []:
+    if not isinstance(c, dict):
+        continue
+    fp = c.get("fingerprint") or ""
+    if not fp:
+        continue
+    print("native\t{}\t{}".format(c.get("name") or "(unnamed)", fp))
+    n += 1
+for c in data.get("gamestream") or []:
+    if not isinstance(c, dict):
+        continue
+    fp = c.get("fingerprint") or ""
+    if not fp:
+        continue
+    print("gamestream\t{}\t{}".format(c.get("label") or "(unnamed)", fp))
+    n += 1
+sys.exit(0 if n else 3)
+PY
+}
+
+# Moonlight PIN: the client shows a PIN, this submits it to the waiting
+# ceremony. Address the PIN to the identity `ctl pair status` lists.
+cmd_pin() {
+  local json rows py_st=0
+  json="$(punktfunk-host ctl pair status --json 2>/dev/null || true)"
+  rows="$(ctl_json_rows "$json" pin)" && py_st=0 || py_st=$?
+  if [[ $py_st -eq 2 || -z "$json" ]]; then
+    say "Couldn't reach the host — is it running?"
+    say "Start it with: systemctl --user start punktfunk-host"
+    tui_pause
+    return 1
+  fi
+  if [[ $py_st -ne 0 || -z "$rows" ]]; then
+    say "No Moonlight client is waiting on a PIN."
+    say "Start pairing from the client, then open this again."
+    tui_pause
+    return 0
+  fi
+  say "Moonlight pairing"
+  local i=0 uid fp ip
+  local uids=() fps=() ips=()
+  while IFS=$'\t' read -r uid fp ip; do
+    [[ -n "$uid" ]] || continue
+    i=$((i + 1))
+    uids+=("$uid"); fps+=("$fp"); ips+=("$ip")
+    local tail="$fp"
+    (( ${#tail} > 10 )) && tail="…${tail: -10}"
+    say "  $i. $uid  $ip  $tail"
+  done <<<"$rows"
+  local n=1
+  if (( i > 1 )); then
+    printf 'Number: '
+    read -r n || true
+    if ! [[ "$n" =~ ^[1-9][0-9]*$ ]] || (( n > i )); then
+      say "That is not a waiting device."
+      tui_pause
+      return 1
+    fi
+  fi
+  printf 'PIN from the client: '
+  local pin=""
+  read -r pin || true
+  if [[ -z "$pin" ]]; then
+    say "No PIN entered."
+    tui_pause
+    return 1
+  fi
+  local idx=$((n - 1))
+  punktfunk-host ctl pin "$pin" "${uids[$idx]}" "${fps[$idx]}" "${ips[$idx]}" || true
+  tui_pause
+}
+
+# Pick a paired device from `ctl clients --json` and unpair that fingerprint.
+cmd_unpair() {
+  local json rows py_st=0
+  json="$(punktfunk-host ctl clients --json 2>/dev/null || true)"
+  rows="$(ctl_json_rows "$json" unpair)" && py_st=0 || py_st=$?
+  if [[ $py_st -eq 2 || -z "$json" ]]; then
+    say "Couldn't reach the host — is it running?"
+    say "Start it with: systemctl --user start punktfunk-host"
+    tui_pause
+    return 1
+  fi
+  if [[ $py_st -ne 0 || -z "$rows" ]]; then
+    say "No paired devices to unpair."
+    tui_pause
+    return 0
+  fi
+  say "Paired devices"
+  local i=0 plane name fp
+  local fps=()
+  while IFS=$'\t' read -r plane name fp; do
+    [[ -n "$fp" ]] || continue
+    i=$((i + 1))
+    fps+=("$fp")
+    local tail="$fp"
+    (( ${#tail} > 10 )) && tail="…${tail: -10}"
+    say "  $i. $plane  $name  $tail"
+  done <<<"$rows"
+  printf 'Number: '
+  local n=""
+  read -r n || true
+  if ! [[ "$n" =~ ^[1-9][0-9]*$ ]] || (( n > i )); then
+    say "That is not a paired device."
+    tui_pause
+    return 1
+  fi
+  local idx=$((n - 1))
+  punktfunk-host ctl unpair "${fps[$idx]}" || true
+  tui_pause
+}
+
+# Opt in the GameStream/Moonlight plane: pin host.env, restart, open the
+# extra ufw profile. Trusted LAN only.
+enable_gamestream_env() {
+  local f tmp
+  f="$(host_env_file)"
+  mkdir -p "$(dirname "$f")"
+  if [[ -f "$f" ]] && grep -q '^PUNKTFUNK_GAMESTREAM=' "$f"; then
+    tmp="$(mktemp "${f}.XXXXXX")"
+    sed 's/^PUNKTFUNK_GAMESTREAM=.*/PUNKTFUNK_GAMESTREAM=1/' "$f" > "$tmp"
+    mv -f "$tmp" "$f"
+  else
+    if [[ -f "$f" && -s "$f" ]]; then
+      local last
+      last="$(tail -c1 "$f" 2>/dev/null || true)"
+      [[ "$last" == $'\n' || -z "$last" ]] || printf '\n' >> "$f"
+    fi
+    printf 'PUNKTFUNK_GAMESTREAM=1\n' >> "$f"
+  fi
+}
+
+cmd_gamestream() {
+  step "GameStream"
+  enable_gamestream_env
+  reload_host
+  open_firewall
+  ok "GameStream is on — stock Moonlight can pair on this LAN"
+  tui_pause
+}
+
 case "${1:-}" in
   setup)  shift; parse_setup_opts "$@"; cmd_setup ;;
   remove) cmd_remove ;;
   status) cmd_status ;;
+  mode)   shift; cmd_mode "$@" ;;
+  pin)    cmd_pin ;;
+  unpair) cmd_unpair ;;
+  gamestream) cmd_gamestream ;;
   ufw)    open_firewall ;;
   ""|-h|--help|help)
     cat <<'EOF'
@@ -860,9 +1174,10 @@ punktfunk-omarchy — wire a punktfunk host into an Omarchy box
   punktfunk-omarchy setup     groups, autostart, ufw, app-menu entry, optional toasts/idle/theme
   punktfunk-omarchy remove    reverse all of it (pairings and config are left alone)
   punktfunk-omarchy status    what is on and what to do next
+  punktfunk-omarchy mode      dedicated | mirror | --status
 
 Docs: https://punktfunk.com/docs/omarchy
 EOF
     ;;
-  *) die "unknown command '$1' (try: setup | remove | status)" ;;
+  *) die "unknown command '$1' (try: setup | remove | status | mode)" ;;
 esac
