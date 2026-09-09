@@ -1,22 +1,12 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import "Model.js" as Model
 
-// The plugin's data half: one long-lived `punktfunk-host ctl watch`, the REST snapshots it
-// triggers, and the one function that spawns anything.
-//
-// **This is the security boundary.** A shell plugin runs unsandboxed inside omarchy-shell, and the
-// management API's admin surface — the pending queue, the PIN, unpair, session control — is exactly
-// what is worth protecting. So the QML holds no credential and speaks no HTTPS: every call spawns
-// `punktfunk-host ctl`, which reads the operator token and the host's certificate from the 0700
-// config directory in its own process and pins the certificate *before* sending anything. Reading
-// `run()` below answers "can this plugin leak a secret?".
-//
-// Exactly ONE process runs continuously (`watcher`). The host caps concurrent event streams and the
-// web console holds one of them, so a stream per surface would be the thing that exhausts the cap.
-// `ctl watch` owns its own reconnect and Last-Event-ID resume; this file only reacts to the
-// synthetic `ctl.resync` line by re-snapshotting, which is the only correct answer to "your
-// incremental state may be stale".
+// The plugin's data half: one `ctl watch`, the snapshots it triggers, and the
+// only spawn site. The QML holds no credential and speaks no HTTPS — every
+// host call is `punktfunk-host ctl`, which pins the certificate before sending
+// the operator token. Reading `run()` answers whether this plugin can leak.
 Item {
   id: root
 
@@ -32,15 +22,13 @@ Item {
   property var gamestreamClients: []
   property var games: []
 
-  // ── displays ─────────────────────────────────────────────────────────────────────────────────
-  // The stored policy's preset id, the resolved policy it expands to, and the two preset
-  // catalogues (built-in and saved presets share one id space). Deliberately NOT the live display
-  // list `ctl display` also carries: on wlroots the registry passes displays through rather than
-  // owning them, so that list is always empty here — see the Panel's DISPLAYS section.
+  // Stored preset, its expansion, and Dedicated vs This screen. Not the live
+  // display list: on wlroots that list is structurally empty.
   property string displayPreset: ""
   property var displayEffective: ({})
   property var displayPresets: []
   property var customPresets: []
+  property string captureMode: "dedicated"
 
   // ── summary ──────────────────────────────────────────────────────────────────────────────────
   // `/status` exposes no device names by design, so it cannot say WHO is streaming. This is the one
@@ -59,14 +47,16 @@ Item {
   property var statsSample: null
   property var statsMeta: null
 
-  // A rolling window of what the Stats poll saw, so the panel can draw the SHAPE of a number and
-  // not just its current value — a bitrate sitting at 300 and a bitrate that just collapsed from
-  // 300 read identically as one figure. Client-side because the host publishes no periodic event
-  // and the alternative, shipping the capture's whole time-series through a process spawn every
-  // two seconds, would cost far more than it shows. Filled only while the Stats tab is open, which
-  // is the only time anything reads it.
+  // Rolling window of the Stats poll. Filled only while the panel is open.
+  // ≈ 3 minutes at the 2 s poll.
   property var history: []
-  readonly property int historyMax: 90        // ≈ 3 minutes at the 2 s poll
+  readonly property int historyMax: 90
+
+  // Optimistic host switch: systemctl is async, so bind the knob to this
+  // until the next snapshot lands.
+  property bool haveDesired: false
+  property bool desiredRunning: false
+  readonly property bool hostEnabled: haveDesired ? desiredRunning : (state !== "stopped")
 
   function pushHistory() {
     var p = {
@@ -94,16 +84,15 @@ Item {
 
   readonly property int exitPin: 4
 
-  // ── the one place anything is spawned ────────────────────────────────────────────────────────
-  //
-  // ⚠ Quickshell's `Process` does NOT search `PATH` — it reported "the binary could not be found"
-  // for `punktfunk-host` on a box where /usr/bin/punktfunk-host was present, executable, and
-  // /usr/bin was in the shell process's own PATH. Hardcoding /usr/bin would be wrong (a sysext or
-  // a /usr/local build lives elsewhere), so the command goes through `sh -c 'exec "$@"' sh …`:
-  // the shell does the PATH lookup and `exec "$@"` passes our argv through **unquoted and
-  // unsplit**, so a device name with a space in it cannot turn into two arguments.
+  // The one place anything is spawned. Quickshell's Process does not search
+  // PATH, so every argv goes through `sh -c 'exec "$@"' sh …`: lookup without
+  // re-quoting, so a device name with a space stays one argument.
+  function spawnArgv(bin, args) {
+    return ["sh", "-c", "exec \"$@\"", "sh", bin].concat(args)
+  }
+
   function argvFor(args) {
-    return ["sh", "-c", "exec \"$@\"", "sh", "punktfunk-host", "ctl"].concat(args)
+    return spawnArgv("punktfunk-host", ["ctl"].concat(args))
   }
 
   // run(["approve", "3"], function (data, err) { … })
@@ -117,6 +106,21 @@ Item {
 
   function detached(argv) {
     Quickshell.execDetached(argv)
+  }
+
+  function detachedBin(bin, args) {
+    detached(spawnArgv(bin, args))
+  }
+
+  function setHostEnabled(on) {
+    root.haveDesired = true
+    root.desiredRunning = !!on
+    detachedBin("systemctl", ["--user", on ? "start" : "stop", "punktfunk-host.service"])
+  }
+
+  function setCaptureMode(mode) {
+    root.captureMode = mode === "mirror" ? "mirror" : "dedicated"
+    detachedBin("punktfunk-omarchy", ["mode", root.captureMode])
   }
 
   // The console opens at a one-shot login page under $XDG_RUNTIME_DIR, so it lands already logged
@@ -172,13 +176,18 @@ Item {
   // ── snapshots ────────────────────────────────────────────────────────────────────────────────
   function refresh() {
     run(["status"], function (data, err) {
-      if (err) { root.state = "stopped"; root.sessions = 0; root.stream = null; return }
+      if (err) {
+        root.state = "stopped"
+        root.sessions = 0
+        root.stream = null
+        if (!(root.haveDesired && root.desiredRunning)) root.haveDesired = false
+        return
+      }
+      root.haveDesired = false
       root.sessions = data.active_sessions || 0
       root.pinPending = !!data.pin_pending
       root.games = data.games || []
       root.state = root.sessions > 0 ? "streaming" : "idle"
-      // The Now tab shows the negotiated mode and codec, so `stream` is read here too and not only
-      // by the Stats poll — otherwise the tab is blank until someone visits Stats.
       root.stream = data.stream || null
       root.audioStreaming = !!data.audio_streaming
     })
@@ -209,6 +218,7 @@ Item {
       root.displayEffective = data.effective || {}
       root.displayPresets = data.presets || []
       root.customPresets = data.custom_presets || []
+      root.captureMode = Model.captureMode(data.settings && data.settings.capture_monitor)
     })
   }
 
@@ -218,13 +228,11 @@ Item {
     run(["display", "preset", id], function () { root.refreshDisplays() })
   }
 
-  // Polled, not evented: the host publishes no periodic stats event, and a bitrate that only moved
-  // on a lifecycle event would be a still photograph labelled "live". `ctl status --json` measured
-  // 116 ms on the Omarchy testbox — under the 150 ms threshold `ctl.rs` sets for itself — and the
-  // Panel only runs this timer while the Stats tab is the one being looked at.
+  // Polled, not evented: the host publishes no periodic stats event. The
+  // panel runs this only while it is open.
   function refreshStats() {
     run(["stats"], function (data, err) {
-      if (err || !data) { root.stream = null; return }
+      if (err || !data) return
       root.stream = data.stream || null
       root.sessionMode = data.session || null
       root.captureArmed = !!(data.capture && data.capture.armed)
@@ -242,8 +250,8 @@ Item {
     })
   }
 
-  // The capture is ONE host-wide slot the web console also drives, and stopping it writes a
-  // recording to disk — so it is never armed as a side effect of opening a tab.
+  // Stopping a capture writes a recording to disk, so it is never armed as
+  // a side effect of opening the panel.
   function setCapture(on) {
     run(["stats", "record", on ? "start" : "stop"], function () { root.refreshStats() })
   }
@@ -263,6 +271,7 @@ Item {
       if (code === root.exitPin) root.pinMismatch = true
       root.state = "stopped"
       root.sessions = 0
+      if (!(root.haveDesired && root.desiredRunning)) root.haveDesired = false
     }
 
     // ⚠ Arm the retry from `running`, NOT from `onExited`. A process that fails to **start** — the
@@ -286,8 +295,7 @@ Item {
     var ev
     try { ev = JSON.parse(line) } catch (e) { return }
 
-    // The display policy is not evented — it only changes when a person edits it, here or in the
-    // console — so a resync re-reads it and the Displays tab re-reads it on arrival. Nothing polls.
+    // Display policy is not evented, so a resync re-reads it. Nothing polls it.
     if (ev.kind === "ctl.resync") { refresh(); refreshClients(); refreshDisplays(); return }
     if (ev.kind === "ctl.disconnected") { root.state = "stopped"; return }
 

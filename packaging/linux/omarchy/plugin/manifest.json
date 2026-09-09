@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "author": "unom",
   "license": "MIT OR Apache-2.0",
-  "description": "Pair devices, watch sessions and control your Punktfunk streaming host from the bar.",
+  "description": "Start the host, pair a device, and watch the live session from the bar.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Punktfunk",
-    "description": "One bar icon and one panel: what is streaming, who is asking to pair, and which devices are trusted.",
+    "description": "Start the host, pair a device, and watch the live session.",
     "category": "System",
     "defaultSection": "right",
     "aliases": ["punktfunk", "streaming"],

@@ -525,7 +525,7 @@ setup_plugin() {
   local dest; dest="$(plugin_dest)"
   mkdir -p "$dest"
   install -m0644 -t "$dest" "$HOOKS_SRC"/plugin/manifest.json "$HOOKS_SRC"/plugin/*.qml \
-    "$HOOKS_SRC"/plugin/README.md
+    "$HOOKS_SRC"/plugin/Model.js "$HOOKS_SRC"/plugin/README.md
   # `omarchy plugin enable` wires it into shell.json and reloads the shell.
   if plugin_known && om plugin enable punktfunk >/dev/null 2>&1; then
     ok "widget installed and enabled — the Punktfunk mark appears in the bar"

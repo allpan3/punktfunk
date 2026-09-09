@@ -1,25 +1,22 @@
 # punktfunk — an Omarchy shell plugin
 
 Pair devices, watch sessions and control your [Punktfunk](https://punktfunk.com) host from the
-Omarchy bar, without opening a browser.
+Omarchy bar, without opening a browser. Same shape as the first-party Tailscale / network / audio
+panels: a hero, then one scrolling column of sections.
 
-- **bar-widget** — host state and live session count, with a badge when a device is waiting for
-  approval. Click opens the panel; right-click opens the web console.
-- **panel** — five tabs over a fixed header:
-  - *Now* — who is streaming and at what, as a hero plus a two-column fact grid. Stop / End game.
-  - *Pairing* — open a window, approve or deny the queue, type a Moonlight PIN.
-  - *Devices* — both planes, access level, unpair on hover.
-  - *Displays* — pick the virtual-display preset, and read the policy it puts in force.
-  - *Stats* — the live stream, sparkline charts of how it is moving, and frame timings while a
-    capture is recording.
+- **bar-widget** — the two-ring mark, filled while streaming, dim when the host is stopped, with a
+  badge when a device is waiting. Click opens the panel. Right-click stops a live session, or opens
+  the web console when nothing is streaming.
+- **panel** — one scrolling column:
+  - *Hero* — rotating phrases while streaming; the trailing switch starts and stops the user unit.
+  - *SESSION* — facts, stop / end-game, and a compact sparkline while live.
+  - *PAIRING* — expands when a device waits; an arm row when the host is idle.
+  - *DEVICES* — both planes, unpair on the row.
+  - *DISPLAY* — Dedicated / This screen (`punktfunk-omarchy mode`), then the presets.
 - **service** — one long-lived event stream that drives both of the above. The pairing toast is
   the `pairing-pending` hook's (it carries Approve / Deny); the panel only updates its badge.
 
-### Why tabs
-
-Five subjects stacked in one column outgrew the popup: the sections at the bottom were reachable
-only by growing the panel past the screen. Tabs make each subject's height independent, and they let
-the one polling surface — *Stats* — run only while it is the thing being looked at.
+Keyboard: `j` / `k` move the cursor, Enter activates, Esc closes, Tab switches panels.
 
 ## Install
 
@@ -43,8 +40,8 @@ prints JSON on stdout. If something that is not your host answers on the managem
 exits 4 with no credential transmitted, and this plugin shows that state instead of a plausible
 "host not running".
 
-`Service.qml`'s `run()` is the only place anything is spawned. Reading it answers "can this plugin
-leak a secret?" in about forty lines.
+`Service.qml` is the only spawn site. Reading `run()` answers "can this plugin leak a secret?" in
+about forty lines.
 
 One process runs continuously: `ctl watch`, in `Service.qml`. Exactly one, because the host caps
 concurrent event streams and the web console holds one of them. It reconnects by itself and emits a
@@ -53,14 +50,8 @@ re-snapshot rather than trust what it has.
 
 ### The one thing that polls
 
-*Stats* has no event to listen to — the host publishes no periodic stats — so the panel polls
-`ctl stats` every two seconds, and **only** while that tab is open. `ctl status --json` measures
-116 ms on the Omarchy testbox, under the 150 ms threshold `ctl.rs` sets for itself. Everything else
-is event-driven or refreshed when its tab is opened.
-
-Nothing here arms a performance capture as a side effect of being read. Arming has consequences the
-reader did not ask for: stopping writes a recording to disk, and the capture is a single host-wide
-slot the web console also drives. It stays a button.
+The host publishes no periodic stats, so the sparkline polls `ctl stats` every two seconds, and
+**only** while the panel is open. Everything else is event-driven or refreshed on open.
 
 ## Traps
 
@@ -78,38 +69,24 @@ Every one of these cost a debugging session, and none of them logs anything usef
 - **`parent.<property>` does not resolve inside `StdioCollector`.** Assign through an explicit `id`
   or the whole call chain silently returns nothing.
 
-### Displays: presets, and no live list
+### Displays: Dedicated, This screen, then presets
 
-The tab picks the virtual-display preset and shows the policy it puts in force. It deliberately does
-**not** list live virtual displays, because on this compositor there are never any to list: a
-wlroots capture arrives over a sandboxed portal handle the host cannot re-open per attach, so
-`vdisplay::registry` passes those displays through rather than owning them, and `/display/state`
-comes back empty. Measured here against a screen you can point at — a live 2414x1188@240 head,
-`displays: []`. A "live displays" section would have been a permanent "none".
+Dedicated and This screen call `punktfunk-omarchy mode`. The rows below pick the virtual-display
+preset and show the policy it puts in force. The section deliberately does **not** list live virtual
+displays: on this compositor there are never any to list. A wlroots capture arrives over a sandboxed
+portal handle the host cannot re-open per attach, so `vdisplay::registry` passes those displays
+through rather than owning them, and `/display/state` comes back empty.
 
-The same limit is why the tab says a display cannot outlive a disconnect under Hyprland: several
-preset summaries promise exactly that, and this compositor cannot deliver it. The other axes —
-topology, identity, mode-conflict, layout — do apply.
+The same limit is why the section says a display cannot outlive a disconnect under Hyprland: several
+preset summaries promise exactly that, and this compositor cannot deliver it.
 
-### Stats: two numbers that are not the same number
+### Sparkline
 
-- **Target** is the encoder bitrate, where adaptive bitrate has settled. Always available.
-- **Sent** is what actually left the box. Only while a capture is recording.
-
-Each is drawn as a sparkline as well as a figure, because one number cannot tell a bitrate that has
-sat at 300 from one that just collapsed to it — and that difference is the reason to open the tab.
-The window is client-side: the panel keeps what its own two-second poll saw, rather than shipping
-the capture's whole time-series through a process spawn on every tick. It fills while you watch,
-holds about three minutes, and is cleared when a session ends so a chart never draws a line between
-two unrelated streams. Each chart's label carries its current value, so the charts replace the
-numeric read-outs rather than repeating them.
-
-Target and Sent differ by an order of magnitude on a still screen (300 Mbps against 11), because
-capture is damage-driven. For the same reason the tab shows **new** frames per second beside
-**repeated** ones: a healthy 240 Hz stream of a motionless desktop reads `0.0 fps new · 157.2 fps
-repeated`, and showing only the first number would report a dead stream. Stage percentiles switch
-between µs and ms at 1 ms — measured, `send` sits at 15 µs and `encode` at 2321 µs, and either
-single unit loses one end of that range.
+**Target** is the encoder bitrate, where adaptive bitrate has settled. The sparkline is that number
+over time, because one figure cannot tell a bitrate that has sat at 300 from one that just collapsed
+to it. The window is client-side: the panel keeps what its own two-second poll saw, fills while the
+panel is open, holds about three minutes, and is cleared when a session ends so a chart never draws
+a line between two unrelated streams.
 
 ### Known limitation: one watcher per monitor
 
