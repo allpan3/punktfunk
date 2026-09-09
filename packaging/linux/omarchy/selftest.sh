@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 #
-# Self-check for the two pieces of `punktfunk-omarchy` that parse or generate a file the USER owns:
-# the xdph picker restore (awk over ~/.config/hypr/xdph.conf) and the hooks.json generator. Both
-# are reachable only on an Omarchy box, which is exactly why they need a check that runs anywhere.
+# Self-check for the pieces of `punktfunk-omarchy` that parse or generate a file the USER owns,
+# plus lan_sources / the hidden ufw verb — all of it without root or an Omarchy box.
 #
 #     bash packaging/linux/omarchy/selftest.sh
 #
@@ -221,6 +220,65 @@ if (parse_setup_opts --nonsense=1 >/dev/null 2>&1); then
   printf '  FAIL an unknown option was accepted\n'; fails=$((fails + 1))
 else
   printf '  ok   an unknown option is refused\n'
+fi
+
+echo "lan_sources / ufw"
+
+# RFC1918 always. tailscale0 only when `ip` says the iface exists — no root, no real nic.
+mkdir -p "$WORK/ip-yes" "$WORK/ip-no"
+printf '#!/bin/sh\nexit 0\n' > "$WORK/ip-yes/ip"
+printf '#!/bin/sh\nexit 1\n' > "$WORK/ip-no/ip"
+chmod +x "$WORK/ip-yes/ip" "$WORK/ip-no/ip"
+
+{
+  printf '%s\n' 192.168.0.0/16 10.0.0.0/8 172.16.0.0/12
+} > "$WORK/expected-lan"
+PATH="$WORK/ip-no:$PATH" lan_sources > "$WORK/actual-lan"
+check "lan_sources lists RFC1918 when tailscale0 is absent" "$WORK/expected-lan" "$WORK/actual-lan"
+
+{
+  printf '%s\n' 192.168.0.0/16 10.0.0.0/8 172.16.0.0/12 tailscale0
+} > "$WORK/expected-lan-ts"
+PATH="$WORK/ip-yes:$PATH" lan_sources > "$WORK/actual-lan-ts"
+check "lan_sources adds tailscale0 when the iface exists" "$WORK/expected-lan-ts" "$WORK/actual-lan-ts"
+
+help_out="$("$SCRIPT" help)"
+if grep -q 'autostart, ufw' <<<"$help_out"; then
+  printf '  ok   help names ufw as a setup step\n'
+else
+  printf '  FAIL help dropped the ufw setup mention\n'; fails=$((fails + 1))
+fi
+if grep -qE 'punktfunk-omarchy ufw[[:space:]]' <<<"$help_out"; then
+  printf '  FAIL hidden ufw verb leaked into public help\n'; fails=$((fails + 1))
+else
+  printf '  ok   ufw verb stays out of public help\n'
+fi
+if grep -q 'punktfunk-omarchy ufw       re-apply the LAN-scoped ufw rules (hidden; path unit)' "$SCRIPT"; then
+  printf '  ok   hidden ufw verb has help text in the header\n'
+else
+  printf '  FAIL hidden ufw verb has no header help text\n'; fails=$((fails + 1))
+fi
+if grep -qE '^[[:space:]]*ufw\)' "$SCRIPT"; then
+  printf '  ok   hidden ufw verb is dispatched\n'
+else
+  printf '  FAIL hidden ufw verb is not dispatched\n'; fails=$((fails + 1))
+fi
+
+if grep -qx 'PathExists=/sys/class/net/tailscale0' ./punktfunk-omarchy-ufw.path; then
+  printf '  ok   path unit watches /sys/class/net/tailscale0\n'
+else
+  printf '  FAIL path unit does not watch /sys/class/net/tailscale0\n'; fails=$((fails + 1))
+fi
+if grep -qx 'ExecStart=punktfunk-omarchy ufw' ./punktfunk-omarchy-ufw.service; then
+  printf '  ok   service runs punktfunk-omarchy ufw\n'
+else
+  printf '  FAIL service ExecStart is not punktfunk-omarchy ufw\n'; fails=$((fails + 1))
+fi
+if grep -q 'enable --now punktfunk-omarchy-ufw.path' "$SCRIPT" &&
+   grep -q 'disable --now punktfunk-omarchy-ufw.path' "$SCRIPT"; then
+  printf '  ok   setup enables the path unit and remove disables it\n'
+else
+  printf '  FAIL setup/remove do not enable/disable the path unit\n'; fails=$((fails + 1))
 fi
 
 echo

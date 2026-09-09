@@ -1,0 +1,11 @@
+# Recouple LAN-scoped ufw rules when tailscale0 appears after setup.
+# setup enables this path unit; remove disables it. The package never enables it.
+[Unit]
+Description=punktfunk Omarchy ufw recouple on tailscale0
+
+[Path]
+PathExists=/sys/class/net/tailscale0
+Unit=punktfunk-omarchy-ufw.service
+
+[Install]
+WantedBy=default.target

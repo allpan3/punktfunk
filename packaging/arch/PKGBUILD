@@ -259,6 +259,12 @@ package_punktfunk-host() {
   install -Dm0644 "$R/scripts/punktfunk-kde-session.service" "$pkgdir/usr/lib/systemd/user/punktfunk-kde-session.service"
   sed -i 's#%h/punktfunk/scripts/headless/run-headless-kde.sh#/usr/share/punktfunk/headless/run-headless-kde.sh#' \
     "$pkgdir/usr/lib/systemd/user/punktfunk-kde-session.service"
+  # Omarchy: recouple ufw when tailscale0 appears after setup. Enabled by `punktfunk-omarchy setup`,
+  # never by the package.
+  install -Dm0644 "$R/packaging/linux/omarchy/punktfunk-omarchy-ufw.path" \
+    "$pkgdir/usr/lib/systemd/user/punktfunk-omarchy-ufw.path"
+  install -Dm0644 "$R/packaging/linux/omarchy/punktfunk-omarchy-ufw.service" \
+    "$pkgdir/usr/lib/systemd/user/punktfunk-omarchy-ufw.service"
   # KWin Desktop-mode authorization: non-launcher .desktop whose X-KDE-Wayland-Interfaces lets the
   # host bind KWin's restricted zkde_screencast (virtual output) + fake_input globals on an
   # interactive Plasma session. Must ship with the host (KWin caches the per-exe grant on first

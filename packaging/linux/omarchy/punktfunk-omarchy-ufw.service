@@ -1,0 +1,7 @@
+# Idempotent: the same open_firewall setup already ran. The path unit starts this.
+[Unit]
+Description=punktfunk Omarchy ufw recouple
+
+[Service]
+Type=oneshot
+ExecStart=punktfunk-omarchy ufw
