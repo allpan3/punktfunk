@@ -116,12 +116,12 @@ punktfunk-host ctl approve 3
 | `stats record start\|stop` | Arm or disarm the performance capture. `stop` writes the recording to disk. The capture is one host-wide slot the web console shares. |
 | `watch` | Stream host events as line-JSON on stdout, one object per line. `--kinds stream.*,pairing.pending` filters; `--since <seq>` resumes. |
 
-**`display` reports an empty `displays` list on wlroots compositors** — Hyprland, Sway, and so
-everything Omarchy runs. That is not "nothing is streaming". A wlroots capture arrives over a
-sandboxed portal handle the host cannot re-open per attach, so the display is passed through rather
-than entered in the registry that `display` lists. Read an empty list as *this host does not track
-them*. The same limit means a display cannot outlive a disconnect there, whatever a preset's
-lifetime says.
+**`display` lists live and lingered heads on Hyprland.** A reconnect inside keep-alive recasts
+the same named output, so the list is the truth. **Sway still reports an empty `displays` list** —
+its capture arrives over a sandboxed portal handle the host cannot re-open per attach, so the
+registry passes those displays through rather than owning them. Read Sway's empty list as *this
+host does not track them*, not as "nothing is streaming". Omarchy is Hyprland, so `ctl display`
+there lists the lingered heads.
 
 ### Reading `stats`
 

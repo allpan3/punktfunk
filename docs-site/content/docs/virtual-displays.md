@@ -146,6 +146,12 @@ this also keeps the **game itself running**.
 
 Default: **10 seconds**.
 
+**Hyprland lists the kept head; Sway does not.** On Hyprland the named output stays in the
+registry for the linger window, so the console and `ctl display` show live and lingered heads,
+and a matching reconnect recasts the same one. Sway still cannot: its capture arrives over a
+portal handle the host cannot re-open per attach, so those displays never enter the list and
+cannot linger, whatever a preset's lifetime says.
+
 **A reconnect always resumes the kept display** — even a second or two after dropping.
 **Deliberately quitting** (closing the client, not a network drop) tears the display down at once,
 skipping the linger. How quickly a *dropped* client is noticed is the QUIC idle timeout — 8 s by
@@ -185,9 +191,10 @@ whatever has focus then — clicking a physical monitor mid-launch can still pul
 
 - Punktfunk only disables monitors it did not create, so a second concurrent client never goes dark.
 - On Hyprland the restore is a `hyprctl reload` — nothing else re-enables a monitor a rule disabled.
-  The reload re-reads your Hyprland config; settings changed at runtime with `hyprctl keyword` are
-  dropped and a non-Lua config re-runs its `exec =` lines (`exec-once` is not). Only happens if a
-  session actually disabled something.
+  The reload runs at real teardown (linger expiry or release), not at disconnect, so exclusive
+  physicals stay dark for the keep-alive window. It re-reads your Hyprland config; settings changed
+  at runtime with `hyprctl keyword` are dropped and a non-Lua config re-runs its `exec =` lines
+  (`exec-once` is not). Only happens if a session actually disabled something.
 
 ### Conflict handling · identity · layout
 

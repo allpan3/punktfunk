@@ -52,9 +52,17 @@ See [Configuration](/docs/configuration) for the full reference.
   the host runs `hyprctl dispatch focusmonitor PF-…` — once when the output is ready, and again right
   before it launches anything from your library. Without that, games open on whichever physical
   monitor had focus and the stream shows a bare desktop.
+- **Keep-alive** — the named headless output lingers for the keep-alive window. ScreenCast is
+  session-scoped (the portal fd is not on the pooled output), so a matching reconnect recasts the
+  same head instead of creating an empty one. Exclusive physicals stay dark until real teardown.
+  `ctl display` lists live and lingered heads.
+- **Window re-home** — before `output remove`, the streamed workspace moves onto a remaining
+  physical monitor. Windows are never destroyed with the stream. A box with no physical left skips
+  the move; those workspaces stay in limbo until Hyprland reassigns them.
 - **Exclusive topology** — if you set it, the host disables your physical monitors for the session
   (`monitor <name>,disable`, or the Lua `hl.monitor{ …, disabled = true }` if you use a Lua config)
-  and brings them back with a **`hyprctl reload`** at teardown. The reload is not a shortcut: a
+  and brings them back with a **`hyprctl reload`** at real teardown — after keep-alive expires, or
+  when you release the display. A disconnect alone leaves them dark. The reload is not a shortcut: a
   disabled Hyprland monitor cannot be re-enabled by re-applying its rule — every targeted form is
   accepted and does nothing — so re-reading your config is the only way back. It also drops other
   runtime `hyprctl keyword` changes and re-runs `exec =` lines in a non-Lua config, and it runs only

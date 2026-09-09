@@ -10,8 +10,9 @@ Omarchy menu, and updates go through `omarchy update`. One command handles all o
 
 <Callout type="info">
 Omarchy already ships Sunshine as an installable service and preinstalls moonlight-qt. Punktfunk
-**coexists** with Sunshine on its own ports — see [Sunshine on the same
-box](#sunshine-on-the-same-box) before you turn anything on.
+is the remote desktop on this box — leave Sunshine off unless you are migrating. They
+**coexist** on native ports during a trial; see [Sunshine on the same
+box](#sunshine-on-the-same-box) before you turn either GameStream plane on.
 </Callout>
 
 **One command instead?** The [guided installer](/docs/install#guided-install-preview) (preview) does
@@ -64,10 +65,10 @@ That one command, each step idempotent and each one reversible:
 | --- | --- |
 | **Groups** | offers to add you to `input` (virtual gamepads) and `punktfunk` (the virtual Steam Deck pad). Both apply at your **next login**. |
 | **Autostart** | enables `punktfunk-host` as a user service so it comes up at login. It also installs the `graphical-session.target` binding — see [Autostart and your session](#autostart-and-your-session) for when that does more than nothing. |
-| **Firewall** | adds ufw rules scoped to your local networks (and `tailscale0` if you have it), each tagged `punktfunk-omarchy` so `remove` finds them again. |
+| **Firewall** | adds ufw rules scoped to your local networks (and `tailscale0` if you have it), each tagged `punktfunk-omarchy` so `remove` finds them again. A path unit recouples those rules when `tailscale0` appears after setup. |
 | **Browser trust** *(optional)* | trusts the console's certificate in Chromium (`~/.pki/nssdb`), so it opens with no security warning at all. |
 | **App menu** | installs "Punktfunk Web Console" as an Omarchy webapp — it appears in Apps (`Super`+`Space`) and opens already logged in, in its own window. |
-| **Bar widget** | the Punktfunk Quickshell widget in the bar — live status, pairing approvals and devices without opening the console. It replaces the tray icon, which is hidden while the widget is enabled. |
+| **Bar widget** | the Punktfunk Quickshell widget in the bar — a hero plus SESSION, PAIRING, DEVICES and DISPLAY, without opening the console. It replaces the tray icon, which is hidden while the widget is enabled. |
 | **Toasts** *(optional)* | pairing requests and stream start/stop as Omarchy notifications, with **Approve** / **Deny** buttons on the pairing one. |
 | **Idle** *(optional)* | keeps the screen awake for the length of a stream and restores your own setting afterwards. |
 | **Theme** *(optional)* | a `~/.config/omarchy/themed/` template so the console **and the Linux client** follow `omarchy-theme-set`. |
@@ -91,6 +92,63 @@ punktfunk-host ctl approve 1
 ```
 
 See [the ctl reference](/docs/host-cli#ctl) for the full verb list.
+
+## Dedicated display vs This screen
+
+What the client sees is a capture-mode switch, not a preset.
+
+| Mode | What streams |
+| --- | --- |
+| **Dedicated display** *(default)* | A virtual display at the client's exact size and refresh. |
+| **This screen** | The primary (or only) monitor on this box, untouched. |
+
+Pick one from **Punktfunk Host** in Apps (`Super`+`Space`), from the bar panel's **DISPLAY**
+section, or:
+
+```sh
+punktfunk-omarchy mode dedicated
+punktfunk-omarchy mode mirror
+punktfunk-omarchy mode --status
+```
+
+`--status` reads the settings file only, so the menu's checked rows do not start the host.
+This screen is the [Streamed screen](/docs/virtual-displays#stream-a-real-monitor-instead)
+pin; Dedicated clears it. A change applies to the **next** connection.
+
+## Keep-alive and window re-home
+
+Omarchy runs Hyprland. A disconnect leaves the named headless output up for the
+[keep-alive](/docs/virtual-displays#keep-alive) window; a matching reconnect recasts that
+same head instead of minting an empty one. Exclusive topology keeps physical monitors dark
+until real teardown.
+
+When the head does come down, its workspace moves onto a remaining physical monitor.
+Windows are never destroyed with the stream. A box with no physical left skips the move.
+
+Release a kept head from the console (**Virtual displays** → *Release*) or with
+`punktfunk-host ctl display release`. `ctl display` lists live and lingered heads on this
+compositor.
+
+## The bar panel
+
+`setup` installs a Quickshell widget in the Omarchy bar. Click opens a panel in the same
+shape as Tailscale, network and audio: a hero, then one scrolling column.
+
+| Section | What it is |
+| --- | --- |
+| **Hero** | Rotating phrases while streaming; the trailing switch starts and stops the user unit. |
+| **SESSION** | Facts, stop / end-game, and a compact sparkline while live. |
+| **PAIRING** | Expands when a device waits; an arm row when the host is idle. |
+| **DEVICES** | Both planes, unpair on the row. |
+| **DISPLAY** | Dedicated / This screen, then the virtual-display presets. |
+
+Right-click the bar mark to stop a live session, or to open the web console when nothing is
+streaming. The pairing toast is the `pairing-pending` hook (Approve / Deny); the panel only
+updates its badge. Keyboard: `j` / `k` move, Enter activates, Esc closes.
+
+The widget replaces the tray icon while it is enabled. DISPLAY does not list live heads —
+Dedicated / This screen and the presets are the daily surface; `ctl display` lists lingered
+ones if you need them.
 
 ## The client on Omarchy
 
@@ -169,6 +227,11 @@ systemctl --user restart punktfunk-host
 
 The cost is one concurrent session on that port; extra sessions fall back to ephemeral ports again.
 
+**Tailscale later still gets a rule.** Setup opens `tailscale0` only while the iface exists.
+A user path unit watches `/sys/class/net/tailscale0` and re-runs the same tagged rules when
+the iface appears after setup — joining a tailnet the next day is enough. `punktfunk-omarchy
+remove` disables the watch.
+
 ## Updating
 
 Punktfunk updates with everything else:
@@ -187,7 +250,10 @@ live in `/home` and persist. Nothing needs re-pairing after a rollback.
 
 ## Sunshine on the same box
 
-`omarchy install service sunshine` and Punktfunk can run together, with one caveat:
+Punktfunk is the remote desktop on this box. Leave Sunshine off unless you are migrating.
+
+`omarchy install service sunshine` and Punktfunk can share a machine during a trial, with one
+caveat:
 
 - **The native plane coexists.** Ports 9777 (QUIC), 47990 (management API) and 47992 (console) are
   ours alone, so the Punktfunk apps and the console work with Sunshine running and untouched.
@@ -195,9 +261,20 @@ live in `/home` and persist. Nothing needs re-pairing after a rollback.
   47998–48010 — exactly Sunshine's ports. Ours are **off by default**; leave them off unless you
   are migrating, and only one host can bind them.
 
-To migrate: `omarchy remove service sunshine`, then re-run `punktfunk-omarchy setup` and answer yes
-to GameStream if you still want stock Moonlight clients. More in [Switching from
-Sunshine](/docs/switching-from-sunshine).
+To migrate: `omarchy remove service sunshine`, then turn GameStream on only if you still want
+stock Moonlight clients. More in [Switching from Sunshine](/docs/switching-from-sunshine).
+
+### GameStream is the Moonlight hatch
+
+Native Punktfunk clients do not need GameStream. Stock [Moonlight](/docs/moonlight) does. It is
+a trusted-LAN hatch, not the default:
+
+- **Punktfunk Host → GameStream** in Apps (`Super`+`Space`)
+- `punktfunk-omarchy gamestream` — pins `PUNKTFUNK_GAMESTREAM=1`, restarts the host, opens the
+  extra ufw profile
+
+A Moonlight client shows a PIN on the device; enter it with **Punktfunk Host → Moonlight PIN**.
+Do not turn GameStream on while Sunshine still holds those ports.
 
 ## Screen sharing keeps working
 
@@ -249,6 +326,10 @@ through. `systemctl --user status xdg-desktop-portal-hyprland`.
 **The host is not running after a reboot.** `punktfunk-omarchy status` will say whether it is bound
 to the desktop session; if not, re-run `punktfunk-omarchy setup`.
 
+**Physical monitors stayed dark after disconnect.** Exclusive topology plus keep-alive — the
+named head is still up. Release it from the console or `punktfunk-host ctl display release`. See
+[Virtual displays](/docs/virtual-displays#troubleshooting).
+
 More in [Troubleshooting](/docs/troubleshooting) and on the [Hyprland page](/docs/hyprland), which
 covers the compositor-level details this page assumes.
 
@@ -259,7 +340,7 @@ punktfunk-omarchy remove                      # the Omarchy wiring
 sudo pacman -R punktfunk-host punktfunk-web   # the packages
 ```
 
-`remove` reverses every step of `setup` — units, drop-in, ufw rules, the certificate trust, the
-webapp, the bar widget, the hooks, the theme template — and restores both the screen-share picker
-and the tray icon. Your config and pairings survive both; see
+`remove` reverses every step of `setup` — units, drop-in, ufw rules, the tailscale0 watch, the
+certificate trust, the webapp, the bar widget, the hooks, the theme template — and restores both
+the screen-share picker and the tray icon. Your config and pairings survive both; see
 [Uninstall](/docs/uninstall) to clear those too.
