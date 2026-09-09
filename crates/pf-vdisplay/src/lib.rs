@@ -43,6 +43,8 @@ pub(crate) fn emit_display_event(ev: DisplayEvent) {
 /// Re-exported so `crate::VirtualDisplay` stays the public name.
 #[path = "vdisplay/backend.rs"]
 pub(crate) mod backend;
+#[cfg(target_os = "linux")]
+pub use backend::SessionCastParts;
 pub use backend::{DisplayOwnership, SessionIsolation, VirtualDisplay, VirtualOutput};
 /// Negotiated ScreenCast cursor mode of a portal-backed output
 /// ([`VirtualDisplay::last_portal_cursor_mode`]). The picker stays private; the verdict is the caller's.

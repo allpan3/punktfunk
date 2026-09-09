@@ -8,8 +8,9 @@
 //!
 //! Linux: a per-session pool driven by [`super::lifecycle`]. Capture on the
 //! default PipeWire daemon (`remote_fd == None`) stays alive with the keepalive;
-//! reconnect re-attaches to the same `node_id`. wlroots (`remote_fd == Some`)
-//! cannot re-open the portal fd, so it stays teardown-on-drop.
+//! reconnect re-attaches to the same `node_id`. Hyprland lingers the named head
+//! and recasts ScreenCast by name; wlroots (`remote_fd == Some`) cannot re-open
+//! the portal fd, so it stays teardown-on-drop.
 //!
 //! [`acquire`] returns a `VirtualOutput` whose `keepalive` is a generation-stamped
 //! `DisplayLease`. Dropping it releases the registry refcount; the lifecycle
@@ -1021,8 +1022,8 @@ mod linux {
         }
     }
 
-    /// Session-facing output: kept node + generation-stamped lease. Only
-    /// poolable (`remote_fd == None`) backends reach here, so `remote_fd` is None.
+    /// Session-facing output: kept node + generation-stamped lease. Pooled
+    /// backends reach here with `remote_fd` None; Hyprland recast may fill it.
     #[allow(clippy::too_many_arguments)]
     fn output_for(
         node_id: u32,
@@ -1094,6 +1095,19 @@ mod linux {
                             && e.hw_cursor == vd.hw_cursor()
                             && e.hdr == vd.hdr()
                             && epoch_matches(e.backend, e.epoch, cur_epoch)
+                            && (backend != "hyprland"
+                                || matches!(
+                                    crate::hyprland::linger_reuse_decision(
+                                        backend,
+                                        mode,
+                                        vd.last_identity_slot(),
+                                        e.backend,
+                                        e.mode,
+                                        e.identity_slot,
+                                        e.output_name.as_deref(),
+                                    ),
+                                    crate::hyprland::LingerReuse::Recast { .. }
+                                ))
                     })
                     .map(|e| (e.generation, e.node_id))
             };
@@ -1142,7 +1156,22 @@ mod linux {
                     }
                 };
                 match reuse {
-                    ReuseOutcome::Reused(out) => return Ok(out),
+                    ReuseOutcome::Reused(out) => {
+                        let pool_gen = out.pool_gen;
+                        match attach_session_cast(vd, out) {
+                            Ok(out) => return Ok(out),
+                            Err(e) => {
+                                if let Some(g) = pool_gen {
+                                    mark_failed(g);
+                                }
+                                tracing::info!(
+                                    backend,
+                                    error = %format!("{e:#}"),
+                                    "virtual display: recast of kept head failed — recreating"
+                                );
+                            }
+                        }
+                    }
                     ReuseOutcome::Dead(dead, restore) => {
                         // Outside the lock: restore physicals, then drop keepalive (may block).
                         if let Some(rst) = restore {
@@ -1189,9 +1218,10 @@ mod linux {
         let real = vd.create(mode)?;
         let identity_slot = vd.last_identity_slot();
 
-        // Pool only `Owned` on the default PipeWire daemon. Pass through
+        // Pool only `Owned` with no portal fd on the output. Pass through
         // `External`/`SessionManaged` (gamescope owns those; pooling wedges on
-        // a stale node) and `remote_fd = Some` (wlroots portal fd cannot reopen).
+        // a stale node) and `remote_fd = Some` (wlroots cannot reopen the fd).
+        // Hyprland leaves the fd off so this arm pools the named head.
         if real.ownership != crate::DisplayOwnership::Owned || real.remote_fd.is_some() {
             tracing::debug!(
                 backend,
@@ -1278,7 +1308,41 @@ mod linux {
             false,
         );
         out.expect_exact_dims = expect_exact_dims;
+        match attach_session_cast(vd, out) {
+            Ok(out) => Ok(out),
+            Err(e) => {
+                mark_failed(generation);
+                Err(e)
+            }
+        }
+    }
+
+    /// Hyprland: attach a session-scoped ScreenCast (pending from `create`, or
+    /// a recast on reconnect). Other backends return `None` and leave `out`.
+    fn attach_session_cast(
+        vd: &mut Box<dyn VirtualDisplay>,
+        mut out: VirtualOutput,
+    ) -> Result<VirtualOutput> {
+        let Some(name) = out.output_name.clone() else {
+            return Ok(out);
+        };
+        let Some((node_id, fd, cast)) = vd.session_cast_for(&name)? else {
+            return Ok(out);
+        };
+        out.node_id = node_id;
+        out.remote_fd = fd;
+        let lease = std::mem::replace(&mut out.keepalive, Box::new(()));
+        out.keepalive = Box::new(CastAndLease {
+            _cast: cast,
+            _lease: lease,
+        });
         Ok(out)
+    }
+
+    /// Drop order: close ScreenCast, then the registry lease (linger vs teardown).
+    struct CastAndLease {
+        _cast: Box<dyn Send>,
+        _lease: Box<dyn Send>,
     }
 
     /// [`DisplayLease`] drop: lifecycle decides linger / pin / teardown.

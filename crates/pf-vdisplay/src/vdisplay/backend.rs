@@ -110,6 +110,10 @@ pub struct VirtualOutput {
     pub seat: Option<String>,
 }
 
+/// PipeWire node, optional remote fd, and the RAII that closes ScreenCast.
+#[cfg(target_os = "linux")]
+pub type SessionCastParts = (u32, Option<OwnedFd>, Box<dyn Send>);
+
 impl VirtualOutput {
     /// Registry-owned output. Caller fills the platform fields (`remote_fd`, `win_capture`, …).
     pub fn owned(
@@ -148,6 +152,13 @@ pub trait VirtualDisplay: Send {
     /// Create a virtual output of the given mode. Teardown is RAII: drop the returned
     /// [`VirtualOutput`]'s `keepalive`.
     fn create(&mut self, mode: Mode) -> Result<VirtualOutput>;
+    /// Session-scoped ScreenCast for a named output the registry is lingering.
+    /// Hyprland recasts by name; default `None` (the pooled node is already live).
+    #[cfg(target_os = "linux")]
+    fn session_cast_for(&mut self, _name: &str) -> Result<Option<SessionCastParts>> {
+        let _ = _name;
+        Ok(None)
+    }
     /// Nested launch command. Instance-local, not env: concurrent sessions must not stomp.
     /// Default no-op; only gamescope spawn uses it.
     fn set_launch_command(&mut self, _cmd: Option<String>) {}
