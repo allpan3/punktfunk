@@ -253,6 +253,40 @@ window it renders in.
 
 ---
 
+## 4b. UI copy
+
+Every string an operator reads *while working a control* — the web console
+first, and any surface that grows the same shape. Error messages stay §4.
+
+A control is made clear by its options, not by a paragraph under it.
+`web/tools/check-i18n.mjs` fails the build on a string over budget.
+
+| Kind | Budget | Rule |
+|---|---|---|
+| Label | ≤ 3 words | Names the thing, not the mechanism. `Your monitors while streaming`, not `Topology`. |
+| Option | — | The outcome, as the operator would say it: `Turn off`, `Stay on`, `Hand over`. |
+| Hint | 1 sentence, ≤ 110 chars | Only when the options cannot carry it. States the consequence or the next move. |
+| Warning | 2 sentences | What happens, then what to do. |
+| Anything longer | — | A `Docs ↗` link into `docs-site/` beside the hint. The console does not host manuals. |
+
+- Never the implementation: no `atiadlxx.dll`, no `PUT /display/settings`, no
+  connector enum in a hint.
+- Never a platform in the words — `Windows only` means the control should not
+  have been rendered. Gate it on what the host says it enforces.
+- Status words are outcomes: `Streaming`, `Kept`, `Kept until released`, `Off`.
+  Not `Lingering`, `Pinned`, `Active`.
+- Translations get 20% more room; the base locale is where the budget bites.
+- The lint's allowlist is for legal and security texts, where the exact wording
+  is the point. Each entry is a debt line in `design/web-console-overhaul.md` §2.2.
+
+Bad: `Windows only, takes effect with Exclusive topology. Before disabling your
+physical monitors, the host also tells them to power their panel off over the
+DDC/CI monitor-control channel, and wakes them again when the stream ends. …`
+Good: `Stops the stutter some setups get with a dark monitor. If one stays dark,
+press its power button.` + `Docs ↗`
+
+---
+
 ## 5. Checklist (every PR)
 
 - [ ] Subject is `type(scope): summary`, ≤ 72 characters, imperative, no period

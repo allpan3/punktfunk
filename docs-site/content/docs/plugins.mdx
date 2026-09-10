@@ -320,6 +320,15 @@ packaged `/usr` and `~/.local` layouts. Point `PUNKTFUNK_SCRIPTING` at it (see
 whose `PATH` is much shorter than your shell's — a runner that `plugins add` finds and the console
 doesn't is that difference, and the env var is the fix.
 
+**A plugin's interface won't load** — plugin UIs are served on their own port (47993 by default)
+so a plugin can never act as you on the console. Two things stop a browser talking to it:
+
+- **The certificate isn't accepted for that port.** Certificates are trusted per origin, and a
+  frame cannot prompt for one, so the console offers an **Open in a tab** button. Accept the
+  warning there once, come back, and retry.
+- **The port is closed on the host.** Open TCP 47993 in the host's firewall. To move it, set
+  `PUNKTFUNK_UI_PLUGIN_PORT` to a free port and restart the console.
+
 **Where a plugin's log output goes** — the console's **Logs** page, under the **Plugins** filter.
 Plugin lines sit next to the host's, on one timeline, tagged `plugin:<name>` (`plugin:runner` for
 the supervisor). An empty Plugins view almost always means the runner isn't running — check with

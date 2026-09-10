@@ -75,6 +75,54 @@ if (emitted < expected) {
 	);
 }
 
+// The UI copy budget (design/web-console-overhaul.md D2, docs/writing.md §4b). A control is
+// made clear by its options, not by a paragraph under it — the measured baseline was 47 strings
+// over 120 characters, three of them over 550, each sitting under a two-button toggle.
+//
+// Anything an operator might still want to know goes to docs-site behind a `Docs ↗` link.
+const HINT = /(_help|_hint|_note|_intro)$/;
+const HINT_MAX = 110;
+const OTHER_MAX = 200;
+// Translations get 20% more room: German runs longer than English for the same sentence, and
+// squeezing it back under an English budget buys stilted German, not a clearer control. The
+// base locale is where the copy is authored, so that is where the real limit bites.
+const TRANSLATION_SLACK = 1.2;
+
+// Legal and security texts, where the exact wording is the point and a Docs link is not a
+// substitute for reading it. Every entry here is a debt line in the design doc §2.2.
+const LONG_OK = new Set([
+	"store_spec_lead", // installing from a raw package registry: no catalog, no review
+	"store_install_external_note", // third-party catalog code runs with the runner's privileges
+	"store_update_all_external_note", // the same, for a bulk update
+]);
+
+const limit = (key, isBase) =>
+	Math.round(
+		(HINT.test(key) ? HINT_MAX : OTHER_MAX) * (isBase ? 1 : TRANSLATION_SLACK),
+	);
+
+const tooLong = [];
+for (const locale of settings.locales) {
+	const path = resolve(project, "..", pathPattern.replace("{locale}", locale));
+	if (!existsSync(path))
+		fail(`messages for locale "${locale}" missing at ${path}`);
+	const messages = JSON.parse(readFileSync(path, "utf8"));
+	for (const [key, value] of Object.entries(messages)) {
+		if (key.startsWith("$") || typeof value !== "string") continue;
+		if (LONG_OK.has(key)) continue;
+		const max = limit(key, locale === settings.baseLocale);
+		if (value.length > max) {
+			tooLong.push(`  ${locale}/${key}: ${value.length} chars (max ${max})`);
+		}
+	}
+}
+if (tooLong.length > 0) {
+	fail(
+		`${tooLong.length} message(s) over the UI copy budget — shorten them, or move the detail ` +
+			`into docs-site behind a Docs link (docs/writing.md §4b):\n${tooLong.join("\n")}`,
+	);
+}
+
 console.log(
-	`✔ i18n check: ${emitted} compiled messages for ${settings.locales.join(", ")}`,
+	`✔ i18n check: ${emitted} compiled messages for ${settings.locales.join(", ")}, all within the copy budget`,
 );

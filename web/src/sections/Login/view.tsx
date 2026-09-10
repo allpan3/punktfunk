@@ -1,6 +1,7 @@
 import { ease } from "@unom/style";
 import { motion } from "motion/react";
 import { type FC, useState } from "react";
+import { DocsLink } from "@/components/docs-link";
 import Logo from "@/components/logo";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -28,14 +29,7 @@ export const LoginView: FC<{
 					<CardTitle className="text-xl">{m.login_title()}</CardTitle>
 					<p className="text-sm text-muted-foreground">
 						{m.login_subtitle()}{" "}
-						<a
-							href="https://docs.punktfunk.unom.io/docs/forgot-password"
-							target="_blank"
-							rel="noreferrer"
-							className="underline underline-offset-4 hover:text-foreground"
-						>
-							{m.login_docs_link()}
-						</a>
+						<DocsLink path="forgot-password">{m.login_docs_link()}</DocsLink>
 					</p>
 				</CardHeader>
 				<CardContent>

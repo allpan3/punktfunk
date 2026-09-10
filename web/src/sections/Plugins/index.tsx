@@ -15,6 +15,7 @@ import { type FC, useEffect, useMemo, useRef } from "react";
 import { pluginIcon, usePlugins } from "@/api/plugins";
 import { useInstalledPlugins } from "@/api/store";
 import { pluginOriginFrom, useUiConfig } from "@/api/uiConfig";
+import { DocsLink } from "@/components/docs-link";
 import { Button } from "@/components/ui/button";
 import { useLocale } from "@/lib/i18n";
 import { m } from "@/paraglide/messages";
@@ -221,7 +222,8 @@ const UnavailableCard: FC = () => (
 				{m.plugin_origin_unavailable_title()}
 			</h2>
 			<p className="text-sm text-muted-foreground">
-				{m.plugin_origin_unavailable_hint()}
+				{m.plugin_origin_unavailable_hint()}{" "}
+				<DocsLink path="plugins#troubleshooting" />
 			</p>
 		</div>
 	</div>
@@ -242,7 +244,8 @@ const UntrustedOriginCard: FC<{ href: string; onRetry: () => void }> = ({
 				{m.plugin_origin_untrusted_title()}
 			</h2>
 			<p className="text-sm text-muted-foreground">
-				{m.plugin_origin_untrusted_hint()}
+				{m.plugin_origin_untrusted_hint()}{" "}
+				<DocsLink path="plugins#troubleshooting" />
 			</p>
 			<Button asChild variant="outline" size="sm">
 				<a href={href} target="_blank" rel="noreferrer">

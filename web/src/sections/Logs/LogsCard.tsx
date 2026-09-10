@@ -15,6 +15,7 @@ import {
 	useRef,
 	useState,
 } from "react";
+import { DocsLink } from "@/components/docs-link";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -304,13 +305,19 @@ export const LogsCard: FC<{
 								</div>
 							) : (
 								<p className="text-muted-foreground">
-									{isLoading
-										? m.common_loading()
-										: nothingSelected
-											? m.logs_sources_none()
-											: onlyPlugins
-												? m.logs_empty_plugins()
-												: m.logs_empty()}
+									{isLoading ? (
+										m.common_loading()
+									) : nothingSelected ? (
+										m.logs_sources_none()
+									) : onlyPlugins ? (
+										// A silent runner says why in its own log; the docs name it.
+										<>
+											{m.logs_empty_plugins()}{" "}
+											<DocsLink path="plugins#troubleshooting" />
+										</>
+									) : (
+										m.logs_empty()
+									)}
 								</p>
 							)}
 						</div>

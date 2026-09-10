@@ -228,6 +228,45 @@ independent of the preset. On a box already in Steam game mode, a dedicated Stea
 mode's Steam first and restores it when the session ends. (GameStream / Moonlight launches follow
 the same routing.)
 
+## Advanced Windows options
+
+Three extra levers on the **Virtual displays** page, shown only on a Windows host that can act on
+them. All three take effect with **Exclusive** topology, where your physical monitors are turned
+off for the duration of the stream, and all three are undone when the stream ends — or, if the
+host crashes mid-stream, the next time it starts.
+
+### Power monitors off (DDC/CI)
+
+Before removing your physical monitors from the desktop, the host also tells each one to power its
+panel off over the DDC/CI monitor-control channel, and wakes them again afterwards.
+
+Some setups see a periodic stutter when the streamed display is the only active one: the dark
+monitor keeps probing its inputs, and a panel that was told to sleep does not. Monitors without
+DDC/CI support are skipped. If a monitor does not wake up afterwards, press its power button once
+and turn this off.
+
+### Disable monitor devices (PnP)
+
+On top of removing the monitors from the desktop, the host disables their Windows device entries
+for the duration of the stream.
+
+A standby monitor or TV that keeps waking its connection — auto input scan, instant-on — can then
+no longer interrupt the stream, because Windows ignores its wake events entirely while the device
+is disabled. If the host crashes mid-stream, the monitors are re-enabled the next time it starts;
+until then you can re-enable them by hand in Device Manager.
+
+### Hold monitor identity (EDID)
+
+**AMD graphics cards only.** While streaming, the host tells the AMD driver to keep treating each
+connected monitor as present with its current identity (EDID) even while the monitor sleeps — the
+software equivalent of a dummy plug.
+
+This stops the driver from periodically probing a sleeping monitor's connection, which on some
+setups causes a rhythmic stutter every couple of seconds while the virtual display is the only
+active one. The option appears only where the AMD driver's control library (`atiadlxx.dll`) is
+actually installed. If a monitor misbehaves afterwards, turn this off and unplug/replug it — or,
+in the worst case, reinstall the graphics driver.
+
 ## When a game ends, and when a session does
 
 Two switches, on the **Virtual displays** page under **When a game or a session ends**, tie a
