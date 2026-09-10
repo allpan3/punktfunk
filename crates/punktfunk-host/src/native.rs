@@ -1091,6 +1091,7 @@ pub(crate) fn setup_failed_sentence(e: &anyhow::Error) -> Option<String> {
         .map(|m| m.user_message())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn serve_session(
     conn: link::SessionLink,
     opts: &Arc<Punktfunk1Options>,
