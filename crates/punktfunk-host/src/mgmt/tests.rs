@@ -1823,11 +1823,33 @@ async fn display_settings_surface() {
     assert!(enforced.contains(&"mode_conflict"));
     assert!(enforced.contains(&"identity"));
     assert!(enforced.contains(&"layout"));
-    // DDC/CI, PnP-disable, and EDID-lock are acted on (Windows exclusive-isolate;
-    // edid_lock additionally needs an AMD driver).
-    assert!(enforced.contains(&"ddc_power_off"));
-    assert!(enforced.contains(&"pnp_disable_monitors"));
-    assert!(enforced.contains(&"edid_lock"));
+    // The console renders this list verbatim and hides anything absent from it
+    // (design/web-console-overhaul.md D1), so a name here is a control an operator can
+    // click. A build that cannot act on a field must not advertise it.
+    assert_eq!(
+        enforced.contains(&"ddc_power_off"),
+        cfg!(target_os = "windows"),
+        "DDC/CI power-off is the Windows exclusive-isolate lever"
+    );
+    assert_eq!(
+        enforced.contains(&"pnp_disable_monitors"),
+        cfg!(target_os = "windows"),
+        "PnP monitor-disable is the Windows exclusive-isolate lever"
+    );
+    // These three are additionally conditional ON their platform — an AMD driver, the
+    // MIRROR backend, a gamescope binary — so only the negative direction is universal.
+    assert!(
+        !enforced.contains(&"edid_lock") || cfg!(target_os = "windows"),
+        "EDID lock is the AMD driver's connector emulation, which exists only on Windows"
+    );
+    assert!(
+        !enforced.contains(&"capture_monitor") || cfg!(target_os = "linux"),
+        "pinning a real monitor needs the Linux MIRROR backend"
+    );
+    assert!(
+        !enforced.contains(&"game_session") || cfg!(target_os = "linux"),
+        "a dedicated game session is a headless gamescope spawn"
+    );
 }
 
 /// No backend has created a display here (non-Windows reports none): empty `/state`, no-op `/release`.

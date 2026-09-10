@@ -328,6 +328,15 @@ fn c_str(buf: &[u8]) -> String {
 
 /// Apply `action` to every AMD adapter connector, or only `connector_filter`.
 /// [`EmulAction::Lock`] pins occupied connectors only unless the filter names one.
+/// Whether `atiadlxx.dll` loads with every export this module binds.
+///
+/// The one-shot answer to "does this box have the EDID-lock lever at all". Probed once
+/// and cached: the module stays loaded for the process either way.
+pub fn available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| Adl::load().is_some())
+}
+
 pub fn run(action: EmulAction, connector_filter: Option<i32>) -> RunOutcome {
     let mut recs: Vec<OpRecord> = Vec::new();
     let mut rec = |op: &'static str, target: &str, took_ms: u128, rc: i32, extra: String| {

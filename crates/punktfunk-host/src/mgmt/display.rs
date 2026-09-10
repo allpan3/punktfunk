@@ -45,6 +45,32 @@ pub(crate) fn preset_summary(id: &str) -> &'static str {
     }
 }
 
+/// Whether the AMD driver's control library loads — the EDID lever's only precondition.
+///
+/// The lever is that driver's connector-emulation call, so the DLL is the honest question; a
+/// GPU-vendor check is a proxy for it, and was the console's own gate until this moved here.
+fn edid_lock_available() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        pf_win_display::adl_emul::available()
+    }
+    #[cfg(not(target_os = "windows"))]
+    false
+}
+
+/// Whether a gamescope backend is usable on this host. Cached: see the call site.
+fn gamescope_present() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        static PRESENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *PRESENT.get_or_init(|| {
+            crate::vdisplay::available().contains(&crate::vdisplay::Compositor::Gamescope)
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    false
+}
+
 pub(crate) fn display_settings_state() -> DisplaySettingsState {
     use crate::vdisplay::policy::{self, Preset};
     let store = policy::prefs();
@@ -72,13 +98,24 @@ pub(crate) fn display_settings_state() -> DisplaySettingsState {
         "mode_conflict".into(),
         "identity".into(),
         "layout".into(),
-        "game_session".into(),
-        // Windows-only at the exclusive isolate (`vdisplay/windows/manager.rs`); inert elsewhere.
-        "ddc_power_off".into(),
-        "pnp_disable_monitors".into(),
-        // Windows + ADL only; inert without `atiadlxx.dll`. Console hides the toggle unless an AMD GPU is present.
-        "edid_lock".into(),
     ];
+    // `game_session: dedicated` routes a launch to its own headless gamescope
+    // (`native/compositor.rs`), so without the binary the axis stores and does nothing.
+    // Probed once: `available()` forks `gamescope --version` and walks /proc, and an
+    // install mid-run is a host restart away either way.
+    if gamescope_present() {
+        enforced.push("game_session".into());
+    }
+    // Windows-only: both levers live in the exclusive isolate (`vdisplay/windows/manager.rs`).
+    // A field this build cannot act on is not advertised — the console renders `enforced`
+    // verbatim, so a name kept here is a dead control there.
+    if cfg!(target_os = "windows") {
+        enforced.push("ddc_power_off".into());
+        enforced.push("pnp_disable_monitors".into());
+    }
+    if edid_lock_available() {
+        enforced.push("edid_lock".into());
+    }
     // Linux-only: `capture_monitor` needs the MIRROR backend (`vdisplay::open`). Do not
     // advertise it off Linux — a stored pin would never take effect.
     if cfg!(target_os = "linux") {
