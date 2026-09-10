@@ -15,7 +15,6 @@ import {
 import { usePlatform } from "@/api/platform";
 import { QueryState } from "@/components/query-state";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
@@ -69,158 +68,154 @@ export const SessionGameCard: FC = () => {
 	if (!actsAny("session")) return null;
 
 	return (
-		<Card>
-			<CardHeader>
-				<CardTitle>{m.session_game_title()}</CardTitle>
-			</CardHeader>
-			<CardContent className="space-y-4">
-				<p className="max-w-prose text-sm text-muted-foreground">
-					{m.session_game_help()}
-				</p>
-				<QueryState isLoading={q.isLoading} error={q.error} refetch={q.refetch}>
-					{server && (
-						<div className="space-y-6">
-							{enforces("session_on_game_exit") && (
-								<Field
-									label={m.session_game_on_exit()}
-									help={m.session_game_on_exit_help()}
-									group
-								>
-									<div className="flex flex-wrap gap-2">
-										<Choice
-											selected={server.session_on_game_exit === true}
-											disabled={busy}
-											onClick={() => apply({ session_on_game_exit: true })}
-										>
-											{m.session_game_on_exit_end()}
-										</Choice>
-										<Choice
-											selected={server.session_on_game_exit === false}
-											disabled={busy}
-											onClick={() => apply({ session_on_game_exit: false })}
-										>
-											{m.session_game_on_exit_keep()}
-										</Choice>
-									</div>
-								</Field>
-							)}
+		<section className="space-y-4">
+			<h3 className="text-sm font-medium">{m.session_game_title()}</h3>
+			<p className="max-w-prose text-sm text-muted-foreground">
+				{m.session_game_help()}
+			</p>
+			<QueryState isLoading={q.isLoading} error={q.error} refetch={q.refetch}>
+				{server && (
+					<div className="space-y-6">
+						{enforces("session_on_game_exit") && (
+							<Field
+								label={m.session_game_on_exit()}
+								help={m.session_game_on_exit_help()}
+								group
+							>
+								<div className="flex flex-wrap gap-2">
+									<Choice
+										selected={server.session_on_game_exit === true}
+										disabled={busy}
+										onClick={() => apply({ session_on_game_exit: true })}
+									>
+										{m.session_game_on_exit_end()}
+									</Choice>
+									<Choice
+										selected={server.session_on_game_exit === false}
+										disabled={busy}
+										onClick={() => apply({ session_on_game_exit: false })}
+									>
+										{m.session_game_on_exit_keep()}
+									</Choice>
+								</div>
+							</Field>
+						)}
 
-							{enforces("game_on_session_end") && (
-								<Field
-									label={m.session_game_end_game()}
-									help={m.session_game_end_game_help()}
-									group
-								>
-									<div className="flex flex-wrap gap-2">
-										{END_POLICIES.map((p) => (
-											<Choice
-												key={p}
-												selected={(server.game_on_session_end ?? "keep") === p}
-												disabled={busy}
-												onClick={() => apply({ game_on_session_end: p })}
-											>
-												{END_POLICY_LABEL[p]()}
-											</Choice>
-										))}
-									</div>
-									{(server.game_on_session_end ?? "keep") === "always" && (
-										<p className="max-w-prose text-xs text-muted-foreground">
-											{m.session_game_always_warning()}
-										</p>
-									)}
-									{/* Shown for every option, including "leave it running": on a nested
+						{enforces("game_on_session_end") && (
+							<Field
+								label={m.session_game_end_game()}
+								help={m.session_game_end_game_help()}
+								group
+							>
+								<div className="flex flex-wrap gap-2">
+									{END_POLICIES.map((p) => (
+										<Choice
+											key={p}
+											selected={(server.game_on_session_end ?? "keep") === p}
+											disabled={busy}
+											onClick={() => apply({ game_on_session_end: p })}
+										>
+											{END_POLICY_LABEL[p]()}
+										</Choice>
+									))}
+								</div>
+								{(server.game_on_session_end ?? "keep") === "always" && (
+									<p className="max-w-prose text-xs text-muted-foreground">
+										{m.session_game_always_warning()}
+									</p>
+								)}
+								{/* Shown for every option, including "leave it running": on a nested
 								    gamescope launch the game IS inside the streamed display, so the
 								    display's own keep-alive outranks anything chosen here — verified
 								    on glass (.41), where a deliberate stop ended the game under
 								    `keep`. Worded so a non-gamescope host reads it and moves on. */}
-									<p className="max-w-prose text-xs text-muted-foreground">
-										{m.session_game_nested_note()}
-									</p>
-								</Field>
-							)}
+								<p className="max-w-prose text-xs text-muted-foreground">
+									{m.session_game_nested_note()}
+								</p>
+							</Field>
+						)}
 
-							{/* Its own axis rather than a fourth end-policy: that one asks what a
+						{/* Its own axis rather than a fourth end-policy: that one asks what a
 							    session owes its game, this one asks what a new launch owes the last
 							    one — and wanting a game to survive a disconnect says nothing about
 							    wanting it kept when you deliberately pick something else. */}
-							{enforces("game_on_new_launch") && (
-								<Field
-									label={m.session_game_new_launch()}
-									help={m.session_game_new_launch_help()}
-									group
-								>
-									<div className="flex flex-wrap gap-2">
-										{NEW_LAUNCH_POLICIES.map((p) => (
-											<Choice
-												key={p}
-												selected={(server.game_on_new_launch ?? "keep") === p}
-												disabled={busy}
-												onClick={() => apply({ game_on_new_launch: p })}
-											>
-												{NEW_LAUNCH_LABEL[p]()}
-											</Choice>
-										))}
-									</div>
-									{(server.game_on_new_launch ?? "keep") === "end" && (
-										<p className="max-w-prose text-xs text-muted-foreground">
-											{m.session_game_new_launch_scope()}
-										</p>
-									)}
-								</Field>
-							)}
+						{enforces("game_on_new_launch") && (
+							<Field
+								label={m.session_game_new_launch()}
+								help={m.session_game_new_launch_help()}
+								group
+							>
+								<div className="flex flex-wrap gap-2">
+									{NEW_LAUNCH_POLICIES.map((p) => (
+										<Choice
+											key={p}
+											selected={(server.game_on_new_launch ?? "keep") === p}
+											disabled={busy}
+											onClick={() => apply({ game_on_new_launch: p })}
+										>
+											{NEW_LAUNCH_LABEL[p]()}
+										</Choice>
+									))}
+								</div>
+								{(server.game_on_new_launch ?? "keep") === "end" && (
+									<p className="max-w-prose text-xs text-muted-foreground">
+										{m.session_game_new_launch_scope()}
+									</p>
+								)}
+							</Field>
+						)}
 
-							{enforces("disconnect_grace_seconds") &&
-								(server.game_on_session_end ?? "keep") === "always" && (
-									<Field
-										label={m.session_game_grace()}
-										help={m.session_game_grace_help()}
-										htmlFor="session-grace-seconds"
-									>
-										<div className="flex items-center gap-2">
-											{/* Deliberately NOT `InputNumber`, unlike the numeric fields on
+						{enforces("disconnect_grace_seconds") &&
+							(server.game_on_session_end ?? "keep") === "always" && (
+								<Field
+									label={m.session_game_grace()}
+									help={m.session_game_grace_help()}
+									htmlFor="session-grace-seconds"
+								>
+									<div className="flex items-center gap-2">
+										{/* Deliberately NOT `InputNumber`, unlike the numeric fields on
 										    the policy card next door. This one writes to the HOST on
 										    blur, and InputNumber commits while you type — so its own
 										    blur-time clamp would race the apply below, which still
 										    closes over the pre-clamp value. The host is the authority
 										    here regardless: it clamps to 10..=86400 on write and
 										    answers with what it actually stored. */}
-											<Input
-												id="session-grace-seconds"
-												type="number"
-												min={10}
-												max={86400}
-												className="w-28"
-												value={grace}
-												disabled={busy}
-												onChange={(e) => setGrace(e.target.value)}
-												onBlur={() => {
-													const n = Number(grace);
-													if (!Number.isFinite(n)) {
-														setGrace(
-															String(server.disconnect_grace_seconds ?? 300),
-														);
-														return;
-													}
-													// The host clamps to 10..=86400 and returns what it stored, so
-													// a nonsense number is corrected rather than rejected.
-													if (n !== server.disconnect_grace_seconds) {
-														apply({ disconnect_grace_seconds: n });
-													}
-												}}
-											/>
-											<span className="text-sm text-muted-foreground">
-												{m.display_keep_alive_seconds()}
-											</span>
-										</div>
-									</Field>
-								)}
+										<Input
+											id="session-grace-seconds"
+											type="number"
+											min={10}
+											max={86400}
+											className="w-28"
+											value={grace}
+											disabled={busy}
+											onChange={(e) => setGrace(e.target.value)}
+											onBlur={() => {
+												const n = Number(grace);
+												if (!Number.isFinite(n)) {
+													setGrace(
+														String(server.disconnect_grace_seconds ?? 300),
+													);
+													return;
+												}
+												// The host clamps to 10..=86400 and returns what it stored, so
+												// a nonsense number is corrected rather than rejected.
+												if (n !== server.disconnect_grace_seconds) {
+													apply({ disconnect_grace_seconds: n });
+												}
+											}}
+										/>
+										<span className="text-sm text-muted-foreground">
+											{m.display_keep_alive_seconds()}
+										</span>
+									</div>
+								</Field>
+							)}
 
-							{error && <p className="text-sm text-destructive">{error}</p>}
-						</div>
-					)}
-				</QueryState>
-			</CardContent>
-		</Card>
+						{error && <p className="text-sm text-destructive">{error}</p>}
+					</div>
+				)}
+			</QueryState>
+		</section>
 	);
 };
 

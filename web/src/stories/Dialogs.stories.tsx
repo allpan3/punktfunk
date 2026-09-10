@@ -42,8 +42,8 @@ const Demo = ({
 						destructive: true,
 					}
 				: {
-						title: m.display_discard_confirm(),
-						confirmLabel: m.common_discard(),
+						title: m.display_preset_delete_confirm(),
+						confirmLabel: m.display_preset_delete(),
 					},
 		);
 		setAnswer(String(ok));

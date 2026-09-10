@@ -1,0 +1,319 @@
+// The host's desktop, to scale (design/web-console-overhaul.md D5, §5.4).
+//
+// One picture replaces three controls: the Live displays list (state rides the box), the X/Y
+// arrangement table (drag the box), and the Streamed screen card (the radio sits on the
+// monitor's own box). It answers "what happens to my screens when a device connects" before
+// any of the settings below it are read — which is the whole point of putting state above
+// configuration.
+//
+// Positions come from the host in DESKTOP pixels and are rendered as percentages of the
+// bounding box, so the map is responsive with no measurement. Only dragging needs the
+// container's real rect, and it reads it at drag time.
+import { Monitor, X } from "lucide-react";
+import {
+	type FC,
+	type PointerEvent as ReactPointerEvent,
+	useState,
+} from "react";
+import type { ApiDisplayInfo, ApiMonitorInfo } from "@/api/gen/model";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
+import { m } from "@/paraglide/messages";
+
+/** `2560x1440@120` / `2560x1440` → pixels. A head with no parsable mode is skipped. */
+export function parseMode(mode: string): { w: number; h: number } | undefined {
+	const hit = /^(\d+)x(\d+)/.exec(mode.trim());
+	if (!hit) return undefined;
+	const w = Number(hit[1]);
+	const h = Number(hit[2]);
+	return w > 0 && h > 0 ? { w, h } : undefined;
+}
+
+export interface MapBox {
+	key: string;
+	kind: "monitor" | "virtual";
+	x: number;
+	y: number;
+	w: number;
+	h: number;
+	title: string;
+	/** Mode line, or the state chip for a virtual display. */
+	detail: string;
+	primary?: boolean;
+	/** `active` | `lingering` | `pinned` — drives the chip on a virtual box. */
+	state?: string;
+	/** Milliseconds until a kept display is torn down; absent when active or held. */
+	expiresInMs?: number | null;
+	slot?: number;
+	connector?: string;
+	/** Dimmed: this monitor turns off while streaming under the previewed topology. */
+	dimmed?: boolean;
+	draggable?: boolean;
+}
+
+/** Everything the map draws, in desktop pixels — pure, so the layout maths is testable. */
+export function toBoxes(
+	monitors: readonly ApiMonitorInfo[],
+	displays: readonly ApiDisplayInfo[],
+	opts: { dimMonitors?: boolean } = {},
+): MapBox[] {
+	const boxes: MapBox[] = [];
+	for (const mon of monitors) {
+		// A managed head IS one of our virtual displays; drawing it twice would double every
+		// streaming screen on a KWin host.
+		if (mon.managed) continue;
+		const size = parseMode(mon.mode);
+		if (!size) continue;
+		boxes.push({
+			key: `mon-${mon.connector}`,
+			kind: "monitor",
+			x: mon.x,
+			y: mon.y,
+			w: size.w,
+			h: size.h,
+			title: mon.connector,
+			detail: mon.mode,
+			primary: mon.primary,
+			connector: mon.connector,
+			dimmed: opts.dimMonitors === true || !mon.enabled,
+		});
+	}
+	for (const d of displays) {
+		const size = parseMode(d.mode);
+		if (!size) continue;
+		boxes.push({
+			key: `slot-${d.slot}`,
+			kind: "virtual",
+			x: d.x,
+			y: d.y,
+			w: size.w,
+			h: size.h,
+			title: d.client ?? m.display_map_unnamed(),
+			detail: d.mode,
+			state: d.state,
+			expiresInMs: d.expires_in_ms,
+			slot: d.slot,
+			// Only a display with a stable identity slot has a manual-layout key; an anonymous
+			// one has nowhere to store a position, so it cannot be arranged.
+			draggable: d.identity_slot != null,
+		});
+	}
+	return boxes;
+}
+
+/** Bounding box over every drawn box, in desktop pixels. */
+export function bounds(boxes: readonly MapBox[]) {
+	const minX = Math.min(...boxes.map((b) => b.x));
+	const minY = Math.min(...boxes.map((b) => b.y));
+	const maxX = Math.max(...boxes.map((b) => b.x + b.w));
+	const maxY = Math.max(...boxes.map((b) => b.y + b.h));
+	return { minX, minY, w: maxX - minX, h: maxY - minY };
+}
+
+/**
+ * Snap a dragged edge to a neighbour's edge, so screens end up flush instead of one pixel apart.
+ * Tolerance is in desktop pixels and scales with the map, or snapping would be unreachable on a
+ * 5K desktop drawn 600 px wide.
+ */
+export function snap(
+	value: number,
+	size: number,
+	edges: readonly number[],
+	tolerance: number,
+): number {
+	let best = value;
+	let bestDelta = tolerance;
+	for (const edge of edges) {
+		for (const candidate of [edge, edge - size]) {
+			const delta = Math.abs(candidate - value);
+			if (delta < bestDelta) {
+				best = candidate;
+				bestDelta = delta;
+			}
+		}
+	}
+	return best;
+}
+
+export const DesktopMap: FC<{
+	monitors: readonly ApiMonitorInfo[];
+	displays: readonly ApiDisplayInfo[];
+	/** Preview: the selected policy turns the physical monitors off while streaming. */
+	dimMonitors?: boolean;
+	/** Pinned monitor (`capture_monitor`), so its box can show it is the streamed one. */
+	captureMonitor?: string | null;
+	onRelease?: (slot: number) => void;
+	/** Commit a dragged position, in desktop pixels. */
+	onMove?: (slot: number, x: number, y: number) => void;
+	busy?: boolean;
+}> = ({
+	monitors,
+	displays,
+	dimMonitors,
+	captureMonitor,
+	onRelease,
+	onMove,
+	busy,
+}) => {
+	// While a box is being dragged its position is local; everything else still comes from the
+	// host, so a poll landing mid-drag cannot yank the box out from under the pointer.
+	const [drag, setDrag] = useState<{
+		slot: number;
+		x: number;
+		y: number;
+	} | null>(null);
+
+	const boxes = toBoxes(monitors, displays, { dimMonitors });
+	if (boxes.length === 0) return null;
+	const placed = boxes.map((b) =>
+		drag && b.slot === drag.slot ? { ...b, x: drag.x, y: drag.y } : b,
+	);
+	const box = bounds(placed);
+	const pct = (v: number, span: number) => `${(v / span) * 100}%`;
+
+	const onPointerDown = (b: MapBox) => (e: ReactPointerEvent<HTMLElement>) => {
+		if (!onMove || !b.draggable || b.slot === undefined || busy) return;
+		const container = e.currentTarget.parentElement;
+		if (!container) return;
+		const rect = container.getBoundingClientRect();
+		if (rect.width === 0) return;
+		// Desktop pixels per screen pixel — the map is uniformly scaled, so one ratio does both
+		// axes.
+		const scale = box.w / rect.width;
+		const grabX = e.clientX * scale - b.x;
+		const grabY = e.clientY * scale - b.y;
+		// Every other box's edges are what a drag snaps to.
+		const xEdges = placed
+			.filter((o) => o.key !== b.key)
+			.flatMap((o) => [o.x, o.x + o.w]);
+		const yEdges = placed
+			.filter((o) => o.key !== b.key)
+			.flatMap((o) => [o.y, o.y + o.h]);
+		const tolerance = Math.max(8, box.w * 0.02);
+		e.currentTarget.setPointerCapture(e.pointerId);
+
+		const move = (ev: PointerEvent) => {
+			setDrag({
+				slot: b.slot as number,
+				x: Math.round(snap(ev.clientX * scale - grabX, b.w, xEdges, tolerance)),
+				y: Math.round(snap(ev.clientY * scale - grabY, b.h, yEdges, tolerance)),
+			});
+		};
+		const up = () => {
+			window.removeEventListener("pointermove", move);
+			window.removeEventListener("pointerup", up);
+			// Read the committed position from state at drop time rather than closing over a
+			// stale one.
+			setDrag((d) => {
+				if (d && d.slot === b.slot && (d.x !== b.x || d.y !== b.y)) {
+					onMove(d.slot, d.x, d.y);
+				}
+				return null;
+			});
+		};
+		window.addEventListener("pointermove", move);
+		window.addEventListener("pointerup", up);
+	};
+
+	return (
+		<div
+			// A fixed aspect box: the desktop's own proportions, scaled to whatever width there is.
+			className="relative w-full overflow-hidden rounded-lg border bg-muted/30"
+			style={{ aspectRatio: `${box.w} / ${box.h}` }}
+			role="img"
+			aria-label={m.display_map_label()}
+		>
+			{placed.map((b) => (
+				// The box is a drag handle, not a control: every action it offers is also on the
+				// rows below the map, which are the keyboard and screen-reader path.
+				<div
+					key={b.key}
+					onPointerDown={onPointerDown(b)}
+					className={cn(
+						"absolute flex flex-col justify-between gap-1 overflow-hidden rounded-md border p-1.5 text-[10px] leading-tight sm:p-2 sm:text-xs",
+						b.kind === "virtual"
+							? "border-dashed border-primary/70 bg-primary/10"
+							: "border-border bg-card",
+						// A streamed screen sits ON the desktop, so it draws over the heads it
+						// covers — under `primary` and `exclusive` it shares their origin, and
+						// relying on source order left its name hidden under a monitor's box.
+						b.kind === "virtual" && "z-[1]",
+						b.dimmed && "opacity-40",
+						b.draggable &&
+							onMove &&
+							"cursor-grab touch-none active:cursor-grabbing",
+						drag?.slot === b.slot && "z-10 ring-2 ring-primary",
+					)}
+					style={{
+						left: pct(b.x - box.minX, box.w),
+						top: pct(b.y - box.minY, box.h),
+						width: pct(b.w, box.w),
+						height: pct(b.h, box.h),
+					}}
+				>
+					<div className="min-w-0">
+						<div className="flex items-center gap-1">
+							<span className="truncate font-medium">{b.title}</span>
+							{b.primary && (
+								<span role="img" aria-label={m.display_monitor_primary()}>
+									★
+								</span>
+							)}
+							{b.connector && b.connector === captureMonitor && (
+								<Monitor
+									className="size-3 shrink-0"
+									aria-label={m.display_map_streamed()}
+								/>
+							)}
+						</div>
+						<div className="truncate text-muted-foreground">{b.detail}</div>
+					</div>
+					{b.kind === "virtual" && (
+						<div className="flex items-center justify-between gap-1">
+							<span className="truncate text-muted-foreground">
+								{stateLabel(b.state, b.expiresInMs)}
+							</span>
+							{/* An active display belongs to a live session — tearing it down is session
+							    control, not display management, so only a kept one offers Release. */}
+							{onRelease && b.slot !== undefined && b.state !== "active" && (
+								<Button
+									variant="ghost"
+									size="icon"
+									className="size-5 shrink-0"
+									aria-label={m.display_release()}
+									title={m.display_release()}
+									disabled={busy}
+									onClick={() => onRelease(b.slot as number)}
+								>
+									<X className="size-3" />
+								</Button>
+							)}
+						</div>
+					)}
+				</div>
+			))}
+		</div>
+	);
+};
+
+/** Outcomes, not the wire's words (D10): never "Lingering" or "Pinned". */
+export function stateLabel(
+	state?: string,
+	expiresInMs?: number | null,
+): string {
+	switch (state) {
+		case "active":
+			return m.display_state_streaming();
+		case "pinned":
+			return m.display_state_kept_until();
+		case "lingering":
+			// The countdown is the reason this box is still on the map, so it rides the chip
+			// rather than being dropped with the list that used to carry it. Rounded up: "0 s"
+			// on a display that has not gone yet reads as a bug.
+			return expiresInMs == null
+				? m.display_state_kept()
+				: m.display_state_kept_for({ seconds: Math.ceil(expiresInMs / 1000) });
+		default:
+			return "";
+	}
+}

@@ -1,0 +1,109 @@
+import { describe, expect, test } from "bun:test";
+import type { ApiDisplayInfo, ApiMonitorInfo } from "@/api/gen/model";
+import { bounds, parseMode, snap, toBoxes } from "./DesktopMap";
+
+const mon = (over: Partial<ApiMonitorInfo>): ApiMonitorInfo => ({
+	connector: "DP-1",
+	description: "Dell U2718Q",
+	enabled: true,
+	managed: false,
+	mode: "2560x1440@120",
+	primary: false,
+	scale: 1,
+	selected: false,
+	x: 0,
+	y: 0,
+	...over,
+});
+
+const disp = (over: Partial<ApiDisplayInfo>): ApiDisplayInfo => ({
+	backend: "kwin",
+	display_index: 0,
+	group: 0,
+	mode: "3840x2160@120",
+	sessions: 1,
+	slot: 1,
+	state: "active",
+	topology: "extend",
+	x: 2560,
+	y: 0,
+	...over,
+});
+
+describe("parseMode", () => {
+	test.each([
+		["2560x1440@120", { w: 2560, h: 1440 }],
+		["1920x1080", { w: 1920, h: 1080 }],
+	])("%s", (mode, expected) => {
+		expect(parseMode(mode)).toEqual(expected);
+	});
+
+	// A head the host could not read a mode for has no size, so it cannot be drawn to scale.
+	test.each(["", "unknown", "0x0", "x1080"])("%p has no size", (mode) => {
+		expect(parseMode(mode)).toBeUndefined();
+	});
+});
+
+describe("toBoxes", () => {
+	// On KWin our own virtual displays also appear in the monitor list. Drawing both would
+	// double every streaming screen on the map.
+	test("a managed head is not drawn twice", () => {
+		const boxes = toBoxes(
+			[mon({}), mon({ connector: "pf-virtual-1", managed: true, x: 2560 })],
+			[disp({})],
+		);
+		expect(boxes.map((b) => b.key)).toEqual(["mon-DP-1", "slot-1"]);
+	});
+
+	test("a head with an unreadable mode is skipped, not drawn at zero size", () => {
+		expect(toBoxes([mon({ mode: "unknown" })], [])).toEqual([]);
+	});
+
+	// Only a display with an identity slot has a manual-layout key to store a position under.
+	test("only an identity-slotted display can be dragged", () => {
+		const [anon, keyed] = toBoxes(
+			[],
+			[disp({ slot: 1 }), disp({ slot: 2, identity_slot: 3 })],
+		);
+		expect(anon.draggable).toBeFalsy();
+		expect(keyed.draggable).toBe(true);
+	});
+
+	test("preview dims the physical monitors, never the virtual screen", () => {
+		const boxes = toBoxes([mon({})], [disp({})], { dimMonitors: true });
+		expect(boxes.find((b) => b.kind === "monitor")?.dimmed).toBe(true);
+		expect(boxes.find((b) => b.kind === "virtual")?.dimmed).toBeFalsy();
+	});
+
+	// A disabled head is real and still shown — it is why "why isn't my monitor here?" has an
+	// answer — but it is not lit.
+	test("a disabled head is dimmed on its own", () => {
+		expect(toBoxes([mon({ enabled: false })], [])[0].dimmed).toBe(true);
+	});
+});
+
+describe("bounds", () => {
+	test("spans every box, including negative origins", () => {
+		const boxes = toBoxes(
+			[mon({ x: -1920, mode: "1920x1080" }), mon({ connector: "DP-2" })],
+			[],
+		);
+		expect(bounds(boxes)).toEqual({ minX: -1920, minY: 0, w: 4480, h: 1440 });
+	});
+});
+
+describe("snap", () => {
+	const edges = [0, 2560];
+	test("a near miss lands flush against a neighbour's edge", () => {
+		expect(snap(2554, 1920, edges, 16)).toBe(2560);
+	});
+	test("the trailing edge snaps too, so a screen sits to the LEFT flush", () => {
+		expect(snap(-1914, 1920, edges, 16)).toBe(-1920);
+	});
+	test("outside the tolerance the drag is left where it was put", () => {
+		expect(snap(2400, 1920, edges, 16)).toBe(2400);
+	});
+	test("the nearest edge wins when two are in range", () => {
+		expect(snap(30, 100, [0, 40], 50)).toBe(40);
+	});
+});
