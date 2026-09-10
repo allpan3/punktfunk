@@ -10,6 +10,7 @@ import {
 	useSetDisplaySettings,
 } from "@/api/gen/display/display";
 import type { ApiMonitorInfo } from "@/api/gen/model";
+import { usePlatform } from "@/api/platform";
 import { QueryState } from "@/components/query-state";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -32,6 +33,7 @@ export const MonitorCard: FC = () => {
 	const monitors = useGetDisplayMonitors();
 	const settings = useGetDisplaySettings();
 	const save = useSetDisplaySettings();
+	const { acts } = usePlatform();
 
 	const policy = settings.data?.settings;
 	const rows = monitors.data?.monitors ?? [];
@@ -46,14 +48,9 @@ export const MonitorCard: FC = () => {
 	// `policy` is undefined, which is never equal to `pinned` — so the card used to announce an env
 	// pin that may not exist and go read-only on every slow load.
 	const envLocked = !!pinned && !!policy && policy.capture_monitor !== pinned;
-	// The host says whether it can honor a pin at all. Windows enumerates its heads but has no
-	// backend that can capture one (see `MonitorsResponse.pin_supported`), and this card used to
-	// offer the choice anyway: the PUT persisted, nothing consumed it, and a virtual display was
-	// still created on connect. Defaults to TRUE when the field is absent so an older host — which
-	// only ever shipped this picker where it worked — is not retroactively locked out.
-	const pinSupported = monitors.data?.pin_supported ?? true;
-	// Both reasons produce the same read-only card; only the explanation above it differs.
-	const locked = envLocked || !pinSupported;
+	// An env pin outranks the stored policy, so the card goes read-only rather than offering
+	// controls that would silently lose to it.
+	const locked = envLocked;
 
 	const choose = (connector: string | null) => {
 		if (!policy || locked) return;
@@ -71,6 +68,10 @@ export const MonitorCard: FC = () => {
 
 	const busy = save.isPending;
 	const error = save.error instanceof ApiError ? save.error.message : undefined;
+
+	// A host with no MIRROR backend cannot honour a pin at all: the PUT would persist, nothing
+	// would consume it, and a virtual display would still be created on connect.
+	if (!acts("display", "capture_monitor")) return null;
 
 	const row = (
 		key: string,
@@ -140,12 +141,7 @@ export const MonitorCard: FC = () => {
 				<p className="max-w-prose text-sm text-muted-foreground">
 					{m.display_monitor_intro()}
 				</p>
-				{!pinSupported && (
-					<p className="text-sm text-amber-600 dark:text-amber-500">
-						{m.display_monitor_unsupported()}
-					</p>
-				)}
-				{pinSupported && envLocked && (
+				{envLocked && (
 					<p className="text-sm text-amber-600 dark:text-amber-500">
 						{m.display_monitor_env_locked()}
 					</p>

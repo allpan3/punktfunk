@@ -23,7 +23,6 @@ import {
 	useSetDisplaySettings,
 	useUpdateCustomPreset,
 } from "@/api/gen/display/display";
-import { useListGpus } from "@/api/gen/gpu/gpu";
 import type {
 	ApiDisplayInfo,
 	CustomPreset,
@@ -37,7 +36,9 @@ import type {
 	Preset,
 	Topology,
 } from "@/api/gen/model";
+import { usePlatform } from "@/api/platform";
 import { type ConfirmOptions, useDialogs } from "@/components/dialogs";
+import { DocsLink } from "@/components/docs-link";
 import { QueryState } from "@/components/query-state";
 import { Stagger } from "@/components/stagger";
 import { Badge } from "@/components/ui/badge";
@@ -352,11 +353,11 @@ export const DisplayForm: FC<{
 }) => {
 	const qc = useQueryClient();
 	const { confirm, promptText } = useDialogs();
-	// The EDID-lock toggle is gated on an AMD GPU being present — the axis is the AMD driver's
-	// ADL connector-emulation lever and exists nowhere else. GPUs don't hot-swap; one fetch with
-	// the section's lifetime is plenty (no refetch interval).
-	const gpus = useListGpus();
-	const amdHost = (gpus.data?.gpus ?? []).some((g) => g.vendor === "amd");
+	// The host names every axis it acts on; a name absent from that list is not rendered
+	// (design/web-console-overhaul.md D1). The old EDID gate asked "is there an AMD GPU?"
+	// as a stand-in for "does `atiadlxx.dll` load", which only the host can answer.
+	const { acts } = usePlatform();
+	const enforces = (field: string) => acts("display", field);
 	const createPreset = useCreateCustomPreset();
 	const updatePreset = useUpdateCustomPreset();
 	const deletePreset = useDeleteCustomPreset();
@@ -825,46 +826,51 @@ export const DisplayForm: FC<{
 
 			{/* Game-session routing — orthogonal to the preset/lifecycle axes, so it lives outside the
 			    Custom block and applies immediately on change (like a preset click). */}
-			<div className="border-t pt-4">
-				<Choice
-					label={m.display_game_session()}
-					help={m.display_game_session_help()}
-					value={draft.game_session ?? "auto"}
-					options={["auto", "dedicated"]}
-					labels={GAME_SESSION_LABEL}
-					disabled={busy}
-					onPick={(v) => applyAxis({ game_session: v as GameSession })}
-				/>
-			</div>
+			{enforces("game_session") && (
+				<div className="border-t pt-4">
+					<Choice
+						label={m.display_game_session()}
+						help={m.display_game_session_help()}
+						value={draft.game_session ?? "auto"}
+						options={["auto", "dedicated"]}
+						labels={GAME_SESSION_LABEL}
+						disabled={busy}
+						onPick={(v) => applyAxis({ game_session: v as GameSession })}
+					/>
+				</div>
+			)}
 
 			{/* EXPERIMENTAL toggles — orthogonal like game-session (survive preset switches, apply
-			    immediately). Windows-only in effect, acted on at the Exclusive isolate. */}
-			<ExperimentalToggle
-				label={m.display_ddc()}
-				help={m.display_ddc_help()}
-				value={draft.ddc_power_off ?? false}
-				offLabel={m.display_ddc_disabled()}
-				onLabel={m.display_ddc_enabled()}
-				busy={busy}
-				onSet={(on) => applyAxis({ ddc_power_off: on })}
-			/>
-			<ExperimentalToggle
-				label={m.display_pnp()}
-				help={m.display_pnp_help()}
-				value={draft.pnp_disable_monitors ?? false}
-				offLabel={m.display_pnp_disabled()}
-				onLabel={m.display_pnp_enabled()}
-				busy={busy}
-				onSet={(on) => applyAxis({ pnp_disable_monitors: on })}
-			/>
-			{/* AMD hosts only: the axis is the driver's ADL connector-emulation lever, which
-			    exists nowhere else — a toggle NVIDIA/Intel operators could flip but that can
-			    never do anything would be the "saved and then did nothing" trap the enforced
-			    list exists to prevent. */}
-			{amdHost && (
+			    immediately). Each is rendered only where the host acts on it. */}
+			{enforces("ddc_power_off") && (
+				<ExperimentalToggle
+					label={m.display_ddc()}
+					help={m.display_ddc_help()}
+					docs="virtual-displays#power-monitors-off-ddcci"
+					value={draft.ddc_power_off ?? false}
+					offLabel={m.display_ddc_disabled()}
+					onLabel={m.display_ddc_enabled()}
+					busy={busy}
+					onSet={(on) => applyAxis({ ddc_power_off: on })}
+				/>
+			)}
+			{enforces("pnp_disable_monitors") && (
+				<ExperimentalToggle
+					label={m.display_pnp()}
+					help={m.display_pnp_help()}
+					docs="virtual-displays#disable-monitor-devices-pnp"
+					value={draft.pnp_disable_monitors ?? false}
+					offLabel={m.display_pnp_disabled()}
+					onLabel={m.display_pnp_enabled()}
+					busy={busy}
+					onSet={(on) => applyAxis({ pnp_disable_monitors: on })}
+				/>
+			)}
+			{enforces("edid_lock") && (
 				<ExperimentalToggle
 					label={m.display_edid()}
 					help={m.display_edid_help()}
+					docs="virtual-displays#hold-monitor-identity-edid"
 					value={draft.edid_lock ?? false}
 					offLabel={m.display_edid_disabled()}
 					onLabel={m.display_edid_enabled()}
@@ -896,18 +902,20 @@ export const DisplayForm: FC<{
 					{tr(LAYOUT_LABEL, serverEffective.layout.mode)}
 				</Badge>
 				<Badge variant="outline">{`${serverEffective.max_displays}×`}</Badge>
-				{(draft.game_session ?? "auto") === "dedicated" && (
-					<Badge variant="secondary">
-						{m.display_game_session_dedicated()}
-					</Badge>
-				)}
-				{(draft.ddc_power_off ?? false) && (
+				{enforces("game_session") &&
+					(draft.game_session ?? "auto") === "dedicated" && (
+						<Badge variant="secondary">
+							{m.display_game_session_dedicated()}
+						</Badge>
+					)}
+				{enforces("ddc_power_off") && (draft.ddc_power_off ?? false) && (
 					<Badge variant="outline">{m.display_ddc_badge()}</Badge>
 				)}
-				{(draft.pnp_disable_monitors ?? false) && (
-					<Badge variant="outline">{m.display_pnp_badge()}</Badge>
-				)}
-				{(draft.edid_lock ?? false) && (
+				{enforces("pnp_disable_monitors") &&
+					(draft.pnp_disable_monitors ?? false) && (
+						<Badge variant="outline">{m.display_pnp_badge()}</Badge>
+					)}
+				{enforces("edid_lock") && (draft.edid_lock ?? false) && (
 					<Badge variant="outline">{m.display_edid_badge()}</Badge>
 				)}
 			</div>
@@ -972,12 +980,14 @@ const Field: FC<{
 const ExperimentalToggle: FC<{
 	label: string;
 	help: string;
+	/** docs-site route for the detail the hint no longer carries (§2.2). */
+	docs: string;
 	value: boolean;
 	offLabel: string;
 	onLabel: string;
 	busy: boolean;
 	onSet: (v: boolean) => void;
-}> = ({ label, help, value, offLabel, onLabel, busy, onSet }) => (
+}> = ({ label, help, docs, value, offLabel, onLabel, busy, onSet }) => (
 	<div className="border-t pt-4">
 		{/* A labelled group: the pair of buttons is one control, and the label belongs to both. */}
 		<fieldset className="space-y-3">
@@ -1001,7 +1011,9 @@ const ExperimentalToggle: FC<{
 					</Button>
 				))}
 			</div>
-			<p className="max-w-prose text-xs text-muted-foreground">{help}</p>
+			<p className="max-w-prose text-xs text-muted-foreground">
+				{help} <DocsLink path={docs} />
+			</p>
 		</fieldset>
 	</div>
 );

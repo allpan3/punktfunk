@@ -149,7 +149,6 @@
 	"compositor_available": "Available",
 	"compositor_unavailable": "Unavailable",
 	"compositor_default": "Default",
-	"compositor_none": "This host has no compositor backends — they are a Linux concept. Virtual displays here run on the bundled pf-vdisplay driver.",
 	"host_gpus": "GPUs",
 	"host_gpus_help": "The GPU the host captures and encodes on. Automatic picks the best GPU; preferring one pins capture + encode to it. A change applies to the next session.",
 	"gpu_automatic": "Automatic",
@@ -705,7 +704,6 @@
 	"session_game_grace": "Reconnect window",
 	"session_game_grace_help": "How long a client that vanished has to come back before its game is closed. The console shows the countdown, and reconnecting cancels it.",
 	"session_game_saved": "Session and game settings saved",
-	"session_game_inert": "This host has no way to launch games, so these settings do nothing here",
 	"session_game_nested_note": "On a gamescope game session the game runs *inside* the streamed display, so it lives exactly as long as that display does — which is what Keep alive above decides, not this setting. A deliberate Stop tears that display down at once and takes the game with it, whichever option you pick here.",
 	"display_monitor_title": "Streamed screen",
 	"display_monitor_intro": "By default the host creates its own virtual screen for each client, sized to that client. Instead, you can stream one of the screens this computer already has — what you see on that monitor is what the client sees.",
@@ -715,7 +713,6 @@
 	"display_monitor_none": "This host reports no monitors.",
 	"display_monitor_unavailable": "Couldn't list the monitors on this host",
 	"display_monitor_env_locked": "Pinned by PUNKTFUNK_CAPTURE_MONITOR on this host — unset it to choose here.",
-	"display_monitor_unsupported": "Streaming one of these screens isn't supported on this host yet — it's available on Linux hosts only. The screens are listed so you can see what this computer has; clients keep getting their own virtual screen.",
 	"display_monitor_primary": "primary",
 	"display_monitor_disabled": "off",
 	"display_monitor_saved": "Streamed screen saved",
@@ -764,5 +761,7 @@
 	"update_result_failed": "Update to {to} failed during {stage}.",
 	"update_result_log": "Installer log:",
 	"library_field_role": "This entry opens a launcher",
-	"library_field_role_help": "Shows it in the Launchers row above your games instead of in the grid. It still starts and stops the same way."
+	"library_field_role_help": "Shows it in the Launchers row above your games instead of in the grid. It still starts and stops the same way.",
+	"docs_link": "Docs",
+	"store_all_platforms": "Show all platforms"
 }

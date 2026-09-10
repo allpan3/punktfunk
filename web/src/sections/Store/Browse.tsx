@@ -6,7 +6,10 @@ import { QueryState } from "@/components/query-state";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { isBoolean, useLocalPref } from "@/lib/prefs";
 import { cn } from "@/lib/utils";
 import { m } from "@/paraglide/messages";
 import { RunnerBanner } from "./Runner";
@@ -38,15 +41,28 @@ export const BrowseTab: FC<{
 	);
 	const [query, setQuery] = useState("");
 	const [source, setSource] = useState<string | null>(null);
+	// A Linux operator should not scroll past Windows plugins to find theirs
+	// (design/web-console-overhaul.md D9). The host decides what `compatible` means; this only
+	// decides whether to show the rest. Off by default, remembered per browser.
+	const [allPlatforms, setAllPlatforms] = useLocalPref(
+		"pf-store-all-platforms",
+		false,
+		isBoolean,
+	);
 
 	const entries = catalog.data?.plugins ?? [];
 	const sources = catalog.data?.sources ?? [];
+	const forHost = useMemo(
+		() => entries.filter((e) => allPlatforms || e.compatible),
+		[entries, allPlatforms],
+	);
+	const hiddenCount = entries.length - forHost.length;
 	const shown = useMemo(
 		() =>
-			entries.filter(
+			forHost.filter(
 				(e) => (source === null || e.source === source) && matches(e, query),
 			),
-		[entries, source, query],
+		[forHost, source, query],
 	);
 
 	return (
@@ -87,6 +103,23 @@ export const BrowseTab: FC<{
 								{s.name}
 							</Button>
 						))}
+					</div>
+				)}
+				{/* Only offered when it would reveal something — an all-compatible catalog does
+				    not need a filter for the empty set. */}
+				{(hiddenCount > 0 || allPlatforms) && (
+					<div className="flex items-center gap-2 sm:ml-auto">
+						<Checkbox
+							id="store-all-platforms"
+							checked={allPlatforms}
+							onCheckedChange={(v) => setAllPlatforms(v === true)}
+						/>
+						<Label
+							htmlFor="store-all-platforms"
+							className="text-sm font-normal text-muted-foreground"
+						>
+							{m.store_all_platforms()}
+						</Label>
 					</div>
 				)}
 			</div>

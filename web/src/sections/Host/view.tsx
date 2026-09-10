@@ -105,26 +105,23 @@ export const HostView: FC<{
 
 				{gpu}
 
-				<Card>
-					<CardHeader>
-						<CardTitle>{m.host_compositors()}</CardTitle>
-					</CardHeader>
-					<CardContent className="space-y-4">
-						<p className="text-sm text-muted-foreground">
-							{m.host_compositors_help()}
-						</p>
-						<QueryState
-							isLoading={compositors.isLoading}
-							error={compositors.error}
-							refetch={compositors.refetch}
-						>
-							{/* Empty is a real answer, not a load failure: a Windows host drives the
-						    pf-vdisplay driver and has no compositor backends at all. */}
-							{compositors.data?.length === 0 ? (
-								<p className="rounded-md border p-4 text-sm text-muted-foreground">
-									{m.compositor_none()}
-								</p>
-							) : (
+				{/* Empty is a real answer, not a load failure: a Windows host drives the
+				    pf-vdisplay driver and has no compositor backends at all — so the card is
+				    absent there rather than reporting "none" at a card's worth of height. */}
+				{compositors.data?.length !== 0 && (
+					<Card>
+						<CardHeader>
+							<CardTitle>{m.host_compositors()}</CardTitle>
+						</CardHeader>
+						<CardContent className="space-y-4">
+							<p className="text-sm text-muted-foreground">
+								{m.host_compositors_help()}
+							</p>
+							<QueryState
+								isLoading={compositors.isLoading}
+								error={compositors.error}
+								refetch={compositors.refetch}
+							>
 								<ul className="divide-y rounded-md border">
 									{compositors.data?.map((c) => (
 										<li
@@ -152,10 +149,10 @@ export const HostView: FC<{
 										</li>
 									))}
 								</ul>
-							)}
-						</QueryState>
-					</CardContent>
-				</Card>
+							</QueryState>
+						</CardContent>
+					</Card>
+				)}
 			</div>
 		</Section>
 	);

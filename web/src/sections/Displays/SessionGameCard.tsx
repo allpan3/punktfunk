@@ -12,8 +12,8 @@ import {
 	useGetSessionSettings,
 	useSetSessionSettings,
 } from "@/api/gen/session/session";
+import { usePlatform } from "@/api/platform";
 import { QueryState } from "@/components/query-state";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -37,18 +37,11 @@ export const SessionGameCard: FC = () => {
 	const q = useGetSessionSettings();
 	const save = useSetSessionSettings();
 	const server = q.data?.settings;
-	// Which axes this build acts on. An EMPTY list means the build enforces nothing — the contract
-	// says so outright ("Empty on a platform with no launch path (macOS), so the console can say so
-	// instead of offering a switch that does nothing"), and this card's own comment promises the
-	// controls are "shown disabled rather than hidden".
-	//
-	// The old `enforced.length === 0 || …` read empty as "enforces EVERYTHING", so on exactly the
-	// platform the flag exists for, every control stayed live: clicking one PUT the setting and
-	// toasted success for an axis the host would never act on. Absent (an older host that never
-	// sent the field) still means "assume it acts" — that is the compatible reading, and it is a
-	// different case from present-and-empty.
-	const enforced = q.data?.enforced;
-	const acts = (field: string) => !enforced || enforced.includes(field);
+	// A platform gate is never transient, so an axis this build does not act on is not
+	// rendered at all — disabled-with-a-reason is for busy and live-session only
+	// (design/web-console-overhaul.md §2.1).
+	const { acts, actsAny } = usePlatform();
+	const enforces = (field: string) => acts("session", field);
 
 	// The grace field is free text while being typed, so it gets a local buffer; the other two axes
 	// are discrete and go straight to the host.
@@ -73,6 +66,8 @@ export const SessionGameCard: FC = () => {
 	const busy = save.isPending;
 	const error = save.error instanceof ApiError ? save.error.message : undefined;
 
+	if (!actsAny("session")) return null;
+
 	return (
 		<Card>
 			<CardHeader>
@@ -85,140 +80,141 @@ export const SessionGameCard: FC = () => {
 				<QueryState isLoading={q.isLoading} error={q.error} refetch={q.refetch}>
 					{server && (
 						<div className="space-y-6">
-							<Field
-								label={m.session_game_on_exit()}
-								help={m.session_game_on_exit_help()}
-								group
-							>
-								<div className="flex flex-wrap gap-2">
-									<Choice
-										selected={server.session_on_game_exit === true}
-										disabled={busy || !acts("session_on_game_exit")}
-										onClick={() => apply({ session_on_game_exit: true })}
-									>
-										{m.session_game_on_exit_end()}
-									</Choice>
-									<Choice
-										selected={server.session_on_game_exit === false}
-										disabled={busy || !acts("session_on_game_exit")}
-										onClick={() => apply({ session_on_game_exit: false })}
-									>
-										{m.session_game_on_exit_keep()}
-									</Choice>
-								</div>
-							</Field>
-
-							<Field
-								label={m.session_game_end_game()}
-								help={m.session_game_end_game_help()}
-								group
-							>
-								<div className="flex flex-wrap gap-2">
-									{END_POLICIES.map((p) => (
+							{enforces("session_on_game_exit") && (
+								<Field
+									label={m.session_game_on_exit()}
+									help={m.session_game_on_exit_help()}
+									group
+								>
+									<div className="flex flex-wrap gap-2">
 										<Choice
-											key={p}
-											selected={(server.game_on_session_end ?? "keep") === p}
-											disabled={busy || !acts("game_on_session_end")}
-											onClick={() => apply({ game_on_session_end: p })}
+											selected={server.session_on_game_exit === true}
+											disabled={busy}
+											onClick={() => apply({ session_on_game_exit: true })}
 										>
-											{END_POLICY_LABEL[p]()}
+											{m.session_game_on_exit_end()}
 										</Choice>
-									))}
-								</div>
-								{(server.game_on_session_end ?? "keep") === "always" && (
-									<p className="max-w-prose text-xs text-muted-foreground">
-										{m.session_game_always_warning()}
-									</p>
-								)}
-								{/* Shown for every option, including "leave it running": on a nested
+										<Choice
+											selected={server.session_on_game_exit === false}
+											disabled={busy}
+											onClick={() => apply({ session_on_game_exit: false })}
+										>
+											{m.session_game_on_exit_keep()}
+										</Choice>
+									</div>
+								</Field>
+							)}
+
+							{enforces("game_on_session_end") && (
+								<Field
+									label={m.session_game_end_game()}
+									help={m.session_game_end_game_help()}
+									group
+								>
+									<div className="flex flex-wrap gap-2">
+										{END_POLICIES.map((p) => (
+											<Choice
+												key={p}
+												selected={(server.game_on_session_end ?? "keep") === p}
+												disabled={busy}
+												onClick={() => apply({ game_on_session_end: p })}
+											>
+												{END_POLICY_LABEL[p]()}
+											</Choice>
+										))}
+									</div>
+									{(server.game_on_session_end ?? "keep") === "always" && (
+										<p className="max-w-prose text-xs text-muted-foreground">
+											{m.session_game_always_warning()}
+										</p>
+									)}
+									{/* Shown for every option, including "leave it running": on a nested
 								    gamescope launch the game IS inside the streamed display, so the
 								    display's own keep-alive outranks anything chosen here — verified
 								    on glass (.41), where a deliberate stop ended the game under
 								    `keep`. Worded so a non-gamescope host reads it and moves on. */}
-								<p className="max-w-prose text-xs text-muted-foreground">
-									{m.session_game_nested_note()}
-								</p>
-							</Field>
+									<p className="max-w-prose text-xs text-muted-foreground">
+										{m.session_game_nested_note()}
+									</p>
+								</Field>
+							)}
 
 							{/* Its own axis rather than a fourth end-policy: that one asks what a
 							    session owes its game, this one asks what a new launch owes the last
 							    one — and wanting a game to survive a disconnect says nothing about
 							    wanting it kept when you deliberately pick something else. */}
-							<Field
-								label={m.session_game_new_launch()}
-								help={m.session_game_new_launch_help()}
-								group
-							>
-								<div className="flex flex-wrap gap-2">
-									{NEW_LAUNCH_POLICIES.map((p) => (
-										<Choice
-											key={p}
-											selected={(server.game_on_new_launch ?? "keep") === p}
-											disabled={busy || !acts("game_on_new_launch")}
-											onClick={() => apply({ game_on_new_launch: p })}
-										>
-											{NEW_LAUNCH_LABEL[p]()}
-										</Choice>
-									))}
-								</div>
-								{(server.game_on_new_launch ?? "keep") === "end" && (
-									<p className="max-w-prose text-xs text-muted-foreground">
-										{m.session_game_new_launch_scope()}
-									</p>
-								)}
-							</Field>
-
-							{(server.game_on_session_end ?? "keep") === "always" && (
+							{enforces("game_on_new_launch") && (
 								<Field
-									label={m.session_game_grace()}
-									help={m.session_game_grace_help()}
-									htmlFor="session-grace-seconds"
+									label={m.session_game_new_launch()}
+									help={m.session_game_new_launch_help()}
+									group
 								>
-									<div className="flex items-center gap-2">
-										{/* Deliberately NOT `InputNumber`, unlike the numeric fields on
+									<div className="flex flex-wrap gap-2">
+										{NEW_LAUNCH_POLICIES.map((p) => (
+											<Choice
+												key={p}
+												selected={(server.game_on_new_launch ?? "keep") === p}
+												disabled={busy}
+												onClick={() => apply({ game_on_new_launch: p })}
+											>
+												{NEW_LAUNCH_LABEL[p]()}
+											</Choice>
+										))}
+									</div>
+									{(server.game_on_new_launch ?? "keep") === "end" && (
+										<p className="max-w-prose text-xs text-muted-foreground">
+											{m.session_game_new_launch_scope()}
+										</p>
+									)}
+								</Field>
+							)}
+
+							{enforces("disconnect_grace_seconds") &&
+								(server.game_on_session_end ?? "keep") === "always" && (
+									<Field
+										label={m.session_game_grace()}
+										help={m.session_game_grace_help()}
+										htmlFor="session-grace-seconds"
+									>
+										<div className="flex items-center gap-2">
+											{/* Deliberately NOT `InputNumber`, unlike the numeric fields on
 										    the policy card next door. This one writes to the HOST on
 										    blur, and InputNumber commits while you type — so its own
 										    blur-time clamp would race the apply below, which still
 										    closes over the pre-clamp value. The host is the authority
 										    here regardless: it clamps to 10..=86400 on write and
 										    answers with what it actually stored. */}
-										<Input
-											id="session-grace-seconds"
-											type="number"
-											min={10}
-											max={86400}
-											className="w-28"
-											value={grace}
-											disabled={busy || !acts("disconnect_grace_seconds")}
-											onChange={(e) => setGrace(e.target.value)}
-											onBlur={() => {
-												const n = Number(grace);
-												if (!Number.isFinite(n)) {
-													setGrace(
-														String(server.disconnect_grace_seconds ?? 300),
-													);
-													return;
-												}
-												// The host clamps to 10..=86400 and returns what it stored, so
-												// a nonsense number is corrected rather than rejected.
-												if (n !== server.disconnect_grace_seconds) {
-													apply({ disconnect_grace_seconds: n });
-												}
-											}}
-										/>
-										<span className="text-sm text-muted-foreground">
-											{m.display_keep_alive_seconds()}
-										</span>
-									</div>
-								</Field>
-							)}
+											<Input
+												id="session-grace-seconds"
+												type="number"
+												min={10}
+												max={86400}
+												className="w-28"
+												value={grace}
+												disabled={busy}
+												onChange={(e) => setGrace(e.target.value)}
+												onBlur={() => {
+													const n = Number(grace);
+													if (!Number.isFinite(n)) {
+														setGrace(
+															String(server.disconnect_grace_seconds ?? 300),
+														);
+														return;
+													}
+													// The host clamps to 10..=86400 and returns what it stored, so
+													// a nonsense number is corrected rather than rejected.
+													if (n !== server.disconnect_grace_seconds) {
+														apply({ disconnect_grace_seconds: n });
+													}
+												}}
+											/>
+											<span className="text-sm text-muted-foreground">
+												{m.display_keep_alive_seconds()}
+											</span>
+										</div>
+									</Field>
+								)}
 
-							{/* Present-and-empty is the "this build acts on none of it" signal; ABSENT
-							    is an older host that never sent the field, where claiming inertness
-							    would be a guess. Same distinction `acts()` makes above. */}
-							{enforced?.length === 0 && (
-								<Badge variant="outline">{m.session_game_inert()}</Badge>
-							)}
 							{error && <p className="text-sm text-destructive">{error}</p>}
 						</div>
 					)}

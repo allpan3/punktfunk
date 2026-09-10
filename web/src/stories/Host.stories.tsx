@@ -16,12 +16,13 @@ type Story = StoryObj<typeof meta>;
 
 export const Default: Story = {};
 
-/** A non-Linux host: compositor backends don't exist there, so the list is empty by design. */
+/** A non-Linux host has no compositor backends at all, so the card is absent rather than
+ * reporting "none" at a card's worth of height (design/web-console-overhaul.md §3.3). */
 export const NoCompositors: Story = {
 	args: { compositors: { data: [], isLoading: false, error: null } },
 };
 
-/** A Windows host wears the Windows mark (and, correctly, has no compositors). */
+/** A Windows host wears the Windows mark (and, correctly, shows no Compositors card). */
 export const WindowsHost: Story = {
 	args: {
 		host: {

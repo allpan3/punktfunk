@@ -149,7 +149,6 @@
 	"compositor_available": "Verfügbar",
 	"compositor_unavailable": "Nicht verfügbar",
 	"compositor_default": "Standard",
-	"compositor_none": "Dieser Host hat keine Compositor-Backends – die gibt es nur unter Linux. Virtuelle Displays laufen hier über den mitgelieferten pf-vdisplay-Treiber.",
 	"host_gpus": "GPUs",
 	"host_gpus_help": "Die GPU, auf der der Host aufnimmt und encodiert. Automatisch wählt die beste GPU; eine bevorzugte GPU bindet Aufnahme + Encoding an sie. Eine Änderung gilt ab der nächsten Sitzung.",
 	"gpu_automatic": "Automatisch",
@@ -705,7 +704,6 @@
 	"session_game_grace": "Zeitfenster für die Rückkehr",
 	"session_game_grace_help": "Wie lange ein verschwundener Client Zeit hat zurückzukommen, bevor sein Spiel geschlossen wird. Die Konsole zeigt den Countdown; eine neue Verbindung bricht ihn ab.",
 	"session_game_saved": "Sitzungs- und Spieleinstellungen gespeichert",
-	"session_game_inert": "Dieser Host kann keine Spiele starten – hier bewirken diese Einstellungen nichts",
 	"session_game_nested_note": "In einer gamescope-Spielsitzung läuft das Spiel *innerhalb* der gestreamten Anzeige und lebt daher genau so lange wie diese – das entscheidet „Offen halten“ oben, nicht diese Einstellung. Ein bewusstes Stoppen reißt die Anzeige sofort ab und nimmt das Spiel mit, egal was du hier wählst.",
 	"display_monitor_title": "Übertragener Bildschirm",
 	"display_monitor_intro": "Standardmäßig erstellt der Host für jeden Client einen eigenen virtuellen Bildschirm in dessen Auflösung. Stattdessen kannst du einen Bildschirm übertragen, den dieser Computer bereits hat — was auf diesem Monitor zu sehen ist, sieht auch der Client.",
@@ -715,7 +713,6 @@
 	"display_monitor_none": "Dieser Host meldet keine Monitore.",
 	"display_monitor_unavailable": "Monitore konnten auf diesem Host nicht ermittelt werden",
 	"display_monitor_env_locked": "Auf diesem Host über PUNKTFUNK_CAPTURE_MONITOR festgelegt — dort entfernen, um hier zu wählen.",
-	"display_monitor_unsupported": "Das Übertragen eines dieser Bildschirme wird auf diesem Host noch nicht unterstützt — das gibt es bisher nur auf Linux-Hosts. Die Bildschirme sind hier aufgeführt, damit du siehst, was dieser Computer hat; Clients bekommen weiterhin ihren eigenen virtuellen Bildschirm.",
 	"display_monitor_primary": "primär",
 	"display_monitor_disabled": "aus",
 	"display_monitor_saved": "Übertragener Bildschirm gespeichert",
@@ -764,5 +761,7 @@
 	"update_result_failed": "Update auf {to} ist in Phase {stage} fehlgeschlagen.",
 	"update_result_log": "Installer-Log:",
 	"library_field_role": "Dieser Eintrag öffnet einen Launcher",
-	"library_field_role_help": "Zeigt ihn in der Launcher-Reihe über deinen Spielen statt im Raster. Er startet und endet genauso wie sonst."
+	"library_field_role_help": "Zeigt ihn in der Launcher-Reihe über deinen Spielen statt im Raster. Er startet und endet genauso wie sonst.",
+	"docs_link": "Doku",
+	"store_all_platforms": "Alle Plattformen zeigen"
 }
