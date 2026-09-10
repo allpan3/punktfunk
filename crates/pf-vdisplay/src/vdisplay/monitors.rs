@@ -14,7 +14,7 @@
 //! `pf-inject`'s absolute-coordinate region selection.
 
 use crate::Compositor;
-use anyhow::{bail, Result};
+use anyhow::Result;
 
 /// One head as the compositor currently reports it.
 ///
@@ -121,7 +121,9 @@ pub fn list(compositor: Compositor) -> Result<Vec<PhysicalMonitor>> {
         #[cfg(target_os = "linux")]
         Compositor::Gamescope => crate::gamescope::list_monitors(),
         #[cfg(not(target_os = "linux"))]
-        _ => bail!("physical-monitor enumeration is implemented for the Linux backends only"),
+        _ => {
+            anyhow::bail!("physical-monitor enumeration is implemented for the Linux backends only")
+        }
     }
 }
 
