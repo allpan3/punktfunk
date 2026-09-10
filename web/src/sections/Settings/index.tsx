@@ -2,13 +2,18 @@ import Section from "@unom/ui/section";
 import { toast } from "@unom/ui/toast";
 import { LogOut } from "lucide-react";
 import type { FC } from "react";
+import { pluginIcon, uiPlugins, usePlugins } from "@/api/plugins";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
 import { changeLocale, type Locale, locales, useLocale } from "@/lib/i18n";
+import { MANAGE, pluginPin, togglePin, usePins } from "@/lib/nav";
 import { m } from "@/paraglide/messages";
 
-// Settings reads no API (just the locale + a logout button), so it's a single
-// presentational section — no container/view split needed.
+// Settings owns the console's own preferences — the locale, the sidebar pins, and the way
+// out. Everything here is per browser (design/web-console-overhaul.md D8); nothing reaches
+// the host.
 export const SectionSettings: FC = () => {
 	const current = useLocale();
 
@@ -49,9 +54,11 @@ export const SectionSettings: FC = () => {
 					</CardContent>
 				</Card>
 
+				<NavigationCard />
+
 				<Card className="max-w-lg">
 					<CardHeader>
-						<CardTitle>{m.nav_settings()}</CardTitle>
+						<CardTitle>{m.settings_account()}</CardTitle>
 					</CardHeader>
 					<CardContent>
 						<Button variant="outline" onClick={onLogout}>
@@ -62,5 +69,49 @@ export const SectionSettings: FC = () => {
 				</Card>
 			</div>
 		</Section>
+	);
+};
+
+/**
+ * Which Manage pages and plugin UIs sit in the sidebar's primary group.
+ *
+ * The list is what CAN be pinned, so an operator who never opens Automation can see that the
+ * page exists without it costing a permanent slot. A plugin appears here as soon as it
+ * surfaces a UI — that is the pin the install toast points at.
+ */
+const NavigationCard: FC = () => {
+	const [pins, setPins] = usePins();
+	const { data } = usePlugins();
+	const plugins = uiPlugins(data);
+	const row = (id: string, title: string, Icon: typeof LogOut) => (
+		<li key={id} className="flex items-center gap-3 py-1.5">
+			<Checkbox
+				id={`pin-${id}`}
+				checked={pins.includes(id)}
+				onCheckedChange={() => setPins(togglePin(pins, id))}
+			/>
+			<Icon className="size-4 shrink-0 text-muted-foreground" />
+			<Label htmlFor={`pin-${id}`} className="font-normal">
+				{title}
+			</Label>
+		</li>
+	);
+	return (
+		<Card className="max-w-lg">
+			<CardHeader>
+				<CardTitle>{m.settings_navigation()}</CardTitle>
+			</CardHeader>
+			<CardContent className="space-y-2">
+				<p className="text-sm text-muted-foreground">
+					{m.settings_navigation_help()}
+				</p>
+				<ul>
+					{MANAGE.map((n) => row(n.to, n.label(), n.icon))}
+					{plugins.map((p) =>
+						row(pluginPin(p.id), p.title, pluginIcon(p.ui?.icon)),
+					)}
+				</ul>
+			</CardContent>
+		</Card>
 	);
 };

@@ -10,7 +10,7 @@
 // now verified against the plugin origin before it is honoured.
 import { useQuery } from "@tanstack/react-query";
 import { getRouteApi, useNavigate } from "@tanstack/react-router";
-import { ExternalLink, RefreshCw } from "lucide-react";
+import { ExternalLink, Pin, PinOff, RefreshCw } from "lucide-react";
 import { type FC, useEffect, useMemo, useRef } from "react";
 import { pluginIcon, usePlugins } from "@/api/plugins";
 import { useInstalledPlugins } from "@/api/store";
@@ -18,6 +18,7 @@ import { pluginOriginFrom, useUiConfig } from "@/api/uiConfig";
 import { DocsLink } from "@/components/docs-link";
 import { Button } from "@/components/ui/button";
 import { useLocale } from "@/lib/i18n";
+import { pluginPin, togglePin, usePins } from "@/lib/nav";
 import { m } from "@/paraglide/messages";
 import { TierBadge } from "@/sections/Store/TierBadge";
 
@@ -27,6 +28,11 @@ export const SectionPlugin: FC = () => {
 	useLocale();
 	const { pluginId, _splat } = route.useParams();
 	const navigate = useNavigate();
+	// This page is a plugin's only fixed address now that plugin UIs no longer inject a sidebar
+	// entry — so the way back into the sidebar is here, on the page you are already on.
+	const [pins, setPins] = usePins();
+	const pin = pluginPin(pluginId);
+	const isPinned = pins.includes(pin);
 	const iframeRef = useRef<HTMLIFrameElement>(null);
 
 	// Header metadata (title/version/icon) from the directory; falls back to the id.
@@ -156,6 +162,20 @@ export const SectionPlugin: FC = () => {
 					</span>
 				)}
 				{provenance && <TierBadge tier={provenance.tier} />}
+				<Button
+					variant="ghost"
+					size="sm"
+					className="ml-auto"
+					aria-pressed={isPinned}
+					onClick={() => setPins(togglePin(pins, pin))}
+				>
+					{isPinned ? (
+						<PinOff className="size-4" />
+					) : (
+						<Pin className="size-4" />
+					)}
+					{isPinned ? m.nav_unpin() : m.nav_pin()}
+				</Button>
 				{/* Full-window, on the PLUGIN origin. This link used to be the same escalation as the
 				    iframe with no sandbox involved at all — a top-level document on the console origin,
 				    holding the operator's session. It only stops being that because the origin moved,
@@ -165,7 +185,7 @@ export const SectionPlugin: FC = () => {
 						href={`${pluginOrigin}/plugin-ui/${pluginId}/`}
 						target="_blank"
 						rel="noreferrer"
-						className="ml-auto inline-flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
+						className="inline-flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
 					>
 						<ExternalLink className="size-4" />
 						{m.plugin_open_new_tab()}

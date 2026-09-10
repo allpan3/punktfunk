@@ -50,6 +50,10 @@ function read<T>(key: string, fallback: T, valid: (v: unknown) => v is T): T {
  *
  * `valid` is what keeps a value written by an older console (or a plugin id since removed)
  * from reaching a component that cannot render it.
+ *
+ * `fallback` must be a stable reference for an object or array — it is the server snapshot,
+ * and a fresh `[]` on every render is a new snapshot on every render. Hoist it to a module
+ * constant.
  */
 export function useLocalPref<T>(
 	key: string,
@@ -78,3 +82,6 @@ export function useLocalPref<T>(
 }
 
 export const isBoolean = (v: unknown): v is boolean => typeof v === "boolean";
+
+export const isStringArray = (v: unknown): v is string[] =>
+	Array.isArray(v) && v.every((s) => typeof s === "string");

@@ -1,54 +1,31 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import {
-	Activity,
-	GaugeCircle,
-	KeyRound,
-	LibraryBig,
-	MonitorPlay,
-	MoreHorizontal,
-	Puzzle,
-	Server,
-	Settings,
-	Stethoscope,
-	Workflow,
-} from "lucide-react";
+import { MoreHorizontal } from "lucide-react";
 import { motion } from "motion/react";
 import { type ReactNode, useState } from "react";
 import { useHostEvents } from "@/api/events";
 import { pluginIcon, uiPlugins, usePlugins } from "@/api/plugins";
 import { BrandMark } from "@/components/brand-mark";
-import { Stagger, staggerProps } from "@/components/stagger";
+import { staggerProps } from "@/components/stagger";
 import { Wordmark } from "@/components/wordmark";
 import { changeLocale, type Locale, locales, useLocale } from "@/lib/i18n";
+import {
+	MANAGE,
+	type NavEntry,
+	PRIMARY,
+	pluginPin,
+	resolvePins,
+	usePins,
+} from "@/lib/nav";
 import { cn } from "@/lib/utils";
 import { m } from "@/paraglide/messages";
+import { useNewPluginToast } from "./plugin-toast";
 
 const MLink = motion(Link);
 
-const NAV = [
-	{ to: "/", icon: Activity, label: () => m.nav_dashboard() },
-	{ to: "/host", icon: Server, label: () => m.nav_host() },
-	{ to: "/displays", icon: MonitorPlay, label: () => m.nav_displays() },
-	{ to: "/library", icon: LibraryBig, label: () => m.nav_library() },
-	{ to: "/stats", icon: GaugeCircle, label: () => m.nav_stats() },
-	// The page is the troubleshooting home now — health checks above the log stream. The ROUTE stays
-	// `/logs`: bookmarks and deep links outlive a label.
-	{ to: "/logs", icon: Stethoscope, label: () => m.nav_troubleshooting() },
-	{ to: "/pairing", icon: KeyRound, label: () => m.nav_pairing() },
-	{ to: "/automation", icon: Workflow, label: () => m.nav_automation() },
-	{ to: "/plugins", icon: Puzzle, label: () => m.nav_plugins() },
-	{ to: "/settings", icon: Settings, label: () => m.nav_settings() },
-] as const;
-
-// "/plugins" is the store's index route and "/plugins/<id>" a plugin's own UI, so the store entry
-// only counts as active on an exact match — otherwise it would light up alongside the plugin's own
-// nav entry below. Same reason "/" is exact.
-const EXACT: readonly string[] = ["/", "/plugins"];
-
-// On phones a flat 8-tab bar is too cramped, so the first four are pinned and the rest live behind a
-// "More" tab that opens a sheet above the bar. Keep it ≤ 5 slots including "More".
-const MOBILE_PRIMARY = NAV.slice(0, 4);
-const MOBILE_OVERFLOW = NAV.slice(4);
+const ITEM =
+	"group relative flex items-center gap-3 rounded-md px-3 py-2 text-sm text-muted-foreground transition-colors hover:text-foreground";
+const ACTIVE = { className: "bg-primary/15 text-foreground font-medium" };
+const RISE = { from: { opacity: 0, x: -20 }, enter: { opacity: 1, x: 0 } };
 
 export function AppShell({ children }: { children: ReactNode }) {
 	// Read the locale so the whole shell re-renders on a language switch.
@@ -57,69 +34,40 @@ export function AppShell({ children }: { children: ReactNode }) {
 	// each event affects, so pages update on the transition instead of on their own timer. The
 	// polling intervals stay as a floor in case the stream is unavailable.
 	useHostEvents();
+	// Plugin UIs no longer inject themselves into the sidebar, so a fresh install has to say
+	// where it went (design §4.1).
+	useNewPluginToast();
 	return (
 		<div className="flex min-h-screen">
 			{/* Desktop sidebar (≥ sm). Sticky at viewport height: the page (body) scrolls with
 			    long content, but the sidebar stays pinned — the explicit h-dvh stops the flex
 			    stretch that would otherwise grow it (and push the language switcher) below the
-			    fold. overflow-y-auto lets the nav itself scroll on very short viewports. */}
-			<aside className="sticky top-0 hidden h-dvh w-60 shrink-0 flex-col overflow-y-auto border-r bg-card/40 p-4 sm:flex">
+			    fold. overflow-y-auto lets the nav itself scroll on very short viewports.
+
+			    Tablet widths (sm–lg) collapse it to icons: the console used to drop straight from
+			    a 240 px sidebar to the phone layout, so a tablet either lost a third of its width
+			    to labels or lost the sidebar entirely. Labels ride `title` there. */}
+			<aside className="sticky top-0 hidden h-dvh w-16 shrink-0 flex-col overflow-y-auto border-r bg-card/40 p-2 sm:flex lg:w-60 lg:p-4">
 				<Link
 					to="/"
 					aria-label="Punktfunk"
 					className="mb-7 flex items-center gap-2 px-2 pt-1"
 				>
-					<BrandMark className="size-7 drop-shadow-[0_2px_12px_rgba(108,91,243,0.45)]" />
-					<Wordmark className="h-4" />
+					<BrandMark className="size-7 shrink-0 drop-shadow-[0_2px_12px_rgba(108,91,243,0.45)]" />
+					<Wordmark className="hidden h-4 lg:block" />
 				</Link>
-				<motion.nav
-					animate="enter"
-					initial="from"
-					{...staggerProps()}
-					className="flex flex-col gap-1"
-				>
-					{NAV.map(({ to, icon: Icon, label }) => (
-						<MLink
-							key={to}
-							variants={{
-								from: { opacity: 0, x: -20 },
-								enter: { opacity: 1, x: 0 },
-							}}
-							whileHover={{ scale: 1.02 }}
-							whileTap={{ scale: 0.98 }}
-							to={to}
-							activeOptions={{ exact: EXACT.includes(to) }}
-							className="group relative flex items-center gap-3 rounded-md px-3 py-2 text-sm text-muted-foreground transition-colors hover:text-foreground"
-							activeProps={{
-								className: "bg-primary/15 text-foreground font-medium",
-							}}
-						>
-							{/* Hover brightens: a brand-tinted wash layered OVER whatever the
-                    link's background is (transparent or the active tint), so the
-                    item gets lighter on hover — including the active one. */}
-							<span
-								aria-hidden
-								className="pointer-events-none absolute inset-0 rounded-md bg-primary/0 transition-colors duration-200 group-hover:bg-primary/15"
-							/>
-							<Icon className="relative size-4" />
-							<span className="relative">{label()}</span>
-						</MLink>
-					))}
-				</motion.nav>
-				<PluginNavSection />
-				<div className="mt-auto pt-4">
+				<Sidebar />
+				<div className="mt-auto hidden pt-4 lg:block">
 					<LanguageSwitcher />
 				</div>
 			</aside>
 
 			<div className="flex flex-1 flex-col overflow-x-hidden">
-				{/* Mobile top bar (< sm): brand + language. The sidebar is hidden here. */}
+				{/* Mobile top bar (< sm): brand only. The language switch is a set-once control,
+				    so on a phone it lives in Settings rather than in every screen's chrome. */}
 				<header className="flex items-center gap-2 border-b bg-card/40 px-4 py-3 sm:hidden">
 					<BrandMark className="size-6" />
 					<Wordmark className="h-3.5" />
-					<div className="ml-auto">
-						<LanguageSwitcher />
-					</div>
 				</header>
 
 				<main className="flex-1">
@@ -136,79 +84,152 @@ export function AppShell({ children }: { children: ReactNode }) {
 	);
 }
 
-/** Desktop sidebar: the dynamic "Plugins" group, fed by the plugin directory. Renders nothing until
- * at least one plugin surfaces a UI — a host with no plugins sees zero extra chrome. */
-function PluginNavSection() {
+/** The sidebar's three groups: the primary five, Manage, then whatever the operator pinned. */
+function Sidebar() {
+	const [pins] = usePins();
 	const { data } = usePlugins();
 	const plugins = uiPlugins(data);
-	if (plugins.length === 0) return null;
+	const pinned = resolvePins(pins, plugins);
 	return (
-		// Its own animation container, with the same variants + stagger as the main nav above. These
-		// were plain links: the group sits OUTSIDE that `motion.nav`, so it inherited neither the
-		// stagger nor the variants and plugin entries simply appeared. They arrive asynchronously
-		// (and a fresh install adds one to a nav that is already on screen), which is exactly when
-		// the animation earns its keep.
-		<Stagger root className="mt-6 flex flex-col gap-1">
-			<motion.p
-				variants={{ from: { opacity: 0 }, enter: { opacity: 1 } }}
-				className="px-3 pb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground/70"
-			>
-				{m.nav_plugins()}
-			</motion.p>
-			{plugins.map((p) => {
-				const Icon = pluginIcon(p.ui?.icon);
-				return (
-					// The motion wrapper is a DIV around the link, not `motion(Link)`: wrapping Link
-					// erases TanStack's typed `params`, and these entries need `$pluginId`.
-					<motion.div
-						key={p.id}
-						variants={{
-							from: { opacity: 0, x: -20 },
-							enter: { opacity: 1, x: 0 },
-						}}
-						whileHover={{ scale: 1.02 }}
-						whileTap={{ scale: 0.98 }}
-					>
-						<Link
-							to="/plugins/$pluginId/$"
-							params={{ pluginId: p.id, _splat: "" }}
-							className="group relative flex items-center gap-3 rounded-md px-3 py-2 text-sm text-muted-foreground transition-colors hover:text-foreground"
-							activeProps={{
-								className: "bg-primary/15 text-foreground font-medium",
-							}}
-						>
-							<span
-								aria-hidden
-								className="pointer-events-none absolute inset-0 rounded-md bg-primary/0 transition-colors duration-200 group-hover:bg-primary/15"
+		<motion.nav
+			animate="enter"
+			initial="from"
+			{...staggerProps()}
+			className="flex flex-col gap-1"
+		>
+			{PRIMARY.map((n) => (
+				<SidebarLink key={n.to} entry={n} />
+			))}
+			<GroupLabel>{m.nav_group_manage()}</GroupLabel>
+			{MANAGE.map((n) => (
+				<SidebarLink key={n.to} entry={n} />
+			))}
+			{pinned.length > 0 && (
+				<>
+					<GroupLabel>{m.nav_group_pinned()}</GroupLabel>
+					{pinned.map((p) =>
+						p.kind === "nav" ? (
+							<SidebarLink key={`pin-${p.entry.to}`} entry={p.entry} />
+						) : (
+							<PluginLink
+								key={`pin-${p.plugin.id}`}
+								id={p.plugin.id}
+								title={p.plugin.title}
+								icon={p.plugin.ui?.icon}
 							/>
-							<Icon className="relative size-4" />
-							<span className="relative truncate">{p.title}</span>
-						</Link>
-					</motion.div>
-				);
-			})}
-		</Stagger>
+						),
+					)}
+				</>
+			)}
+		</motion.nav>
 	);
 }
 
-/** Mobile bottom navigation (< sm): four pinned tabs + a "More" tab whose sheet holds the rest. */
+/** A group heading. Invisible at icon width, where a divider does the same job in 1 px. */
+function GroupLabel({ children }: { children: ReactNode }) {
+	return (
+		<motion.p
+			variants={{ from: { opacity: 0 }, enter: { opacity: 1 } }}
+			className="mt-6 border-t pt-4 px-3 pb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground/70 lg:border-0 lg:pt-0"
+		>
+			<span className="hidden lg:inline">{children}</span>
+		</motion.p>
+	);
+}
+
+function SidebarLink({ entry }: { entry: NavEntry }) {
+	const { to, icon: Icon, label, exact } = entry;
+	return (
+		<MLink
+			variants={RISE}
+			whileHover={{ scale: 1.02 }}
+			whileTap={{ scale: 0.98 }}
+			to={to}
+			title={label()}
+			activeOptions={{ exact: exact === true }}
+			className={ITEM}
+			activeProps={ACTIVE}
+		>
+			{/* Hover brightens: a brand-tinted wash layered OVER whatever the link's background
+			    is (transparent or the active tint), so the item gets lighter on hover —
+			    including the active one. */}
+			<span
+				aria-hidden
+				className="pointer-events-none absolute inset-0 rounded-md bg-primary/0 transition-colors duration-200 group-hover:bg-primary/15"
+			/>
+			<Icon className="relative size-4 shrink-0" />
+			<span className="relative hidden lg:inline">{label()}</span>
+		</MLink>
+	);
+}
+
+/** A pinned plugin's own UI. Its own component because `$pluginId` needs typed `params`. */
+function PluginLink({
+	id,
+	title,
+	icon,
+}: {
+	id: string;
+	title: string;
+	icon?: string;
+}) {
+	const Icon = pluginIcon(icon);
+	return (
+		// The motion wrapper is a DIV around the link, not `motion(Link)`: wrapping Link erases
+		// TanStack's typed `params`, and this entry needs `$pluginId`.
+		<motion.div
+			variants={RISE}
+			whileHover={{ scale: 1.02 }}
+			whileTap={{ scale: 0.98 }}
+		>
+			<Link
+				to="/plugins/$pluginId/$"
+				params={{ pluginId: id, _splat: "" }}
+				title={title}
+				className={ITEM}
+				activeProps={ACTIVE}
+			>
+				<span
+					aria-hidden
+					className="pointer-events-none absolute inset-0 rounded-md bg-primary/0 transition-colors duration-200 group-hover:bg-primary/15"
+				/>
+				<Icon className="relative size-4 shrink-0" />
+				<span className="relative hidden truncate lg:inline">{title}</span>
+			</Link>
+		</motion.div>
+	);
+}
+
+/**
+ * Mobile bottom navigation (< sm): the primary five minus one, plus "More".
+ *
+ * "More" opens a LIST — icon, label, one line of what the page is for — grouped Manage /
+ * Pinned / Plugins. It was a 4-column icon grid with 10 px labels, which is unreadable and
+ * says nothing about what a page does.
+ */
 function MobileNav() {
 	const [moreOpen, setMoreOpen] = useState(false);
 	const pathname = useRouterState({ select: (s) => s.location.pathname });
+	const [pins] = usePins();
 	const { data } = usePlugins();
 	const plugins = uiPlugins(data);
-	// Highlight "More" when the current route lives in the overflow — plugins included.
+	// The bar takes four; the rest of the primary five open the sheet above Manage, because a
+	// five-tab bar plus More is six and 400 px does not hold six legible tabs. They keep their
+	// own unlabelled group — a primary destination filed under "Manage" is a lie about what it
+	// is.
+	const bar = PRIMARY.slice(0, 4);
+	const spill = PRIMARY.slice(4);
+	const overflow = [...spill, ...MANAGE];
+	const pinnedPlugins = plugins.filter((p) => pins.includes(pluginPin(p.id)));
+	const rest = plugins.filter((p) => !pins.includes(pluginPin(p.id)));
+	// Highlight "More" when the current route lives in the sheet — plugins included.
 	const overflowActive =
 		pathname.startsWith("/plugins/") ||
-		MOBILE_OVERFLOW.some(
-			(n) => pathname === n.to || pathname.startsWith(`${n.to}/`),
-		);
-	// Fixed two-line-tall label box so a 1- or 2-line label (labels vary by locale) keeps every icon
-	// at the same height.
+		overflow.some((n) => pathname === n.to || pathname.startsWith(`${n.to}/`));
 	const tab =
 		"flex flex-1 flex-col items-center justify-center gap-1 px-0.5 py-2 text-muted-foreground transition-colors";
-	const lbl =
-		"flex h-7 w-full items-center justify-center text-center text-[10px] leading-tight";
+	const lbl = "w-full truncate text-center text-xs leading-tight";
+	const close = () => setMoreOpen(false);
 	return (
 		<>
 			{/* Tap-outside backdrop, under the bar (z-50) but over the page. */}
@@ -217,56 +238,52 @@ function MobileNav() {
 					type="button"
 					aria-label={m.nav_close_menu()}
 					className="fixed inset-0 z-40 bg-black/40 sm:hidden"
-					onClick={() => setMoreOpen(false)}
+					onClick={close}
 				/>
 			)}
 			<nav
 				className="fixed inset-x-0 bottom-0 z-50 sm:hidden"
 				style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
 			>
-				{/* The "More" sheet sits directly above the bar (bottom-full of the fixed nav). */}
+				{/* The "More" sheet sits directly above the bar (bottom-full of the fixed nav).
+				    Capped at 70vh so a host with several plugins still shows the bar under it. */}
 				{moreOpen && (
-					<div className="absolute inset-x-0 bottom-full border-t bg-card/95 backdrop-blur">
-						<div className="grid grid-cols-4 gap-1 p-2">
-							{MOBILE_OVERFLOW.map(({ to, icon: Icon, label }) => (
-								<Link
-									key={to}
-									to={to}
-									onClick={() => setMoreOpen(false)}
-									activeOptions={{ exact: EXACT.includes(to) }}
-									className={cn(tab, "rounded-md")}
-									activeProps={{ className: "text-[var(--brand-light)]" }}
-								>
-									<Icon className="size-5 shrink-0" />
-									<span className={lbl}>{label()}</span>
-								</Link>
+					<div className="absolute inset-x-0 bottom-full max-h-[70vh] overflow-y-auto border-t bg-card/95 backdrop-blur">
+						{spill.length > 0 && (
+							<MoreGroup>
+								{spill.map((n) => (
+									<MoreRow key={n.to} entry={n} onNavigate={close} />
+								))}
+							</MoreGroup>
+						)}
+						<MoreGroup label={m.nav_group_manage()}>
+							{MANAGE.map((n) => (
+								<MoreRow key={n.to} entry={n} onNavigate={close} />
 							))}
-							{plugins.map((p) => {
-								const Icon = pluginIcon(p.ui?.icon);
-								return (
-									<Link
-										key={p.id}
-										to="/plugins/$pluginId/$"
-										params={{ pluginId: p.id, _splat: "" }}
-										onClick={() => setMoreOpen(false)}
-										className={cn(tab, "rounded-md")}
-										activeProps={{ className: "text-[var(--brand-light)]" }}
-									>
-										<Icon className="size-5 shrink-0" />
-										<span className={lbl}>{p.title}</span>
-									</Link>
-								);
-							})}
-						</div>
+						</MoreGroup>
+						{pinnedPlugins.length > 0 && (
+							<MoreGroup label={m.nav_group_pinned()}>
+								{pinnedPlugins.map((p) => (
+									<MorePluginRow key={p.id} plugin={p} onNavigate={close} />
+								))}
+							</MoreGroup>
+						)}
+						{rest.length > 0 && (
+							<MoreGroup label={m.nav_plugins()}>
+								{rest.map((p) => (
+									<MorePluginRow key={p.id} plugin={p} onNavigate={close} />
+								))}
+							</MoreGroup>
+						)}
 					</div>
 				)}
 				<div className="flex border-t bg-card/95 backdrop-blur">
-					{MOBILE_PRIMARY.map(({ to, icon: Icon, label }) => (
+					{bar.map(({ to, icon: Icon, label, exact }) => (
 						<Link
 							key={to}
 							to={to}
-							onClick={() => setMoreOpen(false)}
-							activeOptions={{ exact: EXACT.includes(to) }}
+							onClick={close}
+							activeOptions={{ exact: exact === true }}
 							className={tab}
 							activeProps={{ className: "text-[var(--brand-light)]" }}
 						>
@@ -292,7 +309,83 @@ function MobileNav() {
 	);
 }
 
-function LanguageSwitcher() {
+function MoreGroup({
+	label,
+	children,
+}: {
+	label?: string;
+	children: ReactNode;
+}) {
+	return (
+		<div className="border-b last:border-0">
+			{label && (
+				<p className="px-4 pt-3 pb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground/70">
+					{label}
+				</p>
+			)}
+			<ul className={label ? undefined : "pt-2"}>{children}</ul>
+		</div>
+	);
+}
+
+/** A 44 px-tall row: icon, label, and the one line that says what the page is for. */
+const ROW =
+	"flex items-center gap-3 px-4 py-2.5 text-sm text-muted-foreground transition-colors";
+
+function MoreRow({
+	entry,
+	onNavigate,
+}: {
+	entry: NavEntry;
+	onNavigate: () => void;
+}) {
+	const { to, icon: Icon, label, hint, exact } = entry;
+	return (
+		<li>
+			<Link
+				to={to}
+				onClick={onNavigate}
+				activeOptions={{ exact: exact === true }}
+				className={ROW}
+				activeProps={{ className: "text-[var(--brand-light)]" }}
+			>
+				<Icon className="size-5 shrink-0" />
+				<span className="min-w-0">
+					<span className="block font-medium text-foreground">{label()}</span>
+					<span className="block truncate text-xs">{hint()}</span>
+				</span>
+			</Link>
+		</li>
+	);
+}
+
+function MorePluginRow({
+	plugin,
+	onNavigate,
+}: {
+	plugin: { id: string; title: string; ui?: { icon?: string } };
+	onNavigate: () => void;
+}) {
+	const Icon = pluginIcon(plugin.ui?.icon);
+	return (
+		<li>
+			<Link
+				to="/plugins/$pluginId/$"
+				params={{ pluginId: plugin.id, _splat: "" }}
+				onClick={onNavigate}
+				className={ROW}
+				activeProps={{ className: "text-[var(--brand-light)]" }}
+			>
+				<Icon className="size-5 shrink-0" />
+				<span className="block min-w-0 truncate font-medium text-foreground">
+					{plugin.title}
+				</span>
+			</Link>
+		</li>
+	);
+}
+
+export function LanguageSwitcher() {
 	const current = useLocale();
 	return (
 		// biome-ignore lint/a11y/useSemanticElements: an aria-labelled role="group" is the right pattern for this small control cluster — no single semantic element fits.

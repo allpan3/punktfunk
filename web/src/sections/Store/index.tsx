@@ -30,6 +30,7 @@ import {
 } from "./InstallDialogs";
 import { InstalledTab } from "./Installed";
 import { BatchPendingCard, JobProgressSection } from "./JobProgress";
+import { PluginUis } from "./PluginUis";
 import { SourcesTab } from "./Sources";
 
 type StoreTab = "browse" | "installed" | "sources";
@@ -255,6 +256,8 @@ export const SectionStore: FC = () => {
 					// back with one. Only reachable mid-run; a lone install has nothing to show here.
 					step && <BatchPendingCard step={step} />
 				)}
+
+				<PluginUis />
 
 				<Tabs value={tab} onValueChange={(v) => setTab(v as StoreTab)}>
 					<TabsList>
