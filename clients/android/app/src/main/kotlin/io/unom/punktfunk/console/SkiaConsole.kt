@@ -357,17 +357,18 @@ object SkiaConsole {
             identity = runCatching { obtainIdentity(IdentityStore(app)) }
                 .onFailure { Log.w(TAG, "identity unavailable: ${it.message}") }
                 .getOrNull()
+            // Commands from the console, drained on a short cadence once the identity is in:
+            // a start-on-library shelf queues its fetch before the first frame.
+            main.post(object : Runnable {
+                override fun run() {
+                    if (handle == 0L) return
+                    drainCommands()
+                    main.postDelayed(this, 100)
+                }
+            })
         }
         discovery = HostDiscovery.shared(app).also { it.addNetworkListener(onNetworkChanged) }
         resumeDiscovery()
-        // Commands from the console, drained on a short cadence.
-        main.post(object : Runnable {
-            override fun run() {
-                if (handle == 0L) return
-                drainCommands()
-                main.postDelayed(this, 100)
-            }
-        })
         pushHosts()
     }
 

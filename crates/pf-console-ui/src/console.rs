@@ -5,7 +5,7 @@
 //! [`crate::SkiaOverlay`] and the Android GL host both sit on this; nothing here
 //! knows a `VkImage`, an SDL event, or a JNI env.
 
-use crate::model::{ConsoleBus, ConsoleShared, HostRow};
+use crate::model::{ConsoleBus, ConsoleCmd, ConsoleShared, HostRow};
 use crate::screens::Screen;
 use crate::shell::{ConsoleOptions, Shell};
 use crate::theme::Fonts;
@@ -99,7 +99,12 @@ impl Console {
         handles: &ConsoleHandles,
     ) -> Result<Console> {
         let stream = stream_intent(&entry);
+        let fetch = entry_fetch(&entry);
         let stack = entry_stack(entry, &handles.library);
+        // After the shelf samples the epoch: the host may drain this before the first frame.
+        if let Some(cmd) = fetch {
+            handles.bus.send(cmd);
+        }
         let mut shell = Shell::new(
             handles.console.clone(),
             handles.library.clone(),
@@ -215,13 +220,26 @@ fn stream_intent(entry: &ConsoleEntry) -> Option<crate::screens::ConnectIntent> 
     })
 }
 
+/// The start shelf's library fetch, queued by [`Console::new`] like every other shelf push.
+/// [`Console::navigate`] sends none: it re-roots on the list the model already holds.
+fn entry_fetch(entry: &ConsoleEntry) -> Option<ConsoleCmd> {
+    let (ConsoleEntry::Library(host) | ConsoleEntry::Stream(host)) = entry else {
+        return None;
+    };
+    Some(ConsoleCmd::FetchLibrary {
+        addr: host.addr.clone(),
+        mgmt: host.mgmt_port,
+        fp_hex: host.fp_hex.clone(),
+    })
+}
+
 fn entry_stack(entry: ConsoleEntry, library: &crate::library::LibraryShared) -> Vec<Screen> {
     match entry {
         ConsoleEntry::Home => vec![Screen::Home(crate::screens::home::HomeScreen::new())],
         ConsoleEntry::Library(host) | ConsoleEntry::Stream(host) => vec![
             Screen::Home(crate::screens::home::HomeScreen::new()),
-            // Snapshot the model's fetch epoch so the host's following `FetchLibrary`
-            // is the first raise; that is how the shelf knows the result is its own.
+            // Snapshot the model's fetch epoch before the entry's `FetchLibrary` is queued;
+            // that is how the shelf knows the result is its own.
             Screen::Library(crate::screens::library::LibraryScreen::new(
                 &host,
                 library.fetch_epoch(),
@@ -272,6 +290,25 @@ mod tests {
         assert_eq!(intent.profile, None);
         assert!(!intent.request_access);
         assert_eq!(intent.title, "Desk");
+    }
+
+    /// A host entry opens a shelf, and a shelf nobody fetches for spins forever.
+    #[test]
+    fn a_host_entry_queues_its_shelfs_fetch() {
+        assert_eq!(entry_fetch(&ConsoleEntry::Home), None);
+        for entry in [
+            ConsoleEntry::Library(Box::new(row())),
+            ConsoleEntry::Stream(Box::new(row())),
+        ] {
+            assert_eq!(
+                entry_fetch(&entry),
+                Some(ConsoleCmd::FetchLibrary {
+                    addr: "10.0.0.5".into(),
+                    mgmt: 47990,
+                    fp_hex: "aa".into(),
+                })
+            );
+        }
     }
 
     /// Both host entries land on the same two screens, so B leaves a cancelled stream
