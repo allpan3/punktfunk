@@ -774,7 +774,11 @@ struct Shared {
     /// Disk cache vs live host. Live [`LibraryShared::set_games`] resets this to [`Stale::No`].
     stale: Stale,
     /// Fetched poster bytes the renderer hasn't decoded yet (id, encoded image).
-    art_in: VecDeque<(String, Vec<u8>)>,
+    art_in: VecDeque<(String, Arc<[u8]>)>,
+    /// Every poster this fetch pushed. Embedders send once; a screen that evicted or never
+    /// held a raster decodes it again from here. The host serves source files as-is, so
+    /// this is the library's encoded art — a fraction of the rasters it caps.
+    posters: std::collections::HashMap<String, Arc<[u8]>>,
     /// Posters a host decoded on its own thread, waiting to be adopted. Separate from
     /// [`Shared::art_in`] because taking one costs nothing: the work is already done.
     decoded_in: VecDeque<(String, DecodedPoster)>,
@@ -845,6 +849,7 @@ impl Default for LibraryShared {
             games: Vec::new(),
             stale: Stale::No,
             art_in: VecDeque::new(),
+            posters: std::collections::HashMap::new(),
             decoded_in: VecDeque::new(),
             art_scale: None,
             generation: 0,
@@ -856,7 +861,7 @@ impl Default for LibraryShared {
 }
 
 impl LibraryShared {
-    /// A fetch is starting: `Loading`, and the epoch advances.
+    /// A fetch is starting: `Loading`, the epoch advances, and the previous posters go.
     ///
     /// Must go through here, not `set_phase(Loading)`. A cache that answers before the next
     /// frame would otherwise leave the epoch unchanged and the shelf on the previous host.
@@ -865,6 +870,9 @@ impl LibraryShared {
         s.phase = LibraryPhase::Loading;
         // Previous host's stale note is not this fetch's; a cached render re-declares it.
         s.stale = Stale::No;
+        // Every fetch pushes its art again; keeping the last one's would grow per host visited.
+        s.art_in.clear();
+        s.posters.clear();
         s.fetch_epoch += 1;
         s.generation += 1;
     }
@@ -965,7 +973,20 @@ impl LibraryShared {
     }
 
     pub fn push_art(&self, id: String, bytes: Vec<u8>) {
-        self.0.lock().unwrap().art_in.push_back((id, bytes));
+        let bytes: Arc<[u8]> = bytes.into();
+        let mut s = self.0.lock().unwrap();
+        s.posters.insert(id.clone(), bytes.clone());
+        s.art_in.push_back((id, bytes));
+    }
+
+    /// This fetch's poster for `id`, however many screens have decoded it already.
+    pub(crate) fn poster(&self, id: &str) -> Option<Arc<[u8]>> {
+        self.0.lock().unwrap().posters.get(id).cloned()
+    }
+
+    /// Bytes that did not decode: dropped so a visible tile does not retry them every frame.
+    pub(crate) fn forget_poster(&self, id: &str) {
+        self.0.lock().unwrap().posters.remove(id);
     }
 
     /// A poster a host already decoded, off the thread that draws.
@@ -1009,36 +1030,14 @@ impl LibraryShared {
         }
     }
 
-    /// At most `max` newly fetched posters; the rest stay queued.
+    /// At most `max` newly arrived posters, in arrival order; the rest stay queued.
     ///
-    /// Bounded: the renderer decodes on the render thread. Encoded bytes left behind are
-    /// two orders smaller than the rasters they become.
-    pub(crate) fn drain_art(&self, max: usize) -> Vec<(String, Vec<u8>)> {
+    /// Bounded: the renderer decodes on the render thread. Draining does not forget a
+    /// poster — [`Self::poster`] still has it.
+    pub(crate) fn drain_art(&self, max: usize) -> Vec<(String, Arc<[u8]>)> {
         let mut s = self.0.lock().unwrap();
         let n = max.min(s.art_in.len());
         s.art_in.drain(..n).collect()
-    }
-
-    /// At most `max` queued posters in `want`; every other entry stays.
-    ///
-    /// Bytes are pushed once per fetch and never re-sent. A wholesale drain on collections
-    /// would drop covers the shelf still needs.
-    pub(crate) fn take_art_for(
-        &self,
-        want: &std::collections::HashSet<String>,
-        max: usize,
-    ) -> Vec<(String, Vec<u8>)> {
-        let mut s = self.0.lock().unwrap();
-        let mut out = Vec::new();
-        let mut i = 0;
-        while i < s.art_in.len() && out.len() < max {
-            if want.contains(&s.art_in[i].0) {
-                out.extend(s.art_in.remove(i));
-            } else {
-                i += 1;
-            }
-        }
-        out
     }
 }
 
@@ -1175,44 +1174,19 @@ mod tests {
         assert!(shared.drain_art(2).is_empty());
     }
 
-    /// Poster bytes are pushed once per fetch and never re-sent; anything taken and not drawn is gone.
+    /// Embedders send a poster once per fetch. A screen that evicted it decodes it from here.
     #[test]
-    fn a_selective_take_leaves_everything_it_did_not_ask_for() {
+    fn a_poster_outlives_its_drain_until_the_next_fetch() {
         let shared = LibraryShared::default();
-        for i in 0..6 {
-            shared.push_art(format!("g{i}"), vec![i as u8]);
-        }
-        let want = ["g1".to_string(), "g4".to_string(), "g9".to_string()]
-            .into_iter()
-            .collect();
-        let took: Vec<String> = shared
-            .take_art_for(&want, 8)
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-        assert_eq!(
-            took,
-            ["g1", "g4"],
-            "an id that never arrived is not an error"
+        shared.push_art("g0".into(), vec![7]);
+        assert_eq!(shared.drain_art(9).len(), 1);
+        assert_eq!(shared.poster("g0").as_deref(), Some(&[7u8][..]));
+        shared.begin_fetch();
+        assert!(
+            shared.poster("g0").is_none(),
+            "the last fetch's art outlived it"
         );
-        let rest: Vec<String> = shared.drain_art(9).into_iter().map(|(id, _)| id).collect();
-        assert_eq!(rest, ["g0", "g2", "g3", "g5"], "the rest is untouched");
-    }
-
-    #[test]
-    fn a_selective_take_is_bounded_too() {
-        let shared = LibraryShared::default();
-        for i in 0..6 {
-            shared.push_art(format!("g{i}"), vec![i as u8]);
-        }
-        let want: std::collections::HashSet<String> = (0..6).map(|i| format!("g{i}")).collect();
-        assert_eq!(shared.take_art_for(&want, 2).len(), 2);
-        assert_eq!(shared.take_art_for(&want, 2).len(), 2);
-        assert_eq!(
-            shared.take_art_for(&want, 9).len(),
-            2,
-            "and then it is empty"
-        );
+        assert!(shared.drain_art(9).is_empty());
     }
 
     #[test]

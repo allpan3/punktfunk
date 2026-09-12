@@ -142,6 +142,25 @@ fn decode_near_cache_size(data: &Data, k: f64) -> Option<Image> {
     codec.get_image(info, None).ok()
 }
 
+/// Decode `id` into `art`. Bytes that will not decode leave the model, so no tile retries them.
+pub(super) fn decode_into(
+    art: &mut HashMap<String, Image>,
+    shared: &LibraryShared,
+    id: String,
+    bytes: &[u8],
+    k: f64,
+) {
+    match decode_poster(bytes, k) {
+        Some(img) => {
+            art.insert(id, img);
+        }
+        None => {
+            tracing::debug!(%id, "undecodable poster");
+            shared.forget_poster(&id);
+        }
+    }
+}
+
 /// Coldest stamps first, past [`ART_BUDGET`]. Split out so the policy tests without Skia.
 fn art_to_evict(live: &[String], seen: &HashMap<String, u64>) -> Vec<String> {
     if live.len() <= ART_BUDGET {
@@ -149,7 +168,7 @@ fn art_to_evict(live: &[String], seen: &HashMap<String, u64>) -> Vec<String> {
     }
     let mut by_age: Vec<(u64, &String)> = live
         .iter()
-        // Never-drawn stamps 0. Encoded bytes are gone after decode; this does not refill.
+        // Never-drawn stamps 0. `sync` decodes it again from the model's bytes once drawn.
         .map(|id| (seen.get(id).copied().unwrap_or(0), id))
         .collect();
     by_age.sort_unstable();
@@ -403,7 +422,7 @@ pub(crate) struct LibraryScreen {
     art: HashMap<String, Image>,
     /// Decode scale. This screen does not republish `k`; a grow cannot re-decode.
     art_k: f64,
-    /// Last-draw frame per id. Grid pages the whole library; unstamped covers stay forever.
+    /// Last-draw frame per id, placeholders too: `sync` re-decodes a stamped id with no raster.
     art_seen: HashMap<String, u64>,
     frame: u64,
     /// Armed after neighbourhood art or 400 ms. Unarmed, nothing draws.
@@ -731,13 +750,30 @@ impl LibraryScreen {
         // One at a time against the clock rather than a fixed count — see [`ART_FRAME_BUDGET`].
         // The deadline is checked AFTER a decode so every frame lands at least one.
         let started = std::time::Instant::now();
-        while let Some((id, bytes)) = shared.drain_art(1).pop() {
-            match decode_poster(&bytes, k) {
-                Some(img) => {
-                    self.art.insert(id, img);
-                }
-                None => tracing::debug!(%id, "undecodable poster"),
+        // What the last frame drew as a placeholder goes first: an evicted cover returns on sight.
+        let redraw: Vec<String> = self
+            .art_seen
+            .iter()
+            .filter(|&(id, &f)| f == self.frame && !self.art.contains_key(id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in redraw {
+            if let Some(bytes) = shared.poster(&id) {
+                decode_into(&mut self.art, &shared, id, &bytes, k);
             }
+            if started.elapsed() >= ART_FRAME_BUDGET {
+                return;
+            }
+        }
+        // Arrivals only while there is room: past the budget the next draw evicts them unseen.
+        while self.art.len() < ART_BUDGET {
+            let Some((id, bytes)) = shared.drain_art(1).pop() else {
+                break;
+            };
+            if self.art.contains_key(&id) {
+                continue;
+            }
+            decode_into(&mut self.art, &shared, id, &bytes, k);
             if started.elapsed() >= ART_FRAME_BUDGET {
                 break;
             }
@@ -2347,6 +2383,39 @@ mod tests {
         assert_eq!(dropped.len(), 2);
         assert!(dropped.contains(&"g7".to_string()));
         assert!(dropped.contains(&"g9".to_string()));
+    }
+
+    /// Embedders send each poster once. Past the budget, a cover evicted or never decoded
+    /// must come back the frame after it is drawn — scrolling out and back included.
+    #[test]
+    fn every_cover_returns_when_drawn_in_a_library_past_the_budget() {
+        let png = {
+            let mut surface =
+                skia_safe::surfaces::raster_n32_premul((6, 9)).expect("a raster surface");
+            surface.canvas().clear(Color4f::new(0.2, 0.4, 0.6, 1.0));
+            let image = surface.image_snapshot();
+            let data = image.encode(None, skia_safe::EncodedImageFormat::PNG, 100);
+            data.expect("a PNG encoder").as_bytes().to_vec()
+        };
+        let library = LibraryShared::default();
+        let spec = vec![("Title", None); ART_BUDGET + 40];
+        let titles = games(&spec);
+        for g in &titles {
+            library.push_art(g.id.clone(), png.clone());
+        }
+        let ids: Vec<String> = titles.iter().map(|g| g.id.clone()).collect();
+        library.set_games(titles);
+        let mut s = LibraryScreen::new(&host(), library.fetch_epoch());
+        s.sync(&library);
+        assert!(s.art.len() <= ART_BUDGET, "decoded past the budget unseen");
+        // A scroll, one tile at a time: drawn (maybe as a placeholder), evict, next sync.
+        for id in ids.iter().chain(ids.iter().rev()) {
+            s.frame += 1;
+            s.art_seen.insert(id.clone(), s.frame);
+            s.evict_art();
+            s.sync(&library);
+            assert!(s.art.contains_key(id), "{id} stayed a monogram");
+        }
     }
 
     /// Platform-less Steam collates as store: `[None, None]` is one collection, `[Some, None]` two.

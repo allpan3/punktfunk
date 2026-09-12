@@ -151,16 +151,13 @@ impl CollectionsScreen {
             self.cursor = self.cursor.clamp(0, (self.groups.len() as i32 - 1).max(0));
         }
         // Art arrives after the list settles; the generation guard would miss it.
-        if self.root {
-            self.pump_art(library);
-        }
+        self.pump_art(library);
     }
 
-    /// Decode only the covers this screen fans, and only as the library's root.
+    /// Decode only the covers this screen fans, from the model's kept bytes.
     ///
-    /// The shelf drains the model's queue wholesale. Bytes are pushed once per fetch
-    /// and never re-sent: a wholesale drain here would keep a dozen posters and leave
-    /// the next shelf with monograms for the rest of the session.
+    /// Reading those takes nothing from the arrival queue, so the shelf below or the
+    /// drill-in above still gets every cover.
     fn pump_art(&mut self, library: &LibraryShared) {
         let want: std::collections::HashSet<String> = self
             .groups
@@ -172,19 +169,19 @@ impl CollectionsScreen {
         if want.is_empty() {
             return;
         }
-        // Already decoded by the host: a move, not work this frame.
-        for (id, poster) in library.drain_decoded() {
-            self.art.insert(id, poster.into_image());
-        }
-        // Against the clock, like the shelf's own drain — one at a time, at least one a frame.
-        let started = std::time::Instant::now();
-        while let Some((id, bytes)) = library.take_art_for(&want, 1).pop() {
-            match super::library::decode_poster(&bytes, self.art_k) {
-                Some(img) => {
-                    self.art.insert(id, img);
-                }
-                None => tracing::debug!(%id, "undecodable poster"),
+        // Already decoded by the host: a move, not work this frame. A shelf below owns them.
+        if self.root {
+            for (id, poster) in library.drain_decoded() {
+                self.art.insert(id, poster.into_image());
             }
+        }
+        // Against the clock, like the shelf's own pump — one at a time, at least one a frame.
+        let started = std::time::Instant::now();
+        for id in want {
+            let Some(bytes) = library.poster(&id) else {
+                continue;
+            };
+            super::library::decode_into(&mut self.art, library, id, &bytes, self.art_k);
             if started.elapsed() >= super::library::ART_FRAME_BUDGET {
                 break;
             }
@@ -249,8 +246,8 @@ impl CollectionsScreen {
                 let mut shelf =
                     super::library::LibraryScreen::new(&self.host, ctx.library.fetch_epoch());
                 shelf.set_filter(g.key.clone(), g.label.clone());
-                // Covers this tile just fanned. Without them the drill-in waits out
-                // the art deadline and shows monograms: the shared queue was drained above.
+                // Covers this tile just fanned, so the drill-in's entrance does not wait
+                // out the art deadline for covers already decoded here.
                 shelf.adopt_art(self.art.clone());
                 fx.push(Screen::Library(shelf));
                 Some(MenuPulse::Confirm)
@@ -793,10 +790,8 @@ mod tests {
         library
     }
 
-    /// As the library's root this screen feeds itself — and takes only the covers it fans.
-    ///
-    /// Poster bytes are pushed once per fetch and never re-sent. A wholesale drain
-    /// would look right here and leave the next shelf with monograms.
+    /// As the library's root this screen decodes only the covers it fans, and reading
+    /// them leaves the arrival queue whole for the next shelf.
     #[test]
     fn as_the_librarys_root_it_takes_only_the_covers_it_fans() {
         let library = two_platforms();
@@ -823,20 +818,15 @@ mod tests {
         let mut decoded: Vec<String> = s.art.keys().cloned().collect();
         decoded.sort();
         assert_eq!(decoded, fanned, "it decoded something it never draws");
-        let left: Vec<String> = library
-            .drain_art(99)
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
         assert_eq!(
-            left,
-            ["g3", "g7"],
-            "the covers no tile fans must survive for the shelf"
+            library.drain_art(99).len(),
+            8,
+            "it consumed covers the next shelf is fed by"
         );
     }
 
-    /// From a shelf's Y that shelf is still underneath and still draining the queue.
-    /// Touching it here would starve it.
+    /// From a shelf's Y it fills its fan from the kept bytes, even covers the shelf
+    /// below evicted, and the queue that shelf drains stays whole.
     #[test]
     fn a_drill_in_from_a_shelf_leaves_the_queue_alone() {
         let library = two_platforms();
@@ -844,7 +834,7 @@ mod tests {
         for _ in 0..8 {
             s.sync(&library);
         }
-        assert!(s.art.is_empty(), "it took art the shelf below is fed by");
+        assert_eq!(s.art.len(), 2 * FAN, "its fan stayed monograms");
         assert_eq!(
             library.drain_art(99).len(),
             8,
