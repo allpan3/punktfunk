@@ -686,12 +686,19 @@ private struct ShotStreamHero: View {
 
     var body: some View {
         GeometryReader { geo in
+            #if os(macOS)
+            // The mac canvas: the stream window overhangs it by a point on each side.
+            let px = ShotDevice.mac.pixels(.landscape)
+            ShotHUD(width: px.w, height: px.h)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            #else
             // The whole display in pixels: the safe-area frame plus its insets, at backing scale.
             let insets = geo.safeAreaInsets
             ShotHUD(
                 width: Int(((geo.size.width + insets.leading + insets.trailing) * scale).rounded()),
                 height: Int(((geo.size.height + insets.top + insets.bottom) * scale).rounded()))
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            #endif
         }
         .background { ShotDesktopFrame() }
         .background(Color.black.ignoresSafeArea())

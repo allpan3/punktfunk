@@ -70,8 +70,22 @@ struct ScreenshotHostView: View {
         #endif
     }
 
-    var body: some View {
+    #if os(macOS)
+    /// The scene mounts once the window sits on the canvas: laid out at the launch size and then
+    /// resized, a carousel keeps whichever card sat at its old offset.
+    @State private var placed = false
+    #endif
+
+    @ViewBuilder private var sceneContent: some View {
+        #if os(macOS)
+        if placed { scene.make() } else { Color.clear }
+        #else
         scene.make()
+        #endif
+    }
+
+    var body: some View {
+        sceneContent
             .environment(\.colorScheme, scene.colorScheme)
             .environment(\.gamepadMetrics, gamepadMetrics)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -82,7 +96,7 @@ struct ScreenshotHostView: View {
             .background(Color.black.ignoresSafeArea())
             #endif
             #if os(macOS)
-            .background(MacShotWindowConfigurator(scene: scene))
+            .background(MacShotWindowConfigurator(scene: scene) { placed = true })
             #elseif os(iOS)
             .background(IOSOrientationConfigurator(orientation: scene.orientation))
             #endif
@@ -116,6 +130,7 @@ struct ScreenshotHostView: View {
 /// display the window floats at 1×.
 private struct MacShotWindowConfigurator: NSViewRepresentable {
     let scene: ShotScene
+    let onPlaced: () -> Void
 
     func makeNSView(context: Context) -> NSView { NSView() }
 
@@ -132,19 +147,29 @@ private struct MacShotWindowConfigurator: NSViewRepresentable {
                 .filter { $0.backingScaleFactor == ShotDevice.mac.scale }
                 .map { scene.macFullScreen ? $0.frame : $0.visibleFrame }
                 .first { $0.width >= size.width && $0.height >= size.height }
-            if scene.macFullScreen { window.styleMask = [.borderless] }
+            if scene.macFullScreen {
+                window.styleMask = [.borderless]
+                window.hasShadow = false // its rim would sit inside the canvas
+            }
+            var canvas: NSRect?
             if let area {
+                // A borderless window leaves its outermost point clear, so the chromeless canvas
+                // sits one point inside it. The top edge stays on screen, or macOS pushes it down.
+                let pad: CGFloat = scene.macFullScreen ? 1 : 0
                 let top = area.maxY.rounded(.down)
-                window.setFrame(NSRect(x: area.minX, y: top - size.height,
-                                       width: size.width, height: size.height), display: true)
+                let frame = NSRect(x: area.minX, y: top - size.height - 2 * pad,
+                                   width: size.width + 2 * pad, height: size.height + 2 * pad)
+                window.setFrame(frame, display: true)
+                canvas = frame.insetBy(dx: pad, dy: pad)
             } else {
                 window.setFrame(NSRect(origin: .zero, size: size), display: true)
                 window.center()
             }
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
-            MacSelfCapture.canvas = Self.globalRect(window.frame)
+            MacSelfCapture.canvas = Self.globalRect(canvas ?? window.frame)
             Self.announce(window, name, size)
+            onPlaced()
         }
     }
 
