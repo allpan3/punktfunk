@@ -189,12 +189,11 @@ pub(crate) struct NativeD3d11Decoder {
     want_recovery: bool,
 }
 
-// SAFETY: every field is either owned plain data or a reference-counted COM interface with
-// interlocked counts, so moving the whole struct to another thread and releasing it there is
-// sound. D3D11's immediate context is not thread-SAFE but it is thread-AGNOSTIC: it requires
-// serialised use, which `&mut self` on every method gives, not use from one fixed thread. The
-// presenter never touches these objects — it reaches the shared textures through their NT
-// handles on its own device. Moved, never shared; deliberately NOT `Sync`.
+// SAFETY: every field is plain data, a COM interface with interlocked counts, or an owned NT
+// handle (the hand-off's completion event), so moving the struct to another thread and
+// releasing it there is sound. D3D11's immediate context is thread-agnostic, not thread-safe:
+// `&mut self` on every method serialises it. The presenter reaches the shared textures only
+// through their NT handles on its own device. Moved, never shared; deliberately NOT `Sync`.
 unsafe impl Send for NativeD3d11Decoder {}
 
 impl NativeD3d11Decoder {

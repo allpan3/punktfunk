@@ -27,19 +27,20 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use windows::core::Interface;
 use windows::Win32::d3d11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11Device5, ID3D11DeviceContext, ID3D11Fence,
-    ID3D11Multithread, ID3D11Query, ID3D11Texture2D, ID3D11VideoContext1, ID3D11VideoDevice,
-    ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorEnumerator1,
-    ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView, D3D11_ASYNC_GETDATA_DONOTFLUSH,
-    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX,
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_FENCE_FLAG_SHARED,
-    D3D11_QUERY_DATA_TIMESTAMP_DISJOINT, D3D11_QUERY_DESC, D3D11_QUERY_TIMESTAMP,
-    D3D11_QUERY_TIMESTAMP_DISJOINT, D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX,
-    D3D11_RESOURCE_MISC_SHARED_NTHANDLE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
-    D3D11_USAGE_DEFAULT, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
-    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
-    D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
-    D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
+    D3D11CreateDevice, ID3D11Device, ID3D11Device5, ID3D11DeviceContext, ID3D11DeviceContext4,
+    ID3D11Fence, ID3D11Multithread, ID3D11Query, ID3D11Texture2D, ID3D11VideoContext1,
+    ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
+    ID3D11VideoProcessorEnumerator1, ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView,
+    D3D11_ASYNC_GETDATA_DONOTFLUSH, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
+    D3D11_BOX, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+    D3D11_FENCE_FLAG_NONE, D3D11_FENCE_FLAG_SHARED, D3D11_QUERY_DATA_TIMESTAMP_DISJOINT,
+    D3D11_QUERY_DESC, D3D11_QUERY_TIMESTAMP, D3D11_QUERY_TIMESTAMP_DISJOINT,
+    D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX, D3D11_RESOURCE_MISC_SHARED_NTHANDLE, D3D11_SDK_VERSION,
+    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_STREAM,
+    D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
+    D3D11_VPOV_DIMENSION_TEXTURE2D,
 };
 use windows::Win32::d3dcommon::{D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1};
 use windows::Win32::dxgi::{
@@ -53,6 +54,8 @@ use windows::Win32::dxgi::{
     DXGI_FORMAT_P010, DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
     DXGI_SHARED_RESOURCE_READ, DXGI_SHARED_RESOURCE_WRITE,
 };
+use windows::Win32::synchapi::{CreateEventW, WaitForSingleObject};
+use windows::Win32::winbase::WAIT_OBJECT_0;
 use windows::Win32::windef::RECT;
 use windows::Win32::winnt::{GENERIC_ALL, HANDLE};
 
@@ -67,6 +70,9 @@ const ACQUIRE_TIMEOUT_MS: u32 = 2000;
 
 /// An acquire that waited this long met the presenter still reading the slot.
 const ACQUIRE_STALL: Duration = Duration::from_millis(1);
+
+/// Budget for one [`DoneFence::wait`], milliseconds. A frame later than this is late anyway.
+const DONE_WAIT_BUDGET_MS: u32 = 100;
 
 /// NT handle of one ring slot, closed on the last drop. The ring holds one reference and
 /// every [`D3d11Frame`] handed off holds another, so a rebuild cannot close a handle the
@@ -741,6 +747,81 @@ fn shared_fence_supported(device: &ID3D11Device) -> Result<()> {
     Ok(())
 }
 
+/// Bounds the GPU work queued on the hand-off context to one frame. [`HandoffRing::present`]
+/// signals it after each hand-off and blocks until the GPU passes the signal, so the
+/// presenter receives a finished frame and a GPU-bound stream backs up ahead of the decoder
+/// instead of as queued decode work behind it. The keyed mutex still orders the presenter's
+/// read: a timeout only loosens the bound, and may wake the next wait early.
+/// `PUNKTFUNK_D3D11_HANDOFF_WAIT=0` turns it off.
+struct DoneFence {
+    context4: ID3D11DeviceContext4,
+    fence: ID3D11Fence,
+    /// Auto-reset event the fence sets on completion; closed on drop.
+    event: HANDLE,
+    value: u64,
+}
+
+impl DoneFence {
+    fn new(device: &ID3D11Device, context: &ID3D11DeviceContext) -> Result<DoneFence> {
+        let device5: ID3D11Device5 = device
+            .cast()
+            .context("device lacks ID3D11Device5 (pre-1703 Windows?)")?;
+        let context4: ID3D11DeviceContext4 = context
+            .cast()
+            .context("context lacks ID3D11DeviceContext4")?;
+        let mut fence: Option<ID3D11Fence> = None;
+        // SAFETY: a COM call on the live device writing a local `Option` out-param, checked below.
+        unsafe { device5.CreateFence(0, D3D11_FENCE_FLAG_NONE, &mut fence) }
+            .context("CreateFence")?;
+        let fence = fence.ok_or_else(|| anyhow!("CreateFence returned no fence"))?;
+        // SAFETY: an unnamed auto-reset event with default attributes; `Drop` closes it.
+        let event = unsafe { CreateEventW(None, false, false, windows::core::PCWSTR::null()) };
+        if event.0.is_null() {
+            return Err(anyhow!("CreateEventW returned no event"));
+        }
+        Ok(DoneFence {
+            context4,
+            fence,
+            event,
+            value: 0,
+        })
+    }
+
+    /// Signal after the work queued so far and block until the GPU passes it. Returns the
+    /// time blocked and whether the budget ran out.
+    fn wait(&mut self) -> Result<(Duration, bool)> {
+        self.value += 1;
+        let started = Instant::now();
+        // SAFETY: COM calls on the live context and fence; `event` is the live handle this
+        // value owns.
+        unsafe {
+            self.context4
+                .Signal(&self.fence, self.value)
+                .ok()
+                .context("fence signal")?;
+            self.context4.Flush();
+            if self.fence.GetCompletedValue() >= self.value {
+                return Ok((started.elapsed(), false));
+            }
+            self.fence
+                .SetEventOnCompletion(self.value, self.event)
+                .ok()
+                .context("fence completion event")?;
+            let woke = WaitForSingleObject(self.event, DONE_WAIT_BUDGET_MS);
+            Ok((started.elapsed(), woke != WAIT_OBJECT_0 as u32))
+        }
+    }
+}
+
+impl Drop for DoneFence {
+    fn drop(&mut self) {
+        // SAFETY: `event` is the handle `new` created and this value owns; `Drop` runs once.
+        unsafe {
+            let _ = windows::Win32::handleapi::CloseHandle(self.event);
+        }
+    }
+}
+
 /// One-second window of hand-off costs. `info` under `PUNKTFUNK_PRESENT_DEBUG=1` (the
 /// presenter's window switch) or when a frame stalled; `debug` otherwise.
 struct HandoffWindow {
@@ -753,6 +834,9 @@ struct HandoffWindow {
     /// `DecoderBeginFrame` busy retries and the time they cost.
     begin_retries: u32,
     begin_wait: Duration,
+    /// [`DoneFence`] block time, summed, and the waits that ran out of budget.
+    done_wait: Duration,
+    done_timeouts: u32,
     blt_us: Vec<u64>,
     debug: bool,
 }
@@ -766,6 +850,8 @@ impl HandoffWindow {
             acquire_wait: Duration::ZERO,
             begin_retries: 0,
             begin_wait: Duration::ZERO,
+            done_wait: Duration::ZERO,
+            done_timeouts: 0,
             blt_us: Vec::with_capacity(256),
             debug: std::env::var_os("PUNKTFUNK_PRESENT_DEBUG").is_some(),
         }
@@ -788,7 +874,7 @@ impl HandoffWindow {
         }
         let (blt_p50_us, _) = crate::session::window_percentiles(&mut self.blt_us);
         let blt_max_us = self.blt_us.iter().copied().max().unwrap_or(0);
-        let stalled = self.begin_retries > 0 || self.acquire_stalls > 0;
+        let stalled = self.begin_retries > 0 || self.acquire_stalls > 0 || self.done_timeouts > 0;
         // Both arms carry the same fields: `tracing` levels are not runtime values.
         if self.debug || stalled {
             tracing::info!(
@@ -800,6 +886,8 @@ impl HandoffWindow {
                 acquire_wait_us = self.acquire_wait.as_micros() as u64,
                 begin_retries = self.begin_retries,
                 begin_wait_us = self.begin_wait.as_micros() as u64,
+                done_wait_us = self.done_wait.as_micros() as u64,
+                done_timeouts = self.done_timeouts,
                 "D3D11VA hand-off window"
             );
         } else {
@@ -812,6 +900,8 @@ impl HandoffWindow {
                 acquire_wait_us = self.acquire_wait.as_micros() as u64,
                 begin_retries = self.begin_retries,
                 begin_wait_us = self.begin_wait.as_micros() as u64,
+                done_wait_us = self.done_wait.as_micros() as u64,
+                done_timeouts = self.done_timeouts,
                 "D3D11VA hand-off window"
             );
         }
@@ -821,6 +911,8 @@ impl HandoffWindow {
         self.acquire_wait = Duration::ZERO;
         self.begin_retries = 0;
         self.begin_wait = Duration::ZERO;
+        self.done_wait = Duration::ZERO;
+        self.done_timeouts = 0;
         self.blt_us.clear();
     }
 }
@@ -869,6 +961,9 @@ pub(crate) struct HandoffRing {
     generation: u32,
     /// Blt GPU timing; `None` when the device has no timestamp queries.
     timer: Option<BltTimer>,
+    /// Completion wait after each hand-off; `None` when turned off or the device has no
+    /// fences.
+    done: Option<DoneFence>,
     window: HandoffWindow,
 }
 
@@ -890,6 +985,16 @@ impl HandoffRing {
             Err(e) => tracing::info!(error = %format!("{e:#}"), "D3D11 shared fence unsupported"),
         }
         let timer = BltTimer::new(&device);
+        let done = if std::env::var("PUNKTFUNK_D3D11_HANDOFF_WAIT").as_deref() == Ok("0") {
+            None
+        } else {
+            DoneFence::new(&device, &context)
+                .inspect_err(|e| {
+                    tracing::info!(error = %format!("{e:#}"), "D3D11 hand-off completion wait unavailable");
+                })
+                .ok()
+        };
+        tracing::info!(on = done.is_some(), "D3D11 hand-off completion wait");
         Ok(HandoffRing {
             device,
             context,
@@ -902,6 +1007,7 @@ impl HandoffRing {
             planar_ring: None,
             generation: 0,
             timer,
+            done,
             window: HandoffWindow::new(),
         })
     }
@@ -1025,11 +1131,30 @@ impl HandoffRing {
         self.window.begin_wait += waited;
     }
 
+    /// Hand one decoded surface off ([`Self::hand_off`]), then block until the GPU has
+    /// finished it ([`DoneFence`]). A failed wait turns the wait off, not the frame.
+    pub(crate) fn present(&mut self, source: HandoffSource<'_>) -> Result<D3d11Frame> {
+        let frame = self.hand_off(source)?;
+        match self.done.as_mut().map(DoneFence::wait) {
+            Some(Ok((waited, timed_out))) => {
+                self.window.done_wait += waited;
+                self.window.done_timeouts += u32::from(timed_out);
+            }
+            Some(Err(e)) => {
+                tracing::warn!(error = %format!("{e:#}"),
+                    "D3D11 hand-off completion wait failed — handing frames over at submission");
+                self.done = None;
+            }
+            None => {}
+        }
+        Ok(frame)
+    }
+
     /// Hand one decoded surface to the next ring slot under its keyed mutex: a planar copy
     /// when the presenter imports the pool's format, a video-processor Blt to RGB otherwise.
     /// A failed planar hand-off turns planar off for that format and takes the RGB path.
     /// The acquire also back-pressures if the presenter is still reading this slot.
-    pub(crate) fn present(&mut self, source: HandoffSource<'_>) -> Result<D3d11Frame> {
+    fn hand_off(&mut self, source: HandoffSource<'_>) -> Result<D3d11Frame> {
         if let Some(format) = self.planar_format(source.texture) {
             match self.present_planar(&source, format) {
                 Ok(frame) => return Ok(frame),

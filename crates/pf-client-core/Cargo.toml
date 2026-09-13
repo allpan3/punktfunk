@@ -214,6 +214,8 @@ windows = { git = "https://github.com/microsoft/windows-rs", rev = "acb5a1a74410
     "d3dcommon",
     "dxgi",
     "handleapi",
+    # CreateEventW/WaitForSingleObject: the hand-off completion wait (video_d3d11.rs).
+    "synchapi",
     # RECT/HMONITOR for DXGI_OUTPUT_DESC1 (the display-HDR volume query).
     "windef",
     # HGLOBAL (clipboard.rs) + HINSTANCE (video_d3d11.rs), and the NT `HANDLE` the shared-surface
