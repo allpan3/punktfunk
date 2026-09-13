@@ -643,8 +643,9 @@ pub struct NvencCudaEncoder {
     /// Armed by a successful RFI; next `submit` tags that AU as the recovery anchor (NVENC
     /// applies invalidation at the next `encode_picture`).
     pending_anchor: bool,
-    /// Intra refresh wave in flight: a declined RFI's answer instead of the IDR. The start
-    /// frame carries `forceIntraRefreshWithFrameCnt`; the driver sweeps from there.
+    /// Intra refresh wave in flight: the opt-in (`rfi::nvenc_wave_enabled`) answer to a
+    /// declined RFI instead of the IDR. The start frame carries `forceIntraRefreshWithFrameCnt`;
+    /// the driver sweeps from there.
     wave: Option<Wave>,
     /// Timestamps `[start, close)` of the latest wave: part-dirty pictures the driver would
     /// otherwise serve as an RFI anchor. The close and everything after are clean.
@@ -962,9 +963,10 @@ impl NvencCudaEncoder {
             .is_some_and(|(start, close)| ts >= start && ts < close)
     }
 
-    /// Frames a forced intra refresh wave takes on this session; 0 when the wave is off.
+    /// Frames a forced intra refresh wave takes on this session; 0 unless
+    /// `PUNKTFUNK_INTRA_REFRESH=1` opts the wave in ([`crate::rfi::nvenc_wave_enabled`]).
     fn wave_cycle(&self) -> u32 {
-        if !crate::rfi::wave_enabled() {
+        if !crate::rfi::nvenc_wave_enabled() {
             return 0;
         }
         crate::rfi::wave_cycle(

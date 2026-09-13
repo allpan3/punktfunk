@@ -357,7 +357,8 @@ impl ReanchorGate {
 
     /// The current lift came from intra refresh marks, not an IDR or an anchor. A client with
     /// a bitstream planner forgets its damaged-chain marks on the frame this turns true: the
-    /// wave healed content by overwrite, which the chain cannot show.
+    /// wave healed content by overwrite, which the chain cannot show. Nothing re-checks the
+    /// picture afterwards, so a host marks only a sweep that decodes bit-exact.
     pub fn lifted_by_marks(&self) -> bool {
         !self.awaiting && self.mark_lift
     }

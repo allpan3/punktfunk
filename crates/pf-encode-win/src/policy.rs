@@ -6,8 +6,9 @@
 /// `PUNKTFUNK_INTRA_REFRESH=1` — opt into the periodic intra-refresh wave on
 /// AMF/QSV: a moving intra band heals FEC-unrecoverable loss without a
 /// 20-40× IDR spike, and selects IR over LTR there (the wave sweeps the
-/// picture; LTR pins references). `0` also turns off the on-demand wave every
-/// backend runs where an RFI declines (`rfi::wave_enabled`).
+/// picture; LTR pins references), and opts NVENC's on-demand wave in
+/// (`rfi::nvenc_wave_enabled`). `0` also turns off the on-demand wave the VCN
+/// backends run where an RFI declines (`rfi::wave_enabled`).
 pub fn intra_refresh_requested() -> bool {
     crate::knobs::get().intra_refresh == 1
 }

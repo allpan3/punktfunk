@@ -1080,8 +1080,9 @@ pub mod encode {
         pub nvenc_max_sessions: u8,
         /// `PUNKTFUNK_NVENC_SPLIT_ARBITRATE`: `1` = arm the live split experiment.
         pub nvenc_split_arbitrate: u8,
-        /// `PUNKTFUNK_INTRA_REFRESH`: `0` = the on-demand wave only, `1` = the periodic wave on
-        /// AMF/QSV too, `2` = no wave, IDR on every loss.
+        /// `PUNKTFUNK_INTRA_REFRESH`: `0` = the on-demand wave on Vulkan Video/VAAPI only,
+        /// `1` = NVENC's on-demand wave and the periodic wave on AMF/QSV too, `2` = no wave,
+        /// IDR on every loss.
         pub intra_refresh: u8,
         /// `PUNKTFUNK_AMF_USAGE`: `0` = ultralowlatency, `1` = lowlatency,
         /// `2` = lowlatency_high_quality, `3` = transcoding, `4` = highquality.

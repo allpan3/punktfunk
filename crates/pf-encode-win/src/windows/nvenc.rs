@@ -509,8 +509,9 @@ pub struct NvencD3d11Encoder {
     /// is the recovery anchor. NVENC applies invalidation at the next `encode_picture`. Without
     /// the tag the client can only lift on an IDR, which session glue suppresses after RFI.
     pending_anchor: bool,
-    /// Intra refresh wave in flight: a declined RFI's answer instead of the IDR. The start
-    /// frame carries `forceIntraRefreshWithFrameCnt`; the driver sweeps from there.
+    /// Intra refresh wave in flight: the opt-in (`rfi::nvenc_wave_enabled`) answer to a
+    /// declined RFI instead of the IDR. The start frame carries `forceIntraRefreshWithFrameCnt`;
+    /// the driver sweeps from there.
     wave: Option<Wave>,
     /// Timestamps `[start, close)` of the latest wave: part-dirty pictures the driver would
     /// otherwise serve as an RFI anchor. The close and everything after are clean.
@@ -822,9 +823,10 @@ impl NvencD3d11Encoder {
             .is_some_and(|(start, close)| ts >= start && ts < close)
     }
 
-    /// Frames a forced intra refresh wave takes on this session; 0 when the wave is off.
+    /// Frames a forced intra refresh wave takes on this session; 0 unless
+    /// `PUNKTFUNK_INTRA_REFRESH=1` opts the wave in ([`crate::rfi::nvenc_wave_enabled`]).
     fn wave_cycle(&self) -> u32 {
-        if !crate::rfi::wave_enabled() {
+        if !crate::rfi::nvenc_wave_enabled() {
             return 0;
         }
         crate::rfi::wave_cycle(
@@ -1864,7 +1866,8 @@ impl Encoder for NvencD3d11Encoder {
             supports_rfi: self.rfi_supported,
             // What the session actually configured (cleared in `query_caps` if the GPU lacks YUV444).
             chroma_444: self.chroma_444,
-            // Direct-NVENC recovers via real RFI (or a forced IDR), never an intra-refresh wave.
+            // Direct-NVENC recovers via real RFI (or a forced IDR); its wave is an opt-in
+            // measurement path (`rfi::nvenc_wave_enabled`), never a periodic one.
             intra_refresh: false,
             intra_refresh_recovery: false,
             intra_refresh_period: 0,
@@ -2677,7 +2680,8 @@ mod tests {
     /// `-dropL` the frame the anchor P answers, `-dropP` the anchor P ahead of B, `-dropC`
     /// the two frames ahead of the mid-B loss; the anchor P, B's close and C's close must
     /// decode identical. `PF_WAVE_SMOKE=WxH[:bits[:fps]]` runs a production shape
-    /// (`3840x2160:10:120`); 10-bit feeds R10G10B10A2 textures.
+    /// (`3840x2160:10:120`); 10-bit feeds R10G10B10A2 textures. The wave is opt-in on NVENC,
+    /// so the run needs `PUNKTFUNK_INTRA_REFRESH=1` in its environment.
     ///
     /// `cargo test -p pf-encode-win --features nvenc nvenc_wave_smoke -- --ignored --nocapture`
     #[test]
@@ -2764,7 +2768,7 @@ mod tests {
                 "the RTX box invalidates references"
             );
             let cycle = enc.wave_cycle() as usize;
-            assert!(cycle >= 2, "the wave is on");
+            assert!(cycle >= 2, "the wave is on (PUNKTFUNK_INTRA_REFRESH=1)");
             println!(
                 "nvenc_wave_smoke: {W}x{H} {}-bit {fps} fps, cycle {cycle} frames",
                 if ten_bit { 10 } else { 8 }

@@ -121,9 +121,24 @@ pub fn wave_cycle(rows: u32, fps: u32, max_cycle: u32, pinned: Option<u32>) -> u
 }
 
 /// `PUNKTFUNK_INTRA_REFRESH=0` keeps the IDR on every backend. The same knob at `1` opts the
-/// Windows periodic wave in (`policy::intra_refresh_requested`); unset is this wave alone.
+/// Windows periodic wave in (`policy::intra_refresh_requested`) and NVENC's on-demand wave
+/// ([`nvenc_wave_enabled`]); unset is the VCN wave alone.
 pub fn wave_enabled() -> bool {
     crate::knobs::get().intra_refresh != 2
+}
+
+/// NVENC answers a declined RFI with the IDR unless `PUNKTFUNK_INTRA_REFRESH=1` opts its wave
+/// in for a measurement. A client lifts on the wave's marks for good and forgets every damage
+/// mark, so only a sweep that decodes bit-exact may mark. NVENC's does not: an invalidate call
+/// mid-sweep stops it while the host still marks the close, and its bands bleed a few rows
+/// under motion. Both leave a grey smear that only the next IDR clears.
+pub fn nvenc_wave_enabled() -> bool {
+    nvenc_wave_opted_in(crate::knobs::get().intra_refresh)
+}
+
+/// `1` alone waves; unset (`0`) and off (`2`) both keep the IDR.
+fn nvenc_wave_opted_in(intra_refresh: u8) -> bool {
+    intra_refresh == 1
 }
 
 /// `PUNKTFUNK_IR_PERIOD_FRAMES=<frames>` pins the cycle for a measurement: the one wave-length
@@ -137,7 +152,15 @@ pub fn pinned_cycle() -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{pick_anchor, plan_slot_recovery, wave_cycle, Wave};
+    use super::{nvenc_wave_opted_in, pick_anchor, plan_slot_recovery, wave_cycle, Wave};
+
+    /// The NVENC wave is opt-in: the default knob keeps the IDR, `1` waves, off never does.
+    #[test]
+    fn nvenc_waves_only_when_opted_in() {
+        assert!(!nvenc_wave_opted_in(0), "unset: IDR");
+        assert!(nvenc_wave_opted_in(1));
+        assert!(!nvenc_wave_opted_in(2), "PUNKTFUNK_INTRA_REFRESH=0: IDR");
+    }
 
     /// Rows cap the cycle (1080p = 17 CTB rows), a quarter second caps it at 60 fps, the
     /// driver ceiling and the pin override, never below 2.

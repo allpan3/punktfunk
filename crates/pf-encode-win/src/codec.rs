@@ -56,7 +56,8 @@ pub struct EncodedFrame {
     /// Boundary of an encoder-driven intra refresh wave: its start AU and its close AU.
     /// The pump tags `punktfunk_core::packet::USER_FLAG_RECOVERY_POINT`; the client lifts
     /// its freeze on the second mark since a loss, so a wave that starts after the loss
-    /// heals in one cycle. Only the Vulkan backend sets it.
+    /// heals in one cycle. The lift is final on the client, so only a sweep that decodes
+    /// bit-exact may mark: Vulkan Video and VAAPI do, NVENC only when opted in.
     pub recovery_point: bool,
     /// Shard-aligned self-delimiting chunks ([`Encoder::set_wire_chunking`]).
     /// The session stamps `punktfunk_core::packet::USER_FLAG_CHUNK_ALIGNED`.
