@@ -349,6 +349,13 @@ public final class StreamLayerView: NSView {
         ) { [weak self] _ in
             self?.attemptPendingCapture()
         })
+        // A drag or clamshell switch onto a screen of another refresh kind changes how the
+        // presenter paces; a same-scale move fires no backing change, so listen for the screen.
+        windowObservers.append(NotificationCenter.default.addObserver(
+            forName: NSWindow.didChangeScreenNotification, object: window, queue: .main
+        ) { [weak self] _ in
+            self?.layoutPresenter()
+        })
         attemptPendingCapture()
     }
 
@@ -989,20 +996,18 @@ public final class StreamLayerView: NSView {
             reconcileCursorRender() // initial render mode (a capture-model start composites)
         }
 
-        // Presenter choice + lifecycle live in SessionPresenter (shared with iOS/tvOS): stage-2
-        // (explicit VTDecompressionSession decode + a CAMetalLayer/display-link present) by
-        // default, the stage-1 pump as the Metal-missing / DEBUG fallback. The link comes from
-        // NSView.displayLink so it tracks the display this view is on.
-        // Intercept the pump's coded-dims callback: re-fit the metal sublayer to the real content
-        // aspect (main thread) BEFORE forwarding to the owner's overlay END-signal. Fires only on a
-        // size CHANGE (first frame + each resolved resize), so this is rare, not per-frame.
+        // Presenter choice + lifecycle live in SessionPresenter (shared with iOS/tvOS); the link
+        // comes from NSView.displayLink so it tracks this view's display. No window exists yet
+        // (SwiftUI's makeNSView), so the screen kind is guessed from NSScreen.main until the first
+        // layoutPresenter in a window reads the real one. The coded-dims callback re-fits the
+        // metal sublayer on main BEFORE the owner's overlay END-signal (rare: size changes only).
         let overlayDecodedSize = onDecodedSize
         presenter.start(
             connection: connection,
             baseLayer: displayLayer,
             endToEndMeter: endToEndMeter,
             makeDisplayLink: { [unowned self] in self.displayLink(target: $0, selector: $1) },
-            adaptiveSync: Self.isAdaptiveSync(window?.screen),
+            adaptiveSync: Self.isAdaptiveSync(window?.screen ?? NSScreen.main),
             onFrame: onFrame,
             onSessionEnd: onSessionEnd,
             onDecodedSize: { [weak self] w, h in // resize overlay END signal (new-mode IDR dims)
@@ -1038,6 +1043,9 @@ public final class StreamLayerView: NSView {
         // `videoBounds` is read on every mouse event — that belongs on layout, not on input.
         safeModePixels = window?.screen?.notchSafePixelSize
         presenter.layout(in: videoBounds, contentsScale: window?.backingScaleFactor ?? 1)
+        // The screen kind is only real once in a window (a pre-window start guessed from
+        // NSScreen.main); a same-scale drag to another kind of screen re-decides here too.
+        if let screen = window?.screen { presenter.setAdaptiveSync(Self.isAdaptiveSync(screen)) }
         displayLayer.videoGravity = SessionPresenter.gravity
         // Present routing tracks the window's composited state (fullscreen transitions always
         // re-layout, so this stays current): a windowed session presents through a Core Animation
@@ -1059,8 +1067,9 @@ public final class StreamLayerView: NSView {
     }
 
     /// A screen that varies its refresh (ProMotion, adaptive sync) has no fixed scanout grid, so
-    /// the presenter paces frames itself — see `SessionPresenter.presentAtDue`. Resolved once at
-    /// session start; a move to another kind of screen takes effect on the next connect.
+    /// the presenter paces frames itself — see `SessionPresenter.presentAtDue`. Read from
+    /// `NSScreen.main` at start (no window yet) and from the window's screen on every layout and
+    /// screen move; a flip rebuilds the presentation.
     static func isAdaptiveSync(_ screen: NSScreen?) -> Bool {
         guard let screen else { return false }
         return screen.maximumRefreshInterval - screen.minimumRefreshInterval > 0.001

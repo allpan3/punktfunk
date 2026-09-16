@@ -327,6 +327,10 @@ public final class MetalVideoPresenter {
     private var windowedPresentStaged: WindowedPresentMode = .async
     private var windowedPresentActive: WindowedPresentMode = .async
 
+    /// Whether presents currently ride the compositor (`transaction` / `surface`), which paces
+    /// them itself and ignores `presentAtMediaTime`. Render thread only, like the mode it reads.
+    var presentsComposited: Bool { windowedPresentActive != .async }
+
     /// PUNKTFUNK_TXN_PRESENT=main — the ORIGINAL transactional present (commit →
     /// waitUntilScheduled → hop to the MAIN thread and present inside its CATransaction), kept
     /// as a field A/B lever. The default is the render-thread commit: the present harness

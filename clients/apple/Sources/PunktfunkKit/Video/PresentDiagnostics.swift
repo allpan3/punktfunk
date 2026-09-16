@@ -271,13 +271,16 @@ final class PresentDebugStats: @unchecked Sendable {
     private var inFlight = 0
     private var maxInFlight = 0
 
-    /// `pace` names the live present policy (immediate|vsync|due|deadline) and `linkPeriod`
-    /// reads the ordinary display link's last period, so one line says what paced the frames
-    /// whose glass deltas it reports.
-    private let pace: String
+    /// `pace` names the live present policy (immediate|vsync|due|deadline, "(composited)" when a
+    /// windowed present ignores the schedule) and `linkPeriod` reads the ordinary display link's
+    /// last period, so one line says what paced the frames whose glass deltas it reports.
+    private let pace: () -> String
     private let linkPeriod: () -> CFTimeInterval
 
-    init(cadence: CadenceClock?, pace: String, linkPeriod: @escaping () -> CFTimeInterval) {
+    init(
+        cadence: CadenceClock?, pace: @escaping () -> String,
+        linkPeriod: @escaping () -> CFTimeInterval
+    ) {
         self.cadence = cadence
         self.pace = pace
         self.linkPeriod = linkPeriod
@@ -357,7 +360,7 @@ final class PresentDebugStats: @unchecked Sendable {
                 + "noDrawable=%d dropped=%d qDrop=%d qDry=%d maxRenderMs=%.1f inflightMax=%d "
                 + "forced=%d glassDeltaMs p50=%.2f max=%.2f n=%d latchMs p50=%.2f max=%.2f "
                 + "vendLeadMs p50=%.2f max=%.2f",
-            pace, linkPeriod() * 1000, decoded, ok, failed, empty, gated, noDrawable, dropped,
+            pace(), linkPeriod() * 1000, decoded, ok, failed, empty, gated, noDrawable, dropped,
             smoothing.overflowDrops, smoothing.underflows, maxRenderMs, inflightMax,
             gate?.drainForced() ?? 0, p50, dMax, deltas.count, latchP50, latchMax,
             vendP50, vendMax) + cadenceLine

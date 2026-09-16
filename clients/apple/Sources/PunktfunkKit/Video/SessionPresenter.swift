@@ -208,18 +208,41 @@ final class SessionPresenter {
     /// Present at the source-cadence due time instead of flipping on arrival: the adaptive-sync
     /// panel case, where no scanout grid absorbs arrival jitter, so the client must pace. Only
     /// the latency intent on arrival pacing — smoothness snaps its own grid, glass and deadline
-    /// pace themselves. `PUNKTFUNK_PRESENT_MODE=due` forces it on a fixed panel for an A/B;
+    /// pace themselves — and only while the user's V-Sync toggle is off: an explicit ON keeps the
+    /// grid snap it asks for. `PUNKTFUNK_PRESENT_MODE=due` forces it on any panel for an A/B;
     /// `immediate` / `vsync` force it off. Internal (not private) for unit tests.
     static func presentAtDue(
-        adaptiveSync: Bool, priority: PresentPriority, pacing: PresentPacing, env: String?
+        adaptiveSync: Bool, priority: PresentPriority, pacing: PresentPacing, vsync: Bool,
+        env: String?
     ) -> Bool {
         guard priority == .latency, pacing == .arrival else { return false }
         switch env {
         case "due": return true
         case "immediate", "vsync": return false
-        default: return adaptiveSync
+        default: return adaptiveSync && !vsync
         }
     }
+
+    /// The view's verdict on the hosting screen (`StreamLayerView.isAdaptiveSync`), pushed on every
+    /// layout and screen move. A flip that changes the due-time decision rebuilds the presentation
+    /// on the same connection — one IDR — because a pipeline's cadence clock is fixed at its start.
+    /// Main thread.
+    func setAdaptiveSync(_ on: Bool) {
+        adaptiveSync = on
+        guard let resolvePresentAtDue, resolvePresentAtDue(on) != presentAtDueApplied else { return }
+        presentLog.info("screen refresh kind changed — rebuilding presentation")
+        restartPresentation()
+    }
+    #endif
+
+    /// Whether the hosting screen varies its refresh (ProMotion, adaptive sync) — the view's
+    /// verdict, pushed at start and by `setAdaptiveSync`; every restart carries the latest. Main.
+    private var adaptiveSync = false
+    #if os(macOS)
+    /// The running stage-2 pipeline's due-time verdict, and the resolver that recomputes it for a
+    /// new screen kind with this session's intent and pacing baked in. nil without a pipeline.
+    private var presentAtDueApplied = false
+    private var resolvePresentAtDue: ((Bool) -> Bool)?
     #endif
 
     private var pump: StreamPump?
@@ -281,10 +304,12 @@ final class SessionPresenter {
         stop()
         self.connection = connection
         self.baseLayer = baseLayer
+        self.adaptiveSync = adaptiveSync
         restart = { [weak self] layer in
-            self?.start(
+            guard let self else { return }
+            self.start(
                 connection: connection, baseLayer: layer, endToEndMeter: endToEndMeter,
-                makeDisplayLink: makeDisplayLink, adaptiveSync: adaptiveSync,
+                makeDisplayLink: makeDisplayLink, adaptiveSync: self.adaptiveSync,
                 onFrame: onFrame, onSessionEnd: onSessionEnd, onDecodedSize: onDecodedSize)
         }
 
@@ -317,9 +342,14 @@ final class SessionPresenter {
             selectedPacing, priority: priority, videoLayerCompatible: !connection.isChroma444)
         #if os(macOS)
         let vsyncPaced = priority != .latency && pacing == .arrival
-        let presentAtDue = Self.presentAtDue(
-            adaptiveSync: adaptiveSync, priority: priority, pacing: pacing,
-            env: ProcessInfo.processInfo.environment["PUNKTFUNK_PRESENT_MODE"])
+        let presentMode = ProcessInfo.processInfo.environment["PUNKTFUNK_PRESENT_MODE"]
+        let vsyncSetting = SessionSettings.current.vsync
+        let resolveDue = { (adaptive: Bool) in
+            Self.presentAtDue(
+                adaptiveSync: adaptive, priority: priority, pacing: pacing, vsync: vsyncSetting,
+                env: presentMode)
+        }
+        let presentAtDue = resolveDue(adaptiveSync)
         #else
         let vsyncPaced = false
         let presentAtDue = false
@@ -357,6 +387,10 @@ final class SessionPresenter {
             surfaceLayer = pipeline.surfaceLayer
             #endif
             stage2 = pipeline
+            #if os(macOS)
+            presentAtDueApplied = presentAtDue
+            resolvePresentAtDue = resolveDue
+            #endif
             // The ordinary link supplies the vsync grid, retries transient Metal drawable misses,
             // and polls which decoded IOSurface reached glass. Frame arrival remains the render
             // trigger. Deadline pacing owns its drawable-vending CAMetalDisplayLink instead.
@@ -577,15 +611,19 @@ final class SessionPresenter {
         contentSize = size // the view drops the new pipeline's repeat of this size
     }
 
-    /// The pipeline's `onPresentWedged` cure, hopped to MAIN: rebuild the presentation the way
-    /// a reconnect does — fresh pipeline, presenter and CAMetalLayer — on the SAME connection.
-    /// The old pipeline stops (its `token` silences its `onSessionEnd`), the new pump asks the
-    /// host for an IDR because it starts without a format, and the replayed layout gives the
-    /// new sublayer its frame before the first vend. A relink alone does not unwedge it. The
-    /// cost is ~1 s of freeze plus one IDR, against a session that otherwise never moves again.
+    /// The pipeline's `onPresentWedged` cure, hopped to MAIN. A relink alone does not unwedge it;
+    /// the cost is ~1 s of freeze plus one IDR, against a session that otherwise never moves again.
     private func rebuildPresentation() {
-        guard let restart, let baseLayer else { return }
         presentLog.error("presenter wedged — rebuilding pipeline, presenter and layer")
+        restartPresentation()
+    }
+
+    /// Rebuild the presentation the way a reconnect does — fresh pipeline, presenter and
+    /// CAMetalLayer — on the SAME connection. The old pipeline stops (its `token` silences its
+    /// `onSessionEnd`), the new pump asks the host for an IDR because it starts without a format,
+    /// and the replayed layout gives the new sublayer its frame before the first vend.
+    private func restartPresentation() {
+        guard let restart, let baseLayer else { return }
         restart(baseLayer)
         if let lastLayout { layout(in: lastLayout.bounds, contentsScale: lastLayout.contentsScale) }
     }
@@ -596,6 +634,9 @@ final class SessionPresenter {
     func stop() {
         restart = nil
         baseLayer = nil
+        #if os(macOS)
+        resolvePresentAtDue = nil
+        #endif
         contentSize = nil // a new session re-derives it from its first frame
         pump?.stop()
         pump = nil

@@ -407,21 +407,23 @@ final class PresentPacingTests: XCTestCase {
     // MARK: - Due-time presents (adaptive-sync panels)
 
     /// Due-time presents exist for an adaptive-sync screen under the latency intent on arrival
-    /// pacing only; PUNKTFUNK_PRESENT_MODE forces them either way. The pipeline runs the
-    /// free-running cadence tuning for them and keeps smoothness on the snapping one.
+    /// pacing with V-Sync off; PUNKTFUNK_PRESENT_MODE forces them either way. The pipeline runs
+    /// the free-running cadence tuning for them and keeps smoothness on the snapping one.
     func testPresentAtDueResolution() {
-        XCTAssertTrue(SessionPresenter.presentAtDue(
-            adaptiveSync: true, priority: .latency, pacing: .arrival, env: nil))
-        XCTAssertFalse(SessionPresenter.presentAtDue(
-            adaptiveSync: false, priority: .latency, pacing: .arrival, env: nil))
-        XCTAssertFalse(SessionPresenter.presentAtDue(
-            adaptiveSync: true, priority: .smooth(buffer: 2), pacing: .arrival, env: nil))
-        XCTAssertFalse(SessionPresenter.presentAtDue(
-            adaptiveSync: true, priority: .latency, pacing: .glass, env: nil))
-        XCTAssertFalse(SessionPresenter.presentAtDue(
-            adaptiveSync: true, priority: .latency, pacing: .arrival, env: "immediate"))
-        XCTAssertTrue(SessionPresenter.presentAtDue(
-            adaptiveSync: false, priority: .latency, pacing: .arrival, env: "due"))
+        func due(
+            _ adaptive: Bool, _ priority: PresentPriority = .latency,
+            _ pacing: PresentPacing = .arrival, vsync: Bool = false, env: String? = nil
+        ) -> Bool {
+            SessionPresenter.presentAtDue(
+                adaptiveSync: adaptive, priority: priority, pacing: pacing, vsync: vsync, env: env)
+        }
+        XCTAssertTrue(due(true))
+        XCTAssertFalse(due(false))
+        XCTAssertFalse(due(true, .smooth(buffer: 2)))
+        XCTAssertFalse(due(true, .latency, .glass))
+        XCTAssertFalse(due(true, vsync: true), "an explicit V-Sync ON keeps the grid snap")
+        XCTAssertFalse(due(true, env: "immediate"))
+        XCTAssertTrue(due(false, env: "due"))
         XCTAssertEqual(
             Stage2Pipeline.cadenceTuning(store: .newestWins, presentAtDue: true), .freeRunning())
         XCTAssertNil(Stage2Pipeline.cadenceTuning(store: .newestWins, presentAtDue: false))

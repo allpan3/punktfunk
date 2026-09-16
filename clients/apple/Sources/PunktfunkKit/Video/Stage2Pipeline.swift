@@ -927,8 +927,16 @@ public final class Stage2Pipeline {
         // vends the drawables and its per-refresh updates co-drive the render thread — see
         // startDeadlinePresenter. Deadline sessions ALWAYS carry the stats (their pf-present line
         // streams to Console.app via presentLog — the on-device pacing decomposition).
-        let pace = pacing == .deadline ? "deadline"
+        let paceName = pacing == .deadline ? "deadline"
             : presentAtDue ? "due" : vsyncEnabled ? "vsync" : "immediate"
+        #if os(macOS)
+        // A composited (windowed) present is paced by the compositor, whatever was scheduled.
+        let pace = { [presenter] in
+            presenter.presentsComposited ? paceName + "(composited)" : paceName
+        }
+        #else
+        let pace = { paceName }
+        #endif
         let debugStats = (presentDebug || pacing == .deadline)
             ? PresentDebugStats(cadence: cadence, pace: pace, linkPeriod: vsyncClock.lastPeriod)
             : nil
