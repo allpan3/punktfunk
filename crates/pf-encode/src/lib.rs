@@ -1411,6 +1411,26 @@ pub fn resolved_backend_ingests_rgb_444() -> bool {
     false
 }
 
+/// Encoder half of the 10-bit SDR gate: this backend writes a 10-bit stream from the 8-bit
+/// surface an SDR desktop captures.
+///
+/// Windows direct-NVENC ingests the IDD packed `Rgb10a2Sdr`; Linux direct-NVENC takes the
+/// plain 8-bit surface and asks NVENC for 10-bit output. VAAPI and Vulkan stay out: both tie
+/// depth to a BT.2020 PQ colour path, so a 10-bit SDR session would mislabel its samples.
+/// The GPU still has to pass `can_encode_10bit`.
+#[cfg(target_os = "windows")]
+pub fn backend_carries_sdr10() -> bool {
+    windows_resolved_backend() == WindowsBackend::Nvenc
+}
+#[cfg(target_os = "linux")]
+pub fn backend_carries_sdr10() -> bool {
+    cfg!(feature = "nvenc") && !linux_zero_copy_is_vaapi()
+}
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+pub fn backend_carries_sdr10() -> bool {
+    false
+}
+
 /// True if the Windows codec advertisement comes from a real GPU probe
 /// ([`windows_codec_support`]) rather than the static superset. AMF always;
 /// QSV with `qsv`; NVENC with `nvenc`.

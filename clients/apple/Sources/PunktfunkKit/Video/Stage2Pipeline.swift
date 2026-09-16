@@ -758,12 +758,13 @@ public final class Stage2Pipeline {
         cadence?.reset()
         token = StopFlag() // fresh token per start — a stop is permanent (like StreamPump)
 
-        // Configure the decoder's chroma + the layer's initial colorimetry before the first frame. The
-        // chroma subsampling drives only the decode pixel format (orthogonal to HDR/depth); the HDR
-        // config is the Welcome's latched value, which a mid-session flip then overrides per-frame.
+        // Configure the decoder's chroma + depth and the layer's initial colorimetry before the
+        // first frame. The Welcome's HDR and depth seed the layer; a mid-session flip then
+        // overrides per frame from the decoded buffer.
         decoder.setChroma444(connection.isChroma444)
         decoder.setCodec(connection.videoCodec)
-        presenter.configure(hdr: connection.isHDR)
+        decoder.setBitDepth(connection.bitDepth)
+        presenter.configure(hdr: connection.isHDR, tenBitSDR: connection.bitDepth >= 10)
         decodedSink?.reset()
 
         let token = token
@@ -1226,7 +1227,7 @@ public final class Stage2Pipeline {
                         decodedSize: CGSize(
                             width: CVPixelBufferGetWidth(pixelBuffer),
                             height: CVPixelBufferGetHeight(pixelBuffer)),
-                        isHDR: isHDR)
+                        isHDR: isHDR, tenBitSDR: MetalVideoPresenter.tenBitBuffer(pixelBuffer))
                 case .planar(let planes):
                     presenter.reconcileLayer(
                         decodedSize: CGSize(width: planes.width, height: planes.height),

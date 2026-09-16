@@ -641,7 +641,7 @@ pub(crate) async fn get_session_settings() -> Json<SessionSettingsState> {
     responses(
         (status = OK, description = "Settings stored; the new state", body = SessionSettingsState),
         (status = BAD_REQUEST, description = "Malformed settings body", body = ApiError),
-        (status = INTERNAL_SERVER_ERROR, description = "Settings could not be persisted", body = ApiError),
+        (status = INTERNAL_SERVER_ERROR, description = "Couldn't save the session settings", body = ApiError),
         (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
     )
 )]

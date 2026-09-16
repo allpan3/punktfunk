@@ -5669,8 +5669,11 @@ pub unsafe extern "C" fn punktfunk_h265_concealer_free(c: *mut PunktfunkH265Conc
     });
 }
 
-/// Fold one Annex-B access unit. `out_kind` says what to decode; for `Rewritten`,
-/// `out_buf`/`out_len` hold the bytes until [`punktfunk_h265_concealer_release`].
+/// Fold one Annex-B access unit.
+///
+/// `out_kind` says what to decode. For `Rewritten`, `out_buf` and `out_len`
+/// hold the bytes until [`punktfunk_h265_concealer_release`]. A length that
+/// cannot fit a Rust slice returns [`PunktfunkStatus::InvalidArg`].
 ///
 /// # Safety
 /// `c` is a valid handle; `au` points to `len` readable bytes; the out pointers are writable.
@@ -5696,10 +5699,13 @@ pub unsafe extern "C" fn punktfunk_h265_concealer_conceal(
         if au.is_null() && len != 0 {
             return PunktfunkStatus::NullPointer;
         }
+        if ffi_slice_bytes::<u8>(len).is_none() {
+            return PunktfunkStatus::InvalidArg;
+        }
         let bytes: &[u8] = if len == 0 {
             &[]
         } else {
-            // SAFETY: `au` is non-null here and points to `len` readable bytes per the contract.
+            // SAFETY: `au` is non-null and `ffi_slice_bytes` proved the extent fits a Rust slice.
             unsafe { std::slice::from_raw_parts(au, len) }
         };
         *out_buf = std::ptr::null_mut();

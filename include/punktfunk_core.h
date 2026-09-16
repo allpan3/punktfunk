@@ -3320,8 +3320,11 @@ PunktfunkH265Concealer *punktfunk_h265_concealer_new(void);
 // `c` was returned by [`punktfunk_h265_concealer_new`] and is not used after this call.
 void punktfunk_h265_concealer_free(PunktfunkH265Concealer *c);
 
-// Fold one Annex-B access unit. `out_kind` says what to decode; for `Rewritten`,
-// `out_buf`/`out_len` hold the bytes until [`punktfunk_h265_concealer_release`].
+// Fold one Annex-B access unit.
+//
+// `out_kind` says what to decode. For `Rewritten`, `out_buf` and `out_len`
+// hold the bytes until [`punktfunk_h265_concealer_release`]. A length that
+// cannot fit a Rust slice returns [`PunktfunkStatus::InvalidArg`].
 //
 // # Safety
 // `c` is a valid handle; `au` points to `len` readable bytes; the out pointers are writable.

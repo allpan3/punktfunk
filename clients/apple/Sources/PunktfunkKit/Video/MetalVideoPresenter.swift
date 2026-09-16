@@ -83,6 +83,17 @@ private let sdrColorspace: CGColorSpace? = {
     return CGColorSpace(name: CGColorSpace.sRGB)
 }()
 
+/// The SDR drawable of a 10-bit session: the same gamma-encoded BT.709 samples as the 8-bit
+/// path in a 10-bit unorm drawable, so the decode's depth reaches the panel instead of being
+/// requantised at present. Tagged by `sdrColorspace` like the 8-bit one. Not an extended-range
+/// format: those re-map the [0,1] range and want a different shader output.
+///
+/// `PUNKTFUNK_SDR10_DRAWABLE=8` keeps the 8-bit drawable — the A/B lever if a panel composites
+/// the wide format wrong.
+private let sdr10Drawable: MTLPixelFormat =
+    ProcessInfo.processInfo.environment["PUNKTFUNK_SDR10_DRAWABLE"] == "8"
+    ? .bgra8Unorm : .bgr10a2Unorm
+
 /// Runtime-compiled (no metallib build step needed in SwiftPM): a fullscreen triangle and Y′CbCr→RGB
 /// fragment shaders whose conversion arrives as three constant rows computed per frame on the CPU
 /// (`CscRows` — the Swift port of pf-client-core's `csc_rows`, from the decoded buffer's actual
@@ -365,7 +376,9 @@ public final class MetalVideoPresenter {
 
     private var surfacePool: [SurfaceSlot] = []
     private var surfacePoolSize: CGSize = .zero
-    private var surfacePoolHDR = false
+    /// What the pool's surfaces and textures were allocated for.
+    private enum SurfaceDepth { case sdr8, sdr10, hdr }
+    private var surfacePoolDepth = SurfaceDepth.sdr8
     private var surfaceSeq: UInt64 = 0
     /// Index of the slot most recently handed to the layer — never rewritten next, even if its
     /// use count already dropped (the compositor may still be scanning out the previous frame).
@@ -418,6 +431,8 @@ public final class MetalVideoPresenter {
     /// SDR (BT.709 8-bit → bgra8) and HDR (BT.2020 PQ 10-bit → rgba16Float) pipelines. Selected per
     /// frame in `render`; the layer is reconfigured to match when the session flips (HDR toggle).
     private let pipelineSDR: MTLRenderPipelineState
+    /// `pf_frag` into `sdr10Drawable`: the SDR shader, wider attachment.
+    private let pipelineSDR10: MTLRenderPipelineState
     private let pipelineHDR: MTLRenderPipelineState
     /// tvOS only: the in-shader PQ→SDR tone-map fallback (pf_frag_hdr_tv → bgra8), used whenever
     /// the display is composited without HDR headroom — see `setDisplayHeadroom`. nil elsewhere.
@@ -453,6 +468,9 @@ public final class MetalVideoPresenter {
     /// Render-thread confined once the pipeline runs (Stage2Pipeline.start's one pre-thread
     /// `configure` call is ordered before the thread starts, so it doesn't race).
     private var hdrActive = false
+    /// The SDR layer holds `sdr10Drawable` (a 10-bit session). Switched beside `hdrActive` in
+    /// `configure`; not read while `hdrActive`.
+    private var tenBitSDRActive = false
     /// Has `configureColor` run even once? `hdrActive` starts `false`, so a session that is SDR from
     /// the first frame matches the initial state and used to fall straight through `configure`'s
     /// guard — the layer then kept `make()`'s bare config, which never assigns a colour space, and
@@ -499,6 +517,7 @@ public final class MetalVideoPresenter {
               let queue = device.makeCommandQueue()
         else { return nil }
         let pipelineSDR: MTLRenderPipelineState
+        let pipelineSDR10: MTLRenderPipelineState
         let pipelineHDR: MTLRenderPipelineState
         let pipelineHDRToneMap: MTLRenderPipelineState?
         let pipelinePlanar: MTLRenderPipelineState
@@ -521,6 +540,11 @@ public final class MetalVideoPresenter {
             sdr.fragmentFunction = library.makeFunction(name: "pf_frag")
             sdr.colorAttachments[0].pixelFormat = .bgra8Unorm
             pipelineSDR = try device.makeRenderPipelineState(descriptor: sdr)
+            let sdr10 = MTLRenderPipelineDescriptor()
+            sdr10.vertexFunction = vtx
+            sdr10.fragmentFunction = library.makeFunction(name: "pf_frag")
+            sdr10.colorAttachments[0].pixelFormat = sdr10Drawable
+            pipelineSDR10 = try device.makeRenderPipelineState(descriptor: sdr10)
             let hdr = MTLRenderPipelineDescriptor()
             hdr.vertexFunction = vtx
             hdr.fragmentFunction = library.makeFunction(name: "pf_frag_hdr")
@@ -596,7 +620,8 @@ public final class MetalVideoPresenter {
         layer.maximumDrawableCount = 3
 
         return MetalVideoPresenter(
-            device: device, queue: queue, pipelineSDR: pipelineSDR, pipelineHDR: pipelineHDR,
+            device: device, queue: queue, pipelineSDR: pipelineSDR, pipelineSDR10: pipelineSDR10,
+            pipelineHDR: pipelineHDR,
             pipelineHDRToneMap: pipelineHDRToneMap, pipelinePlanar: pipelinePlanar,
             pipelinePlanarHDR: pipelinePlanarHDR, pipelinePlanarToneMap: pipelinePlanarToneMap,
             textureCache: textureCache, layer: layer)
@@ -604,6 +629,7 @@ public final class MetalVideoPresenter {
 
     private init(
         device: MTLDevice, queue: MTLCommandQueue, pipelineSDR: MTLRenderPipelineState,
+        pipelineSDR10: MTLRenderPipelineState,
         pipelineHDR: MTLRenderPipelineState, pipelineHDRToneMap: MTLRenderPipelineState?,
         pipelinePlanar: MTLRenderPipelineState,
         pipelinePlanarHDR: MTLRenderPipelineState,
@@ -613,6 +639,7 @@ public final class MetalVideoPresenter {
         self.device = device
         self.queue = queue
         self.pipelineSDR = pipelineSDR
+        self.pipelineSDR10 = pipelineSDR10
         self.pipelineHDR = pipelineHDR
         self.pipelineHDRToneMap = pipelineHDRToneMap
         self.pipelinePlanar = pipelinePlanar
@@ -627,8 +654,10 @@ public final class MetalVideoPresenter {
     /// (idempotent — the guard makes a same-state call a no-op), so a mid-session HDR toggle (the host
     /// re-inits its encoder; the decoded `frame.isHDR` flips) reconfigures here automatically. HDR uses
     /// an rgba16Float drawable + BT.2020 PQ colour space + EDR with a 203-nit reference-white anchor;
-    /// SDR uses the plain 8-bit sRGB path.
-    public func configure(hdr: Bool) {
+    /// SDR uses the sRGB-tagged 8-bit drawable, or `sdr10Drawable` when `tenBitSDR` (a 10-bit
+    /// session — HDR outranks it, an HDR frame never lands on the SDR-10 drawable).
+    public func configure(hdr: Bool, tenBitSDR: Bool = false) {
+        let wide = tenBitSDR && !hdr
         #if os(tvOS)
         // Reconfigure on an HDR flip AND on a passthrough↔tone-map flip: the display's headroom
         // changes when the AVDisplayManager mode switch (requested at session start) completes —
@@ -636,17 +665,19 @@ public final class MetalVideoPresenter {
         stagingLock.lock()
         let passthrough = stagedDisplayHeadroom > 1.0
         stagingLock.unlock()
-        guard !didConfigureColor || hdr != hdrActive
+        guard !didConfigureColor || hdr != hdrActive || wide != tenBitSDRActive
             || (hdr && passthrough != hdrPassthroughActive)
         else { return }
         hdrActive = hdr
+        tenBitSDRActive = wide
         hdrPassthroughActive = passthrough
         #else
-        guard !didConfigureColor || hdr != hdrActive else { return }
+        guard !didConfigureColor || hdr != hdrActive || wide != tenBitSDRActive else { return }
         hdrActive = hdr
+        tenBitSDRActive = wide
         #endif
         didConfigureColor = true
-        configureColor(hdr: hdr)
+        configureColor(hdr: hdr, tenBitSDR: wide)
     }
 
     /// tvOS: park the display's current EDR headroom (a MAIN-thread `UIScreen` read — pushed by
@@ -664,7 +695,7 @@ public final class MetalVideoPresenter {
     /// (`wantsExtendedDynamicRangeContent`/`edrMetadata`/`CAEDRMetadata` are all unavailable there) —
     /// and a bare PQ colour-space tag composites UNtone-mapped (the "overblown HDR" Apple TV report),
     /// so tvOS instead tone-maps PQ→SDR in the shader (pf_frag_hdr_tv) and keeps the SDR layer config.
-    private func configureColor(hdr: Bool) {
+    private func configureColor(hdr: Bool, tenBitSDR: Bool) {
         if hdr {
             #if os(tvOS)
             if hdrPassthroughActive {
@@ -689,10 +720,11 @@ public final class MetalVideoPresenter {
             layer.edrMetadata = makeEDR(lastHdrMeta)
             #endif
         } else {
-            // SDR: gamma-encoded BT.709 [0,1] in an 8-bit drawable, tagged so CoreAnimation
-            // colour-matches it into the output rather than drawing it in the panel's native
-            // space (see sdrColorspace; PUNKTFUNK_SDR_COLORSPACE=none restores untagged).
-            layer.pixelFormat = .bgra8Unorm
+            // SDR: gamma-encoded BT.709 [0,1], tagged so CoreAnimation colour-matches it into
+            // the output rather than drawing it in the panel's native space (see sdrColorspace;
+            // PUNKTFUNK_SDR_COLORSPACE=none restores untagged). A 10-bit session takes the
+            // 10-bit drawable so the decode's depth reaches the panel.
+            layer.pixelFormat = tenBitSDR ? sdr10Drawable : .bgra8Unorm
             layer.colorspace = sdrColorspace
             #if !os(tvOS)
             layer.wantsExtendedDynamicRangeContent = false
@@ -798,11 +830,20 @@ public final class MetalVideoPresenter {
         #endif
     }
 
-    func reconcileLayer(decodedSize: CGSize, isHDR: Bool) {
+    /// A 10-bit decode (P010 / `x444`, either range) — the buffer's own word, not the session's.
+    static func tenBitBuffer(_ buffer: CVPixelBuffer) -> Bool {
+        let pf = CVPixelBufferGetPixelFormatType(buffer)
+        return pf == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+            || pf == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange
+            || pf == kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange
+            || pf == kCVPixelFormatType_444YpCbCr10BiPlanarFullRange
+    }
+
+    func reconcileLayer(decodedSize: CGSize, isHDR: Bool, tenBitSDR: Bool = false) {
         stagingLock.lock()
         let targetFromLayout = drawableTarget
         stagingLock.unlock()
-        configure(hdr: isHDR)
+        configure(hdr: isHDR, tenBitSDR: tenBitSDR)
         applyStagedHdrMeta()
         let targetSize = (targetFromLayout.width > 0 && targetFromLayout.height > 0)
             ? targetFromLayout : decodedSize
@@ -841,18 +882,13 @@ public final class MetalVideoPresenter {
         let targetFromLayout = drawableTarget
         stagingLock.unlock()
 
-        // Reconcile the layer with the decoded frame's HDR-ness (handles a mid-session SDR↔HDR flip).
-        configure(hdr: isHDR)
-        applyStagedHdrMeta()
-
         // P010/x444 store 10-bit luma/chroma in 16-bit samples → R16/RG16; NV12/444v is 8-bit → R8/RG8.
         // Derived from the actual decoded buffer so a 4:4:4 (full chroma plane) frame just works.
-        let pf = CVPixelBufferGetPixelFormatType(pixelBuffer)
-        let tenBit =
-            pf == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
-            || pf == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange
-            || pf == kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange
-            || pf == kCVPixelFormatType_444YpCbCr10BiPlanarFullRange
+        let tenBit = Self.tenBitBuffer(pixelBuffer)
+        // Reconcile the layer with the decoded frame's HDR-ness and depth (a mid-session SDR↔HDR
+        // flip, and the 10-bit SDR drawable).
+        configure(hdr: isHDR, tenBitSDR: tenBit)
+        applyStagedHdrMeta()
         // The frame's Y′CbCr→RGB rows, from its ACTUAL signaling (buffer attachments + pixel
         // format) — a BT.601-signaled stream gets 601 coefficients, full-range gets full-range
         // expansion; recomputed per frame because the host can flip colour in-band (SDR↔HDR).
@@ -875,9 +911,9 @@ public final class MetalVideoPresenter {
         // HDR splits by the display's headroom (kept in step with the layer by `configure` above):
         // PQ passthrough into an HDR-composited display, the tone-map shader otherwise.
         let hdrPipeline = hdrPassthroughActive ? pipelineHDR : (pipelineHDRToneMap ?? pipelineHDR)
-        let pipeline = hdrActive ? hdrPipeline : pipelineSDR
+        let pipeline = hdrActive ? hdrPipeline : (tenBitSDRActive ? pipelineSDR10 : pipelineSDR)
         #else
-        let pipeline = hdrActive ? pipelineHDR : pipelineSDR
+        let pipeline = hdrActive ? pipelineHDR : (tenBitSDRActive ? pipelineSDR10 : pipelineSDR)
         #endif
         let decodedSize = CGSize(
             width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer))
@@ -1117,8 +1153,9 @@ public final class MetalVideoPresenter {
     /// closest observable analogue of "reached glass" here (the composite follows within a
     /// refresh, so the display-stage meters read slightly OPTIMISTIC in this mode).
     ///
-    /// The pool tracks `hdrActive`: bgra8 for SDR, rgba16Float tagged BT.2100 PQ for HDR —
-    /// `configure` already ran, so the caller's `pipeline` attachment format always matches.
+    /// The pool tracks the layer's depth: bgra8 or `sdr10Drawable` for SDR, rgba16Float tagged
+    /// BT.2100 PQ for HDR — `configure` already ran, so the caller's `pipeline` attachment
+    /// format always matches.
     /// HDR OPEN RISK (why this whole mode is a prototype): whether the compositor honors the
     /// PQ tag + EDR for plain-CALayer IOSurface contents needs an on-glass eyeball; the metal
     /// layer underneath keeps `wantsExtendedDynamicRangeContent` as the EDR anchor (the harness
@@ -1128,7 +1165,8 @@ public final class MetalVideoPresenter {
         onPresented: ((Int64?) -> Void)?,
         luma: MTLTexture, keepAlive: [Any], bind: (MTLRenderCommandEncoder) -> Void
     ) -> Bool {
-        ensureSurfacePool(size: targetSize, hdr: hdrActive)
+        ensureSurfacePool(
+            size: targetSize, depth: hdrActive ? .hdr : (tenBitSDRActive ? .sdr10 : .sdr8))
         guard let slotIndex = takeSurfaceSlot(),
               let commandBuffer = queue.makeCommandBuffer()
         else { return false }
@@ -1181,19 +1219,34 @@ public final class MetalVideoPresenter {
         return true
     }
 
-    /// (Re)build the pool at `size`/`hdr` — 4 IOSurface render targets (one on glass, one
+    /// IOSurface and Metal formats that share one word. Metal `bgr10a2Unorm` is IOSurface `l10r`
+    /// (`ARGB2101010LEPacked`): alpha in the top two bits, then R, G, B down to bit 0.
+    private static func surfaceFormats(_ depth: SurfaceDepth) -> (OSType, MTLPixelFormat) {
+        switch depth {
+        case .hdr: return (kCVPixelFormatType_64RGBAHalf, .rgba16Float)
+        case .sdr8: return (kCVPixelFormatType_32BGRA, .bgra8Unorm)
+        case .sdr10:
+            return sdr10Drawable == .bgra8Unorm
+                ? (kCVPixelFormatType_32BGRA, .bgra8Unorm)
+                : (kCVPixelFormatType_ARGB2101010LEPacked, sdr10Drawable)
+        }
+    }
+
+    /// (Re)build the pool at `size`/`depth` — 4 IOSurface render targets (one on glass, one
     /// committed in CA, one rendering, one spare). RENDER THREAD. A failed allocation leaves the
     /// pool empty; the caller returns false and the ring's putBack + display-link retry take
     /// over.
-    private func ensureSurfacePool(size: CGSize, hdr: Bool) {
-        guard size != surfacePoolSize || hdr != surfacePoolHDR else { return }
+    private func ensureSurfacePool(size: CGSize, depth: SurfaceDepth) {
+        guard size != surfacePoolSize || depth != surfacePoolDepth else { return }
         surfacePool.removeAll()
         lastHandedOff = nil
         let w = Int(size.width)
         let h = Int(size.height)
         guard w > 0, h > 0 else { return }
-        // rgba16Float (8 B/px) carries the PQ-encoded HDR samples; bgra8 the SDR ones. 256-byte
-        // row alignment satisfies both IOSurface and Metal linear-texture rules.
+        let hdr = depth == .hdr
+        // rgba16Float (8 B/px) carries the PQ-encoded HDR samples; the SDR formats are 4 B/px.
+        // 256-byte row alignment satisfies both IOSurface and Metal linear-texture rules.
+        let (surfaceFormat, textureFormat) = Self.surfaceFormats(depth)
         let bytesPerElement = hdr ? 8 : 4
         let bytesPerRow = ((w * bytesPerElement) + 255) & ~255
         let props: [String: Any] = [
@@ -1201,11 +1254,10 @@ public final class MetalVideoPresenter {
             kIOSurfaceHeight as String: h,
             kIOSurfaceBytesPerElement as String: bytesPerElement,
             kIOSurfaceBytesPerRow as String: bytesPerRow,
-            kIOSurfacePixelFormat as String: hdr
-                ? kCVPixelFormatType_64RGBAHalf : kCVPixelFormatType_32BGRA,
+            kIOSurfacePixelFormat as String: surfaceFormat,
         ]
         let desc = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: hdr ? .rgba16Float : .bgra8Unorm, width: w, height: h, mipmapped: false)
+            pixelFormat: textureFormat, width: w, height: h, mipmapped: false)
         desc.usage = [.renderTarget]
         desc.storageMode = .shared
         for _ in 0..<4 {
@@ -1229,7 +1281,7 @@ public final class MetalVideoPresenter {
         }
         // Only now is this size actually built.
         surfacePoolSize = size
-        surfacePoolHDR = hdr
+        surfacePoolDepth = depth
         // The EDR request rides the SURFACE layer too (its contents are what composite); the
         // metal layer underneath keeps its own from configureColor as the anchor. Layer flags
         // are committed by the next swap's transaction flush.
@@ -1315,7 +1367,7 @@ public final class MetalVideoPresenter {
 
     #if DEBUG
     private func logSizeIfChanged(decoded: CGSize, drawable: CGSize) {
-        let sig = "\(Int(decoded.width))x\(Int(decoded.height))→\(Int(drawable.width))x\(Int(drawable.height))|hdr\(hdrActive ? 1 : 0)"
+        let sig = "\(Int(decoded.width))x\(Int(decoded.height))→\(Int(drawable.width))x\(Int(drawable.height))|hdr\(hdrActive ? 1 : 0)|sdr10\(tenBitSDRActive ? 1 : 0)"
         if sig != lastSizeSig {
             lastSizeSig = sig
             // Explicit verdict: is the shader presenting 1:1 (decoded == drawable) or resampling? The
@@ -1330,7 +1382,7 @@ public final class MetalVideoPresenter {
                     format: "RESAMPLE scale=%.4fx%.4f %@", sx, sy,
                     (sx < 1 || sy < 1) && lanczos != nil ? "lanczos" : "catmull-rom")
             let msg =
-                "stage2: decoded \(Int(decoded.width))x\(Int(decoded.height)) → drawable \(Int(drawable.width))x\(Int(drawable.height)) [\(verdict)] hdr=\(hdrActive)"
+                "stage2: decoded \(Int(decoded.width))x\(Int(decoded.height)) → drawable \(Int(drawable.width))x\(Int(drawable.height)) [\(verdict)] hdr=\(hdrActive) sdr10=\(tenBitSDRActive)"
             presenterLog.info("\(msg, privacy: .public)")
         }
     }

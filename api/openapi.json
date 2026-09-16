@@ -3682,7 +3682,7 @@
             }
           },
           "500": {
-            "description": "Settings could not be persisted",
+            "description": "Couldn't save the session settings",
             "content": {
               "application/json": {
                 "schema": {

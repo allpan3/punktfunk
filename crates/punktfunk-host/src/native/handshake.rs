@@ -814,11 +814,14 @@ async fn negotiate_video_format(
     // `hdr_capture_failed(VirtualOutput)`; GameStream's rtsp.rs check has no twin here because
     // that latch is per-source and this gate already used this session's source.
     let capture_supports_hdr = crate::capture::capturer_supports_hdr_for(compositor);
-    // SDR-10: Windows IDD expands BGRA 8→10 (`Rgb10a2Sdr`); only direct-NVENC ingests that
-    // packed RGB. Linux has no SDR-10 chain (`resolved_backend_ingests_rgb_444` is false off
-    // Windows).
-    let sdr10_chain_ok =
-        codec_carries_sdr10(codec) && crate::encode::resolved_backend_ingests_rgb_444();
+    // 4:4:4 only when host, client, ingest chain, and GPU all allow it. The ask is read here
+    // because depth resolves first and a 4:4:4 session bounds it.
+    let host_wants_444 = pf_host_config::config().four_four_four;
+    let client_supports_444 = hello.video_caps & punktfunk_core::quic::VIDEO_CAP_444 != 0;
+    // SDR-10 needs a backend that writes 10 bits from the 8-bit capture an SDR desktop hands
+    // it: direct-NVENC on either OS.
+    let sdr10_chain_ok = sdr10_fits(codec, host_wants_444 && client_supports_444)
+        && crate::encode::backend_carries_sdr10();
     let depth_reachable = (client_wants_hdr && capture_supports_hdr) || sdr10_chain_ok;
     // Probe may open a tiny encoder; spawn_blocking, short-circuited behind the cheap gates.
     let gpu_can_10bit =
@@ -847,10 +850,6 @@ async fn negotiate_video_format(
         "encode bit depth"
     );
 
-    // 4:4:4 only when host, client, ingest chain, and GPU all allow it. Resolved before
-    // Welcome so the client sizes its decoder from what we will actually emit.
-    let host_wants_444 = pf_host_config::config().four_four_four;
-    let client_supports_444 = hello.video_caps & punktfunk_core::quic::VIDEO_CAP_444 != 0;
     // Ingest chain, not capturer: Windows 4:4:4 needs direct-NVENC RGB ingest (AMF cannot;
     // QSV/ffmpeg has no RGB 4:4:4 wiring). PyroWave does its own RGB→YCbCr; its gate is
     // `can_encode_444`. HDR does not cost chroma (HEVC Main 4:4:4 10).
@@ -948,13 +947,17 @@ fn linux_chroma_under_hdr(
     crate::encode::ChromaFormat::Yuv420
 }
 
-/// Codecs that carry 10-bit SDR off the packed-RGB capture. PyroWave is out: that capture path
-/// hands it NV12 under SDR, so a 10-bit label would outrun the stream.
-fn codec_carries_sdr10(codec: crate::encode::Codec) -> bool {
+/// Whether this session's shape can carry 10-bit SDR off an 8-bit capture.
+///
+/// PyroWave is out: its capture path hands NV12 under SDR, so a 10-bit label would outrun the
+/// stream. A Linux 4:4:4 ask is out too — that capture is planar 8-bit YUV, and NVENC refuses
+/// a planar surface in a 10-bit session (`register_resource` fails), so 4:4:4 keeps its chroma
+/// and stays 8-bit. Windows 4:4:4 is packed RGB and composes with depth.
+fn sdr10_fits(codec: crate::encode::Codec, chroma_444_asked: bool) -> bool {
     matches!(
         codec,
         crate::encode::Codec::H265 | crate::encode::Codec::Av1
-    )
+    ) && !(cfg!(target_os = "linux") && chroma_444_asked)
 }
 
 /// Whether Hello carried a format at all. Decode maps an absent one to 48 kHz/16-bit, so
@@ -1030,10 +1033,19 @@ mod tests {
     #[test]
     fn av1_carries_sdr10_and_pyrowave_does_not() {
         use crate::encode::Codec;
-        assert!(codec_carries_sdr10(Codec::Av1));
-        assert!(codec_carries_sdr10(Codec::H265));
-        assert!(!codec_carries_sdr10(Codec::PyroWave));
-        assert!(!codec_carries_sdr10(Codec::H264));
+        assert!(sdr10_fits(Codec::Av1, false));
+        assert!(sdr10_fits(Codec::H265, false));
+        assert!(!sdr10_fits(Codec::PyroWave, false));
+        assert!(!sdr10_fits(Codec::H264, false));
+    }
+
+    /// A Linux 4:4:4 ask keeps its chroma at 8-bit: NVENC refuses the planar 8-bit surface in
+    /// a 10-bit session. Windows 4:4:4 is packed RGB, so depth still composes there.
+    #[test]
+    fn a_444_ask_bounds_depth_only_on_linux() {
+        use crate::encode::Codec;
+        assert_eq!(sdr10_fits(Codec::H265, true), !cfg!(target_os = "linux"));
+        assert_eq!(sdr10_fits(Codec::Av1, true), !cfg!(target_os = "linux"));
     }
 
     /// 1472-byte discovery ceiling minus QUIC header + AEAD. Same number `pcm`'s ladder test uses.

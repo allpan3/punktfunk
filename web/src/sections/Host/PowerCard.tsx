@@ -99,8 +99,8 @@ export const PowerSection: FC = () => {
 	);
 };
 
-/** The password-confirm dialog — the update-apply recipe: plain fetch (a 401 here is a wrong
- * password, not an expired session), password verified and stripped in the BFF. */
+/** The password-confirm dialog keeps its 401 handling local: this route uses 401 for a wrong
+ * password, while apiFetch redirects only the auth middleware's `unauthorized` body. */
 const ConfirmDialog: FC<{
 	action: ActionInfo;
 	onClose: () => void;

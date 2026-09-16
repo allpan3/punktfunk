@@ -56,6 +56,22 @@ int main(void) {
     }
 #endif
 
+    {
+        PunktfunkH265Concealer *concealer = punktfunk_h265_concealer_new();
+        PunktfunkConcealment kind = PUNKTFUNK_CONCEALMENT_INTACT;
+        uint8_t byte = 0;
+        uint8_t *out = NULL;
+        uintptr_t out_len = 0;
+        PunktfunkStatus status = punktfunk_h265_concealer_conceal(
+            concealer, &byte, SIZE_MAX, &kind, &out, &out_len);
+        if (status != PUNKTFUNK_STATUS_INVALID_ARG) {
+            fprintf(stderr, "FAIL: unrepresentable concealer input accepted (st=%d)\n",
+                    (int)status);
+            return 1;
+        }
+        punktfunk_h265_concealer_free(concealer);
+    }
+
     const uint32_t DROP_PERIOD = 8;   /* drop 1 of every 8 packets */
     PunktfunkConfig host_cfg = make_config(0, DROP_PERIOD);
     PunktfunkConfig client_cfg = make_config(1, DROP_PERIOD);
