@@ -17,8 +17,10 @@
 //! notch at 90 %, each step kept only if the decoder's latency follows the
 //! rate). Both re-probe on [`CAP_REPROBE_WINDOWS_MIN`]. Climbs require
 //! utilization (delivered ≈ target) and stay within ×1.5 of the windowed
-//! proven mark. Tests in this module pin the contract.
+//! proven mark. [`ModeLadder`] moves the other knob: a rate too thin to feed
+//! the negotiated mode picks a smaller one. Tests here pin both contracts.
 
+use crate::config::Mode;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
@@ -152,6 +154,27 @@ const BASELINE_MIN_WINDOWS: usize = 4;
 /// Unacked [`crate::quic::SetBitrate`] requests before the host is treated as
 /// predating renegotiation and the controller goes quiet.
 const MAX_UNACKED: u32 = 3;
+/// Mode-ladder resolution step: two thirds, nudged up so 1920×1080 floors on
+/// 1280×720 rather than a pixel short of it. Scaling the negotiated size keeps
+/// a 16:10 or ultrawide mode at its own shape.
+const RUNG_SCALE: f64 = 0.667;
+/// Refresh floor for a rung. Halving is the step, so 60 → 30 and 30 → 20.
+const MIN_RUNG_HZ: u32 = 20;
+/// Climb margin over the next rung's bits-per-pixel floor, as a fraction.
+/// Descent needs the floor breached; the asymmetry is what stops a link
+/// oscillating on a rung boundary from flapping the mode.
+const UP_MARGIN_NUM: u64 = 13;
+const UP_MARGIN_DEN: u64 = 10;
+/// Clean windows a climb must hold — ~10 s on the 750 ms cadence.
+const UP_CLEAN_WINDOWS: u32 = 14;
+/// Minimum spacing between accepted rung changes before a climb.
+const RUNG_COOLDOWN: Duration = Duration::from_secs(20);
+/// Quiet after a mode request. The host's answer advances the rung, and each
+/// switch rebuilds its encoder, so at most one request is outstanding.
+const ASK_GRACE: Duration = Duration::from_secs(2);
+/// Grace ceiling. An unanswered ask doubles it, so a rung this encoder refuses
+/// stops being re-asked every few seconds.
+const ASK_GRACE_MAX: Duration = Duration::from_secs(32);
 
 /// `PUNKTFUNK_ABR_MAX_MBPS` (megabits/second) caps the climb ceiling however
 /// it is learned. [`set_ceiling`](BitrateController::set_ceiling) never
@@ -179,6 +202,13 @@ fn resolve_ceiling_cap(env_kbps: Option<u32>, setting_kbps: u32) -> Option<u32> 
     env_kbps.or(Some(setting_kbps).filter(|&k| k > 0))
 }
 
+/// Samples per second a mode asks the encoder for. `0` only when an axis is.
+fn pixel_rate(width: u32, height: u32, refresh_hz: u32) -> u64 {
+    (width as u64)
+        .saturating_mul(height as u64)
+        .saturating_mul(refresh_hz.max(1) as u64)
+}
+
 /// Upper bound on bitrate this stream's shape could use, in kbps.
 ///
 /// The probe-measured ceiling is pure link capacity (`delivered × 0.7`) with
@@ -194,9 +224,7 @@ pub(crate) fn stream_ceiling_kbps(
     bit_depth: u8,
     chroma_format: u8,
 ) -> u32 {
-    let pixel_rate = (width as u64)
-        .saturating_mul(height as u64)
-        .saturating_mul(refresh_hz.max(1) as u64);
+    let pixel_rate = pixel_rate(width, height, refresh_hz);
     if pixel_rate == 0 {
         return u32::MAX;
     }
@@ -221,6 +249,177 @@ pub(crate) fn stream_ceiling_kbps(
     // bits/s = pixel_rate × bpp; kbps = that / 1000. The milli- factor and
     // the kbps divisor cancel: pixel_rate × milli_bpp / 1_000_000.
     u32::try_from(pixel_rate.saturating_mul(milli_bpp) / 1_000_000).unwrap_or(u32::MAX)
+}
+
+/// Bits per pixel, in thousandths, below which a hardware encoder stops
+/// producing a picture. Game content: 0.1 bpp is clean, 0.05 is blocky, 0.03
+/// is a smear. H.264 is the least efficient of the three and needs more.
+fn bpp_floor_milli(codec: u8) -> u32 {
+    match codec {
+        crate::quic::CODEC_H264 => 100,
+        _ => 70,
+    }
+}
+
+/// Rate at which `mode` sits exactly on `milli_bpp`, in kbps. The milli-
+/// factor and the kbps divisor cancel, as in [`stream_ceiling_kbps`].
+fn rung_floor_kbps(mode: Mode, milli_bpp: u32) -> u32 {
+    let rate = pixel_rate(mode.width, mode.height, mode.refresh_hz);
+    u32::try_from(rate.saturating_mul(milli_bpp as u64) / 1_000_000).unwrap_or(u32::MAX)
+}
+
+/// Rungs for `base`, richest first: the cross product of native/[`RUNG_SCALE`]
+/// size and native/halved refresh, ordered by pixel rate. 1080p30 gives
+/// 1080p30, 1080p20, 720p30, 720p20; 1080p60 gives 1080p60, 1080p30, 720p60,
+/// 720p30. A step that does not buy a quarter of the axis is left out, so
+/// `base` is always rung 0 and 24 Hz grows no refresh rung.
+fn rungs_for(base: Mode) -> Vec<Mode> {
+    // Quarters in u64: `base` is whatever mode the host negotiated.
+    let buys_a_quarter = |step: u32, from: u32| step as u64 * 4 <= from as u64 * 3;
+    let mut sizes = vec![(base.width, base.height)];
+    let small = crate::render_scale::apply(base.width, base.height, RUNG_SCALE, u32::MAX);
+    if buys_a_quarter(small.0, base.width) {
+        sizes.push(small);
+    }
+    let mut rates = vec![base.refresh_hz];
+    let slow = (base.refresh_hz / 2).max(MIN_RUNG_HZ);
+    if buys_a_quarter(slow, base.refresh_hz) {
+        rates.push(slow);
+    }
+    let mut rungs: Vec<Mode> = sizes
+        .iter()
+        .flat_map(|&(width, height)| {
+            rates.iter().map(move |&refresh_hz| Mode {
+                width,
+                height,
+                refresh_hz,
+            })
+        })
+        .collect();
+    rungs.sort_by_key(|m| std::cmp::Reverse(pixel_rate(m.width, m.height, m.refresh_hz)));
+    rungs
+}
+
+/// Which mode the Automatic rate can actually feed.
+///
+/// The rate controller moves one knob, so a starved link rides the negotiated
+/// mode down to [`FLOOR_KBPS`] — 0.03 bpp at 1080p30, which is not a picture.
+/// This picks a smaller rung instead. Descent needs
+/// [`BAD_WINDOWS_TO_DECREASE`] windows under the rung's [`bpp_floor_milli`],
+/// or one window when the controller is already cutting; the climb back needs
+/// [`UP_MARGIN_NUM`]/[`UP_MARGIN_DEN`] of the next rung's floor held for
+/// [`UP_CLEAN_WINDOWS`], one rung per [`RUNG_COOLDOWN`].
+///
+/// Rung 0 is the mode the session is in, and a switch this ladder did not ask
+/// for rebuilds it around the new mode — a resize or the user's picker always
+/// outranks it, and it never climbs above what they chose.
+pub(crate) struct ModeLadder {
+    rungs: Vec<Mode>,
+    rung: usize,
+    milli_bpp: u32,
+    /// Refresh the session was negotiated or last steered to. A rung's own
+    /// refresh never replaces it, so a resize mid-descent cannot pin the mode.
+    base_refresh_hz: u32,
+    /// Rung asked for, and when. At most one request is outstanding.
+    asked: Option<(Mode, Instant)>,
+    ask_grace: Duration,
+    /// Last accepted switch, either direction. Gates the climb only.
+    last_switch: Option<Instant>,
+    starved_windows: u32,
+    clean_windows: u32,
+}
+
+impl ModeLadder {
+    /// `None` for PyroWave: a pinned all-intra rate has nothing to descend for.
+    pub(crate) fn new(base: Mode, codec: u8) -> Option<Self> {
+        if codec == crate::quic::CODEC_PYROWAVE {
+            return None;
+        }
+        Some(ModeLadder {
+            rungs: rungs_for(base),
+            rung: 0,
+            milli_bpp: bpp_floor_milli(codec),
+            base_refresh_hz: base.refresh_hz,
+            asked: None,
+            ask_grace: ASK_GRACE,
+            last_switch: None,
+            starved_windows: 0,
+            clean_windows: 0,
+        })
+    }
+
+    /// One report window; `Some(mode)` is the mode to ask the host for.
+    /// `kbps` is the rate the encoder is on (a cut the controller just asked
+    /// for counts now — waiting for its ack costs a window at the very moment
+    /// the picture is worst), and `cutting` says it is descending.
+    pub(crate) fn on_window(&mut self, now: Instant, kbps: u32, cutting: bool) -> Option<Mode> {
+        match self.asked {
+            Some((_, at)) if now.duration_since(at) < self.ask_grace => return None,
+            Some(_) => {
+                // Unanswered: the host refused, or its ack is still in flight.
+                // Back off and re-earn the step.
+                self.ask_grace = (self.ask_grace * 2).min(ASK_GRACE_MAX);
+                self.asked = None;
+                self.starved_windows = 0;
+            }
+            None => {}
+        }
+        let starving = kbps < rung_floor_kbps(self.rungs[self.rung], self.milli_bpp);
+        if starving {
+            self.clean_windows = 0;
+            self.starved_windows += 1;
+        } else {
+            self.starved_windows = 0;
+            self.clean_windows += 1;
+        }
+        let next = if starving && (self.starved_windows >= BAD_WINDOWS_TO_DECREASE || cutting) {
+            self.rungs.get(self.rung + 1).copied()
+        } else if self.rung > 0
+            && self.clean_windows >= UP_CLEAN_WINDOWS
+            && self
+                .last_switch
+                .is_none_or(|t| now.duration_since(t) >= RUNG_COOLDOWN)
+            && (kbps as u64).saturating_mul(UP_MARGIN_DEN)
+                >= (rung_floor_kbps(self.rungs[self.rung - 1], self.milli_bpp) as u64)
+                    .saturating_mul(UP_MARGIN_NUM)
+        {
+            Some(self.rungs[self.rung - 1])
+        } else {
+            None
+        };
+        if let Some(mode) = next {
+            self.asked = Some((mode, now));
+        }
+        next
+    }
+
+    /// An accepted switch. The rung the host answers with replaces the one
+    /// asked for, so a host that corrects the size it can deliver keeps the
+    /// rungs above it reachable. Anyone else's switch rebuilds the ladder.
+    pub(crate) fn on_mode(&mut self, now: Instant, mode: Mode) {
+        let asked = self.asked.take();
+        self.ask_grace = ASK_GRACE;
+        self.starved_windows = 0;
+        self.clean_windows = 0;
+        self.last_switch = Some(now);
+        if let Some(i) = asked.and_then(|(m, _)| self.rungs.iter().position(|&r| r == m)) {
+            self.rungs[i] = mode;
+            self.rung = i;
+            return;
+        }
+        // A resize carries the live refresh, so a rung's own refresh arriving
+        // here is this ladder's echo, not a choice — rebasing on it would drop
+        // the rungs above and strand the session at the descended rate. Any
+        // other refresh is the user's, and becomes the new base.
+        let refresh_hz = if mode.refresh_hz == self.rungs[self.rung].refresh_hz {
+            self.base_refresh_hz
+        } else {
+            mode.refresh_hz
+        };
+        self.base_refresh_hz = refresh_hz;
+        self.rungs = rungs_for(Mode { refresh_hz, ..mode });
+        self.rung = 0;
+    }
 }
 
 /// Score one window's latency against its rolling-min baseline, then record it.
@@ -476,6 +675,12 @@ impl BitrateController {
         if refresh_hz > 0 {
             self.frame_budget_us = Some(1_000_000 / refresh_hz as i64);
         }
+    }
+
+    /// Host-acked encoder rate. [`ModeLadder`] judges its rung against this,
+    /// not against delivered bytes: a still desktop underfills any target.
+    pub(crate) fn current_kbps(&self) -> u32 {
+        self.current_kbps
     }
 
     /// `(rise, severe)`: half a frame budget and 1.5 of them, against this
@@ -1197,6 +1402,261 @@ impl BitrateController {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const WINDOW: Duration = Duration::from_millis(750);
+
+    fn m(width: u32, height: u32, refresh_hz: u32) -> Mode {
+        Mode {
+            width,
+            height,
+            refresh_hz,
+        }
+    }
+
+    fn ladder(base: Mode) -> ModeLadder {
+        ModeLadder::new(base, crate::quic::CODEC_HEVC).expect("hevc has a ladder")
+    }
+
+    /// Descend `l` to `mode`, accepting every rung the host is asked for.
+    fn descend_to(l: &mut ModeLadder, at: Instant, kbps: u32, mode: Mode) {
+        for _ in 0..8 {
+            if let Some(next) = l.on_window(at, kbps, true) {
+                l.on_mode(at, next);
+                if next == mode {
+                    return;
+                }
+            }
+        }
+        panic!("never reached {mode:?}");
+    }
+
+    #[test]
+    fn rungs_are_the_negotiated_mode_scaled() {
+        assert_eq!(
+            rungs_for(m(1920, 1080, 30)),
+            [
+                m(1920, 1080, 30),
+                m(1920, 1080, 20),
+                m(1280, 720, 30),
+                m(1280, 720, 20)
+            ]
+        );
+        assert_eq!(
+            rungs_for(m(1920, 1080, 60)),
+            [
+                m(1920, 1080, 60),
+                m(1920, 1080, 30),
+                m(1280, 720, 60),
+                m(1280, 720, 30)
+            ]
+        );
+    }
+
+    #[test]
+    fn rungs_keep_a_non_16_9_shape() {
+        assert_eq!(
+            rungs_for(m(1280, 800, 60)),
+            [
+                m(1280, 800, 60),
+                m(1280, 800, 30),
+                m(852, 532, 60),
+                m(852, 532, 30)
+            ]
+        );
+        let ultrawide = rungs_for(m(3440, 1440, 60));
+        assert_eq!(ultrawide[2], m(2294, 960, 60));
+        // Within a percent of 21:9 — a rung must not letterbox the picture.
+        let (base, rung) = (3440.0 / 1440.0, 2294.0 / 960.0_f64);
+        assert!((base - rung).abs() / base < 0.01, "{rung} is not {base}");
+    }
+
+    #[test]
+    fn a_refresh_rung_must_buy_something() {
+        // 24 → 20 is a twelfth of the pixel rate for a whole encoder rebuild.
+        assert_eq!(rungs_for(m(1920, 1080, 24)).len(), 2);
+        assert_eq!(rungs_for(m(1920, 1080, 20)).len(), 2);
+    }
+
+    #[test]
+    fn descends_when_the_rate_cannot_feed_the_mode() {
+        // 1080p30 at 3 Mbps is 0.048 bpp. 1080p20 is 0.072 — above the floor,
+        // so the descent stops at one rung.
+        let mut l = ladder(m(1920, 1080, 30));
+        let t = Instant::now();
+        assert_eq!(
+            l.on_window(t, 3_000, false),
+            None,
+            "one window is not a trend"
+        );
+        assert_eq!(l.on_window(t, 3_000, false), Some(m(1920, 1080, 20)));
+        l.on_mode(t, m(1920, 1080, 20));
+        for i in 1..=8 {
+            assert_eq!(l.on_window(t + WINDOW * i, 3_000, false), None);
+        }
+    }
+
+    #[test]
+    fn a_cutting_controller_descends_on_the_window_it_cuts() {
+        let mut l = ladder(m(1920, 1080, 30));
+        let t = Instant::now();
+        assert_eq!(l.on_window(t, 3_000, true), Some(m(1920, 1080, 20)));
+    }
+
+    #[test]
+    fn descends_several_rungs_at_the_bitrate_floor() {
+        let mut l = ladder(m(1920, 1080, 60));
+        let t = Instant::now();
+        // FLOOR_KBPS at 1080p60 is 0.016 bpp; 720p30 is 0.072.
+        descend_to(&mut l, t, FLOOR_KBPS, m(1280, 720, 30));
+        for i in 1..=8 {
+            assert_eq!(l.on_window(t + WINDOW * i, FLOOR_KBPS, true), None);
+        }
+    }
+
+    #[test]
+    fn h264_descends_where_hevc_holds() {
+        let hevc = rung_floor_kbps(m(1920, 1080, 30), bpp_floor_milli(crate::quic::CODEC_HEVC));
+        let h264 = rung_floor_kbps(m(1920, 1080, 30), bpp_floor_milli(crate::quic::CODEC_H264));
+        assert!(hevc < 5_000 && 5_000 < h264, "{hevc} / {h264}");
+        let mut l = ModeLadder::new(m(1920, 1080, 30), crate::quic::CODEC_H264).unwrap();
+        let t = Instant::now();
+        assert_eq!(l.on_window(t, 5_000, true), Some(m(1920, 1080, 20)));
+    }
+
+    #[test]
+    fn the_climb_needs_the_full_margin() {
+        let mut l = ladder(m(1920, 1080, 30));
+        let t = Instant::now();
+        descend_to(&mut l, t, 3_000, m(1920, 1080, 20));
+        // 5 Mbps clears 1080p20's floor but not 1.3 × 1080p30's.
+        let past_cooldown = t + RUNG_COOLDOWN;
+        for i in 1..=UP_CLEAN_WINDOWS + 4 {
+            assert_eq!(l.on_window(past_cooldown + WINDOW * i, 5_000, false), None);
+        }
+        let t = past_cooldown + WINDOW * (UP_CLEAN_WINDOWS + 5);
+        assert_eq!(l.on_window(t, 5_660, false), None, "one kbps short");
+        assert_eq!(
+            l.on_window(t + WINDOW, 5_661, false),
+            Some(m(1920, 1080, 30))
+        );
+    }
+
+    #[test]
+    fn the_climb_waits_out_the_cooldown() {
+        let mut l = ladder(m(1920, 1080, 60));
+        let t = Instant::now();
+        descend_to(&mut l, t, FLOOR_KBPS, m(1280, 720, 30));
+        // Clean windows are earned long before the cooldown expires.
+        for i in 1..=26 {
+            assert_eq!(
+                l.on_window(t + WINDOW * i, 100_000, false),
+                None,
+                "window {i}"
+            );
+        }
+        assert_eq!(
+            l.on_window(t + WINDOW * 27, 100_000, false),
+            Some(m(1280, 720, 60))
+        );
+    }
+
+    #[test]
+    fn a_rate_astride_a_rung_boundary_does_not_flap() {
+        let mut l = ladder(m(1920, 1080, 60));
+        let t = Instant::now();
+        descend_to(&mut l, t, FLOOR_KBPS, m(1280, 720, 30));
+        let floor = rung_floor_kbps(m(1280, 720, 30), bpp_floor_milli(crate::quic::CODEC_HEVC));
+        for i in 1..=200u32 {
+            let kbps = if i % 2 == 0 { floor - 100 } else { floor + 100 };
+            assert_eq!(l.on_window(t + WINDOW * i, kbps, false), None, "window {i}");
+        }
+    }
+
+    #[test]
+    fn a_switch_it_did_not_ask_for_rebases_it() {
+        let mut l = ladder(m(1920, 1080, 60));
+        let t = Instant::now();
+        // The user's picker. 720p60 is the new rung 0, however fat the link.
+        l.on_mode(t, m(1280, 720, 60));
+        for i in 1..=60 {
+            assert_eq!(
+                l.on_window(t + WINDOW * i, 500_000, false),
+                None,
+                "window {i}"
+            );
+        }
+        let t = t + WINDOW * 61;
+        assert_eq!(l.on_window(t, FLOOR_KBPS, true), Some(m(1280, 720, 30)));
+    }
+
+    #[test]
+    fn a_corrected_ack_keeps_the_rungs_above_it() {
+        let mut l = ladder(m(1920, 1080, 30));
+        let t = Instant::now();
+        assert_eq!(l.on_window(t, 3_000, true), Some(m(1920, 1080, 20)));
+        // Host delivers a size of its own choosing.
+        l.on_mode(t, m(1904, 1072, 20));
+        let t = t + RUNG_COOLDOWN;
+        for i in 1..UP_CLEAN_WINDOWS {
+            assert_eq!(
+                l.on_window(t + WINDOW * i, 20_000, false),
+                None,
+                "window {i}"
+            );
+        }
+        assert_eq!(
+            l.on_window(t + WINDOW * UP_CLEAN_WINDOWS, 20_000, false),
+            Some(m(1920, 1080, 30))
+        );
+    }
+
+    #[test]
+    fn an_unanswered_ask_backs_off() {
+        let mut l = ladder(m(1920, 1080, 30));
+        let t = Instant::now();
+        assert_eq!(l.on_window(t, 3_000, true), Some(m(1920, 1080, 20)));
+        // Rejected: nothing acks, so the next ask waits out a doubled grace
+        // and re-earns its windows instead of re-asking every window.
+        let t = t + ASK_GRACE;
+        assert_eq!(
+            l.on_window(t, 3_000, false),
+            None,
+            "the timed-out ask re-earns"
+        );
+        assert_eq!(l.on_window(t, 3_000, false), Some(m(1920, 1080, 20)));
+        let t = t + ASK_GRACE;
+        assert_eq!(l.on_window(t, 3_000, false), None, "the grace doubled");
+        assert_eq!(l.on_window(t, 3_000, false), None, "the grace doubled");
+    }
+
+    #[test]
+    fn a_resize_mid_descent_does_not_strand_the_refresh() {
+        let mut l = ladder(m(1920, 1080, 30));
+        let t = Instant::now();
+        // Descend to the 20 Hz rung.
+        assert_eq!(l.on_window(t, 3_000, true), Some(m(1920, 1080, 20)));
+        l.on_mode(t, m(1920, 1080, 20));
+
+        // The presenter's resize carries the LIVE refresh, so this arrives as
+        // 20 Hz. Adopting it as the base would delete every rung above and
+        // pin the session at 20 Hz for good.
+        l.on_mode(t, m(1280, 800, 20));
+        assert_eq!(
+            l.base_refresh_hz, 30,
+            "the rung's own refresh is not a choice"
+        );
+        assert_eq!(l.rungs[0], m(1280, 800, 30), "30 Hz is still reachable");
+
+        // A refresh the ladder did not put there is the user's, and rebases.
+        l.on_mode(t, m(1280, 800, 60));
+        assert_eq!(l.base_refresh_hz, 60);
+        assert_eq!(l.rungs[0], m(1280, 800, 60));
+    }
+
+    #[test]
+    fn pyrowave_has_no_ladder() {
+        assert!(ModeLadder::new(m(1920, 1080, 60), crate::quic::CODEC_PYROWAVE).is_none());
+    }
 
     /// Pump's 750 ms tick; 5× is past [`CHANGE_COOLDOWN`].
     const TICK: Duration = Duration::from_millis(750);

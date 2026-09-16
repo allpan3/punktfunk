@@ -161,6 +161,13 @@ impl DataPump {
         // Bound the probe by stream shape, not raw link capacity. A fat LAN
         // otherwise licenses rates no inter-coded stream can use.
         abr.set_stream_cap(stream_cap_kbps);
+        // The other knob. Same arming as the controller, so an explicit
+        // bitrate or PyroWave has no ladder. `PUNKTFUNK_ABR_LADDER=0` pins
+        // the negotiated mode however thin the rate gets.
+        let mut ladder = (abr.current_kbps() > 0
+            && std::env::var("PUNKTFUNK_ABR_LADDER").map_or(true, |v| v != "0"))
+        .then(|| crate::abr::ModeLadder::new(*pump_mode_slot.lock().unwrap(), negotiated_codec))
+        .flatten();
         // Encode thresholds in this session's frame budgets, not the 120 Hz
         // durations they were calibrated at. 60 Hz would take SEVERE ×0.7
         // on an ordinary one-frame encode hiccup.
@@ -506,6 +513,12 @@ impl DataPump {
                     seen_mode_gen = mg;
                     abr.on_mode_switch();
                     let m = *pump_mode_slot.lock().unwrap();
+                    // Whoever asked. A switch the ladder did not request
+                    // rebuilds it around `m`, so a resize or the user's
+                    // picker outranks every rung.
+                    if let Some(l) = ladder.as_mut() {
+                        l.on_mode(Instant::now(), m);
+                    }
                     // Frame budget is a mode property: refresh changes
                     // what one frame of encode time costs.
                     abr.set_frame_budget(m.refresh_hz);
@@ -601,6 +614,31 @@ impl DataPump {
                             kbps,
                             "adaptive bitrate: control queue full — re-target dropped"
                         );
+                    }
+                }
+                // Same window feeds both knobs: one picks the rate, the
+                // other the mode that rate can feed. A discarded window
+                // teaches neither.
+                if let Some(l) = ladder.as_mut().filter(|_| !discard) {
+                    let acked = abr.current_kbps();
+                    let cutting = verdict.is_some_and(|v| v < acked);
+                    let target = if cutting {
+                        verdict.unwrap_or(acked)
+                    } else {
+                        acked
+                    };
+                    if let Some(mode) = l.on_window(Instant::now(), target, cutting) {
+                        tracing::info!(
+                            ?mode,
+                            kbps = target,
+                            "adaptive bitrate: stepping the mode ladder"
+                        );
+                        if ctrl_tx.try_send(CtrlRequest::Mode(mode)).is_err() {
+                            tracing::warn!(
+                                ?mode,
+                                "adaptive bitrate: control queue full — mode step dropped"
+                            );
+                        }
                     }
                 }
                 flush_in_window = false;
