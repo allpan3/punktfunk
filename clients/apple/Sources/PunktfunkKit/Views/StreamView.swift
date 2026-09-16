@@ -1002,6 +1002,7 @@ public final class StreamLayerView: NSView {
             baseLayer: displayLayer,
             endToEndMeter: endToEndMeter,
             makeDisplayLink: { [unowned self] in self.displayLink(target: $0, selector: $1) },
+            adaptiveSync: Self.isAdaptiveSync(window?.screen),
             onFrame: onFrame,
             onSessionEnd: onSessionEnd,
             onDecodedSize: { [weak self] w, h in // resize overlay END signal (new-mode IDR dims)
@@ -1055,6 +1056,14 @@ public final class StreamLayerView: NSView {
         if captured, desktopMouse, cursorChannelActive {
             window?.invalidateCursorRects(for: self)
         }
+    }
+
+    /// A screen that varies its refresh (ProMotion, adaptive sync) has no fixed scanout grid, so
+    /// the presenter paces frames itself — see `SessionPresenter.presentAtDue`. Resolved once at
+    /// session start; a move to another kind of screen takes effect on the next connect.
+    static func isAdaptiveSync(_ screen: NSScreen?) -> Bool {
+        guard let screen else { return false }
+        return screen.maximumRefreshInterval - screen.minimumRefreshInterval > 0.001
     }
 
     public override func viewDidChangeBackingProperties() {

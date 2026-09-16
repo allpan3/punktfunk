@@ -49,8 +49,8 @@ public struct ReadyFrame: @unchecked Sendable {
     public let flags: UInt32
     /// When this frame is DUE on the SOURCE's cadence, in `CACurrentMediaTime` seconds — the
     /// domain the present path schedules against (`presentAtMediaTime`, `VsyncClock`). Stamped
-    /// where the frame enters the ready store, by the pipeline's `CadenceClock`; `nil` under the
-    /// latency intent, which has no clock and presents on arrival. May be in the PAST: that is a
+    /// where the frame enters the ready store, by the pipeline's `CadenceClock`; `nil` when the
+    /// session runs no clock (plain latency on a fixed panel). May be in the PAST: that is a
     /// late frame, and the contract is "already due ⇒ present at the next opportunity".
     public var dueMediaTime: CFTimeInterval?
 

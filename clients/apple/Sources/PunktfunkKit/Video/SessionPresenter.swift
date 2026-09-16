@@ -204,6 +204,24 @@ final class SessionPresenter {
         #endif
     }
 
+    #if os(macOS)
+    /// Present at the source-cadence due time instead of flipping on arrival: the adaptive-sync
+    /// panel case, where no scanout grid absorbs arrival jitter, so the client must pace. Only
+    /// the latency intent on arrival pacing — smoothness snaps its own grid, glass and deadline
+    /// pace themselves. `PUNKTFUNK_PRESENT_MODE=due` forces it on a fixed panel for an A/B;
+    /// `immediate` / `vsync` force it off. Internal (not private) for unit tests.
+    static func presentAtDue(
+        adaptiveSync: Bool, priority: PresentPriority, pacing: PresentPacing, env: String?
+    ) -> Bool {
+        guard priority == .latency, pacing == .arrival else { return false }
+        switch env {
+        case "due": return true
+        case "immediate", "vsync": return false
+        default: return adaptiveSync
+        }
+    }
+    #endif
+
     private var pump: StreamPump?
     private var stage2: Stage2Pipeline?
     private var stage2Link: CADisplayLink?
@@ -245,7 +263,9 @@ final class SessionPresenter {
     /// Stage-1 sends compressed samples to `baseLayer`; tvOS's decoded path sends it VideoToolbox
     /// output. Metal paths leave that layer idle and overlay their own CAMetalLayer. The supplied
     /// display-link factory tracks the hosting display for ordinary pacing and decoded-frame
-    /// metering; deadline pacing owns a CAMetalDisplayLink instead.
+    /// metering; deadline pacing owns a CAMetalDisplayLink instead. `adaptiveSync` says that
+    /// display varies its refresh (ProMotion) — macOS then presents at the cadence due time
+    /// (`presentAtDue`) because no scanout grid will absorb arrival jitter for it.
     ///
     /// Call `layout(in:contentsScale:)` after start so any Metal sublayer has valid geometry.
     func start(
@@ -253,6 +273,7 @@ final class SessionPresenter {
         baseLayer: AVSampleBufferDisplayLayer,
         endToEndMeter: LatencyMeter?,
         makeDisplayLink: @escaping (AnyObject, Selector) -> CADisplayLink,
+        adaptiveSync: Bool = false,
         onFrame: (@Sendable (AccessUnit) -> Void)?,
         onSessionEnd: (@Sendable () -> Void)?,
         onDecodedSize: (@Sendable (Int, Int) -> Void)? = nil
@@ -263,7 +284,7 @@ final class SessionPresenter {
         restart = { [weak self] layer in
             self?.start(
                 connection: connection, baseLayer: layer, endToEndMeter: endToEndMeter,
-                makeDisplayLink: makeDisplayLink,
+                makeDisplayLink: makeDisplayLink, adaptiveSync: adaptiveSync,
                 onFrame: onFrame, onSessionEnd: onSessionEnd, onDecodedSize: onDecodedSize)
         }
 
@@ -296,8 +317,12 @@ final class SessionPresenter {
             selectedPacing, priority: priority, videoLayerCompatible: !connection.isChroma444)
         #if os(macOS)
         let vsyncPaced = priority != .latency && pacing == .arrival
+        let presentAtDue = Self.presentAtDue(
+            adaptiveSync: adaptiveSync, priority: priority, pacing: pacing,
+            env: ProcessInfo.processInfo.environment["PUNKTFUNK_PRESENT_MODE"])
         #else
         let vsyncPaced = false
+        let presentAtDue = false
         #endif
         if choice != .stage1,
            let pipeline = Stage2Pipeline(
@@ -307,7 +332,8 @@ final class SessionPresenter {
                gateDepth: Self.gateDepth(
                    env: ProcessInfo.processInfo.environment["PUNKTFUNK_GATE_DEPTH"]),
                storePolicy: priority.storePolicy,
-               vsyncPaced: vsyncPaced) {
+               vsyncPaced: vsyncPaced,
+               presentAtDue: presentAtDue) {
             pipeline.onPresentWedged = { [weak self] in
                 DispatchQueue.main.async { self?.rebuildPresentation() }
             }
@@ -358,6 +384,13 @@ final class SessionPresenter {
         }
     }
 
+    /// Pen-proximity panel-rate boost pass-through (Stage2Pipeline.setInteractionBoost):
+    /// deadline pacing only — under arrival/glass the staged hint feeds no link, so this
+    /// is a no-op there. MAIN thread.
+    func setInteractionBoost(_ on: Bool) {
+        stage2?.setInteractionBoost(on)
+    }
+
     /// Hint the display link with the stream's cadence. On iOS/tvOS a range is always required:
     /// without one, ProMotion devices cap CADisplayLink at 60 Hz (iPhones additionally need
     /// `CADisableMinimumFrameDurationOnPhone` in Info.plist), so a 120 fps stream would present
@@ -370,14 +403,8 @@ final class SessionPresenter {
     /// drop its physical refresh to match the content. With VRR off we fall back to the proven
     /// behavior — iOS keeps a 30 Hz floor; macOS leaves the NSView link at its display's native
     /// rate (it already tracks the display and must NOT be capped to the stream rate).
-    /// Re-applied from `layout` so a mid-session `Reconfigure` picks up a new refresh.
-    /// Pen-proximity panel-rate boost pass-through (Stage2Pipeline.setInteractionBoost):
-    /// deadline pacing only — under arrival/glass the staged hint feeds no link, so this
-    /// is a no-op there. MAIN thread.
-    func setInteractionBoost(_ on: Bool) {
-        stage2?.setInteractionBoost(on)
-    }
-
+    /// Re-applied from `layout` so a mid-session `Reconfigure` picks up a new refresh. Each
+    /// applied range is logged, so a pf-present reading knows what the link was asked for.
     private func syncFrameRate(hz: UInt32) {
         guard hz > 0 else { return }
         // Deadline pacing: the hint goes to the pipeline's CAMetalDisplayLink instead (staged;
@@ -400,7 +427,10 @@ final class SessionPresenter {
         let floor = allowVRR ? min(hzF, 24) : min(hzF, 30)
         let range = CAFrameRateRange(minimum: floor, maximum: max(hzF, 120), preferred: hzF)
         #endif
-        if link.preferredFrameRateRange != range { link.preferredFrameRateRange = range }
+        guard link.preferredFrameRateRange != range else { return }
+        link.preferredFrameRateRange = range
+        presentLog.info(
+            "display link range min=\(range.minimum, privacy: .public) max=\(range.maximum, privacy: .public) preferred=\(range.preferred, privacy: .public)")
     }
 
     /// Refresh display timing and position a Metal presentation layer.

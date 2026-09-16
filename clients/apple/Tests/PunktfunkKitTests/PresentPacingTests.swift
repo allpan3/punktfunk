@@ -403,6 +403,31 @@ final class PresentPacingTests: XCTestCase {
         XCTAssertEqual(
             SessionPresenter.windowedPresentMode(setting: false, env: ""), .async)
     }
+
+    // MARK: - Due-time presents (adaptive-sync panels)
+
+    /// Due-time presents exist for an adaptive-sync screen under the latency intent on arrival
+    /// pacing only; PUNKTFUNK_PRESENT_MODE forces them either way. The pipeline runs the
+    /// free-running cadence tuning for them and keeps smoothness on the snapping one.
+    func testPresentAtDueResolution() {
+        XCTAssertTrue(SessionPresenter.presentAtDue(
+            adaptiveSync: true, priority: .latency, pacing: .arrival, env: nil))
+        XCTAssertFalse(SessionPresenter.presentAtDue(
+            adaptiveSync: false, priority: .latency, pacing: .arrival, env: nil))
+        XCTAssertFalse(SessionPresenter.presentAtDue(
+            adaptiveSync: true, priority: .smooth(buffer: 2), pacing: .arrival, env: nil))
+        XCTAssertFalse(SessionPresenter.presentAtDue(
+            adaptiveSync: true, priority: .latency, pacing: .glass, env: nil))
+        XCTAssertFalse(SessionPresenter.presentAtDue(
+            adaptiveSync: true, priority: .latency, pacing: .arrival, env: "immediate"))
+        XCTAssertTrue(SessionPresenter.presentAtDue(
+            adaptiveSync: false, priority: .latency, pacing: .arrival, env: "due"))
+        XCTAssertEqual(
+            Stage2Pipeline.cadenceTuning(store: .newestWins, presentAtDue: true), .freeRunning())
+        XCTAssertNil(Stage2Pipeline.cadenceTuning(store: .newestWins, presentAtDue: false))
+        XCTAssertEqual(
+            Stage2Pipeline.cadenceTuning(store: .fifo(capacity: 2), presentAtDue: true), .snapping())
+    }
     #endif
 
     // MARK: - Glass-gate depth
