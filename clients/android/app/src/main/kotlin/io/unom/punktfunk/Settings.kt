@@ -872,6 +872,18 @@ fun Settings.preferredCodec(): Int = when (codec) {
     else -> 0
 }
 
+/** The typed fixed-rate ceiling, Mbps — the console shell's ladder top. */
+const val CUSTOM_BITRATE_MAX_MBPS = 2_000
+
+/** Any rate as the console shell words it: "14 Mbps", "1.5 Mbps", "1.5 Gbps". */
+fun bitrateLabel(kbps: Int): String {
+    fun unit(v: Double, suffix: String) =
+        if (kotlin.math.abs(v - kotlin.math.round(v)) < 0.05) "${kotlin.math.round(v).toLong()} $suffix"
+        else String.format(java.util.Locale.ROOT, "%.1f %s", v, suffix)
+    val mbps = kbps / 1000.0
+    return if (kbps >= 1_000_000) unit(mbps / 1000.0, "Gbps") else unit(mbps, "Mbps")
+}
+
 /** (kbps, label). `0` = host default. */
 val BITRATE_OPTIONS = listOf(
     0 to "Automatic",

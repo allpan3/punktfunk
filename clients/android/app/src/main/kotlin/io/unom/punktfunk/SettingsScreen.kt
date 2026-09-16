@@ -833,13 +833,30 @@ private fun DisplaySettings(s: Settings, update: (Settings) -> Unit, context: an
                 "distorts it.",
         ) { fit -> update(s.copy(videoFit = fit)) }
 
+        // A stored rate the menu doesn't list (the speed test writes one) reads as itself under
+        // "Custom", never as the first row; picking "Custom…" keeps the field open until a preset.
+        var customBitratePicked by remember { mutableStateOf(false) }
+        val offMenuBitrate = BITRATE_OPTIONS.none { it.first == s.bitrateKbps }
         SettingDropdown(
             label = "Bitrate",
-            options = BITRATE_OPTIONS,
-            selected = s.bitrateKbps,
+            options = BITRATE_OPTIONS +
+                ((-1) to if (offMenuBitrate) "Custom (${bitrateLabel(s.bitrateKbps)})" else "Custom…"),
+            selected = if (customBitratePicked || offMenuBitrate) -1 else s.bitrateKbps,
             field = "bitrate_kbps",
             caption = "Automatic lets the host decide.",
-        ) { kbps -> update(s.copy(bitrateKbps = kbps)) }
+        ) { kbps ->
+            if (kbps == -1) {
+                customBitratePicked = true
+                // Automatic has no number to start from; 20 Mbps is what the host picks for it.
+                if (s.bitrateKbps == 0) update(s.copy(bitrateKbps = 20_000))
+            } else {
+                customBitratePicked = false
+                update(s.copy(bitrateKbps = kbps))
+            }
+        }
+        if (customBitratePicked || offMenuBitrate) {
+            BitrateField(kbps = s.bitrateKbps) { kbps -> update(s.copy(bitrateKbps = kbps)) }
+        }
 
         // Only codecs this device can actually decode are offered — a preference the client never
         // advertises would be a dead setting (see [codecOptionsFor]).
@@ -1411,6 +1428,26 @@ private fun ResolutionField(
         singleLine = true,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
         modifier = modifier.onFocusChanged { if (!it.isFocused) text = if (value > 0) value.toString() else "" },
+    )
+}
+
+/** A fixed rate in whole Mbps, up to [CUSTOM_BITRATE_MAX_MBPS]. Every usable keystroke commits;
+ * the field keeps the raw text while typing and snaps to the committed rate when focus leaves. */
+@Composable
+private fun BitrateField(kbps: Int, onCommit: (Int) -> Unit) {
+    val committed = if (kbps > 0) (kbps / 1000).toString() else ""
+    var text by remember { mutableStateOf(committed) }
+    OutlinedTextField(
+        value = text,
+        onValueChange = { raw ->
+            text = raw.filter { it.isDigit() }.take(4)
+            val mbps = (text.toIntOrNull() ?: 0).coerceAtMost(CUSTOM_BITRATE_MAX_MBPS)
+            if (mbps > 0) onCommit(mbps * 1000)
+        },
+        label = { Text("Bitrate (Mbps)") },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        modifier = Modifier.fillMaxWidth().onFocusChanged { if (!it.isFocused) text = committed },
     )
 }
 
