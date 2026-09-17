@@ -4,18 +4,7 @@ import XCTest
 
 @testable import PunktfunkKit
 
-/// Pins the macOS ⌘-chord passthrough — the rule deciding which keyDowns `InputCapture`'s local
-/// monitor takes off AppKit and forwards to the host instead of letting a menu key equivalent
-/// claim them. Two things are worth a test rather than a comment:
-///
-///  * ⌘Q reaching the host at all. That is the whole point — it is the compositor chord on
-///    Hyprland/KDE/GNOME, and it used to quit the client.
-///  * ⌘⎋ and ⌃⌘F NOT reaching it, under every combination. They are the way out of a captured
-///    stream; forward either and the user is locked in.
-///
-/// The mouse model is deliberately absent from the rule (and from its signature): the chords are
-/// forwarded under the desktop model too, as they are on the SDL clients. Gating it there read as
-/// a broken client — ⌘Q quit Punktfunk instead of reaching Hyprland.
+// Verify captured Command-chord routing and release ownership while preserving client shortcuts
 final class CommandChordTests: XCTestCase {
     // kVK_ANSI_* — physical positions, layout-independent (the same constants the monitor uses).
     private let q: UInt16 = 12, w: UInt16 = 13, h: UInt16 = 4, m: UInt16 = 46
@@ -121,11 +110,64 @@ final class CommandChordTests: XCTestCase {
         XCTAssertEqual(InputCapture.keyCodeToVK[126], 0x26) // Up arrow (⌃↑ Mission Control)
     }
 
-    private func keyEvent(_ keyCode: UInt16, _ flags: NSEvent.ModifierFlags) -> NSEvent? {
+    // Release ownership follows the forwarded physical key, not the current modifier chord
+    func testTrackedReleasesIgnoreModifierChanges() throws {
+        for flags: NSEvent.ModifierFlags in [.command, [], .control, [.control, .command]] {
+            var tracked: Set<UInt32> = [0x46]
+            let event = try XCTUnwrap(keyEvent(f, flags, type: .keyUp))
+            XCTAssertEqual(InputCapture.takeCommandChordRelease(
+                event, forwarding: true, trackedVKs: &tracked), 0x46)
+            XCTAssertTrue(tracked.isEmpty)
+        }
+    }
+
+    // One key's release cannot clear another held chord key or generate a duplicate release
+    func testRepeatedTapsClaimEachReleaseOnce() throws {
+        var tracked: Set<UInt32> = [0x51, 0x57]
+        let event = try XCTUnwrap(keyEvent(w, .command, type: .keyUp))
+        for _ in 0..<3 {
+            tracked.insert(0x57)
+            XCTAssertEqual(InputCapture.takeCommandChordRelease(
+                event, forwarding: true, trackedVKs: &tracked), 0x57)
+            XCTAssertEqual(tracked, [0x51])
+            XCTAssertNil(InputCapture.takeCommandChordRelease(
+                event, forwarding: true, trackedVKs: &tracked))
+        }
+    }
+
+    // Held-key repeats keep their release outstanding for the eventual physical key-up
+    func testHeldKeyRepeatDoesNotTakeReleaseOwnership() throws {
+        var tracked: Set<UInt32> = [0x57]
+        let repeatedDown = try XCTUnwrap(keyEvent(w, .command, isRepeat: true))
+        XCTAssertNil(InputCapture.takeCommandChordRelease(
+            repeatedDown, forwarding: true, trackedVKs: &tracked))
+        XCTAssertEqual(tracked, [0x57])
+        let release = try XCTUnwrap(keyEvent(w, .command, type: .keyUp))
+        XCTAssertEqual(InputCapture.takeCommandChordRelease(
+            release, forwarding: true, trackedVKs: &tracked), 0x57)
+    }
+
+    // Unowned releases and local input retain the responder-chain path
+    func testUntrackedAndReleasedCaptureKeysPassThrough() throws {
+        var tracked: Set<UInt32> = [0x57]
+        let untracked = try XCTUnwrap(keyEvent(q, .command, type: .keyUp))
+        XCTAssertNil(InputCapture.takeCommandChordRelease(
+            untracked, forwarding: true, trackedVKs: &tracked))
+        let released = try XCTUnwrap(keyEvent(w, .command, type: .keyUp))
+        XCTAssertNil(InputCapture.takeCommandChordRelease(
+            released, forwarding: false, trackedVKs: &tracked))
+        XCTAssertEqual(tracked, [0x57])
+    }
+
+    // Construct physical key events without keyboard layout or window dependencies
+    private func keyEvent(
+        _ keyCode: UInt16, _ flags: NSEvent.ModifierFlags,
+        type: NSEvent.EventType = .keyDown, isRepeat: Bool = false
+    ) -> NSEvent? {
         NSEvent.keyEvent(
-            with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0,
+            with: type, location: .zero, modifierFlags: flags, timestamp: 0,
             windowNumber: 0, context: nil, characters: "", charactersIgnoringModifiers: "",
-            isARepeat: false, keyCode: keyCode)
+            isARepeat: isRepeat, keyCode: keyCode)
     }
 }
 #endif

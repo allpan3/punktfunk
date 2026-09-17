@@ -158,9 +158,8 @@ pub struct WlrootsInjector {
     /// Buttons held on `pointer`. Released before destroy; the compositor will not.
     pressed: Vec<u32>,
     keyboard: ZwpVirtualKeyboardV1,
-    /// Keys held on `keyboard` (evdev). Only a transition reaches `xkb_state`: it counts
-    /// presses per key, and this injector outlives the session, so an unmatched down
-    /// would pin its modifier for the host's lifetime.
+    // Keys held on `keyboard` (evdev); only transitions reach Wayland and XKB
+    // Client repeats must not reassert modifiers or retrigger application shortcuts
     held_keys: Vec<u16>,
     xkb_state: xkb::State,
     _keymap_file: std::fs::File, // compositor mmaps this memfd; drop would unmap it
@@ -404,8 +403,7 @@ impl WlrootsInjector {
         Ok(())
     }
 
-    /// Re-assert the modifier mask after every key, repeats included: the compositor's own
-    /// per-key press count can drift, and `modifiers` is what overrides it.
+    // Keep the compositor's modifier mask aligned with physical key transitions
     fn send_modifiers(&mut self) {
         let depressed = self.xkb_state.serialize_mods(xkb::STATE_MODS_DEPRESSED);
         let latched = self.xkb_state.serialize_mods(xkb::STATE_MODS_LATCHED);
@@ -416,6 +414,7 @@ impl WlrootsInjector {
 }
 
 impl InputInjector for WlrootsInjector {
+    // Send pointer updates and keyboard transitions; Wayland clients generate held-key repeat
     fn inject(&mut self, event: &InputEvent) -> Result<()> {
         let t = self.now_ms();
         match event.kind {
@@ -494,12 +493,12 @@ impl InputInjector for WlrootsInjector {
             InputKind::KeyDown | InputKind::KeyUp => {
                 let down = event.kind == InputKind::KeyDown;
                 if let Some(evdev) = vk_to_evdev(event.code as u8) {
-                    self.keyboard.key(t, evdev as u32, if down { 1 } else { 0 });
                     if note_key(&mut self.held_keys, evdev, down) {
+                        self.keyboard.key(t, evdev as u32, if down { 1 } else { 0 });
                         self.xkb_state
                             .update_key(xkb_keycode(evdev), key_direction(down));
+                        self.send_modifiers();
                     }
-                    self.send_modifiers();
                 } else {
                     tracing::debug!(vk = event.code, "unmapped VK keycode — dropped");
                 }
@@ -519,9 +518,8 @@ impl InputInjector for WlrootsInjector {
     }
 }
 
-/// Record a key on the held set; `true` when it is a transition. A down for a held key is a
-/// repeat (or the up was lost to the client OS); an up for a key not held is stale. Neither
-/// may reach `xkb_state`, whose per-key press count only unwinds with matching ups.
+// Record a physical transition; duplicate downs and stale ups stay local
+// Balanced edges preserve XKB state while Wayland clients own repeat timing
 fn note_key(held: &mut Vec<u16>, evdev: u16, down: bool) -> bool {
     let was_held = held.contains(&evdev);
     if down && !was_held {
@@ -637,6 +635,39 @@ mod tests {
             "session-end release after a real up"
         );
         assert_eq!(held, [KEY_A]);
+    }
+
+    // A held letter emits one pair; a later tap remains a distinct press while Super stays down
+    #[test]
+    fn held_letter_repeats_preserve_the_next_tap() {
+        let mut held = Vec::new();
+        let mut transitions = Vec::new();
+        let stream = [(KEY_LEFTMETA, true), (KEY_A, true)]
+            .into_iter()
+            .chain(std::iter::repeat_n((KEY_A, true), 28))
+            .chain([
+                (KEY_A, false),
+                (KEY_A, true),
+                (KEY_A, false),
+                (KEY_LEFTMETA, false),
+            ]);
+        for (key, down) in stream {
+            if note_key(&mut held, key, down) {
+                transitions.push((key, down));
+            }
+        }
+        assert_eq!(
+            transitions,
+            [
+                (KEY_LEFTMETA, true),
+                (KEY_A, true),
+                (KEY_A, false),
+                (KEY_A, true),
+                (KEY_A, false),
+                (KEY_LEFTMETA, false),
+            ]
+        );
+        assert!(held.is_empty());
     }
 
     /// The trap the gate exists for: xkb counts presses per key, so two Super downs and one up

@@ -93,12 +93,10 @@ public final class InputCapture {
     private var cmdKeysDown: Set<UInt32> = []
 
     #if os(macOS)
-    /// Windows VKs the ⌘-chord passthrough sent DOWN (see the keyDown monitor). macOS stops
-    /// delivering keyUp for ordinary keys while Command is held, so the release half of ⌘Q/⌘W/…
-    /// cannot be relied on to arrive through the responder chain at all: these are flushed when
-    /// the last ⌘ comes up (`flushCommandChord`), which is what stands between the host and a
-    /// key held down for the rest of the session.
+    // Command-chord presses awaiting release through the local monitor
+    // AppKit can discard their keyUp before the responder; Command release remains the fallback
     private var commandChordVKs: Set<UInt32> = []
+    private var capsLockState = CapsLockState(rawFlags: 0)
 
     #endif
 
@@ -194,11 +192,15 @@ public final class InputCapture {
         self.connection = connection
     }
 
-    /// Gate the forwarding without detaching the GC handlers. `suppressClick` marks the
-    /// transition as click-driven: that click's press/release are not forwarded. Every
-    /// transition to false flushes held keys/buttons host-side.
+    // Capture baselines local lock state; release flushes held keys and buttons
+    // The click that engages capture stays local
     public func setForwarding(_ on: Bool, suppressClick: Bool = false) {
         if on {
+            #if os(macOS)
+            if !forwarding {
+                capsLockState = CapsLockState(rawFlags: NSEvent.modifierFlags.rawValue)
+            }
+            #endif
             forwarding = true
             suppressedButton = suppressClick ? 1 : nil
             suppressedDownSeen = false
@@ -224,9 +226,7 @@ public final class InputCapture {
         suppressedDownSeen = false
     }
 
-    /// Begin forwarding the current (and future) mouse/keyboard to the host. Steals the
-    /// global GC handler slots from any previous capture (one live capture per process),
-    /// notifying it via `onPreempted` so its owner releases its capture state.
+    // Own the process-wide device handlers and notify any capture that loses them
     public func start() {
         if let previous = Self.activeCapture, previous !== self {
             // Drop the previous owner's device lists first: its stop() must not be able
@@ -275,24 +275,20 @@ public final class InputCapture {
         ) { [weak self] _ in
             self?.releaseAll()
         })
-        // This monitor is the FIRST thing in the app to see a key: AppKit calls it before
-        // `sendEvent:`, so before any menu key equivalent and before StreamLayerView's keyDown.
-        // Returning nil discards the event outright — which cuts BOTH of those off, and on macOS
-        // the second one is the host's only key path (the GCKeyboard send is iOS-only; see
-        // `attach(keyboard:)`). So the rule here is: anything swallowed must either be handled
-        // client-side or forwarded to the host from inside this block, because nothing downstream
-        // will get a second chance at it.
-        //
-        // ⌘⎋ (capture toggle) and ⌃⌥⇧M (mouse model) are client-side in BOTH states; ⌃⌥⇧Q/D/S/A/O
-        // and ⌃⌘F are client-side only while forwarding (released, the events pass through and the
-        // menu's identical key equivalents handle them). Every OTHER ⌘ chord is the HOST's while
-        // captured — see `forwardsCommandChord`. (On iOS there is no NSEvent monitor — the GC key
-        // handler detects the combos.)
+        // Consumed events never reach menus or the stream responder
+        // Own both edges of forwarded Command chords here so AppKit cannot discard their releases
         #if os(macOS)
         keyEventMonitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.keyDown]
+            matching: [.keyDown, .keyUp]
         ) { [weak self] event in
             guard let self else { return event }
+            if event.type == .keyUp {
+                guard let vk = Self.takeCommandChordRelease(
+                    event, forwarding: self.forwarding, trackedVKs: &self.commandChordVKs)
+                else { return event }
+                self.sendKey(vk, down: false)
+                return nil // The monitor owns this release; the responder must not send it again
+            }
             let flags = Self.chordFlags(event)
             if event.keyCode == 53 /* Esc */, flags == .command {
                 self.suppressedVK = 0x1B // VK_ESC — its keyUp still reaches the responder chain
@@ -592,21 +588,22 @@ public final class InputCapture {
         emitKey(vk, down: down)
     }
 
-    /// NSEvent modifier path (macOS): modifier keys never fire keyDown/keyUp — they arrive
-    /// as flagsChanged, which carries no down-vs-up. `keyCode` names the key that changed
-    /// (kVK_Control & co., already L/R-specific); `resolveModifier` recovers the direction
-    /// from the flags. Fed `event.keyCode` + `UInt(event.modifierFlags.rawValue)` — LOW 16
-    /// bits intact, they carry the device-dependent L/R bits (the .deviceIndependentFlagsMask
-    /// the ⌘⎋ monitor uses deliberately strips exactly these — do NOT pre-mask here).
+    // Caps Lock toggles produce a balanced key pulse; held modifiers retain their physical edges
+    // Keep the raw low bits intact so left and right modifiers remain distinguishable
     public func handleFlagsChanged(keyCode: UInt16, rawFlags: UInt) {
         if inputDebug {
             inputLog.debug(
                 "flagsChanged keyCode \(keyCode, privacy: .public) flags 0x\(String(rawFlags, radix: 16), privacy: .public) forwarding \(self.forwarding, privacy: .public)")
         }
         guard forwarding else { return }
+        if capsLockState.takeTransition(keyCode: keyCode, rawFlags: rawFlags) {
+            sendKey(0x14, down: true) // VK_CAPITAL toggles on the host's press edge
+            sendKey(0x14, down: false)
+            return
+        }
         guard let (vk, down) = Self.resolveModifier(
             keyCode: keyCode, rawFlags: rawFlags, isDown: { pressedVKs.contains($0) })
-        else { return } // Fn / Caps Lock / unknown — nothing the host consumes on this path
+        else { return } // Caps Lock is handled above; Fn and unknown modifiers stay local
         // Keep cmdKeysDown in step (the ⌘⎋ toggle + Esc suppression read it); sendKey
         // adds the VK to pressedVKs so releaseAll/blur flushes a held modifier cleanly.
         if vk == 0x5B || vk == 0x5C {
@@ -623,17 +620,27 @@ public final class InputCapture {
         sendKey(vk, down: down)
     }
 
-    /// Resolve one flagsChanged transition to (Windows VK, down). The changed key is
-    /// `keyCode`; the direction comes from the flags. The device-dependent L/R bits (LOW
-    /// 16 bits, NX_DEVICE*KEYMASK) disambiguate the two same-class keys, but some
-    /// keyboards ship flagsChanged WITHOUT them — only the device-independent class
-    /// bit (NX_CONTROLMASK & co.) is set. A pure diff of the device bits silently drops
-    /// those keys (seen live: Control never forwarded), so this is keyCode-driven with the
-    /// flags as evidence: class bit clear → the key went up; device bits present → they
-    /// say which side is held now; class bit set with NO device bits → flip the held state
-    /// we track (`isDown`, from pressedVKs — SDL ships the same fallback). Each keyCode
-    /// maps to the L/R modifier VK `hidToVK` already emits, so the host needs no change.
-    /// Returns nil for modifiers the host doesn't consume on this path (Fn, Caps Lock).
+    // Track local Caps Lock transitions without assuming the host's lock state
+    struct CapsLockState {
+        private var isOn: Bool
+
+        // A capture begins from current local flags and emits no catch-up toggle
+        init(rawFlags: UInt) {
+            isOn = rawFlags & NSEvent.ModifierFlags.capsLock.rawValue != 0
+        }
+
+        // Only a changed Caps Lock notification owns a host toggle
+        mutating func takeTransition(keyCode: UInt16, rawFlags: UInt) -> Bool {
+            guard keyCode == 57 else { return false }
+            let next = rawFlags & NSEvent.ModifierFlags.capsLock.rawValue != 0
+            defer { isOn = next }
+            return next != isOn
+        }
+    }
+
+    // Resolve a held modifier's side and direction from raw flags
+    // Without device-specific bits, toggle the tracked side when its class remains down
+    // Caps Lock uses the separate transition path; Fn has no host mapping
     static func resolveModifier(
         keyCode: UInt16, rawFlags: UInt, isDown: (UInt32) -> Bool
     ) -> (vk: UInt32, down: Bool)? {
@@ -696,6 +703,16 @@ public final class InputCapture {
     private func sendCommandChordKey(_ vk: UInt32) {
         commandChordVKs.insert(vk)
         sendKey(vk, down: true)
+    }
+
+    // Take one release owed by a forwarded Command press, even when its modifiers have changed
+    static func takeCommandChordRelease(
+        _ event: NSEvent, forwarding: Bool, trackedVKs: inout Set<UInt32>
+    ) -> UInt32? {
+        guard forwarding, event.type == .keyUp, let vk = keyCodeToVK[event.keyCode],
+              trackedVKs.remove(vk) != nil
+        else { return nil }
+        return vk
     }
 
     /// Release whatever the ⌘-chord passthrough sent down and is still held — called when the last

@@ -77,9 +77,10 @@ final class ModifierResolveTests: XCTestCase {
         XCTAssertEqual(up?.down, false)
     }
 
-    // MARK: Modifiers the host doesn't consume on this path
+    // MARK: Modifiers without held-key edges
 
-    func testFnAndCapsLockResolveToNothing() {
+    // Caps Lock takes the transition path; Fn has no host mapping
+    func testFnAndCapsLockHaveNoHeldKeyEdges() {
         XCTAssertNil(resolve(keyCode: 63, rawFlags: 0x80_0000)) // Fn / Globe
         XCTAssertNil(resolve(keyCode: 57, rawFlags: 0x1_0000)) // Caps Lock
     }
