@@ -1,0 +1,125 @@
+name: Test packages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [build/test-packages]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-packages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: macOS DMG
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Build the Rust xcframework
+        run: bash scripts/build-xcframework.sh
+
+      - name: Archive and package the app
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(git describe --tags --match 'v[0-9]*' --abbrev=0 | sed 's/^v//')"
+          ARCHIVE="$RUNNER_TEMP/Punktfunk-macos.xcarchive"
+          DERIVED="$RUNNER_TEMP/DerivedData"
+
+          xcodebuild archive \
+            -project clients/apple/Punktfunk.xcodeproj \
+            -scheme Punktfunk \
+            -destination 'generic/platform=macOS' \
+            -archivePath "$ARCHIVE" \
+            -derivedDataPath "$DERIVED" \
+            -skipMacroValidation -skipPackagePluginValidation \
+            MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
+            CODE_SIGNING_ALLOWED=NO
+
+          APP="$ARCHIVE/Products/Applications/Punktfunk.app"
+          ENTITLEMENTS="$RUNNER_TEMP/Punktfunk-test.entitlements"
+          cp clients/apple/Config/Punktfunk-macOS.entitlements "$ENTITLEMENTS"
+          /usr/libexec/PlistBuddy -c 'Delete :keychain-access-groups' "$ENTITLEMENTS"
+          codesign --force --deep --timestamp=none --sign - \
+            --entitlements "$ENTITLEMENTS" "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
+          STAGE="$RUNNER_TEMP/dmg-stage"
+          mkdir -p "$STAGE"
+          ditto "$APP" "$STAGE/Punktfunk.app"
+          ln -s /Applications "$STAGE/Applications"
+          DMG="$RUNNER_TEMP/Punktfunk-macOS-test-${GITHUB_SHA::7}.dmg"
+          hdiutil create -volname 'Punktfunk Test' -srcfolder "$STAGE" \
+            -ov -format UDZO "$DMG"
+          mkdir -p artifacts
+          cp "$DMG" artifacts/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: punktfunk-macos-${{ github.sha }}
+          path: artifacts/*.dmg
+          if-no-files-found: error
+
+  omarchy:
+    name: Omarchy packages
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    timeout-minutes: 120
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            git nodejs rust clang cmake ninja nasm pkgconf python vulkan-headers \
+            gtk4 libadwaita sdl3 pipewire wayland libxkbcommon opus libei \
+            mesa libglvnd sudo
+
+      - uses: actions/checkout@v4
+
+      - name: Build Arch packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+          CU_SYMS="$(grep -rhoE '\bcu[A-Z][A-Za-z0-9_]*' \
+            crates/punktfunk-host/src/ | sort -u || true)"
+          if [ -n "$CU_SYMS" ] && [ ! -e /usr/lib/libcuda.so ]; then
+            STUB_C="$(mktemp --suffix=.c)"
+            for symbol in $CU_SYMS; do
+              printf 'int %s(void){return 0;}\n' "$symbol" >> "$STUB_C"
+            done
+            gcc -shared -fPIC -Wl,-soname,libcuda.so.1 \
+              -o /usr/lib/libcuda.so.1 "$STUB_C"
+            ln -s libcuda.so.1 /usr/lib/libcuda.so
+            ldconfig
+          fi
+
+          useradd -m builder
+          mkdir -p dist
+          chown -R builder: "$GITHUB_WORKSPACE"
+          sudo -u builder git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cd packaging/arch
+          sudo -u builder env \
+            PF_SRCDIR="$GITHUB_WORKSPACE" \
+            PF_PKGVER="0.38.0.test${GITHUB_RUN_NUMBER}" \
+            PF_PKGREL=1 \
+            PKGDEST="$GITHUB_WORKSPACE/dist" \
+            makepkg -f -d --holdver
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: punktfunk-omarchy-${{ github.sha }}
+          path: |
+            dist/punktfunk-host-*.pkg.tar.zst
+            dist/punktfunk-icons-*.pkg.tar.zst
+          if-no-files-found: error
