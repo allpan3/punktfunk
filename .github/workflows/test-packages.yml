@@ -15,10 +15,10 @@ concurrency:
 jobs:
   macos:
     name: macOS DMG
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -64,7 +64,7 @@ jobs:
           mkdir -p artifacts
           cp "$DMG" artifacts/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: punktfunk-macos-${{ github.sha }}
           path: artifacts/*.dmg
@@ -83,7 +83,7 @@ jobs:
             gtk4 libadwaita sdl3 pipewire wayland libxkbcommon opus libei \
             mesa libglvnd sudo
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Build Arch packages
         shell: bash
@@ -116,7 +116,7 @@ jobs:
             PKGDEST="$GITHUB_WORKSPACE/dist" \
             makepkg -f -d --holdver
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: punktfunk-omarchy-${{ github.sha }}
           path: |
