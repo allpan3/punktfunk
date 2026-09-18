@@ -50,6 +50,8 @@ jobs:
           ENTITLEMENTS="$RUNNER_TEMP/Punktfunk-test.entitlements"
           cp clients/apple/Config/Punktfunk-macOS.entitlements "$ENTITLEMENTS"
           /usr/libexec/PlistBuddy -c 'Delete :keychain-access-groups' "$ENTITLEMENTS"
+          /usr/libexec/PlistBuddy -c 'Delete :com.apple.security.application-groups' "$ENTITLEMENTS"
+          /usr/libexec/PlistBuddy -c 'Add :PunktfunkUseAppLocalDefaults bool true' "$APP/Contents/Info.plist"
           codesign --force --deep --timestamp=none --sign - \
             --entitlements "$ENTITLEMENTS" "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
