@@ -14,12 +14,15 @@ import Foundation
 public enum AppGroup {
     public static let suiteName = "group.io.unom.punktfunk"
 
-    /// The shared defaults suite. Non-nil in a correctly-entitled process; falls back to
-    /// `.standard` if the group is somehow unavailable (unsigned `swift run`, a misprovisioned
-    /// build) so the app still functions single-process rather than crashing — the widget just
-    /// won't see the same store there.
+    /// Ad-hoc macOS packages opt into app-local storage because they have no provisioned group
+    /// Creating a named suite does not establish permission to read or write it
     public static var defaults: UserDefaults {
-        UserDefaults(suiteName: suiteName) ?? .standard
+        #if os(macOS)
+        if Bundle.main.object(forInfoDictionaryKey: "PunktfunkUseAppLocalDefaults") as? Bool == true {
+            return .standard
+        }
+        #endif
+        return UserDefaults(suiteName: suiteName) ?? .standard
     }
 }
 
