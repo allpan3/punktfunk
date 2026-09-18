@@ -61,9 +61,7 @@ final class HostStore: ObservableObject {
     /// never advertises still reads Online. Not persisted (it's live reachability, not config).
     @Published var probedOnline: Set<StoredHost.ID> = []
 
-    /// The App-Group suite — shared with the Widget/Live-Activity extension so a launcher widget
-    /// sees the same saved hosts. Falls back to `.standard` in an un-entitled process (see
-    /// `AppGroup.defaults`).
+    /// Shared defaults for provisioned builds, app-local defaults for ad-hoc macOS packages
     private let defaults = AppGroup.defaults
 
     init() {
