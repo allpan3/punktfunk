@@ -109,12 +109,15 @@ final class ClientIdentityStore: @unchecked Sendable {
         return q
     }
 
+    /// Reuse a legacy identity when the data-protection store is empty or requires an entitlement
     private func copyStored() -> ReadResult {
         let result = read(dataProtection: true)
-        // No entitlement (ad-hoc / unsigned build): the data-protection keychain is
-        // unavailable — read the legacy file keychain instead.
-        if case .denied(errSecMissingEntitlement) = result {
+        switch result {
+        case .absent, .denied(errSecMissingEntitlement):
+            // An unprovisioned read can report not-found even when adding requires an entitlement
             return read(dataProtection: false)
+        default:
+            break
         }
         // An item added before the this-device-only switch keeps the accessibility class it was
         // added with — it would keep riding backups forever, because the identity is never
@@ -129,6 +132,7 @@ final class ClientIdentityStore: @unchecked Sendable {
         return result
     }
 
+    /// Read the identity without treating denied access as a missing item
     private func read(dataProtection: Bool) -> ReadResult {
         var query = Self.query(dataProtection: dataProtection)
         query[kSecReturnData as String] = true
@@ -146,6 +150,7 @@ final class ClientIdentityStore: @unchecked Sendable {
         }
     }
 
+    /// Store the identity in the legacy Keychain when data protection needs an entitlement
     private func add(_ identity: ClientIdentity) -> OSStatus {
         guard let data = try? JSONEncoder().encode(
             Stored(certPEM: identity.certPEM, keyPEM: identity.keyPEM))
