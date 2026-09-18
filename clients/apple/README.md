@@ -42,6 +42,8 @@ PUNKTFUNK_AUTOCONNECT=<ip> PUNKTFUNK_MODE=1280x720x60 swift run PunktfunkClient
   It keeps App Sandbox, removes the team-scoped Keychain and App Group entitlements, and sets
   `PunktfunkUseAppLocalDefaults` in the packaged Info.plist. Hosts and presets stay in the app's
   container; extensions do not share this store. Provisioned builds use the App Group suite.
+  The client identity stays in Keychain; an empty data-protection store also checks the legacy
+  store so an existing pairing identity is reused.
 
 - **Entitlements.** The macOS target is App-Sandboxed and needs `network.server` — the raw-UDP plane
   and quinn both `bind()`. iOS/tvOS share an entitlements file; keep `app-sandbox` out of it. Verify
