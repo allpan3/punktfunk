@@ -74,10 +74,13 @@ jobs:
       # punktfunk-client-linux link deps. Also baked into rust-ci.Dockerfile — but ci.yml
       # runs against the image from the PREVIOUS push (docker.yml bootstrap note), so this
       # keeps the job green across image-content changes; a no-op once the image has them.
-      - name: GTK4/libadwaita/SDL3 dev packages
+      - name: GTK4/libadwaita/SDL3/FFmpeg dev packages
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends libgtk-4-dev libadwaita-1-dev libsdl3-dev
+          apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev libsdl3-dev \
+            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
+            libavfilter-dev libavdevice-dev
 
       # The committed pf-zerocopy SPIR-V blobs are pulled in with include_bytes! and rebuilt only
       # by hand — edit a .comp, forget the rebuild, and the OLD kernel ships with no compile error
