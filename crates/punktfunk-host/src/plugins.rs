@@ -17,6 +17,10 @@
 use anyhow::{bail, Context, Result};
 use std::process::Command;
 
+/// Files the runner consumes through one directory bind. Binding the directory keeps atomic
+/// replacements visible inside the runner's mount namespace.
+pub(crate) const RUNNER_DATA_DIR: &str = "plugin-run";
+
 pub mod access;
 pub mod manifest;
 #[cfg(target_os = "windows")]
@@ -38,6 +42,11 @@ pub fn main(args: &[String]) -> Result<()> {
             }
             forward_to_runner(args)?;
             if !listing {
+                // The runner hands each plugin its token from this file; a running host picks
+                // the new set up on the plugin's first request.
+                if let Err(e) = crate::mgmt_token::load_or_generate_per_plugin() {
+                    println!("Couldn't issue the plugins' API credentials: {e:#}");
+                }
                 // The runner discovers units at startup; without this the change is dormant.
                 match restart_runtime() {
                     Ok(true) => println!("Plugin runner restarted."),
@@ -326,6 +335,36 @@ pub(crate) fn set_runtime_enabled(enabled: bool) -> Result<()> {
 /// the runner is the operator's own user unit.
 pub(crate) fn grant_acl(dir: &std::path::Path, write: bool) -> std::io::Result<()> {
     plat::grant(dir, write).map_err(|e| std::io::Error::other(e.to_string()))
+}
+
+/// Keep a rewritten runner credential readable by the enabled Windows service. POSIX runners
+/// inherit access from the operator and need no ACL adjustment.
+pub(crate) fn converge_runner_credential(path: &std::path::Path) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        let st = runtime_status();
+        if st.installed && st.enabled {
+            plat::grant_runner_credential(path)?;
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = path;
+    Ok(())
+}
+
+/// Restore the enabled Windows runner's directory ACE after secret-directory hardening. POSIX
+/// uses the operator's own account for both processes.
+pub(crate) fn converge_runner_data_dir(dir: &std::path::Path) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        let st = runtime_status();
+        if st.installed && st.enabled {
+            plat::grant_runner_data_dir(dir)?;
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = dir;
+    Ok(())
 }
 
 /// Re-apply every recorded grant's ACL at `serve`. A launcher rewrite can drop the ACE its

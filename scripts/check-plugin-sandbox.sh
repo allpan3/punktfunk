@@ -25,14 +25,14 @@ bun build src/runner-cli.ts --target=bun --outfile /runner.js >/dev/null || { ec
 export HOME=/root
 CFG=$HOME/.config/punktfunk
 P=$CFG/plugins/node_modules/punktfunk-plugin-probe
-mkdir -p "$P" "$HOME/.ssh" "$HOME/steamlike" "$HOME/granted" "$HOME/dynamic"
+mkdir -p "$P" "$CFG/plugin-run" "$HOME/.ssh" "$HOME/steamlike" "$HOME/granted" "$HOME/dynamic"
 echo "secret-admin-token"  > "$CFG/mgmt-token"
 echo "private key"         > "$HOME/.ssh/id_ed25519"
 echo "library-data"        > "$HOME/steamlike/marker"
 echo "granted-data"        > "$HOME/granted/marker"
 echo "dynamic-data"        > "$HOME/dynamic/marker"
-echo '{"probe":"testtoken"}' > "$CFG/plugin-tokens.json"
-printf '{"probe":["/root/granted"]}' > "$CFG/plugin-grants.json"
+echo '{"probe":"testtoken"}' > "$CFG/plugin-run/plugin-tokens.json"
+printf '{"probe":["/root/granted"]}' > "$CFG/plugin-run/plugin-grants.json"
 printf '{"dependencies":{"punktfunk-plugin-probe":"*"}}' > "$CFG/plugins/package.json"
 printf '{"name":"punktfunk-plugin-probe","version":"1.0.0","main":"index.js","punktfunk":{"schema":1,"id":"probe","reads":["~/steamlike"]}}' > "$P/package.json"
 
@@ -81,8 +81,8 @@ done
 [ -n "$line" ] || { echo "FAIL: the plugin never started"; tail -20 "$LOG"; exit 1; }
 
 # The same runner must notice the atomic grant rewrite and restart only this plugin.
-printf '{"probe":["/root/granted","/root/dynamic"]}' > "$CFG/plugin-grants.json.tmp"
-mv "$CFG/plugin-grants.json.tmp" "$CFG/plugin-grants.json"
+printf '{"probe":["/root/granted","/root/dynamic"]}' > "$CFG/plugin-run/plugin-grants.json.tmp"
+mv "$CFG/plugin-run/plugin-grants.json.tmp" "$CFG/plugin-run/plugin-grants.json"
 dynamic_line=""
 for _ in $(seq 1 50); do
   dynamic_line=$(grep '^PROBE ' "$LOG" | grep 'dynamic=dynamic-data' | tail -1 || true)

@@ -1,9 +1,9 @@
 //! The operator's folder-access records for plugins: grants and pending requests.
 //!
-//! `plugin-grants.json` holds what the operator allowed (`{id: {grants, denied}}`; the v1
-//! `{id: [path]}` shape still parses, each string a read-only grant). `plugin-access-pending.json`
-//! holds requests a plugin posted that await a decision. Both are written tmp+rename and
-//! re-read on every operation, so a CLI write by another process is never stale here.
+//! `plugin-run/plugin-grants.json` holds what the operator allowed (`{id: {grants, denied}}`; the
+//! v1 `{id: [path]}` shape still parses, each string a read-only grant).
+//! `plugin-access-pending.json` holds requests a plugin posted that await a decision. Both are
+//! written tmp+rename and re-read on every operation, so a CLI write is never stale here.
 //!
 //! The runner binds these roots (read-only unless `write`); a plugin can ask, never grant —
 //! every request is validated against the real filesystem before it is stored.
@@ -354,7 +354,6 @@ fn to_io(e: impl std::fmt::Display) -> io::Error {
 /// tmp-write + rename so a reader never sees half a file; the temp is 0600 on Unix before it
 /// becomes the real name. One writer for both files.
 fn write_json_atomic<T: Serialize>(dir: &Path, name: &str, value: &T) -> io::Result<()> {
-    pf_paths::create_private_dir(dir)?;
     let tmp = dir.join(format!("{name}.tmp"));
     let body = serde_json::to_string_pretty(value).map_err(to_io)?;
     std::fs::write(&tmp, body)?;
@@ -384,16 +383,17 @@ fn acl_calls() -> usize {
     ACL_CALLS.with(std::cell::Cell::get)
 }
 
-/// Grants + denials and the pending queue, one store over two files under the config dir.
+/// Grants + denials in the runner-data directory, plus the pending queue under the config dir.
 pub struct AccessStore {
     config_dir: PathBuf,
+    runner_dir: PathBuf,
     policy: PathPolicy,
     lock: Mutex<()>,
 }
 
 impl AccessStore {
-    /// The operator's real store: files under `config_dir`, refusals checked against the real
-    /// home, punktfunk config dir, and runtime dir of this host.
+    /// The operator's real store: runner grants under `plugin-run`, pending requests under
+    /// `config_dir`, and refusals checked against this host's real protected roots.
     pub fn open(config_dir: PathBuf) -> Self {
         let home = crate::plugins::manifest::home_dir().unwrap_or_default();
         #[cfg(unix)]
@@ -402,31 +402,34 @@ impl AccessStore {
             .map(PathBuf::from);
         #[cfg(not(unix))]
         let runtime_dir = None;
-        Self {
+        Self::open_with(
+            config_dir.clone(),
             // The policy checks containment against the dir this store actually serves: the
             // management API passes a dedicated access dir, and its contents must refuse.
-            policy: PathPolicy {
+            PathPolicy {
                 home,
-                config_dir: config_dir.clone(),
+                config_dir,
                 runtime_dir,
             },
-            config_dir,
-            lock: Mutex::new(()),
-        }
+        )
     }
 
-    #[cfg(test)]
     fn open_with(config_dir: PathBuf, policy: PathPolicy) -> Self {
+        let runner_dir = config_dir.join(super::RUNNER_DATA_DIR);
+        if let Err(e) = migrate_grants(&config_dir, &runner_dir) {
+            tracing::warn!(error = %e, "plugin grants were not migrated to the runner directory");
+        }
         Self {
             config_dir,
+            runner_dir,
             policy,
             lock: Mutex::new(()),
         }
     }
 
-    /// Both files, fresh — a `plugins grant` from another process must be seen.
+    /// Both records, fresh — a `plugins grant` from another process must be seen.
     fn load_access(&self) -> BTreeMap<String, PluginAccess> {
-        let path = self.config_dir.join(GRANTS_FILE);
+        let path = self.runner_dir.join(GRANTS_FILE);
         let Ok(text) = std::fs::read_to_string(&path) else {
             return BTreeMap::new();
         };
@@ -457,10 +460,12 @@ impl AccessStore {
     }
 
     fn write_access(&self, map: &BTreeMap<String, PluginAccess>) -> io::Result<()> {
-        write_json_atomic(&self.config_dir, GRANTS_FILE, map)
+        prepare_runner_dir(&self.runner_dir)?;
+        write_json_atomic(&self.runner_dir, GRANTS_FILE, map)
     }
 
     fn write_pending(&self, map: &BTreeMap<String, Vec<PendingRequest>>) -> io::Result<()> {
+        pf_paths::create_private_dir(&self.config_dir)?;
         write_json_atomic(&self.config_dir, PENDING_FILE, map)
     }
 
@@ -787,6 +792,31 @@ impl AccessStore {
     }
 }
 
+/// Seed the directory-bound grants file from the pre-directory location. The old copy stays as
+/// rollback data. Two stats when there is nothing to move: `open` runs on every launch check.
+fn migrate_grants(config_dir: &Path, runner_dir: &Path) -> io::Result<()> {
+    let target = runner_dir.join(GRANTS_FILE);
+    let legacy = config_dir.join(GRANTS_FILE);
+    if target.exists() || !legacy.exists() {
+        return Ok(());
+    }
+    prepare_runner_dir(runner_dir)?;
+    let tmp = runner_dir.join(format!("{GRANTS_FILE}.tmp"));
+    std::fs::copy(legacy, &tmp)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::rename(tmp, target)
+}
+
+/// Harden the runner directory, then hand the Windows runner its read ACE back.
+fn prepare_runner_dir(dir: &Path) -> io::Result<()> {
+    pf_paths::create_secret_dir(dir)?;
+    crate::plugins::converge_runner_data_dir(dir).map_err(to_io)
+}
+
 /// `path` as the files record it: canonical when it resolves, else the literal absolute
 /// spelling so a decision can still name an unplugged drive.
 fn resolve_stored(path: &str) -> Option<String> {
@@ -1042,7 +1072,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_grants_parse_as_read_only_legacy() {
+    fn legacy_grants_migrate_and_parse_as_read_only() {
         let f = fixture();
         std::fs::create_dir_all(&f.store_dir).unwrap();
         std::fs::write(
@@ -1051,6 +1081,11 @@ mod tests {
         )
         .unwrap();
         let grants = f.store().grants_for("demo");
+        assert!(f
+            .store_dir
+            .join(crate::plugins::RUNNER_DATA_DIR)
+            .join(GRANTS_FILE)
+            .is_file());
         assert_eq!(
             grants,
             vec![
@@ -1300,13 +1335,17 @@ mod tests {
         // A grant present but the revoked path absent: the file stays byte-identical.
         let games = f.dir("data/games");
         s.grant("demo", &games, false, "cli").unwrap();
-        let bytes_before = std::fs::read(f.store_dir.join(GRANTS_FILE)).unwrap();
+        let grants_file = f
+            .store_dir
+            .join(crate::plugins::RUNNER_DATA_DIR)
+            .join(GRANTS_FILE);
+        let bytes_before = std::fs::read(&grants_file).unwrap();
         let grants = s
             .revoke("demo", Path::new("/mnt/never-granted-pf-test"))
             .unwrap();
         assert_eq!(grants.len(), 1);
         assert_eq!(
-            std::fs::read(f.store_dir.join(GRANTS_FILE)).unwrap(),
+            std::fs::read(grants_file).unwrap(),
             bytes_before,
             "a no-op revoke does not rewrite the file"
         );

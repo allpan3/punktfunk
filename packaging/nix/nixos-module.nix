@@ -770,6 +770,9 @@ in
         serviceConfig = {
           Type = "simple";
           ExecStart = "${cfg.scripting.package}/bin/punktfunk-scripting";
+          # `+` runs outside the namespace: the mandatory plugin-run bind needs the directory before
+          # the host's first start has created it.
+          ExecStartPre = "+${pkgs.coreutils}/bin/mkdir -p -m 0700 %h/.config/punktfunk/plugin-run";
           Restart = "on-failure";
           RestartSec = 2;
           # Deliver SIGTERM to the runner (it orchestrates the structural shutdown of its unit
@@ -834,13 +837,13 @@ in
           # a launcher not listed needs a drop-in.
           #
           # The punktfunk-scripting entries cover the SteamOS layout, which builds the runner under
-          # the home and points ExecStart at it. Every path is '-' because none is guaranteed.
+          # the home and points ExecStart at it. Every path but plugin-run is `-`: ExecStartPre
+          # creates that one.
           BindReadOnlyPaths = [
             "-%h/.config/punktfunk/plugin-token"
-            # What the supervisor hands each sandbox: that plugin's own minted token, and the roots
-            # `plugins grant` added. Without them no plugin with a manifest starts at all.
-            "-%h/.config/punktfunk/plugin-tokens.json"
-            "-%h/.config/punktfunk/plugin-grants.json"
+            # Per-plugin tokens and grants. A directory bind keeps the host's atomic replacements
+            # visible; a file bind would pin the deleted inode.
+            "%h/.config/punktfunk/plugin-run"
             "-%h/.config/punktfunk/native-cert.pem"
             "-%h/.config/punktfunk/cert.pem"
             "-%h/.config/punktfunk/mgmt-endpoint"

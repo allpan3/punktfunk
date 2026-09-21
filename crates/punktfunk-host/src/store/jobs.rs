@@ -260,14 +260,17 @@ fn parse_spec_pkg(spec: &str) -> Option<String> {
     )
 }
 
-pub(crate) fn spawn_install(plan: Plan) -> Result<String> {
+pub(crate) fn spawn_install(
+    plan: Plan,
+    plugin_tokens: crate::mgmt::PluginTokens,
+) -> Result<String> {
     let target = plan.pkg.clone().unwrap_or_else(|| plan.spec.clone());
     let id = begin("install", &target)?;
     let job_id = id.clone();
     std::thread::Builder::new()
         .name("pf-store-install".into())
         .spawn(move || {
-            let result = run_install(&job_id, plan);
+            let result = run_install(&job_id, plan, &plugin_tokens);
             finish(&job_id, result);
             crate::events::emit(crate::events::EventKind::StoreChanged);
         })
@@ -275,7 +278,10 @@ pub(crate) fn spawn_install(plan: Plan) -> Result<String> {
     Ok(id)
 }
 
-pub(crate) fn spawn_uninstall(pkg: String) -> Result<String> {
+pub(crate) fn spawn_uninstall(
+    pkg: String,
+    plugin_tokens: crate::mgmt::PluginTokens,
+) -> Result<String> {
     if super::valid_installed_pkg(&pkg).is_err() {
         bail!("not an installable plugin package name");
     }
@@ -284,7 +290,7 @@ pub(crate) fn spawn_uninstall(pkg: String) -> Result<String> {
     std::thread::Builder::new()
         .name("pf-store-uninstall".into())
         .spawn(move || {
-            let result = run_uninstall(&job_id, &pkg);
+            let result = run_uninstall(&job_id, &pkg, &plugin_tokens);
             finish(&job_id, result);
             crate::events::emit(crate::events::EventKind::StoreChanged);
         })
@@ -292,7 +298,7 @@ pub(crate) fn spawn_uninstall(pkg: String) -> Result<String> {
     Ok(id)
 }
 
-fn run_install(id: &str, plan: Plan) -> Result<()> {
+fn run_install(id: &str, plan: Plan, plugin_tokens: &crate::mgmt::PluginTokens) -> Result<()> {
     let dir = super::plugins_dir();
 
     // Pin must still match what the registry serves.
@@ -405,11 +411,12 @@ fn run_install(id: &str, plan: Plan) -> Result<()> {
     )
     .context("record install provenance")?;
 
+    refresh_plugin_tokens(id, plugin_tokens)?;
     restart_runner(id);
     Ok(())
 }
 
-fn run_uninstall(id: &str, pkg: &str) -> Result<()> {
+fn run_uninstall(id: &str, pkg: &str, plugin_tokens: &crate::mgmt::PluginTokens) -> Result<()> {
     let dir = super::plugins_dir();
     set_phase(id, "removing");
     run_runner(
@@ -423,7 +430,21 @@ fn run_uninstall(id: &str, pkg: &str) -> Result<()> {
     )?;
     set_phase(id, "recording");
     manifest::forget(&dir, pkg).context("update install provenance")?;
+    refresh_plugin_tokens(id, plugin_tokens)?;
     restart_runner(id);
+    Ok(())
+}
+
+/// Persist the installed-id token set, then publish the same set to live authentication before
+/// the runner starts. The file is the runner's handoff; the lock is the API's view, and swapping
+/// it here also revokes an uninstalled plugin's token.
+fn refresh_plugin_tokens(id: &str, plugin_tokens: &crate::mgmt::PluginTokens) -> Result<()> {
+    set_phase(id, "refreshing credentials");
+    let refreshed = crate::mgmt_token::load_or_generate_per_plugin()
+        .context("refresh per-plugin credentials")?;
+    *plugin_tokens
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = refreshed;
     Ok(())
 }
 

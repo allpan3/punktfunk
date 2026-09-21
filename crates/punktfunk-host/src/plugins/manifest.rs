@@ -165,7 +165,7 @@ pub(crate) fn granted_roots_in(id: &str, config_dir: PathBuf) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Extra roots the operator granted a plugin, by id: `<config>/plugin-grants.json` via
+/// Extra roots the operator granted a plugin, by id: `<config>/plugin-run/plugin-grants.json` via
 /// [`crate::plugins::access::AccessStore`].
 ///
 /// Written by `punktfunk-host plugins grant` or an operator's `allow` decision, never by a

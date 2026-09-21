@@ -378,7 +378,8 @@ describe("supervision", () => {
 		);
 		const grants = (one: unknown[] = []) =>
 			JSON.stringify({ one: { grants: one }, two: { grants: [] } });
-		const grantsFile = path.join(d.dir, "plugin-grants.json");
+		const grantsFile = path.join(d.dir, "plugin-run", "plugin-grants.json");
+		fs.mkdirSync(path.dirname(grantsFile), { recursive: true });
 		fs.writeFileSync(grantsFile, grants());
 
 		const starts: Record<string, number> = { one: 0, two: 0 };

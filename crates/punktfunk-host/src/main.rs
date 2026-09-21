@@ -770,8 +770,7 @@ fn parse_serve(args: &[String]) -> Result<(mgmt::Options, native::NativeServe, b
         opts.plugin_token = Some(crate::mgmt_token::load_or_generate_plugin()?);
         // One token per installed plugin, so the API can tell them apart: a plugin may write its
         // own registration and its own provider, and no other's.
-        let ids: Vec<String> = crate::plugins::manifest::installed().into_keys().collect();
-        opts.plugin_tokens = crate::mgmt_token::load_or_generate_per_plugin(&ids)?;
+        opts.plugin_tokens = crate::mgmt_token::load_or_generate_per_plugin()?;
     }
     // Default all-interfaces so paired clients browse over mTLS. Admin stays loopback in
     // `require_auth`. Packaged units ship a fixed ExecStart — `host.env` is the upgrade-safe pin;

@@ -457,7 +457,7 @@ const writePluginToken = (config: string, stateDir: string, id: string): string 
 	const file = path.join(stateDir, ".plugin-token");
 	try {
 		const tokens = JSON.parse(
-			fs.readFileSync(path.join(config, "plugin-tokens.json"), "utf8"),
+			fs.readFileSync(path.join(config, "plugin-run", "plugin-tokens.json"), "utf8"),
 		) as Record<string, string>;
 		const token = tokens[id];
 		if (token === undefined) return undefined;
@@ -492,7 +492,7 @@ const runSandboxed = (
 			resume(
 				Effect.fail(
 					new Error(
-						`no token for ${id} in plugin-tokens.json — the host mints one per installed plugin on its next start, and under the runner's unit that file has to be bound into the home it replaces`,
+						`No API credential exists for ${id} yet. Restart the host if this persists.`,
 					),
 				),
 			);
@@ -707,7 +707,7 @@ type FileStamp = { mtimeMs: number; size: number } | undefined;
 /** The grants file's rename-safe polling stamp; absence is a stable state too. */
 const grantFileStamp = (config: string): FileStamp => {
 	try {
-		const stat = fs.statSync(path.join(config, "plugin-grants.json"));
+		const stat = fs.statSync(path.join(config, "plugin-run", "plugin-grants.json"));
 		return { mtimeMs: stat.mtimeMs, size: stat.size };
 	} catch {
 		return undefined;

@@ -215,14 +215,14 @@ export const sandboxEnv = (
 });
 
 /**
- * The operator's extra roots for `id` from `plugin-grants.json`. Accepts a legacy path array
+ * The operator's extra roots for `id` from `plugin-run/plugin-grants.json`. Accepts a legacy array
  * (read-only grants) and a `{ grants: [{ path, write }] }` record. Anything else — malformed JSON,
  * a missing entry, a shape that does not parse strictly — grants nothing.
  */
 export const grantedRoots = (configDir: string, id: string): GrantedRoot[] => {
 	try {
 		const map = JSON.parse(
-			fs.readFileSync(path.join(configDir, "plugin-grants.json"), "utf8"),
+			fs.readFileSync(path.join(configDir, "plugin-run", "plugin-grants.json"), "utf8"),
 		) as Record<string, unknown>;
 		const entry = map[id];
 		if (Array.isArray(entry)) {

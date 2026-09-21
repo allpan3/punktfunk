@@ -424,7 +424,10 @@ pub(crate) async fn list_installed() -> Response {
         (status = FORBIDDEN, description = "Not authorized for the plugin token", body = ApiError),
     )
 )]
-pub(crate) async fn install_plugin(ApiJson(req): ApiJson<InstallRequest>) -> Response {
+pub(crate) async fn install_plugin(
+    State(st): State<Arc<MgmtState>>,
+    ApiJson(req): ApiJson<InstallRequest>,
+) -> Response {
     let plan =
         match (
             req.source.as_deref(),
@@ -477,7 +480,7 @@ pub(crate) async fn install_plugin(ApiJson(req): ApiJson<InstallRequest>) -> Res
             ),
         };
 
-    match jobs::spawn_install(plan) {
+    match jobs::spawn_install(plan, st.plugin_tokens.clone()) {
         Ok(job) => (StatusCode::ACCEPTED, Json(JobRef { job })).into_response(),
         Err(e) => api_error(StatusCode::CONFLICT, &format!("{e:#}")),
     }
@@ -501,7 +504,10 @@ pub(crate) async fn install_plugin(ApiJson(req): ApiJson<InstallRequest>) -> Res
         (status = FORBIDDEN, description = "Not authorized for the plugin token", body = ApiError),
     )
 )]
-pub(crate) async fn uninstall_plugin(ApiJson(req): ApiJson<UninstallRequest>) -> Response {
+pub(crate) async fn uninstall_plugin(
+    State(st): State<Arc<MgmtState>>,
+    ApiJson(req): ApiJson<UninstallRequest>,
+) -> Response {
     if let Err(e) = store::valid_installed_pkg(&req.pkg) {
         return api_error(StatusCode::BAD_REQUEST, &format!("{e:#}"));
     }
@@ -525,7 +531,7 @@ pub(crate) async fn uninstall_plugin(ApiJson(req): ApiJson<UninstallRequest>) ->
              removed",
         );
     }
-    match jobs::spawn_uninstall(req.pkg) {
+    match jobs::spawn_uninstall(req.pkg, st.plugin_tokens.clone()) {
         Ok(job) => (StatusCode::ACCEPTED, Json(JobRef { job })).into_response(),
         Err(e) => api_error(StatusCode::CONFLICT, &format!("{e:#}")),
     }

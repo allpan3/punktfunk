@@ -222,11 +222,20 @@ pub(crate) async fn require_auth(
         }
         // A plugin's OWN token: the same routes, plus the identity that makes them its own.
         Some(token) => {
-            let who = st
-                .plugin_tokens
-                .iter()
-                .find(|(_, pt)| token_eq(token, pt))
-                .map(|(id, _)| id.clone());
+            let find = |tokens: &std::collections::BTreeMap<String, String>| {
+                tokens
+                    .iter()
+                    .find(|(_, pt)| token_eq(token, pt))
+                    .map(|(id, _)| id.clone())
+            };
+            let mut who = find(&st.plugin_tokens.read().unwrap_or_else(|p| p.into_inner()));
+            // `plugins add` mints in its own process: the file has the token before memory does.
+            if who.is_none() {
+                if let Some(fresh) = crate::mgmt_token::read_per_plugin(&st.config_dir) {
+                    who = find(&fresh);
+                    *st.plugin_tokens.write().unwrap_or_else(|p| p.into_inner()) = fresh;
+                }
+            }
             match who {
                 Some(id) => forward_plugin(req, next, Some(PluginIdentity(id))).await,
                 None => api_error(

@@ -108,8 +108,9 @@ describe("grantedRoots", () => {
 	test("parses v1 path arrays and v2 grant records, and nothing malformed", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grants-"));
 		try {
+			fs.mkdirSync(path.join(dir, "plugin-run"));
 			const write = (v: unknown) =>
-				fs.writeFileSync(path.join(dir, "plugin-grants.json"), JSON.stringify(v));
+				fs.writeFileSync(path.join(dir, "plugin-run", "plugin-grants.json"), JSON.stringify(v));
 			write({ demo: ["/mnt/old"] });
 			expect(grantedRoots(dir, "demo")).toEqual([{ path: "/mnt/old", write: false }]);
 			write({
@@ -125,7 +126,7 @@ describe("grantedRoots", () => {
 				{ path: "/mnt/read", write: false },
 				{ path: "/mnt/write", write: true },
 			]);
-			fs.writeFileSync(path.join(dir, "plugin-grants.json"), "{not json");
+			fs.writeFileSync(path.join(dir, "plugin-run", "plugin-grants.json"), "{not json");
 			expect(grantedRoots(dir, "demo")).toEqual([]);
 			write({ demo: { grants: [{ path: "/mnt/x", write: "yes" }] } });
 			expect(grantedRoots(dir, "demo")).toEqual([]);

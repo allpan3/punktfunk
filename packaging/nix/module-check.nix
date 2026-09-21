@@ -308,9 +308,9 @@ let
         # $XDG_RUNTIME_DIR: the host's live-stream marker, the session bus, compositor sockets.
         && has appliance "punktfunk-scripting" "BindPaths=%t"
         && has appliance "punktfunk-scripting" "BindReadOnlyPaths=-%h/.config/punktfunk/plugin-token"
-        # The supervisor reads these per sandbox; without them no plugin with a manifest starts.
-        && has appliance "punktfunk-scripting" "BindReadOnlyPaths=-%h/.config/punktfunk/plugin-tokens.json"
-        && has appliance "punktfunk-scripting" "BindReadOnlyPaths=-%h/.config/punktfunk/plugin-grants.json"
+        # A directory bind keeps atomic replacements visible; ExecStartPre makes it exist.
+        && has appliance "punktfunk-scripting" "BindReadOnlyPaths=%h/.config/punktfunk/plugin-run"
+        && has appliance "punktfunk-scripting" "bin/mkdir -p -m 0700 %h/.config/punktfunk/plugin-run"
         # The TLS pin is native-cert.pem after the identity split, cert.pem before it.
         && has appliance "punktfunk-scripting" "BindReadOnlyPaths=-%h/.config/punktfunk/native-cert.pem"
         && has appliance "punktfunk-scripting" "BindReadOnlyPaths=-%h/.config/punktfunk/cert.pem"

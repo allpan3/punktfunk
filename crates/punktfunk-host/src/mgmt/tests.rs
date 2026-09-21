@@ -102,6 +102,10 @@ fn test_plugin_tokens() -> std::collections::BTreeMap<String, String> {
     std::collections::BTreeMap::from([("demo".to_string(), "demo-secret".to_string())])
 }
 
+fn shared_plugin_tokens(tokens: std::collections::BTreeMap<String, String>) -> super::PluginTokens {
+    Arc::new(std::sync::RwLock::new(tokens))
+}
+
 // `None` installs "test-secret" (`send` attaches the matching bearer). An explicit token
 // is for mismatch cases such as `bearer_token_is_enforced`.
 fn test_app(state: Arc<AppState>, token: Option<&str>) -> Router {
@@ -110,7 +114,7 @@ fn test_app(state: Arc<AppState>, token: Option<&str>) -> Router {
         state,
         Some(token.unwrap_or("test-secret").to_string()),
         Some("plugin-secret".to_string()),
-        test_plugin_tokens(),
+        shared_plugin_tokens(test_plugin_tokens()),
         DEFAULT_PORT,
         None,
         stats,
@@ -131,7 +135,7 @@ fn test_app_browser(state: Arc<AppState>) -> Router {
         state,
         Some("test-secret".to_string()),
         Some("plugin-secret".to_string()),
-        test_plugin_tokens(),
+        shared_plugin_tokens(test_plugin_tokens()),
         DEFAULT_PORT,
         None,
         stats,
@@ -150,7 +154,7 @@ fn test_app_native(state: Arc<AppState>, np: Arc<crate::native_pairing::NativePa
         state,
         Some("test-secret".to_string()),
         Some("plugin-secret".to_string()),
-        test_plugin_tokens(),
+        shared_plugin_tokens(test_plugin_tokens()),
         DEFAULT_PORT,
         Some(np),
         stats,
@@ -1081,7 +1085,7 @@ async fn host_info_publishes_the_hosts_own_fingerprint() {
         state,
         Some("test-secret".to_string()),
         Some("plugin-secret".to_string()),
-        test_plugin_tokens(),
+        shared_plugin_tokens(test_plugin_tokens()),
         DEFAULT_PORT,
         None,
         stats,
@@ -1542,6 +1546,75 @@ async fn a_plugin_may_write_only_its_own_id() {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+/// Authentication reads the shared map on every request, so a store job can publish a token
+/// before restarting the runner without rebuilding the management router.
+#[tokio::test]
+async fn a_refreshed_plugin_token_takes_effect_live() {
+    let state = test_state();
+    let stats = state.stats.clone();
+    let tokens = shared_plugin_tokens(std::collections::BTreeMap::from([(
+        "demo".to_string(),
+        "old-secret".to_string(),
+    )]));
+    let app = app(
+        state,
+        Some("test-secret".to_string()),
+        Some("plugin-secret".to_string()),
+        tokens.clone(),
+        DEFAULT_PORT,
+        None,
+        stats,
+        test_client_logs_dir(),
+        test_access_dir(),
+        false,
+        None,
+        false,
+    );
+    *tokens
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+        std::collections::BTreeMap::from([("demo".to_string(), "new-secret".to_string())]);
+    let put = |token: &str| {
+        axum::http::Request::builder()
+            .method("PUT")
+            .uri("/api/v1/plugins/demo")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(r#"{"title":"Demo"}"#))
+            .unwrap()
+    };
+    assert_eq!(
+        send(&app, put("old-secret")).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        send(&app, put("new-secret")).await.0,
+        StatusCode::NO_CONTENT
+    );
+}
+
+/// `plugins add` mints in another process: a token only the file knows authenticates, as that
+/// plugin, on its first request.
+#[tokio::test]
+async fn a_token_minted_by_another_process_authenticates() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join(crate::plugins::RUNNER_DATA_DIR);
+    std::fs::create_dir_all(&run).unwrap();
+    std::fs::write(run.join("plugin-tokens.json"), r#"{"fresh":"cli-secret"}"#).unwrap();
+    let app = test_app_access(test_state(), dir.path());
+    let put = |id: &str| {
+        axum::http::Request::builder()
+            .method("PUT")
+            .uri(format!("/api/v1/plugins/{id}"))
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer cli-secret")
+            .body(Body::from(r#"{"title":"Fresh"}"#))
+            .unwrap()
+    };
+    assert_eq!(send(&app, put("fresh")).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(send(&app, put("demo")).await.0, StatusCode::FORBIDDEN);
 }
 
 /// Same rule on the library side: a provider's entries belong to the plugin that owns the id.
@@ -4312,10 +4385,10 @@ fn test_app_access(state: Arc<AppState>, access_dir: &std::path::Path) -> Router
         state,
         Some("test-secret".to_string()),
         Some("plugin-secret".to_string()),
-        std::collections::BTreeMap::from([
+        shared_plugin_tokens(std::collections::BTreeMap::from([
             ("demo".to_string(), "demo-secret".to_string()),
             ("other".to_string(), "other-secret".to_string()),
-        ]),
+        ])),
         DEFAULT_PORT,
         None,
         stats,

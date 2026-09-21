@@ -18,7 +18,7 @@ use crate::gamestream::{tls::serve_https, AppState};
 use anyhow::{Context, Result};
 use axum::{middleware, routing::get, Json, Router};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use utoipa::{Modify, OpenApi};
 use utoipa_axum::{router::OpenApiRouter, routes};
 use utoipa_scalar::{Scalar, Servable};
@@ -164,9 +164,11 @@ pub(crate) struct MgmtState {
     plugin_token: Option<String>,
     /// Per-plugin tokens by id ([`Options::plugin_tokens`]). A match also stamps
     /// [`auth::PluginIdentity`], which is what the id-scoped routes check.
-    pub(crate) plugin_tokens: std::collections::BTreeMap<String, String>,
+    pub(crate) plugin_tokens: PluginTokens,
     /// Folder grants, denials, and pending requests — the `/plugin-access` routes' store.
     access: Arc<crate::plugins::access::AccessStore>,
+    /// Where `plugin-run/` lives: auth re-reads the token file there on a miss.
+    config_dir: std::path::PathBuf,
     /// Bound port, echoed in [`PortMap`].
     port: u16,
     /// Live device challenges and the tokens they became. See [`mgmt::device_auth`].
@@ -176,6 +178,8 @@ pub(crate) struct MgmtState {
     /// which case the device lane refuses rather than binding to nothing.
     identity_fingerprint: Option<[u8; 32]>,
 }
+
+pub(crate) type PluginTokens = Arc<RwLock<std::collections::BTreeMap<String, String>>>;
 
 /// `native` is the shared punktfunk/1 pairing handle when the unified host
 /// runs the native QUIC server.
@@ -231,7 +235,7 @@ pub async fn run(
         state,
         Some(token),
         opts.plugin_token.filter(|t| !t.trim().is_empty()),
-        opts.plugin_tokens,
+        Arc::new(RwLock::new(opts.plugin_tokens)),
         opts.bind.port(),
         native,
         stats,
@@ -250,14 +254,14 @@ fn app(
     state: Arc<AppState>,
     token: Option<String>,
     plugin_token: Option<String>,
-    plugin_tokens: std::collections::BTreeMap<String, String>,
+    plugin_tokens: PluginTokens,
     port: u16,
     native: Option<Arc<crate::native_pairing::NativePairing>>,
     stats: Arc<crate::stats_recorder::StatsRecorder>,
     // Injected so handler tests use a temp dir, not the real config dir.
     client_logs_dir: std::path::PathBuf,
-    // Where `plugin-grants.json` / `plugin-access-pending.json` live; injected for the same reason.
-    access_config_dir: std::path::PathBuf,
+    // Root for `plugin-run/` and `plugin-access-pending.json`; test-injected.
+    config_dir: std::path::PathBuf,
     gamestream_enabled: bool,
     identity_fingerprint: Option<[u8; 32]>,
     // Whether the WebTransport plane is running. State only for `cors::enabled`, so it is not
@@ -276,7 +280,10 @@ fn app(
         port,
         device_auth: device_auth::DeviceAuth::default(),
         identity_fingerprint,
-        access: Arc::new(crate::plugins::access::AccessStore::open(access_config_dir)),
+        access: Arc::new(crate::plugins::access::AccessStore::open(
+            config_dir.clone(),
+        )),
+        config_dir,
     });
     let (api_routes, api) = api_router_parts();
     let routed = api_routes.route_layer(middleware::from_fn_with_state(

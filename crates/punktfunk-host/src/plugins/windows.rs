@@ -17,10 +17,14 @@ pub(super) const LOCAL_SERVICE_SID: &str = "*S-1-5-19";
 /// `cert.pem`). Never `mgmt-token`. Absent files are skipped, so listing both certs is safe.
 const RUNNER_SECRET_FILES: [&str; 4] = [
     "plugin-token",
-    "plugin-tokens.json",
+    "plugin-run/plugin-tokens.json",
     "native-cert.pem",
     "cert.pem",
 ];
+
+/// Directory-bound inputs. The inheritable read grant covers grants files created by atomic
+/// rename; the secret token also receives a direct ACE after each protected rewrite.
+const RUNNER_INPUT_DIRS: [&str; 1] = [super::RUNNER_DATA_DIR];
 
 /// Unit dirs the runner imports. Inheritable `(RX,WA)`: bun's loader opens unit
 /// files with FILE_WRITE_ATTRIBUTES; plain `(RX)` is EPERM on every import. WA
@@ -69,12 +73,19 @@ pub(super) fn disable() -> Result<()> {
     Ok(())
 }
 
-/// Grant LocalService read on the runner secrets. `serve` writes them with a
-/// SYSTEM/Administrators-only DACL (`pf_paths::write_secret_file`); `/grant:r`
-/// replaces only LocalService's ACE. A later rewrite of the file drops the ACE —
-/// re-run `plugins enable`. Missing files get a note; the grant retries next enable.
+/// Grant LocalService read on runner inputs. The data directory uses an inheritable ACE so atomic
+/// grant-file replacements stay readable; protected credential rewrites reapply a direct ACE.
 fn grant_runner_secret_reads() {
     let cfg = pf_paths::config_dir();
+    for name in RUNNER_INPUT_DIRS {
+        let dir = cfg.join(name);
+        if !create_runner_dir(&dir) {
+            continue;
+        }
+        if let Err(e) = grant_runner_data_dir(&dir) {
+            eprintln!("warning: {e:#}");
+        }
+    }
     for name in RUNNER_SECRET_FILES {
         let path = cfg.join(name);
         if !path.exists() {
@@ -86,18 +97,10 @@ fn grant_runner_secret_reads() {
             );
             continue;
         }
-        let ok = Command::new(icacls_path())
-            .arg(&path)
-            .args(["/grant:r", &format!("{LOCAL_SERVICE_SID}:(R)")])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
-        if !ok {
+        if let Err(e) = grant_runner_secret_read(&path) {
             eprintln!(
-                "warning: could not grant LocalService read on {} - the plugin runner may fail \
-                 to authenticate to the management API",
-                path.display()
+                "warning: {e:#} - the plugin runner may fail to authenticate to the management \
+                 API"
             );
         }
     }
@@ -184,6 +187,44 @@ fn grant_runner_secret_reads() {
     }
 }
 
+/// Restore access after `write_secret_file` replaces the token with a protected file. The
+/// directory ACE also lets LocalService traverse into the dedicated runner-data directory.
+pub(super) fn grant_runner_credential(path: &std::path::Path) -> Result<()> {
+    let dir = path
+        .parent()
+        .context("resolve the runner credential directory")?;
+    grant_runner_data_dir(dir)?;
+    grant_runner_secret_read(path)
+}
+
+pub(super) fn grant_runner_data_dir(dir: &std::path::Path) -> Result<()> {
+    let ok = Command::new(icacls_path())
+        .arg(dir)
+        .args(["/grant:r", &format!("{LOCAL_SERVICE_SID}:(OI)(CI)(RX)")])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if !ok {
+        bail!("grant LocalService read on {}", dir.display());
+    }
+    Ok(())
+}
+
+fn grant_runner_secret_read(path: &std::path::Path) -> Result<()> {
+    let ok = Command::new(icacls_path())
+        .arg(path)
+        .args(["/grant:r", &format!("{LOCAL_SERVICE_SID}:(R)")])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if !ok {
+        bail!("grant LocalService read on {}", path.display());
+    }
+    Ok(())
+}
+
 /// Create a runner directory that the grants below re-ACL, refusing a reparse point.
 ///
 /// `icacls` follows a junction, so a link planted here before the config dir was hardened would
@@ -209,6 +250,7 @@ fn revoke_runner_secret_reads() {
     let cfg = pf_paths::config_dir();
     for name in RUNNER_SECRET_FILES
         .iter()
+        .chain(RUNNER_INPUT_DIRS.iter())
         .chain(RUNNER_UNIT_DIRS.iter())
         .chain(RUNNER_STATE_DIRS.iter())
     {
