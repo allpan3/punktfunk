@@ -505,6 +505,10 @@ fn frame_interval_ns(refresh_hz: u32, fallback_hz: u32) -> i64 {
     1_000_000_000 / i64::from(hz)
 }
 
+fn ui_wants_pad_mask(focus_lost: bool, overlay_open: bool, capture_active: Option<bool>) -> bool {
+    focus_lost || overlay_open || capture_active == Some(false)
+}
+
 /// Whether a present error is `VK_ERROR_DEVICE_LOST` in its chain. A lost device is
 /// unrecoverable by spec — every object on it is dead, and demote-to-software would
 /// rebuild the decoder against that same dead device. Fail the session and let the
@@ -1206,8 +1210,8 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
             stream.as_mut().and_then(|s| s.capture.as_mut()),
             overlay.as_deref(),
         );
-        // Who owns the pad: window focus plus Gaming Mode's overlay signal. Edge-triggered
-        // so an open QAM does not re-flush the pads every iteration.
+        // Who owns the pad: capture, window focus, and Gaming Mode's overlay signal.
+        // Edge-triggered so an open QAM does not re-flush the pads every iteration.
         #[cfg(target_os = "linux")]
         let overlay_now = overlay_focus.as_ref().is_some_and(|of| of.is_open());
         #[cfg(not(target_os = "linux"))]
@@ -1215,7 +1219,11 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
         // Remembered, not applied: the ring is a third owner of this same mask and is only
         // known further down. Applying here too gave one boolean two latches, and whichever
         // fell last unmasked the pads while the other still wanted them masked.
-        let want_mask_ui = focus_lost || overlay_now;
+        let capture_active = stream
+            .as_ref()
+            .and_then(|st| st.capture.as_ref())
+            .map(Capture::captured);
+        let want_mask_ui = ui_wants_pad_mask(focus_lost, overlay_now, capture_active);
         pump.tick();
         // One coalesced MouseMove per iteration — pure motion must reach the host
         // without waiting for a click/key to flush it.
@@ -3390,6 +3398,15 @@ fn desktop_extras(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn released_capture_masks_pads_until_capture_returns() {
+        assert!(ui_wants_pad_mask(false, false, Some(false)));
+        assert!(!ui_wants_pad_mask(false, false, Some(true)));
+        assert!(!ui_wants_pad_mask(false, false, None));
+        assert!(ui_wants_pad_mask(true, false, Some(true)));
+        assert!(ui_wants_pad_mask(false, true, Some(true)));
+    }
 
     #[test]
     fn overlay_damage_presents_a_changed_overlay_only_over_a_still_picture() {
