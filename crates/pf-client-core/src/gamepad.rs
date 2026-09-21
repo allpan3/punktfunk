@@ -27,9 +27,9 @@ const GYRO_LSB_PER_RAD_S: f32 =
 const ACCEL_LSB_PER_G: f32 = wire::MOTION_ACCEL_LSB_PER_G as f32;
 const G: f32 = 9.80665;
 
-/// L1+R1+Start+Select: leave fullscreen and release capture. Still forwarded; also
-/// raises the UI escape. A hold of [`DISCONNECT_HOLD`] disconnects. Not Guide/QAM —
-/// those pass through to the host.
+/// L1+R1+Start+Select: leave fullscreen and release capture. Raises the UI escape;
+/// the presenter masks forwarding until capture returns. A hold of
+/// [`DISCONNECT_HOLD`] disconnects. Not Guide/QAM — those pass through to the host.
 const ESCAPE_CHORD: [u32; 4] = [wire::BTN_LB, wire::BTN_RB, wire::BTN_START, wire::BTN_BACK];
 
 /// 1500 ms is long enough to be deliberate over a leave-fullscreen press.
