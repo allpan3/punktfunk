@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.util.Log
 import android.widget.Toast
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -34,6 +35,7 @@ import io.unom.punktfunk.kit.link.HostResolution
 import io.unom.punktfunk.kit.link.LinkError
 import io.unom.punktfunk.kit.link.LinkRoute
 import io.unom.punktfunk.kit.security.ClientIdentity
+import io.unom.punktfunk.kit.security.IDENTITY_OBTAIN_TIMEOUT_MS
 import io.unom.punktfunk.kit.security.IdentityStore
 import io.unom.punktfunk.kit.security.KnownHost
 import io.unom.punktfunk.kit.security.KnownHostStore
@@ -46,6 +48,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Handshake budget for the no-PIN "request access" connect. Must exceed the host's approval-park
@@ -53,6 +56,12 @@ import kotlinx.coroutines.withContext
  * timing the client out first. Mirrors the Linux client's 185 s.
  */
 private const val REQUEST_ACCESS_TIMEOUT_MS = 185_000
+
+private const val TAG = "pf.connect"
+
+// A failed identity load's line — distinct from "not ready", which implies a retry nothing ran.
+private const val IDENTITY_UNAVAILABLE =
+    "Couldn't create an identity — this device's secure key storage isn't working"
 
 /**
  * How long a host's advertised actions stay fresh before this screen asks again — the desktop's
@@ -260,12 +269,43 @@ fun ConnectScreen(
     }
     // Mint-once on genuine first run; an Unrecoverable store (decrypt failure) surfaces here and
     // refuses to connect — never silently shadow-minting a new identity (which would force re-pair).
+    // Tri-state — in flight / ready / failed — because a tap on any guarded action doubles as the
+    // retry: a failed load keeps its own message instead of the "not ready" line that claims one.
     var identity by remember { mutableStateOf<ClientIdentity?>(null) }
-    LaunchedEffect(Unit) {
-        runCatching { withContext(Dispatchers.IO) { obtainIdentity(identityStore) } }
-            .onSuccess { identity = it }
-            .onFailure { status = "Identity unavailable — re-pair may be required" }
+    var identityFailed by remember { mutableStateOf(false) }
+    var identityLoading by remember { mutableStateOf(false) }
+    fun loadIdentity() {
+        if (identity != null || identityLoading) return
+        identityLoading = true
+        scope.launch {
+            var threw = false
+            val loaded = withTimeoutOrNull(IDENTITY_OBTAIN_TIMEOUT_MS) {
+                withContext(Dispatchers.IO) {
+                    runCatching { obtainIdentity(identityStore) }
+                        .onFailure { threw = true; Log.w(TAG, "identity unavailable", it) }
+                        .getOrNull()
+                }
+            }
+            if (loaded == null && !threw) Log.w(TAG, "identity obtain timed out")
+            identityLoading = false
+            identity = loaded
+            identityFailed = loaded == null
+            if (identityFailed) status = IDENTITY_UNAVAILABLE
+        }
     }
+    // Every identity-gated action funnels here: ready → the identity; in flight → "not ready";
+    // failed → the real failure and a fresh attempt, so the reporting tap is also its retry.
+    fun requireIdentity(): ClientIdentity? {
+        identity?.let { return it }
+        if (identityFailed) {
+            status = IDENTITY_UNAVAILABLE
+            loadIdentity()
+        } else {
+            status = "Identity not ready yet — try again in a moment"
+        }
+        return null
+    }
+    LaunchedEffect(Unit) { loadIdentity() }
     // A trust decision awaiting the user (first-connect TOFU / fp changed / PIN pairing / the
     // request-access-or-PIN choice).
     var pendingTrust by remember { mutableStateOf<PendingTrust?>(null) }
@@ -364,10 +404,7 @@ fun ConnectScreen(
         onFailure: (() -> Unit)? = null,
         onMismatch: (() -> Unit)? = null,
     ) {
-        val id = identity ?: run {
-            status = "Identity not ready yet — try again in a moment"
-            return
-        }
+        val id = requireIdentity() ?: return
         val thisAttempt = ConnectAttempt(name)
         attempt = thisAttempt // shows the ConnectOverlay's "Connecting…" phase immediately
         connecting = true
@@ -443,10 +480,7 @@ fun ConnectScreen(
         launch: String? = null,
         onMismatch: (() -> Unit)? = null,
     ) {
-        if (identity == null) {
-            status = "Identity not ready yet — try again in a moment"
-            return
-        }
+        if (requireIdentity() == null) return
         // The record this dial's pin names. A TOFU dial is to a host not saved yet, so only a
         // placeholder can be it — never the other OS of a dual-boot box at the same address.
         val kh = knownHostStore.resolve(pinHex ?: "", targetHost, targetPort)
@@ -510,11 +544,7 @@ fun ConnectScreen(
     // The connect can't be aborted, so Cancel returns the UI immediately and a late result is torn
     // down silently via the per-attempt flag (mirrors the Linux client's request-access flow).
     fun requestAccess(target: PendingTrust) {
-        val id = identity
-        if (id == null) {
-            status = "Identity not ready yet — try again in a moment"
-            return
-        }
+        val id = requireIdentity() ?: return
         val req = RequestAccessState(target)
         awaiting = req
         connecting = true
@@ -632,10 +662,7 @@ fun ConnectScreen(
     var speedTestPhase by remember { mutableStateOf<SpeedTestPhase>(SpeedTestPhase.Connecting) }
 
     fun startSpeedTest(entry: HostCardEntry) {
-        val id = identity ?: run {
-            status = "Identity not ready yet — try again in a moment"
-            return
-        }
+        val id = requireIdentity() ?: return
         // The magic packet isn't the only thing LNP blocks: without the grant this would EPERM its
         // way to a timeout and report a dead link on a perfectly good one.
         if (!lnpGranted) {
@@ -689,10 +716,7 @@ fun ConnectScreen(
     // Host-power grant is offered none; a destructive one still asks first, because losing what
     // is running on that machine is not something a mis-tap should be able to do.
     fun runHostAction(kh: KnownHost, a: HostActions.Action) {
-        val id = identity ?: run {
-            status = "Identity not ready yet — try again in a moment"
-            return
-        }
+        val id = requireIdentity() ?: return
         val name = kh.name.ifBlank { kh.address }
         notice = "${a.label} — asking $name…"
         status = null
@@ -722,10 +746,7 @@ fun ConnectScreen(
     // is a notice either way (success and failure both name the host), because the row's whole job
     // is to tell a reporter whether the bundle actually landed.
     fun sendLogs(kh: KnownHost) {
-        val id = identity ?: run {
-            status = "Identity not ready yet — try again in a moment"
-            return
-        }
+        val id = requireIdentity() ?: return
         notice = "Sending logs to ${kh.name.ifBlank { kh.address }}…"
         status = null
         scope.launch {

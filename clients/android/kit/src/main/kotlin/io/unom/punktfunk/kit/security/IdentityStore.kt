@@ -3,7 +3,6 @@ package io.unom.punktfunk.kit.security
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
-import android.security.keystore.StrongBoxUnavailableException
 import android.util.Log
 import io.unom.punktfunk.kit.NativeBridge
 import java.io.File
@@ -46,6 +45,9 @@ fun splitGenerated(joined: String): ClientIdentity? {
 
 /** Serialises the mint below. Process-wide: the two shells share one file, not one store object. */
 private val MINT_LOCK = Any()
+
+/** Bound callers put on [obtainIdentity]: the keystore answers in ms, so a wedge must surface. */
+const val IDENTITY_OBTAIN_TIMEOUT_MS = 10_000L
 
 /**
  * Load the device identity, minting *once* on genuine first run. NEVER mints over an error state:
@@ -137,11 +139,13 @@ class IdentityStore(context: Context) {
     private fun getOrCreateKey(): SecretKey {
         val ks = keyStore()
         (ks.getEntry(alias, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
-        // Prefer a StrongBox-backed key; fall back to TEE where StrongBox is absent (e.g. the emulator).
+        // Prefer a StrongBox-backed key; fall back to TEE on ANY keygen failure — a HAL that
+        // reports StrongBox but answers with ProviderException/KeyStoreException instead of
+        // StrongBoxUnavailableException must not wedge first-run mint.
         return try {
             generateKey(strongBox = true)
-        } catch (e: StrongBoxUnavailableException) {
-            Log.i(TAG, "StrongBox unavailable — using TEE-backed key", e)
+        } catch (e: Exception) {
+            Log.i(TAG, "StrongBox keygen failed — using TEE-backed key", e)
             generateKey(strongBox = false)
         }
     }
