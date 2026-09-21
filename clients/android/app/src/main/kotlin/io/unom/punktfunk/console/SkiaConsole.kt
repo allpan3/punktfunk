@@ -40,12 +40,15 @@ import io.unom.punktfunk.kit.library.LibraryClient
 import io.unom.punktfunk.kit.library.LibraryResult
 import io.unom.punktfunk.kit.library.RunningGame
 import io.unom.punktfunk.kit.security.ClientIdentity
+import io.unom.punktfunk.kit.security.IDENTITY_OBTAIN_TIMEOUT_MS
 import io.unom.punktfunk.kit.security.IdentityStore
 import io.unom.punktfunk.kit.security.KnownHost
 import io.unom.punktfunk.kit.security.KnownHostStore
 import io.unom.punktfunk.kit.security.obtainIdentity
 import io.unom.punktfunk.models.ActiveSession
+import java.util.concurrent.Callable
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import okhttp3.CacheControl
@@ -105,8 +108,11 @@ object SkiaConsole {
     private lateinit var presetStore: PresetStore
     private lateinit var settingsStore: SettingsStore
     private var identity: ClientIdentity? = null
-    /** The identity load has ended, with or without one. Main-thread only. */
+    /** The first identity load has ended, with or without one. Main-thread only. */
     private var identityLoaded = false
+    /** A completed load left no identity — the keystore threw or never answered. Main-thread only. */
+    private var identityFailed = false
+    private val identityLoading = AtomicBoolean(false)
     private var discovery: HostDiscovery? = null
     private var discovered: List<DiscoveredHost> = emptyList()
 
@@ -366,13 +372,42 @@ object SkiaConsole {
         main.post(sweep)
     }
 
-    private fun startServices(app: Context) {
+    /**
+     * Load (first run: mint) the device identity, bounded so a wedged keystore surfaces as a
+     * failure instead of a `null` that never resolves. Guarded actions re-run this — the tap
+     * that reports "not ready" is also the retry it promises.
+     */
+    private fun loadIdentity(app: Context) {
+        if (!identityLoading.compareAndSet(false, true)) return
+        val fut = ioPool.submit(Callable { obtainIdentity(IdentityStore(app)) })
         ioPool.execute {
-            val id = runCatching { obtainIdentity(IdentityStore(app)) }
-                .onFailure { Log.w(TAG, "identity unavailable: ${it.message}") }
+            val id = runCatching { fut.get(IDENTITY_OBTAIN_TIMEOUT_MS, TimeUnit.MILLISECONDS) }
+                .onFailure { Log.w(TAG, "identity unavailable", it) }
                 .getOrNull()
-            main.post { identity = id; identityLoaded = true }
+            main.post {
+                identity = id
+                identityLoaded = true
+                identityFailed = id == null
+                identityLoading.set(false)
+            }
         }
+    }
+
+    /**
+     * What a guarded action reports while `identity` is null: the transient line while the first
+     * load is in flight, the real failure once one has finished without an identity. A failed
+     * load is re-kicked here, so the reporting tap is also its retry. Main-thread only.
+     */
+    private fun identityBlocked(): String {
+        if (identityFailed) appContext?.let(::loadIdentity)
+        return if (identityFailed)
+            "Couldn't create an identity — this device's secure key storage isn't working"
+        else
+            "Identity not ready yet — try again in a moment"
+    }
+
+    private fun startServices(app: Context) {
+        loadIdentity(app)
         discovery = HostDiscovery.shared(app).also { it.addNetworkListener(onNetworkChanged) }
         resumeDiscovery()
         // Commands from the console, drained on a short cadence once the identity load ends:
@@ -697,7 +732,7 @@ object SkiaConsole {
         val requestAccess = a.optBoolean("request_access", false)
         val id = identity
         if (id == null) {
-            NativeBridge.nativeConsoleSessionPhase(handle, 2, "Identity not ready yet — try again in a moment")
+            NativeBridge.nativeConsoleSessionPhase(handle, 2, identityBlocked())
             return
         }
         // The shell raises its hold for a GAME launch off a shelf; a desktop connect and a
@@ -895,7 +930,7 @@ object SkiaConsole {
         val hostName = c.optString("host_name").ifEmpty { addr }
         val id = identity
         if (id == null) {
-            notice("Identity not ready yet — try again in a moment")
+            notice(identityBlocked())
             return
         }
         val app = appContext ?: return
@@ -915,7 +950,7 @@ object SkiaConsole {
         val addr = c.optString("addr"); val port = c.optInt("port"); val fp = c.optString("fp_hex")
         val id = identity
         if (id == null) {
-            advanceSpeed(key, SpeedTestPhase.Failed("Identity not ready yet — try again in a moment"))
+            advanceSpeed(key, SpeedTestPhase.Failed(identityBlocked()))
             return
         }
         val app = appContext ?: return
@@ -956,7 +991,7 @@ object SkiaConsole {
         val actionId = c.optString("action_id"); val label = c.optString("label")
         val id = identity
         if (id == null) {
-            notice("Identity not ready yet — try again in a moment")
+            notice(identityBlocked())
             return
         }
         ioPool.execute {
@@ -970,7 +1005,7 @@ object SkiaConsole {
         val pin = c.optString("pin"); val name = c.optString("device_name")
         val id = identity
         if (id == null) {
-            NativeBridge.nativeConsoleSetPair(handle, ConsoleJson.pairFailed("Identity not ready yet — try again in a moment"))
+            NativeBridge.nativeConsoleSetPair(handle, ConsoleJson.pairFailed(identityBlocked()))
             return
         }
         NativeBridge.nativeConsoleSetPair(handle, ConsoleJson.pairBusy())
@@ -1039,7 +1074,8 @@ object SkiaConsole {
         val id = identity
         val kh = knownHostStore.getByFp(fp)
         if (refreshOnly) {
-            if (id == null) return
+            // Silent path — no notice, but the failed load still gets its retry.
+            if (id == null) { identityBlocked(); return }
             ioPool.execute {
                 val games = LibraryClient.fetchRunning(addr, mgmt, id.certPem, id.privateKeyPem, fp)
                 main.post {
@@ -1056,7 +1092,7 @@ object SkiaConsole {
         val gen = fetchGen.incrementAndGet()
         NativeBridge.nativeConsoleLibraryBegin(handle)
         if (id == null) {
-            NativeBridge.nativeConsoleLibraryPhase(handle, ConsoleJson.libraryError("Couldn't load the library", "Identity not ready yet — try again in a moment", true))
+            NativeBridge.nativeConsoleLibraryPhase(handle, ConsoleJson.libraryError("Couldn't load the library", identityBlocked(), true))
             return
         }
         val cache = LibraryCache.standard(app.cacheDir)
