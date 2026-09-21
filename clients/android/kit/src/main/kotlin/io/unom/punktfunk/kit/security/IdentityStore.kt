@@ -49,31 +49,54 @@ private val MINT_LOCK = Any()
 /** Bound callers put on [obtainIdentity]: the keystore answers in ms, so a wedge must surface. */
 const val IDENTITY_OBTAIN_TIMEOUT_MS = 10_000L
 
+// Three in-band attempts absorb a transient KeyMint failure without making the player tap again.
+private const val IDENTITY_MINT_ATTEMPTS = 3
+private const val IDENTITY_MINT_RETRY_DELAY_MS = 100L
+
 /**
- * Load the device identity, minting *once* on genuine first run. NEVER mints over an error state:
+ * Load the device identity, establishing it only on genuine first run. NEVER mints over an error state:
  * an [IdentityLoad.Unrecoverable] surfaces as a throw so the UI can tell the user (re-pair) rather
  * than silently swapping in a new identity (which would change our fingerprint everywhere).
  *
- * Both shells start this on a background thread as the app comes up. Unlocked, both would read
- * `Absent` on first run, both mint, and the loser would keep its copy in memory and dial under a
- * second fingerprint for the life of the process — which the host counts as another client and
- * admits by `mode-conflict: JOIN` rather than treating as a reconnect. Hence the re-read under
- * the lock: whoever gets there second takes what the first one persisted.
+ * Both shells start this on a background thread. The lock and re-read make concurrent first-run
+ * calls share one persisted identity. A first mint can fail transiently in KeyMint, so the same
+ * call retries in-band and re-reads before each attempt; it never mints over a recovered identity.
  */
 fun obtainIdentity(store: IdentityStore): ClientIdentity =
     when (val r = store.load()) {
         is IdentityLoad.Ok -> r.identity
         IdentityLoad.Absent -> synchronized(MINT_LOCK) {
-            when (val second = store.load()) {
-                is IdentityLoad.Ok -> second.identity
-                IdentityLoad.Absent -> mint(store)
-                is IdentityLoad.Unrecoverable ->
-                    throw IdentityUnrecoverableException(second.reason, second.cause)
+            obtainAbsentIdentity(store::load, { mint(store) }) { failure, attempt ->
+                Log.w(TAG, "identity mint attempt $attempt did not complete — retrying", failure)
+                Thread.sleep(IDENTITY_MINT_RETRY_DELAY_MS)
             }
         }
         is IdentityLoad.Unrecoverable ->
             throw IdentityUnrecoverableException(r.reason, r.cause)
     }
+
+/** Retry a genuine first-run mint, re-reading before every attempt so a persisted identity wins. */
+internal fun obtainAbsentIdentity(
+    load: () -> IdentityLoad,
+    mint: () -> ClientIdentity,
+    beforeRetry: (failure: Exception, failedAttempt: Int) -> Unit = { _, _ -> },
+): ClientIdentity {
+    var lastFailure: Exception? = null
+    repeat(IDENTITY_MINT_ATTEMPTS) { index ->
+        when (val current = load()) {
+            is IdentityLoad.Ok -> return current.identity
+            is IdentityLoad.Unrecoverable ->
+                throw IdentityUnrecoverableException(current.reason, current.cause)
+            IdentityLoad.Absent -> try {
+                return mint()
+            } catch (failure: Exception) {
+                lastFailure = failure
+                if (index + 1 < IDENTITY_MINT_ATTEMPTS) beforeRetry(failure, index + 1)
+            }
+        }
+    }
+    throw checkNotNull(lastFailure)
+}
 
 /** Generate and persist a fresh identity. Call under [MINT_LOCK]. */
 private fun mint(store: IdentityStore): ClientIdentity {
