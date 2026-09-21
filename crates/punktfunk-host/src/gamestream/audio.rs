@@ -5,11 +5,10 @@
 //!
 //! Wire (moonlight-common-c `AudioStream.c` / `RtpAudioQueue.c`): 12-byte BE
 //! `RTP_PACKET` (`packetType = 97`, `sequenceNumber++`,
-//! `timestamp += packetDuration`, `ssrc = 0`) then AES-128-CBC Opus (PKCS7). IV
-//! is `BE32(rikeyid + seq)`; the RTP header stays clear. Modern Moonlight decrypts
-//! every packet, so we encrypt every packet. CBC has no auth tag — that is the
-//! protocol; do not append a GCM tag, no stock client can decode it. Authenticated
-//! audio is the native `punktfunk/1` AES-GCM plane.
+//! `timestamp += packetDuration`, `ssrc = 0`) then Opus. When negotiated, the
+//! payload is AES-128-CBC with PKCS7 and IV `BE32(rikeyid + seq)`; the RTP header
+//! stays clear. CBC has no auth tag — that is the protocol. Authenticated audio is
+//! the native `punktfunk/1` AES-GCM plane.
 //!
 //! Stereo is one Opus stream; 5.1/7.1 is libopus multistream. Every layout then
 //! emits Sunshine-style FEC: each aligned block of 4 data packets is followed by
@@ -54,6 +53,8 @@ pub struct AudioParams {
     pub high_quality: bool,
     /// Opus frame duration in ms. Moonlight sends 5, or 10 on a slow decoder/link.
     pub packet_duration_ms: u8,
+    /// Client negotiated `SS_ENC_AUDIO` or its legacy feature flag.
+    pub encrypt: bool,
 }
 
 impl Default for AudioParams {
@@ -62,6 +63,7 @@ impl Default for AudioParams {
             channels: 2,
             high_quality: false,
             packet_duration_ms: 5,
+            encrypt: false,
         }
     }
 }
@@ -182,12 +184,12 @@ fn build_fec_rtp(
 /// A different channel count drops the cache and opens a new one.
 pub type AudioCapSlot = Arc<std::sync::Mutex<Option<Box<dyn AudioCapturer>>>>;
 
-/// Spawn the audio thread (idempotent via `running`). `gcm_key`/`rikeyid` are the
-/// `/launch` AES-CBC payload key — the name is GCM because video uses GCM.
+/// Spawn the audio thread. `aes_key` is present only when the client negotiated
+/// AES-CBC audio; `rikeyid` seeds its per-packet IV.
 #[allow(clippy::too_many_arguments)] // one construction site (RTSP PLAY)
 pub fn start(
     running: Arc<AtomicBool>,
-    gcm_key: [u8; 16],
+    aes_key: Option<[u8; 16]>,
     rikeyid: i32,
     params: AudioParams,
     audio_cap: AudioCapSlot,
@@ -203,7 +205,14 @@ pub fn start(
         .spawn(move || {
             tracing::info!(?params, "audio stream starting");
             if let Err(e) = run(
-                &running, &gcm_key, rikeyid, params, &audio_cap, &on_lost, owner_ip, &av_ping,
+                &running,
+                aes_key.as_ref(),
+                rikeyid,
+                params,
+                &audio_cap,
+                &on_lost,
+                owner_ip,
+                &av_ping,
             ) {
                 tracing::error!(error = %format!("{e:#}"), "audio stream failed");
             }
@@ -216,7 +225,7 @@ pub fn start(
 #[allow(clippy::too_many_arguments)] // one call site (`start`), which carries the same allow
 fn run(
     running: &AtomicBool,
-    gcm_key: &[u8; 16],
+    aes_key: Option<&[u8; 16]>,
     rikeyid: i32,
     params: AudioParams,
     audio_cap: &std::sync::Mutex<Option<Box<dyn AudioCapturer>>>,
@@ -227,8 +236,8 @@ fn run(
     let sock = UdpSocket::bind(("0.0.0.0", AUDIO_PORT)).context("bind audio UDP")?;
     punktfunk_core::transport::grow_socket_buffers(&sock);
     tracing::debug!(port = AUDIO_PORT, "audio: awaiting client ping");
-    // Same owner-IP + session-ping guard as video. Hijacking the endpoint is a DoS
-    // (payload is AES-CBC), not a disclosure, but the race is the same.
+    // Same owner-IP + session-ping guard as video. It prevents an off-path peer
+    // from diverting the stream or receiving plaintext audio.
     let client = super::learn_client_endpoint(&sock, "audio", owner_ip, av_ping)?;
     sock.connect(client)
         .context("connect client audio endpoint")?;
@@ -259,7 +268,7 @@ fn run(
         }
         None => audio::open_audio_capture(want, SAMPLE_RATE).context("open audio capture")?,
     };
-    let result = audio_body(&mut *cap, &sock, gcm_key, rikeyid, params, running, on_lost);
+    let result = audio_body(&mut *cap, &sock, aes_key, rikeyid, params, running, on_lost);
     cap.idle(); // release the Linux stream-sink routing claim between sessions
     audio::park_audio_capture(audio_cap, cap); // drop on Windows (restores default); keep on Linux
     result
@@ -310,11 +319,20 @@ impl SessionEncoder {
     }
 }
 
+fn audio_payload(opus: &[u8], aes_key: Option<&[u8; 16]>, iv_seq: u32) -> Vec<u8> {
+    let Some(key) = aes_key else {
+        return opus.to_vec();
+    };
+    let mut iv = [0u8; 16];
+    iv[0..4].copy_from_slice(&iv_seq.to_be_bytes());
+    Aes128CbcEnc::new(key.into(), (&iv).into()).encrypt_padded_vec::<Pkcs7>(opus)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn audio_body(
     cap: &mut dyn AudioCapturer,
     sock: &UdpSocket,
-    gcm_key: &[u8; 16],
+    aes_key: Option<&[u8; 16]>,
     rikeyid: i32,
     params: AudioParams,
     running: &AtomicBool,
@@ -338,8 +356,8 @@ fn audio_body(
     let mut seq: u16 = 0;
     let mut timestamp: u32 = 0;
     let mut sent: u64 = 0;
-    // FEC on every layout: shards are opaque ciphertext, and the client RS(4,2)
-    // path is not channel-gated.
+    // FEC covers the payload exactly as sent, plaintext or ciphertext. The client
+    // RS(4,2) path is not channel-gated.
     let fec = true;
     let mut fec_block: Vec<Vec<u8>> = Vec::with_capacity(FEC_DATA_SHARDS);
     let (mut fec_base_seq, mut fec_base_ts) = (0u16, 0u32);
@@ -371,11 +389,8 @@ fn audio_body(
             }
             let n = enc.encode_float(&frame, &mut out)?;
             let iv_seq = (rikeyid as u32).wrapping_add(seq as u32);
-            let mut iv = [0u8; 16];
-            iv[0..4].copy_from_slice(&iv_seq.to_be_bytes());
-            let ct = Aes128CbcEnc::new(gcm_key.into(), (&iv).into())
-                .encrypt_padded_vec::<Pkcs7>(&out[..n]);
-            let pkt = build_rtp(seq, timestamp, &ct);
+            let payload = audio_payload(&out[..n], aes_key, iv_seq);
+            let pkt = build_rtp(seq, timestamp, &payload);
             if sock.send(&pkt).is_err() {
                 tracing::info!(sent, "audio: client unreachable — ending session");
                 on_lost();
@@ -389,7 +404,7 @@ fn audio_body(
                     fec_base_seq = seq;
                     fec_base_ts = timestamp;
                 }
-                fec_block.push(ct);
+                fec_block.push(payload);
                 if fec_block.len() == FEC_DATA_SHARDS {
                     match audio_parity(&fec_block) {
                         Some(parity) => {
@@ -456,6 +471,15 @@ mod tests {
     fn frame_sizing() {
         assert_eq!(SAMPLE_RATE as usize * 5 / 1000, 240);
         assert_eq!(SAMPLE_RATE as usize * 10 / 1000, 480);
+    }
+
+    #[test]
+    fn audio_payload_is_sealed_only_with_a_negotiated_key() {
+        let opus = [0x11, 0x22, 0x33];
+        assert_eq!(audio_payload(&opus, None, 7), opus);
+        let sealed = audio_payload(&opus, Some(&[0x44; 16]), 7);
+        assert_ne!(sealed, opus);
+        assert_eq!(sealed.len() % 16, 0, "CBC payload is PKCS7 padded");
     }
 
     #[test]
