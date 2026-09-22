@@ -186,6 +186,15 @@ const DEFAULT_CHECK_EVERY: Duration = Duration::from_secs(1);
 const FIRST_OPEN_ATTEMPTS: u32 = 3;
 /// Endpoint churn settles in well under a second.
 const FIRST_OPEN_RETRY_PAUSE: Duration = Duration::from_secs(1);
+/// Live loopback captures. A join session opens a second one on the same sink, and the
+/// parked defaults, the sink's layout and the voice pins are shared: only the last capture
+/// to end puts them back, and only a capture alone on the sink reshapes it.
+static LIVE_CAPTURES: Mutex<usize> = Mutex::new(0);
+
+fn live_captures() -> std::sync::MutexGuard<'static, usize> {
+    LIVE_CAPTURES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Packet-less stretch after which `DATA_DISCONTINUITY` is idle-resume, not a hole.
 /// Classic loopback delivers nothing while nothing renders, then flags the resume packet;
 /// scoring that flag always would charge every notification on a silent host. ~10 ms engine
@@ -212,6 +221,7 @@ fn capture_thread(
     // Must wake on the engine event every ~10 ms or the loopback buffer wraps. Same MMCSS +
     // `THREAD_PRIORITY_HIGHEST` boost as the paced sender; a no-op if refused.
     pf_frame::thread_qos::boost_thread_priority(true);
+    *live_captures() += 1;
     // Each `capture_once` is one open + inner loop. First open gets [`FIRST_OPEN_ATTEMPTS`]
     // tries before `open()` surfaces Err; the native plane then retries the whole open.
     let mut ready = Some(ready);
@@ -305,12 +315,17 @@ fn capture_thread(
             }
         }
     }
-    // Voice apps back on the default first, then both parked defaults (no-op if never parked,
-    // or if the operator moved them), then the sink's speaker layout.
-    voice.clear();
-    audio_control::restore_default_playback();
-    audio_control::restore_default_recording();
-    audio_control::restore_endpoint_channels();
+    // Last capture out: voice apps back first, then both parked defaults (no-op if never
+    // parked, or if the operator moved them), then the sink's speaker layout. Held across the
+    // restore so a capture starting now parks after it, not before.
+    let mut live = live_captures();
+    *live -= 1;
+    if *live == 0 {
+        voice.clear();
+        audio_control::restore_default_playback();
+        audio_control::restore_default_recording();
+        audio_control::restore_endpoint_channels();
+    }
     Ok(())
 }
 
@@ -500,7 +515,11 @@ fn capture_once(
         .map(|f| f.get_nchannels())
         .filter(|&have| u32::from(have) != channels)
     {
-        if silent_loopback(&dev_name, &dev_id) {
+        let shared = *live_captures() > 1;
+        if silent_loopback(&dev_name, &dev_id) && shared {
+            tracing::info!(device = %dev_name, engine_ch = have, requested = channels,
+                "another session is capturing this sink — keeping its speaker layout");
+        } else if silent_loopback(&dev_name, &dev_id) {
             let hz = engine
                 .as_ref()
                 .map_or(SAMPLE_RATE, |f| f.get_samplespersec());
