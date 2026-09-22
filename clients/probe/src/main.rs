@@ -1164,11 +1164,6 @@ async fn session(args: Args) -> Result<()> {
     //                  pattern that exposed the Windows host's missing jitter buffer (constant
     //                  crackle, 2026-07-03): a steady 5 ms stream never trips it. Record the
     //                  host mic and count silence gaps to regression-test host-side buffering.
-    #[cfg(not(target_os = "linux"))]
-    if args.mic_test {
-        tracing::warn!("--mic-test requires Linux (libopus) — skipped");
-    }
-    #[cfg(target_os = "linux")]
     if args.mic_test {
         let conn2 = conn.clone();
         let burst = args.mic_burst;
