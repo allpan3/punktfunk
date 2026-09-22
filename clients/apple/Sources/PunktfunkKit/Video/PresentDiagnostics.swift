@@ -196,9 +196,9 @@ final class FrameRateHint: @unchecked Sendable {
 }
 
 /// The client half of phase-locked capture (design/phase-locked-capture.md): the decode
-/// callback deposits per-AU arrival stamps (client CLOCK_REALTIME — the core's reassembly-
-/// completion time), the deadline link's thread deposits the latch grid, and ~1 Hz that same
-/// thread flushes the circular arrival-phase statistic to the host. The statistic is a
+/// callback deposits per-AU arrival and decode stamps (client CLOCK_REALTIME — the core's
+/// reassembly-completion time), the deadline link's thread deposits each target and its latch
+/// lead, and ~1 Hz that same thread flushes the circular arrival-phase statistic to the host. The statistic is a
 /// verbatim port of `punktfunk_core::phase::circular_latch` — the host's v3 controller
 /// (grid-locked submits, coherence-gated engage) was tuned against exactly it, and a
 /// period-smeared Wi-Fi link correctly reads coherence ≈ 0 there, so the controller never
@@ -207,72 +207,111 @@ final class FrameRateHint: @unchecked Sendable {
 final class PhaseReporter: @unchecked Sendable {
     private let lock = NSLock()
     private var connection: PunktfunkConnection?
-    /// Arrival stamps since the last flush, client CLOCK_REALTIME. Bounded: ~1 s at 240 fps.
+    /// Arrival stamps since the last flush, client CLOCK_REALTIME, and each one's decode time.
+    /// Bounded: ~1 s at 240 fps.
     private var arrivalsNs: [Int64] = []
-    /// Smallest update-to-update spacing this window: successive `nextLatch` values sit one
-    /// panel period apart except across skipped link updates (2×, 3×, …), so the window
-    /// minimum IS the period. Re-learned every flush so VRR/mode switches track both ways.
+    private var decodesNs: [Int64] = []
+    /// Smallest update-to-update spacing this window: successive targets sit one panel period
+    /// apart except across skipped link updates (2×, 3×, …), so the window minimum IS the period.
+    /// Re-learned every flush so VRR/mode switches track both ways.
     private var periodNs: Int64 = 0
-    private var prevLatchRealNs: Int64 = 0
+    private var prevTargetRealNs: Int64 = 0
     private var lastFlushRealNs: Int64 = 0
 
     func bind(_ c: PunktfunkConnection?) {
         lock.lock()
         connection = c
         arrivalsNs.removeAll()
+        decodesNs.removeAll()
         periodNs = 0
-        prevLatchRealNs = 0
+        prevTargetRealNs = 0
         lastFlushRealNs = 0
         lock.unlock()
     }
 
-    /// Decode-callback side: one AU's arrival (reassembly-completion) stamp.
-    func noteArrival(receivedNs: Int64) {
+    /// Decode-callback side: one AU's arrival (reassembly-completion) stamp and decode end.
+    func noteArrival(receivedNs: Int64, decodedNs: Int64) {
         lock.lock()
-        if connection != nil, arrivalsNs.count < 256 { arrivalsNs.append(receivedNs) }
+        if connection != nil, arrivalsNs.count < 256 {
+            arrivalsNs.append(receivedNs)
+            decodesNs.append(decodedNs - receivedNs)
+        }
         lock.unlock()
     }
 
-    /// Link-thread side, once per update: where the NEXT latch sits on the client's realtime
-    /// clock (the arrival stamps' domain). Learns the period from update spacing and ~1 Hz
-    /// converts the window's arrivals into leads against this grid, then reports — a
-    /// fire-and-forget datagram push on the control plane.
-    func noteGrid(nextLatchRealNs: Int64) {
+    /// Link-thread side, once per update: the update's target present and how far before it the
+    /// client renders (`latchLeadNs`: the late-latch budget, else the whole vend lead), on the
+    /// arrival stamps' realtime clock. Learns the period from target spacing — a budget back-off
+    /// must not read as a short period — and ~1 Hz reports (`report`), a fire-and-forget
+    /// datagram on the control plane.
+    func noteGrid(targetRealNs: Int64, latchLeadNs: Int64) {
         lock.lock()
-        if prevLatchRealNs > 0 {
-            let delta = nextLatchRealNs - prevLatchRealNs
+        if prevTargetRealNs > 0 {
+            let delta = targetRealNs - prevTargetRealNs
             // 2–100 ms accepts 10–500 Hz panels, rejects wakeup hiccups and clock jumps.
             if delta > 2_000_000, delta < 100_000_000, periodNs == 0 || delta < periodNs {
                 periodNs = delta
             }
         }
-        prevLatchRealNs = nextLatchRealNs
+        prevTargetRealNs = targetRealNs
         guard let c = connection, periodNs > 0, arrivalsNs.count >= 8,
-            nextLatchRealNs - lastFlushRealNs >= 1_000_000_000
+            targetRealNs - lastFlushRealNs >= 1_000_000_000
         else {
             lock.unlock()
             return
         }
-        lastFlushRealNs = nextLatchRealNs
+        lastFlushRealNs = targetRealNs
         let period = periodNs
-        let leadsUs = arrivalsNs.map { a -> UInt64 in
-            let m = (nextLatchRealNs - a) % period
-            return UInt64(m < 0 ? m + period : m) / 1000
-        }
+        let report = Self.report(
+            targetRealNs: targetRealNs, latchLeadNs: latchLeadNs, periodNs: period,
+            arrivalsNs: arrivalsNs, decodesNs: decodesNs)
         arrivalsNs.removeAll(keepingCapacity: true)
+        decodesNs.removeAll(keepingCapacity: true)
         periodNs = 0
         let offsetNs = c.clockOffsetNs
         lock.unlock()
-        guard
-            let (leadMeanNs, coherence) = Self.circularLatch(
-                samplesUs: leadsUs, periodNs: period)
-        else { return }
+        guard let report else { return }
+        if presentDebug {
+            print(String(
+                format: "pf-phase leadUs=%llu coherence=%u decodeUs=%lld latchLeadUs=%lld periodUs=%lld",
+                report.leadMeanNs / 1000, report.coherence, report.decodeNs / 1000,
+                latchLeadNs / 1000, period / 1000))
+            fflush(stdout)
+        }
         c.reportPhase(
-            nextLatchHostNs: UInt64(max(0, nextLatchRealNs + offsetNs)),
+            nextLatchHostNs: UInt64(max(0, report.readyByNs + offsetNs)),
             latchPeriodNs: UInt32(clamping: period),
             uncertaintyNs: 1_000_000, // skew residual — same conservative 1 ms as Android
-            arrivalLeadNs: UInt32(clamping: leadMeanNs),
-            coherenceMilli: coherence)
+            arrivalLeadNs: UInt32(clamping: report.leadMeanNs),
+            coherenceMilli: report.coherence)
+    }
+
+    struct Report: Equatable {
+        let readyByNs: Int64
+        let leadMeanNs: UInt64
+        let coherence: UInt16
+        let decodeNs: Int64
+    }
+
+    /// The instant an arrival must beat — the latch point less the window's p75 decode time —
+    /// and the window's circular-mean arrival lead before it. The host's phase lock aims that
+    /// lead at ~2.5 ms, so frames are decoded just before the latch. Nil under 8 samples.
+    static func report(
+        targetRealNs: Int64, latchLeadNs: Int64, periodNs: Int64, arrivalsNs: [Int64],
+        decodesNs: [Int64]
+    ) -> Report? {
+        guard periodNs > 0 else { return nil }
+        let decodes = decodesNs.sorted()
+        let decodeNs = decodes.isEmpty ? 0 : max(0, decodes[decodes.count * 3 / 4])
+        let readyByNs = targetRealNs - latchLeadNs - decodeNs
+        let leadsUs = arrivalsNs.map { a -> UInt64 in
+            let m = (readyByNs - a) % periodNs
+            return UInt64(m < 0 ? m + periodNs : m) / 1000
+        }
+        guard let (leadMeanNs, coherence) = circularLatch(samplesUs: leadsUs, periodNs: periodNs)
+        else { return nil }
+        return Report(
+            readyByNs: readyByNs, leadMeanNs: leadMeanNs, coherence: coherence, decodeNs: decodeNs)
     }
 
     /// Verbatim port of `punktfunk_core::phase::circular_latch` (µs samples against an ns

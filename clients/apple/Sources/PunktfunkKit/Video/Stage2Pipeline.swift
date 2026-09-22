@@ -675,13 +675,16 @@ private final class DeadlineLinkDelegate: NSObject, CAMetalDisplayLinkDelegate {
         let floorS = latch?.presentFloor(lead: leadS) ?? leadS
         if floorS > 0 { hud?.floor(ns: Int64(floorS * 1_000_000_000)) }
         // Phase-locked capture: this update's target present, converted into the arrival
-        // stamps' CLOCK_REALTIME domain. Per-update cost is one clock read; the reporter
-        // itself flushes ~1 Hz.
+        // stamps' CLOCK_REALTIME domain, and how far before it this drawable renders — so the
+        // host aims frames at the latch point, not the refresh. One clock read per update; the
+        // reporter itself flushes ~1 Hz.
         if let phase {
             var ts = timespec()
             clock_gettime(CLOCK_REALTIME, &ts)
             let nowNs = Int64(ts.tv_sec) * 1_000_000_000 + Int64(ts.tv_nsec)
-            phase.noteGrid(nextLatchRealNs: nowNs + Int64(leadS * 1_000_000_000))
+            phase.noteGrid(
+                targetRealNs: nowNs + Int64(leadS * 1_000_000_000),
+                latchLeadNs: Int64(floorS * 1_000_000_000))
         }
         stash.put(VendedDrawable(
             drawable: update.drawable, vendAt: vendAt, target: update.targetPresentationTimestamp))
@@ -873,7 +876,10 @@ public final class Stage2Pipeline {
                 decodeReport.record(receivedNs: frame.receivedNs, decodedNs: frame.decodedNs)
                 // The decoded video plane reanchors independently of host submit phase. Feeding
                 // it to the phase controller adds a standing grid period without moving display.
-                if pacing != .decoded { phaseReporter.noteArrival(receivedNs: frame.receivedNs) }
+                if pacing != .decoded {
+                    phaseReporter.noteArrival(
+                        receivedNs: frame.receivedNs, decodedNs: frame.decodedNs)
+                }
                 // Freeze-until-reanchor: WITHHOLD a decoder-concealed post-loss frame (the gray/
                 // garbage VideoToolbox returns Ok for a reference-missing delta) — don't submit it,
                 // so the CAMetalLayer keeps its last good drawable on glass. The gate lifts (returns
