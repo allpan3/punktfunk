@@ -257,8 +257,8 @@ jobs:
             td: C:\t
             host_flags: '--features nvenc,qsv'
             encode_flags: '--features nvenc,qsv'
-            bun_ship_zip: bun-windows-x64.zip
-            bun_ship_sha: 0a0620930b6675d7ba440e81f4e0e00d3cfbe096c4b140d3fff02205e9e18922
+            bun_ship_zip: bun-windows-x64-baseline.zip
+            bun_ship_sha: 538f9c846355d9e847b2671bc00c47da4229a0befb24df3282b739770f3b475f
             suffix: ''
           - arch: arm64
             target: aarch64-pc-windows-msvc
@@ -453,8 +453,8 @@ jobs:
         shell: pwsh
         run: |
           # ONE pinned bun version. The x64 binary BUILDS the console on this runner (BUN_EXE); the
-          # one the installer ships to RUN it (BUN_SHIP_EXE) is the same file on x64 and the
-          # aarch64 asset of the same release on arm64. The .output is self-contained (Nitro
+          # one the installer ships to RUN it (BUN_SHIP_EXE) is the matrix asset of the same release:
+          # x64 ships `-baseline`, which starts on CPUs without AVX2 (the plain build exits 255). The .output is self-contained (Nitro
           # noExternals — deps bundled + tree-shaken, no node_modules), so the installer ships just
           # bun + a ~75-file .output instead of node + a node_modules forest.
           $ver = 'bun-v1.3.14'
@@ -481,9 +481,7 @@ jobs:
           $bun = Get-Bun 'bun-windows-x64.zip' $sha (Join-Path $td 'bundist')
           "BUN_EXE=$bun" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           & $bun --version
-          $ship = if ('${{ matrix.arch }}' -eq 'x64') { $bun } else {
-            Get-Bun '${{ matrix.bun_ship_zip }}' '${{ matrix.bun_ship_sha }}' (Join-Path $td 'bundist-ship')
-          }
+          $ship = Get-Bun '${{ matrix.bun_ship_zip }}' '${{ matrix.bun_ship_sha }}' (Join-Path $td 'bundist-ship')
           "BUN_SHIP_EXE=$ship" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Build + smoke-boot web console (bun)
