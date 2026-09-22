@@ -1230,6 +1230,12 @@ fn dump_console_screens() {
 
     let (mut s, console, library) = shell(vec![Screen::Home(HomeScreen::new())]);
     dump(&mut s, 40, 8, "01-home", true);
+    // The focus plate between two tiles, then landed with the sweep on its rim.
+    s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    dump(&mut s, 6, 8, "01c-home-plate-travel", true);
+    dump(&mut s, 44, 8, "01d-home-plate-sweep", true);
+    s.handle_menu(MenuEvent::Move(MenuDir::Left));
+    dump(&mut s, 40, 8, "_settle-plate", true);
 
     // Up on the focused saved tile. Eyeball with 01-home: that frame carries the Options hint.
     s.handle_menu(MenuEvent::Move(MenuDir::Up));

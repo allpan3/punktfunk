@@ -1,10 +1,11 @@
 //! Console home: a center-snapping carousel of host tiles plus trailing Add Host
 //! and Rescan actions.
 //!
-//! The cursor is the index; the sprung position chases it. Focus scale,
-//! brightness, and fade read off the live sprung distance so the look matches
-//! the strip mid-motion. A connects, wakes, or pairs; Y opens a paired library;
-//! X or Down open Settings; B pops the root (quit).
+//! Every tile is a focus target in an [`el::Tree`] row; Left and Right ask the tree,
+//! and the focus plate travels behind the tile it lands on. The cursor is the index;
+//! the sprung position chases it. Focus scale, brightness, and fade read off the live
+//! sprung distance so the look matches the strip mid-motion. A connects, wakes, or
+//! pairs; Y opens a paired library; X or Down open Settings; B pops the root (quit).
 //!
 //! Discovery churns the list; focus follows the tile key, not the index. A
 //! press on a side tile only retargets the cursor — Confirm starts a session.
@@ -12,6 +13,7 @@
 //! Settings/Options, pinned-card preset, trailing Add Host.
 
 use crate::anim::{entrances, Entrance, EntranceAt, Spring};
+use crate::el::{Axis, El, Group, Id, Tree};
 use crate::glyphs::{Hint, HintKey};
 use crate::library::{
     step_cursor, StepResult, BUMP_C, BUMP_K, BUMP_PX, ENTER_RISE, ENTER_SCALE, SPRING_C, SPRING_K,
@@ -27,6 +29,8 @@ const TILE_W: f64 = 340.0;
 const TILE_H: f64 = 224.0;
 const TILE_GAP: f64 = 30.0;
 const TILE_CORNER: f64 = 26.0;
+/// Tiles further than this many pitches from the sprung centre are off screen.
+const CULL: f64 = 2.6;
 
 /// Sentinel. Host keys are fingerprints or `addr:port`; neither starts with `\0`.
 const ADD_KEY: &str = "\0add";
@@ -65,9 +69,9 @@ pub(crate) struct HomeScreen {
     bump: Spring,
     /// Last-seen tile keys. Discovery churns the list; focus follows the key.
     keys: Vec<String>,
-    /// Last-drawn tile rects, device px; empty for culled tiles. Hit-testing uses
-    /// the drawn (0.88) side-tile size so an edge press does not pick a neighbour.
-    geom: Vec<Rect>,
+    /// Tiles at their drawn size, culled ones included: a direction reaches past the
+    /// edge, and a pointer hits the (0.88) side-tile size, not its neighbour's.
+    tree: Tree,
     /// Mount entrance. `None` until the first frame (no clock in the constructor)
     /// and again once finished. [`Self::entrance_armed`] stops it re-arming.
     entrance: Option<Entrance>,
@@ -81,7 +85,7 @@ impl HomeScreen {
             anim: Spring::rest(0.0),
             bump: Spring::rest(0.0),
             keys: Vec::new(),
-            geom: Vec::new(),
+            tree: Tree::new(),
             entrance: None,
             entrance_armed: false,
         }
@@ -117,6 +121,31 @@ impl HomeScreen {
         hosts.len() + 2
     }
 
+    fn tile_id(key: &str) -> Id {
+        Id::new(key, 0)
+    }
+
+    fn index_of(&self, id: Id) -> Option<usize> {
+        self.keys.iter().position(|k| Self::tile_id(k) == id)
+    }
+
+    /// Left or Right through the tree. With no rects yet, or at an end, the index step
+    /// moves or bumps.
+    fn travel(&mut self, dir: MenuDir, len: usize) -> Option<MenuPulse> {
+        let focused = self
+            .keys
+            .get(self.cursor.max(0) as usize)
+            .map(|k| Self::tile_id(k));
+        self.tree.set_focus(focused);
+        match self.tree.move_focus(dir).and_then(|id| self.index_of(id)) {
+            Some(i) => {
+                self.cursor = i as i32;
+                Some(MenuPulse::Move)
+            }
+            None => self.step(if dir == MenuDir::Left { -1 } else { 1 }, len, false),
+        }
+    }
+
     pub(crate) fn menu(
         &mut self,
         ev: MenuEvent,
@@ -126,8 +155,7 @@ impl HomeScreen {
         self.reconcile(ctx.hosts);
         let len = Self::len(ctx.hosts);
         match ev {
-            MenuEvent::Move(MenuDir::Left) => self.step(-1, len, false),
-            MenuEvent::Move(MenuDir::Right) => self.step(1, len, false),
+            MenuEvent::Move(dir @ (MenuDir::Left | MenuDir::Right)) => self.travel(dir, len),
             MenuEvent::JumpBack => self.step(-5, len, true),
             MenuEvent::JumpForward => self.step(5, len, true),
             MenuEvent::Confirm => {
@@ -234,16 +262,14 @@ impl HomeScreen {
             // Hover focuses, so the press that follows is the one that OPENS the card rather
             // than the one that reaches it. The move-then-press fallback below stays for a
             // pointer that cannot hover: a touchscreen sends Press with no Move before it.
-            PointerKind::Move => match p.pick(&self.geom).filter(|i| *i < len) {
+            PointerKind::Move => match self.pick(p, len) {
                 Some(i) if i != self.cursor as usize => {
                     self.cursor = i as i32;
                     true
                 }
                 _ => false,
             },
-            // Geometry is a frame old: discovery can shorten the strip between draw
-            // and press, and an index past `len` would land on Add Host.
-            PointerKind::Press => match p.pick(&self.geom).filter(|i| *i < len) {
+            PointerKind::Press => match self.pick(p, len) {
                 Some(i) if i == self.cursor as usize => {
                     self.menu(MenuEvent::Confirm, ctx, fx);
                     true
@@ -256,6 +282,13 @@ impl HomeScreen {
             },
             _ => false,
         }
+    }
+
+    /// The painted tile under `p`, by key: discovery can reorder the strip between draw
+    /// and press.
+    fn pick(&self, p: Pointer, len: usize) -> Option<usize> {
+        let i = self.index_of(self.tree.hit(p.x as f32, p.y as f32)?)?;
+        (i < len && (i as f64 - self.anim.pos).abs() <= CULL).then_some(i)
     }
 
     fn step(&mut self, delta: i32, len: usize, clamp: bool) -> Option<MenuPulse> {
@@ -367,13 +400,22 @@ impl HomeScreen {
         let cy = f64::from(rect.top) + f64::from(rect.height()) / 2.0;
 
         let len = Self::len(ctx.hosts);
-        self.geom.clear();
-        self.geom.resize(len, Rect::new_empty());
+        let t = ctx.t;
+        // A scroll the carousel spring drives, so the plate rides the strip and springs only
+        // between tiles. Two pitches of slack each end hold the overshoot and the bump. The
+        // viewport spans three widths: a scaled screen in a push must not show its clip.
+        let slack = 2.0 * pitch;
+        let offset = (slack + self.anim.pos * pitch - self.bump.pos * k) as f32;
+        let strip = Id::new("hosts", 0);
+        self.tree.set_offset(strip, offset);
+        let content_w = 2.0 * slack + 3.0 * w + len.saturating_sub(1) as f64 * pitch;
+        let viewport = Rect::from_xywh(-w as f32, 0.0, 3.0 * w as f32, rect.height());
+        let origin = (rect.left + viewport.left - offset, rect.top);
+        let mut row = El::scroll(strip, Axis::Horizontal)
+            .group(Group::Row)
+            .child(El::column().place(Rect::from_xywh(0.0, 0.0, content_w as f32, 1.0)));
         for i in 0..len {
             let d = i as f64 - self.anim.pos;
-            if d.abs() > 2.6 {
-                continue;
-            }
             let f = 1.0 - d.abs().min(1.0); // 1 at focus → 0 one slot out
             let ent = self
                 .entrance
@@ -389,74 +431,46 @@ impl HomeScreen {
                 tile_w as f32,
                 tile_h as f32,
             );
-            // Hit boxes track the drawn tile, entrance included: it is still offset
-            // by ENTER_RISE while arriving.
-            self.geom[i] = Rect::from_xywh(
+            // The node is the drawn tile, entrance included: it is still offset by
+            // ENTER_RISE while arriving.
+            let drawn = Rect::from_xywh(
                 (cx - tile_w * scale / 2.0) as f32,
                 (cy - tile_h * scale / 2.0) as f32,
                 (tile_w * scale) as f32,
                 (tile_h * scale) as f32,
             );
-            canvas.save();
-            canvas.translate((cx as f32, cy as f32));
-            canvas.scale((scale as f32, scale as f32));
-            canvas.translate((-cx as f32, -cy as f32));
-            // Rich tiles isolate alpha/recede and blur focus marks. The reduced path keeps the
-            // entrance layer only; live card motion remains direct geometry on the main target.
-            let recede = 1.0 - f;
-            let layer = tile_layer(reduced, ent.fade, alpha, recede);
-            if let Some((layer_alpha, filter_recede)) = layer {
-                let mut lp = crate::theme::layer();
-                lp.set_alpha_f(layer_alpha);
-                if filter_recede {
-                    lp.set_color_filter(skia_safe::color_filters::matrix_row_major(
-                        &crate::theme::recede_matrix(recede),
-                        None,
-                    ));
-                }
-                let bounds = tile.with_outset(((36.0 * k) as f32, (36.0 * k) as f32));
-                canvas.save_layer(
-                    &skia_safe::canvas::SaveLayerRec::default()
-                        .bounds(&bounds)
-                        .paint(&lp),
-                );
-            }
-            if !reduced {
-                crate::theme::focus_halo(canvas, tile, TILE_CORNER as f32, k as f32, f as f32);
-                if f > 0.4 {
-                    crate::theme::drop_shadow(
-                        canvas,
-                        tile,
-                        TILE_CORNER as f32,
-                        k as f32,
-                        0.45 * f as f32,
-                    );
-                }
-            }
-            match slot_at(i, ctx.hosts) {
-                Slot::Host(h) => draw_host_tile(canvas, fonts, h, tile, k, ctx.t),
-                Slot::AddHost => draw_action_tile(canvas, fonts, tile, k, ActionTile::AddHost),
-                Slot::Rescan => draw_action_tile(canvas, fonts, tile, k, ActionTile::Rescan),
-            }
-            // The cheap path leans harder on the veil because it omits the recede matrix.
-            if f < 1.0 {
-                let veil = (1.0 - f) as f32 * if reduced { 0.16 } else { 0.07 };
-                canvas.draw_rrect(
-                    RRect::new_rect_xy(tile, (TILE_CORNER * k) as f32, (TILE_CORNER * k) as f32),
-                    &fill(crate::theme::shade(veil)),
-                );
-            }
-            if reduced && f > 0.01 {
-                canvas.draw_rrect(
-                    RRect::new_rect_xy(tile, (TILE_CORNER * k) as f32, (TILE_CORNER * k) as f32),
-                    &stroke(accent(0.55 * f as f32), (2.0 * k) as f32),
-                );
-            }
-            if layer.is_some() {
-                canvas.restore();
-            }
-            canvas.restore();
+            let node = if d.abs() > CULL {
+                El::column()
+            } else {
+                let look = TileLook {
+                    tile,
+                    center: (cx, cy),
+                    scale,
+                    alpha,
+                    fade: ent.fade,
+                    f,
+                    reduced,
+                    k,
+                };
+                let slot = slot_at(i, ctx.hosts);
+                El::paint(move |canvas, _| look.paint(canvas, fonts, &slot, t))
+            };
+            row = row.child(
+                node.id(Self::tile_id(&self.keys[i]))
+                    .focusable((TILE_CORNER * k * scale) as f32)
+                    .place(drawn.with_offset((-origin.0, -origin.1))),
+            );
         }
+        let frame = self
+            .tree
+            .layout(El::column().child(row.place(viewport)), rect);
+        let focused = self
+            .keys
+            .get(self.cursor.max(0) as usize)
+            .map(|k| Self::tile_id(k));
+        self.tree.set_focus(focused);
+        // The plate is the focus mark: it lifts the tile, so the tile draws no halo.
+        self.tree.paint_focus(canvas, frame, k as f32, dt, reduced);
 
         if ctx.hosts.is_empty() {
             fonts.centered(
@@ -470,6 +484,77 @@ impl HomeScreen {
                 w * 0.7,
             );
         }
+    }
+}
+
+/// One tile as the carousel draws it this frame.
+#[derive(Clone, Copy)]
+struct TileLook {
+    tile: Rect,
+    center: (f64, f64),
+    scale: f64,
+    alpha: f64,
+    /// Entrance fade.
+    fade: f64,
+    /// 1 at focus, 0 one slot out.
+    f: f64,
+    reduced: bool,
+    k: f64,
+}
+
+impl TileLook {
+    fn paint(&self, canvas: &Canvas, fonts: &Fonts, slot: &Slot<'_>, t: f64) {
+        let TileLook {
+            tile,
+            center: (cx, cy),
+            scale,
+            alpha,
+            fade,
+            f,
+            reduced,
+            k,
+        } = *self;
+        canvas.save();
+        canvas.translate((cx as f32, cy as f32));
+        canvas.scale((scale as f32, scale as f32));
+        canvas.translate((-cx as f32, -cy as f32));
+        // Rich tiles isolate alpha/recede and blur focus marks. The reduced path keeps the
+        // entrance layer only; live card motion remains direct geometry on the main target.
+        let recede = 1.0 - f;
+        let layer = tile_layer(reduced, fade, alpha, recede);
+        if let Some((layer_alpha, filter_recede)) = layer {
+            let mut lp = crate::theme::layer();
+            lp.set_alpha_f(layer_alpha);
+            if filter_recede {
+                lp.set_color_filter(skia_safe::color_filters::matrix_row_major(
+                    &crate::theme::recede_matrix(recede),
+                    None,
+                ));
+            }
+            let bounds = tile.with_outset(((36.0 * k) as f32, (36.0 * k) as f32));
+            canvas.save_layer(
+                &skia_safe::canvas::SaveLayerRec::default()
+                    .bounds(&bounds)
+                    .paint(&lp),
+            );
+        }
+        match slot {
+            Slot::Host(h) => draw_host_tile(canvas, fonts, h, tile, k, t),
+            Slot::AddHost => draw_action_tile(canvas, fonts, tile, k, ActionTile::AddHost),
+            Slot::Rescan => draw_action_tile(canvas, fonts, tile, k, ActionTile::Rescan),
+        }
+        // The cheap path leans harder on the veil because it omits the recede matrix.
+        if f < 1.0 {
+            let veil = (1.0 - f) as f32 * if reduced { 0.16 } else { 0.07 };
+            canvas.draw_rrect(
+                RRect::new_rect_xy(tile, (TILE_CORNER * k) as f32, (TILE_CORNER * k) as f32),
+                &fill(crate::theme::shade(veil)),
+            );
+        }
+        if layer.is_some() {
+            canvas.restore();
+        }
+        canvas.restore();
     }
 }
 
@@ -1088,5 +1173,69 @@ mod tests {
         assert_eq!(confirm(&s), "Connect");
         s.cursor = 1;
         assert_eq!(confirm(&s), "Resume");
+    }
+
+    /// Right goes through the tree, three presses between frames included (the culled
+    /// tiles are still targets), and the plate lands on the tile focus reached.
+    #[test]
+    fn the_row_moves_through_the_tree_and_the_plate_lands() {
+        let mut settings = ctx_settings();
+        let hosts = [
+            host("a", true, true, false),
+            host("b", true, true, false),
+            host("c", true, true, false),
+            host("d", true, true, false),
+        ];
+        let pads: Vec<pf_client_core::menu_nav::PadInfo> = Vec::new();
+        let library = crate::library::LibraryShared::default();
+        let mut ctx = Ctx {
+            hosts: &hosts,
+            library: &library,
+            settings: &mut settings,
+            store: crate::store::file_store(),
+            platform: crate::platform::Platform::Desktop,
+            screen: None,
+            pads: &pads,
+            deck: false,
+            fallback_ui: false,
+            pyrowave_ok: true,
+            av1_ok: true,
+            device_name: "test",
+            t: 0.0,
+        };
+        let fonts = crate::theme::build_fonts().unwrap();
+        let mut surface = skia_safe::surfaces::raster_n32_premul((1280, 800)).unwrap();
+        let rect = Rect::from_xywh(0.0, 64.0, 1280.0, 650.0);
+        let mut s = HomeScreen::new();
+        let frame = |s: &mut HomeScreen, ctx: &mut Ctx, surface: &mut skia_safe::Surface| {
+            ctx.t += 1.0 / 60.0;
+            s.render(surface.canvas(), rect, 1.0, 1.0 / 60.0, &fonts, ctx);
+        };
+        for _ in 0..60 {
+            frame(&mut s, &mut ctx, &mut surface);
+        }
+        let mut fx = Outbox::default();
+        for _ in 0..3 {
+            s.menu(MenuEvent::Move(MenuDir::Right), &mut ctx, &mut fx);
+        }
+        assert_eq!(
+            s.cursor, 3,
+            "three presses in one frame reach the fourth tile"
+        );
+        let mut landed = false;
+        for _ in 0..120 {
+            frame(&mut s, &mut ctx, &mut surface);
+            landed |= !s.tree.plate_busy();
+        }
+        let (plate, _) = s.tree.plate_rect().unwrap();
+        let tile = s.tree.rect(HomeScreen::tile_id("d")).unwrap();
+        assert!(
+            (plate.center_x() - tile.center_x()).abs() < 0.5,
+            "{plate:?} vs {tile:?}"
+        );
+        assert!(
+            landed,
+            "the plate lands and its sweep ends within two seconds"
+        );
     }
 }
