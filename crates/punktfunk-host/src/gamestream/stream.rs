@@ -1501,6 +1501,10 @@ fn stream_body(
         if force_idr.swap(false, Ordering::SeqCst) {
             want_keyframe = true;
         }
+        // A re-held PipeWire buffer may have torn the reference the encoder last read.
+        if capturer.take_reference_risk() {
+            want_keyframe = true;
+        }
         if want_keyframe {
             let now = Instant::now();
             let emit = match last_keyframe {
