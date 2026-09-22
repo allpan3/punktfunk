@@ -1,4 +1,5 @@
-//! wlroots/Sway virtual-output backend via sway IPC + xdg-desktop-portal-wlr.
+//! wlroots/Sway virtual-output backend via sway IPC + xdg-desktop-portal-wlr. scroll, a sway
+//! fork, takes the same path through `scrollmsg`.
 //!
 //! 1. `swaymsg create_output` adds a headless output (`HEADLESS-N`). Sway must run the
 //!    headless backend (or co-load it). The name is the before/after diff of
@@ -807,13 +808,25 @@ const SWAYMSG_BUDGET: Duration = Duration::from_secs(5);
 /// 10 s for `systemctl --user try-restart` (waits for the job; result is ignored).
 const PORTAL_RESTART_BUDGET: Duration = Duration::from_secs(10);
 
-/// Bare `swaymsg` with `SWAYSOCK` on the child only. `Command::env` avoids a process
+/// The IPC tool with its socket on the child only. `Command::env` avoids a process
 /// `setenv` racing every `getenv` on a live host. `sock` is `None` when no IPC is
 /// found: leave the child's env alone so an inherited socket still wins.
+///
+/// A `scroll-ipc.*` socket gets `scrollmsg`, which reads `SCROLLSOCK` before `SWAYSOCK`.
 fn swaymsg_command(sock: Option<String>) -> Command {
-    let mut cmd = Command::new("swaymsg");
+    let scroll = sock.as_deref().is_some_and(|s| {
+        std::path::Path::new(s)
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("scroll-ipc."))
+    });
+    let (bin, var) = if scroll {
+        ("scrollmsg", "SCROLLSOCK")
+    } else {
+        ("swaymsg", "SWAYSOCK")
+    };
+    let mut cmd = Command::new(bin);
     if let Some(sock) = sock {
-        cmd.env("SWAYSOCK", sock);
+        cmd.env(var, sock);
     }
     cmd
 }
@@ -822,11 +835,12 @@ fn swaymsg_command(sock: Option<String>) -> Command {
 /// Non-zero exit covers `{"success": false}` too.
 fn swaymsg(args: &[&str]) -> Result<String> {
     let mut cmd = swaymsg_command(crate::session::sway_socket());
+    let prog = cmd.get_program().to_string_lossy().into_owned();
     let out = crate::proc::output_within(cmd.arg("--").args(args), SWAYMSG_BUDGET)
-        .context("run swaymsg (is sway installed?)")?;
+        .with_context(|| format!("run {prog}"))?;
     if !out.status.success() {
         bail!(
-            "swaymsg {:?} failed: {}{}",
+            "{prog} {:?} failed: {}{}",
             args,
             String::from_utf8_lossy(&out.stdout).trim(),
             String::from_utf8_lossy(&out.stderr).trim()
@@ -839,11 +853,12 @@ fn swaymsg(args: &[&str]) -> Result<String> {
 /// `--`, so `-t` is read as a sway command (`Unknown/invalid command '-t'`).
 fn swaymsg_query(kind: &str) -> Result<serde_json::Value> {
     let mut cmd = swaymsg_command(crate::session::sway_socket());
+    let prog = cmd.get_program().to_string_lossy().into_owned();
     let out = crate::proc::output_within(cmd.args(["-t", kind, "--raw"]), SWAYMSG_BUDGET)
-        .context("run swaymsg (is sway installed?)")?;
+        .with_context(|| format!("run {prog}"))?;
     if !out.status.success() {
         bail!(
-            "swaymsg -t {kind} failed: {}",
+            "{prog} -t {kind} failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
@@ -1310,6 +1325,16 @@ mod tests {
             )]
         );
         assert!(overrides(None).is_empty());
+    }
+
+    /// scroll ships `scrollmsg`, not `swaymsg`, and it reads `SCROLLSOCK` first.
+    #[test]
+    fn a_scroll_socket_runs_scrollmsg() {
+        let cmd = swaymsg_command(Some("/run/user/1000/scroll-ipc.1000.42.sock".to_string()));
+        assert_eq!(cmd.get_program(), "scrollmsg");
+        let envs: Vec<_> = cmd.get_envs().map(|(k, _)| k.to_owned()).collect();
+        assert_eq!(envs, ["SCROLLSOCK"]);
+        assert_eq!(swaymsg_command(None).get_program(), "swaymsg");
     }
 
     fn head(connector: &str, enabled: bool) -> crate::monitors::PhysicalMonitor {

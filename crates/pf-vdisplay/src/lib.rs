@@ -93,7 +93,7 @@ pub use routing::{
 pub enum Compositor {
     /// KWin / Plasma 6 — `zkde_screencast` virtual output.
     Kwin,
-    /// wlroots proper (Sway / River) — headless `swaymsg create_output`.
+    /// wlroots proper (Sway / scroll / River) — headless `swaymsg create_output`.
     Wlroots,
     /// Mutter / GNOME — headless backend + Mutter DBus `RecordVirtual`.
     Mutter,
@@ -328,7 +328,8 @@ fn compositor_from_xdg(desktop: &str) -> Result<Compositor> {
         Ok(Compositor::Mutter)
     } else if desktop.contains("HYPRLAND") {
         Ok(Compositor::Hyprland)
-    } else if desktop.contains("SWAY") || desktop.contains("WLROOTS") {
+    } else if desktop.contains("SWAY") || desktop.contains("SCROLL") || desktop.contains("WLROOTS")
+    {
         Ok(Compositor::Wlroots)
     } else {
         anyhow::bail!(
@@ -856,6 +857,7 @@ mod tests {
             Compositor::Hyprland
         );
         assert_eq!(compositor_from_xdg("SWAY").unwrap(), Compositor::Wlroots);
+        assert_eq!(compositor_from_xdg("SCROLL").unwrap(), Compositor::Wlroots);
     }
 
     /// Muffin has no virtual-output API: there is no `PUNKTFUNK_COMPOSITOR`
