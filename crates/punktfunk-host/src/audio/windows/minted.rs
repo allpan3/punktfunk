@@ -492,32 +492,40 @@ fn stamp_identity(endpoint_id: &str, identity: &'static AudioIdentity, role: Rol
             value: pe::StampValue::Str("Punktfunk"),
         },
     ];
-    // Both mic pins are stereo 48 kHz. Mix/host keys are render-only properties.
+    // Both mic pins are stereo 48 kHz, and every mix-format copy a pin carries must agree with
+    // its device format. Left on the driver's 44.1 kHz mono, the capture pin refuses its own
+    // mix format and Control Panel's Recording tab hangs on it.
     if role == Role::Mic {
-        stamps.push(pe::Stamp {
-            label: "device-format",
-            key: pe::PKEY_DEVICE_FORMAT,
-            value: pe::StampValue::Format(&WFX_PCM16_2CH_48K),
+        stamps.extend([
+            pe::Stamp {
+                label: "device-format",
+                key: pe::PKEY_DEVICE_FORMAT,
+                value: pe::StampValue::Format(&WFX_PCM16_2CH_48K),
+            },
+            pe::Stamp {
+                label: "host-format",
+                key: pe::PKEY_HOST_FORMAT,
+                value: pe::StampValue::Format(&WFX_F32_2CH_48K),
+            },
+            pe::Stamp {
+                label: "mix-format-3",
+                key: pe::PKEY_MIX_FORMAT_3,
+                value: pe::StampValue::Format(&WFX_F32_2CH_48K),
+            },
+        ]);
+        stamps.push(if capture {
+            pe::Stamp {
+                label: "capture-mix-format",
+                key: pe::PKEY_CAPTURE_MIX_FORMAT,
+                value: pe::StampValue::Format(&WFX_F32_2CH_48K),
+            }
+        } else {
+            pe::Stamp {
+                label: "mix-format-2",
+                key: pe::PKEY_MIX_FORMAT_2,
+                value: pe::StampValue::Format(&WFX_F32_2CH_48K),
+            }
         });
-        if !capture {
-            stamps.extend([
-                pe::Stamp {
-                    label: "mix-format-2",
-                    key: pe::PKEY_MIX_FORMAT_2,
-                    value: pe::StampValue::Format(&WFX_F32_2CH_48K),
-                },
-                pe::Stamp {
-                    label: "mix-format-3",
-                    key: pe::PKEY_MIX_FORMAT_3,
-                    value: pe::StampValue::Format(&WFX_F32_2CH_48K),
-                },
-                pe::Stamp {
-                    label: "host-format",
-                    key: pe::PKEY_HOST_FORMAT,
-                    value: pe::StampValue::Format(&WFX_F32_2CH_48K),
-                },
-            ]);
-        }
     }
     // Served stamps need no writes or settle delay on later boots.
     if pe::stamps_served(endpoint_id, &stamps) {
