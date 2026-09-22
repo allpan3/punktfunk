@@ -507,7 +507,7 @@ jobs:
     if: ${{ needs.changes.outputs.web == 'true' && needs.changes.outputs.heavy == 'true' }}
     runs-on: ubuntu-24.04
     container:
-      image: oven/bun:1
+      image: oven/bun:1.4.2
     timeout-minutes: 30
     defaults:
       run:
@@ -558,7 +558,7 @@ jobs:
     if: ${{ needs.changes.outputs.docs_site == 'true' && needs.changes.outputs.heavy == 'true' }}
     runs-on: ubuntu-24.04
     container:
-      image: oven/bun:1
+      image: oven/bun:1.4.2
     timeout-minutes: 30
     defaults:
       run:
@@ -584,7 +584,7 @@ jobs:
     if: ${{ needs.changes.outputs.sdk_plugin_kit == 'true' }}
     runs-on: ubuntu-24.04
     container:
-      image: oven/bun:1
+      image: oven/bun:1.4.2
     timeout-minutes: 15
     steps:
       - name: Install git + CA certs
@@ -656,7 +656,7 @@ jobs:
   bun-nix:
     runs-on: ubuntu-24.04
     container:
-      image: oven/bun:1
+      image: oven/bun:1.4.2
     timeout-minutes: 15
     steps:
       # oven/bun ships neither git nor a real node, and the slim base has no CA bundle —
@@ -677,7 +677,7 @@ jobs:
   docs-drift:
     runs-on: ubuntu-24.04
     container:
-      image: oven/bun:1
+      image: oven/bun:1.4.2
     timeout-minutes: 15
     steps:
       # oven/bun ships neither git nor a real node, and the slim base has no CA bundle —

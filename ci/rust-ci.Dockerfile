@@ -37,8 +37,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # release's SHASUMS256.txt). `-baseline` on purpose: it needs no AVX2, so the bun we ship starts on
 # every x86-64 box — something the auto-detecting installer never promised, since it reads the
 # BUILDER's CPU, not the user's.
-ARG BUN_VERSION=1.3.14
-ARG BUN_SHA=a063908ae08b7852ca10939bbdc6ceed3ddabce8fb9402dce83d65d73b36e6c7
+ARG BUN_VERSION=1.4.2
+ARG BUN_SHA=c678040f14fe0440eb839d37cbd0ce4c051a32da72806ac97de6a6aab6bf728f
 RUN curl -fsSL -o /tmp/bun.zip \
       "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-x64-baseline.zip" \
     && echo "${BUN_SHA}  /tmp/bun.zip" | sha256sum -c - \

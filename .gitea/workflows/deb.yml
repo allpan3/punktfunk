@@ -288,22 +288,22 @@ jobs:
         # (our Bun.serve TLS entry), so prove the build IS a bun bundle and serves /login.
         # No TLS env here, so the custom entry binds plain HTTP — the smoke curl stays simple.
         run: |
-          # bun builds AND runs the console. Baked into the rust-ci image; bootstrap here too so the
-          # job stays green against the PREVIOUS image (docker.yml bootstrap lag).
+          # bun builds AND runs the console. Baked into the rust-ci image; fetched here too when the
+          # image's bun is missing or another version (docker.yml bootstrap lag).
           #
           # A PINNED release asset, checked by SHA-256 — never `curl https://bun.sh/install | bash`.
           # build-bun-deb.sh VENDORS this very binary into the punktfunk-bun .deb (BUN_BIN, below),
           # so an install script piped into root's shell is upstream code choosing bytes we then
           # publish under REGISTRY_TOKEN. Not in Debian/Ubuntu, so a pin is the only option here.
-          # ONE bun across the repo: same version as rpm.yml and windows-host.yml, and the same
-          # asset + sum as rpm.yml (windows pins bun-windows-x64.zip, so its sum differs) — bump
-          # all three together (the sums are in the release's SHASUMS256.txt). `-baseline` on
+          # ONE bun across the repo: same version and asset as rpm.yml, arch.yml, the CI images
+          # and the Nix overlay in flake.nix; windows-host.yml pins the same release. Bump them
+          # together (the sums are in the release's SHASUMS256.txt). `-baseline` on
           # purpose: it needs no AVX2, so the bun we ship starts on every x86-64 box — something the
           # auto-detecting installer never promised, since it reads the BUILDER's CPU, not the user's.
-          command -v bun >/dev/null || {
+          [ "$(bun --version 2>/dev/null)" = 1.4.2 ] || {
             apt-get install -y --no-install-recommends unzip
-            BUN_VER=bun-v1.3.14
-            BUN_SHA=a063908ae08b7852ca10939bbdc6ceed3ddabce8fb9402dce83d65d73b36e6c7
+            BUN_VER=bun-v1.4.2
+            BUN_SHA=c678040f14fe0440eb839d37cbd0ce4c051a32da72806ac97de6a6aab6bf728f
             curl -fsSL -o /tmp/bun.zip \
               "https://github.com/oven-sh/bun/releases/download/$BUN_VER/bun-linux-x64-baseline.zip"
             echo "$BUN_SHA  /tmp/bun.zip" | sha256sum -c -
