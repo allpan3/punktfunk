@@ -20,7 +20,7 @@ export function baseOptions(): BaseLayoutProps {
       { text: 'Website', url: 'https://punktfunk.unom.io' },
       { text: 'Support', url: 'https://ko-fi.com/punktfunk' },
       { text: 'Source code', url: 'https://git.unom.io/unom/punktfunk' },
-      { text: 'Discord', url: 'https://discord.gg/kaPNvzMuGU' },
+      { text: 'Discord', url: 'https://discord.gg/wzEGg9y45z' },
       { text: 'Reddit', url: 'https://www.reddit.com/r/Punktfunk/' },
     ],
   }

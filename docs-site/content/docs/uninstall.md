@@ -330,7 +330,7 @@ stop testing — that removes the app and its data with it.
 Uninstall the app from Google Play or from Settings → Apps. That's the whole job — it's a public
 Play listing, so there's no tester list to leave. If you were on the invite-only **canary**
 (Internal testing) track and want off that too, say so on
-[Discord](https://discord.gg/kaPNvzMuGU).
+[Discord](https://discord.gg/wzEGg9y45z).
 
 ### Steam Deck — Decky plugin
 

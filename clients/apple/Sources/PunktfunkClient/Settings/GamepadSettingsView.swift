@@ -414,7 +414,7 @@ struct GamepadSettingsView: View {
     /// README in one glance (the touch `AboutView` holds the same three).
     private enum Destination {
         static let docs = URL(string: "https://docs.punktfunk.unom.io")!
-        static let community = URL(string: "https://discord.gg/kaPNvzMuGU")!
+        static let community = URL(string: "https://discord.gg/wzEGg9y45z")!
         static let source = URL(string: "https://git.unom.io/unom/punktfunk")!
     }
 
