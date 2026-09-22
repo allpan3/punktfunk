@@ -377,20 +377,23 @@ fn ensure_role(
             }
         }
     };
-    da::bind_driver(&hwid, &inf)?;
-
-    let render = wait_for(&devnode, false)?;
-    let capture = match role {
-        Role::Mic => Some(wait_for(&devnode, true).with_context(|| {
-            format!("the minted mic devnode {devnode} produced no capture endpoint")
-        })?),
-        Role::Speakers => None,
-    };
-
-    stamp_identity(&render, identity, role, false);
-    if let Some(cap) = capture.as_ref() {
-        stamp_identity(cap, identity, role, true);
-    }
+    // Once bound, an endpoint can take a default before a later step fails: the restore below
+    // runs on every exit from here.
+    let endpoints = (|| -> Result<(String, Option<String>)> {
+        da::bind_driver(&hwid, &inf)?;
+        let render = wait_for(&devnode, false)?;
+        let capture = match role {
+            Role::Mic => Some(wait_for(&devnode, true).with_context(|| {
+                format!("the minted mic devnode {devnode} produced no capture endpoint")
+            })?),
+            Role::Speakers => None,
+        };
+        stamp_identity(&render, identity, role, false);
+        if let Some(cap) = capture.as_ref() {
+            stamp_identity(cap, identity, role, true);
+        }
+        Ok((render, capture))
+    })();
 
     // A fresh endpoint can grab a default; routing policy belongs to the wiring plan.
     if let Some(prev) = prev_render {
@@ -415,6 +418,7 @@ fn ensure_role(
             );
         }
     }
+    let (render, capture) = endpoints?;
     Ok((devnode, render, capture))
 }
 
