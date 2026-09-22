@@ -2830,16 +2830,21 @@ fn producer_supports_request(
     supports.unwrap_or(false)
 }
 
-/// The offer's `maxFramerate`. KWin asks for its own signal (`Unpaced`); gamescope paints on
-/// every commit, so the wire rate caps its pushes (`Cap`); anyone else keeps its rate.
+/// KWin's unpaced ceiling, in multiples of the stream rate. Above one refresh its ms timer
+/// never gates a real frame; bounded, a game far above the stream rate cannot flood the pool.
+const KWIN_UNPACED_HEADROOM: u32 = 2;
+
+/// The offer's `maxFramerate`. KWin asks for its own signal under a ceiling of
+/// [`KWIN_UNPACED_HEADROOM`] times the stream rate; gamescope paints on every commit, so the
+/// wire rate caps its pushes (`Cap`); anyone else keeps its rate.
 fn offer_pacing(unpaced: bool, gamescope: bool, preferred: Option<(u32, u32, u32)>) -> Pacing {
+    let hz = preferred.map(|(_, _, hz)| hz).filter(|hz| *hz > 0);
     if unpaced {
-        Pacing::Unpaced
+        hz.map_or(Pacing::Unpaced, |hz| {
+            Pacing::Cap(hz * KWIN_UNPACED_HEADROOM)
+        })
     } else if gamescope {
-        preferred
-            .map(|(_, _, hz)| hz)
-            .filter(|hz| *hz > 0)
-            .map_or(Pacing::Producer, Pacing::Cap)
+        hz.map_or(Pacing::Producer, Pacing::Cap)
     } else {
         Pacing::Producer
     }
@@ -3046,10 +3051,16 @@ mod tests {
         assert!(!book.contains(0x10));
     }
 
-    /// Only gamescope gets the wire-rate cap; KWin keeps its own signal; a missing rate caps nothing.
+    /// gamescope is capped at the wire rate, KWin at its headroom above it; a missing rate
+    /// caps nothing.
     #[test]
-    fn only_gamescope_is_capped_at_the_wire_rate() {
-        assert_eq!(offer_pacing(true, true, Some((1, 1, 90))), Pacing::Unpaced);
+    fn pacing_caps_follow_the_wire_rate() {
+        assert_eq!(
+            offer_pacing(true, false, Some((1, 1, 90))),
+            Pacing::Cap(180)
+        );
+        assert_eq!(offer_pacing(true, false, Some((1, 1, 0))), Pacing::Unpaced);
+        assert_eq!(offer_pacing(true, false, None), Pacing::Unpaced);
         assert_eq!(offer_pacing(false, true, Some((1, 1, 90))), Pacing::Cap(90));
         assert_eq!(offer_pacing(false, true, Some((1, 1, 0))), Pacing::Producer);
         assert_eq!(
