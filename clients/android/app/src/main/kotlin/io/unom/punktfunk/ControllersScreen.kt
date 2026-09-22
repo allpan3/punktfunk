@@ -7,6 +7,7 @@ import android.os.CombinedVibration
 import android.os.Handler
 import android.os.Looper
 import android.os.VibrationEffect
+import android.os.Vibrator
 import android.util.Log
 import android.view.InputDevice
 import android.view.KeyEvent
@@ -56,6 +57,9 @@ import io.unom.punktfunk.kit.DsDevice
 import io.unom.punktfunk.kit.Gamepad
 import io.unom.punktfunk.kit.Sc2BleLink
 import io.unom.punktfunk.kit.Sc2Capture
+import io.unom.punktfunk.kit.bodyRumbleFor
+import io.unom.punktfunk.kit.deviceBodyVibrator
+import io.unom.punktfunk.kit.padHasMotor
 import kotlinx.coroutines.delay
 
 /**
@@ -94,7 +98,8 @@ internal fun ControllersScreen(
     // screenshot harness runs where no InputDevice can exist, and the connected-pad card is the
     // point of that shot.
     var generation by remember { mutableIntStateOf(0) }
-    val pads = padsOverride ?: remember(generation) { Gamepad.pads() }.map(::padInfoOf)
+    val body = remember { deviceBodyVibrator(context) }
+    val pads = padsOverride ?: remember(generation) { Gamepad.pads() }.map { padInfoOf(it, body) }
     val others = remember(generation) {
         InputDevice.getDeviceIds()
             .toList()
@@ -772,7 +777,7 @@ private fun PadRow(info: PadInfo, gamepadSetting: Int) {
             if (info.canRumble) {
                 val context = LocalContext.current
                 OutlinedButton(onClick = {
-                    if (info.dev?.let(::testRumble) != true) {
+                    if (info.dev?.let { testRumble(it, deviceBodyVibrator(context)) } != true) {
                         Toast.makeText(context, "No motor answered", Toast.LENGTH_SHORT).show()
                     }
                 }) { Text("Test rumble") }
@@ -878,32 +883,29 @@ internal data class PadInfo(
     val dev: InputDevice? = null,
 )
 
-internal fun padInfoOf(dev: InputDevice): PadInfo = PadInfo(
+/** [body] is this device's own vibrator, which plays a built-in pad's rumble ([bodyRumbleFor]). */
+internal fun padInfoOf(dev: InputDevice, body: Vibrator?): PadInfo = PadInfo(
     name = dev.name,
     detail = deviceDetail(dev),
     forwarded = isForwarded(dev),
     controllerNumber = dev.controllerNumber,
     resolvedPref = Gamepad.prefFor(dev),
     buttons = Gamepad.padMap(dev).buttons, // via padMap so the list refresh reuses the cache
-    canRumble = deviceHasVibrator(dev),
+    canRumble = padHasMotor(dev) || bodyRumbleFor(dev, body) != null,
     dev = dev,
 )
 
-/** Whether the controller reports a rumble motor — via VibratorManager (API 31+) or the legacy Vibrator. */
-private fun deviceHasVibrator(dev: InputDevice): Boolean =
-    if (Build.VERSION.SDK_INT >= 31) {
-        dev.vibratorManager.vibratorIds.isNotEmpty()
-    } else {
-        @Suppress("DEPRECATION")
-        dev.vibrator.hasVibrator()
-    }
-
 /**
- * A short pulse on the pad's own motor. Also the console's `PadAction::Rumble`. `false` when
- * nothing was pulsed — no motor, or the platform refused — so the caller can say so instead of
- * leaving "Test" indistinguishable from a pad that has no motor.
+ * A short pulse on the motor that plays the pad's rumble: its own, or [body] for a built-in pad
+ * without one ([bodyRumbleFor]). Also the console's `PadAction::Rumble`. `false` when nothing
+ * was pulsed — no motor, or the platform refused — so the caller can say so instead of leaving
+ * "Test" indistinguishable from a pad that has no motor.
  */
-internal fun testRumble(dev: InputDevice): Boolean = runCatching {
+internal fun testRumble(dev: InputDevice, body: Vibrator?): Boolean = runCatching {
+    bodyRumbleFor(dev, body)?.let {
+        it.vibrate(VibrationEffect.createOneShot(300, 200))
+        return true
+    }
     if (Build.VERSION.SDK_INT >= 31) {
         val vm = dev.vibratorManager
         if (vm.vibratorIds.isEmpty()) return false

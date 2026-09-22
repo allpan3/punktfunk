@@ -1,5 +1,6 @@
 package io.unom.punktfunk.console
 
+import android.os.Vibrator
 import android.view.InputDevice
 import io.unom.punktfunk.HostActions
 import io.unom.punktfunk.Settings
@@ -315,7 +316,7 @@ internal object ConsoleJson {
      * `{"label", "pref", "pads": [...]}` — the controller chip's text (the driving pad's name),
      * the glyph style's pref byte, and one entry per connected pad for the settings rows and the
      * console's Connected-controllers screen. [extras] are appended, and the first one names the
-     * chip when no `InputDevice` drives it.
+     * chip when no `InputDevice` drives it. [body] is this device's own vibrator.
      *
      * `detail`/`forwarded`/`rumble` come straight from [padInfoOf], the same reader the touch
      * Controllers screen renders from: the support answer a user gets must not depend on which
@@ -325,10 +326,11 @@ internal object ConsoleJson {
         pads: List<InputDevice>,
         driving: InputDevice?,
         extras: List<ExtraPad> = emptyList(),
+        body: Vibrator? = null,
     ): String {
         val arr = JSONArray()
         for (d in pads) {
-            val info = padInfoOf(d)
+            val info = padInfoOf(d, body)
             val entry = JSONObject()
                 .put("name", d.name)
                 .put("key", "${d.vendorId}:${d.productId}:${d.name}")

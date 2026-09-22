@@ -42,6 +42,7 @@ import io.unom.punktfunk.kit.RingNav
 import io.unom.punktfunk.kit.Sc2BleLink
 import io.unom.punktfunk.kit.Sc2Device
 import io.unom.punktfunk.kit.SessionAccess
+import io.unom.punktfunk.kit.isExternalDevice
 import io.unom.punktfunk.kit.ringNavForKey
 import io.unom.punktfunk.kit.link.DeepLinkResult
 import io.unom.punktfunk.kit.link.DeepLinks

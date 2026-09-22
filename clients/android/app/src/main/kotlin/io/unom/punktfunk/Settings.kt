@@ -242,7 +242,7 @@ data class Settings(
      * Opt-in: ALSO play the rumble the host addresses to controller 1 (wire pad 0) on this
      * phone's own vibration motor — for clip-on gamepads that ship without rumble motors, where
      * the phone body is the only actuator in the player's hands. Off by default; read once per
-     * session by StreamScreen (it hands GamepadFeedback the device vibrator only when set). The
+     * session by StreamScreen. A motorless built-in pad rumbles through the body either way. The
      * toggle is hidden on devices without a vibrator (TVs), where this would be a silent no-op.
      */
     val rumbleOnPhone: Boolean = false,

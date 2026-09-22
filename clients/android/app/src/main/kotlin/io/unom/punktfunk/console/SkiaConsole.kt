@@ -28,6 +28,7 @@ import io.unom.punktfunk.runSpeedTest
 import io.unom.punktfunk.kit.Gamepad
 import io.unom.punktfunk.kit.NativeBridge
 import io.unom.punktfunk.kit.VideoDecoders
+import io.unom.punktfunk.kit.deviceBodyVibrator
 import io.unom.punktfunk.kit.discovery.DiscoveredHost
 import io.unom.punktfunk.kit.discovery.HostDiscovery
 import io.unom.punktfunk.kit.discovery.Presence
@@ -576,7 +577,12 @@ object SkiaConsole {
         if (handle == 0L) return
         NativeBridge.nativeConsoleSetPads(
             handle,
-            ConsoleJson.pads(Gamepad.pads(), driving ?: Gamepad.firstPad(), extras),
+            ConsoleJson.pads(
+                Gamepad.pads(),
+                driving ?: Gamepad.firstPad(),
+                extras,
+                appContext?.let(::deviceBodyVibrator),
+            ),
         )
     }
 

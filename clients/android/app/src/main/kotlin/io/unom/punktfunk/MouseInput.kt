@@ -1,9 +1,9 @@
 package io.unom.punktfunk
 
-import android.os.Build
 import android.view.InputDevice
 import android.view.MotionEvent
 import io.unom.punktfunk.kit.NativeBridge
+import io.unom.punktfunk.kit.isExternalDevice
 
 /** True when any connected input device is a pointer (USB/BT mouse, or a touchpad driving one). */
 fun hasPhysicalMouse(): Boolean = InputDevice.getDeviceIds().any { id ->
@@ -16,10 +16,6 @@ fun hasPhysicalKeyboard(): Boolean = InputDevice.getDeviceIds().any { id ->
         it.keyboardType == InputDevice.KEYBOARD_TYPE_ALPHABETIC && it.isExternalDevice()
     } == true
 }
-
-/** Below API 29 there is no `isExternal`; built-in keys and the nav bar carry no vendor id. */
-fun InputDevice.isExternalDevice(): Boolean =
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) isExternal else vendorId != 0
 
 /**
  * Whether a BACK/FORWARD key is a mouse side button, sent to the host as X1/X2, rather than the

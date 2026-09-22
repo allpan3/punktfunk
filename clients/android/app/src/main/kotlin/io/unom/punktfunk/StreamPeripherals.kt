@@ -201,12 +201,13 @@ internal class StreamPeripherals(
         }
         // Host→client feedback (rumble + DualSense lightbar/LEDs), routed to each controller by pad
         // index via the router; poll threads stopped + joined before the router is released and the
-        // session closed. "Rumble on this phone" (opt-in) additionally mirrors controller 1's
-        // rumble onto the device's own vibrator — for clip-on pads without rumble motors.
+        // session closed. The device's own vibrator plays a motorless built-in pad's rumble, and
+        // with "Rumble on this phone" (opt-in) it also mirrors controller 1's.
         feedback = GamepadFeedback(
             handle,
             router,
-            deviceVibrator = if (settings.rumbleOnPhone) deviceBodyVibrator(context) else null,
+            bodyVibrator = deviceBodyVibrator(context),
+            mirrorPad0 = settings.rumbleOnPhone,
         ).also { it.start() }
         // "Gyro from this phone" (opt-in): this device's IMU speaks for controller 1's motion
         // while wire pad 0 is a controller without a gyro of its own — the rumble mirror's

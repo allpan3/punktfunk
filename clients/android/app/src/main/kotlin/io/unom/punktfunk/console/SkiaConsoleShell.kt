@@ -45,6 +45,7 @@ import io.unom.punktfunk.models.LibraryReturn
 import io.unom.punktfunk.kit.Sc2BleLink
 import io.unom.punktfunk.kit.Sc2Capture
 import io.unom.punktfunk.kit.Sc2Device
+import io.unom.punktfunk.kit.deviceBodyVibrator
 import io.unom.punktfunk.rememberConsoleHaptics
 import io.unom.punktfunk.testRumble
 import kotlin.math.roundToInt
@@ -471,7 +472,7 @@ private fun padAction(activity: MainActivity?, action: String, padKey: String) {
             } else {
                 Gamepad.pads()
                     .firstOrNull { "${it.vendorId}:${it.productId}:${it.name}" == padKey }
-                    ?.let(::testRumble) == true
+                    ?.let { testRumble(it, deviceBodyVibrator(activity)) } == true
             }
             if (!pulsed) SkiaConsole.notice("No motor answered.")
         }
