@@ -856,7 +856,7 @@ public final class Stage2Pipeline {
                 connection: connection, token: token, pumpStopped: pumpStopped,
                 ring: ring, renderSignal: renderSignal,
                 device: presenter.metalDevice, queue: presenter.metalQueue,
-                hud: hud, cadence: cadence, rateHint: frameRateHint,
+                hud: hud, stats: debugStats, cadence: cadence, rateHint: frameRateHint,
                 onFrame: onFrame, onSessionEnd: onSessionEnd, onDecodedSize: onDecodedSize,
                 frameHDR: frameHDR,
                 onHdrMeta: { [weak presenter] meta in presenter?.setHdrMeta(meta) })
@@ -1514,7 +1514,7 @@ public final class Stage2Pipeline {
         connection: PunktfunkConnection, token: StopFlag, pumpStopped: DispatchSemaphore,
         ring: FrameStore<ReadyFrame>, renderSignal: DispatchSemaphore,
         device: MTLDevice, queue: MTLCommandQueue,
-        hud: HudSink, cadence: CadenceClock?, rateHint: FrameRateHint,
+        hud: HudSink, stats: PresentDebugStats, cadence: CadenceClock?, rateHint: FrameRateHint,
         onFrame: (@Sendable (AccessUnit) -> Void)?,
         onSessionEnd: (@Sendable () -> Void)?,
         onDecodedSize: (@Sendable (Int, Int) -> Void)?,
@@ -1581,6 +1581,8 @@ public final class Stage2Pipeline {
                                 Int64(ts.tv_sec) * 1_000_000_000 + Int64(ts.tv_nsec)
                             hud.decoded(
                                 ptsNs: ptsNs, receivedNs: receivedNs, decodedNs: decodedNs)
+                            stats.decoded(
+                                isRepeat: flags & PunktfunkConnection.userFlagRepeat != 0)
                             frameHDR.note(planes.pq)
                             // Same cadence sample as the VideoToolbox half: the wavelet decode's
                             // completion IS this frame's presentable instant.
