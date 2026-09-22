@@ -885,11 +885,13 @@ pub(super) fn input_thread(
     };
     // Injector is host-lifetime: a press left dangling stays latched in the
     // compositor (Mutter keeps the implicit grab). Matching ups go out at session
-    // end. HashSet, capped at `MAX_HELD`, so a flood of never-released codes
-    // cannot grow this thread's state; codes past the cap are not auto-released.
+    // end, or when a `KeysHeld` snapshot drops the key. HashSet, capped at `MAX_HELD`,
+    // so a flood of never-released codes cannot grow this thread's state; codes
+    // past the cap are not auto-released.
     const MAX_HELD: usize = 256;
     let mut held_buttons: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut held_keys: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut key_state = punktfunk_core::input::key_state::KeyStateReceiver::default();
     let mut held_touch: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut pen = PenSession::new();
     loop {
@@ -1091,7 +1093,27 @@ pub(super) fn input_thread(
                             }
                         }
                     }
-                    _ => {
+                    InputKind::KeysHeld => {
+                        // What the client holds right now. Key edges are one lossy datagram
+                        // each, so a lost up would otherwise leave the key pressed here and
+                        // the focused app repeating it until the next edge for that key.
+                        for code in key_state.releases(&ev, &held_keys) {
+                            held_keys.remove(&code);
+                            tracing::debug!(
+                                code,
+                                "input: client no longer holds this key — releasing it"
+                            );
+                            let _ = inj_tx.send(InputEvent {
+                                kind: InputKind::KeyUp,
+                                _pad: [0; 3],
+                                code,
+                                x: 0,
+                                y: 0,
+                                flags: 0,
+                            });
+                        }
+                    }
+                    _ if key_state.accept(&ev) => {
                         // Track press/release so a mid-press disconnect can be undone below.
                         match ev.kind {
                             InputKind::MouseButtonDown if held_buttons.len() < MAX_HELD => {
@@ -1124,6 +1146,7 @@ pub(super) fn input_thread(
                         // Host-lifetime injector. Send error = service gone; input is lossy.
                         let _ = inj_tx.send(ev);
                     }
+                    _ => {} // Stale keyboard edges must not undo newer state
                 }
             }
             // Grant missed: drop. Dispatch already counted; no second counter.

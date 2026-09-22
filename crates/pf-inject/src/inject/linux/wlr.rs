@@ -579,6 +579,8 @@ impl InputInjector for WlrootsInjector {
             | InputKind::GamepadAxis
             | InputKind::GamepadRemove
             | InputKind::GamepadArrival => {}
+            // Held-key snapshot: the host turns one into key ups before the injector.
+            InputKind::KeysHeld => {}
             // No virtual-touch protocol here; touch is libei only.
             InputKind::TouchDown | InputKind::TouchMove | InputKind::TouchUp => {}
         }

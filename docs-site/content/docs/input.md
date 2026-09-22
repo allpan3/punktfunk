@@ -61,6 +61,10 @@ Without a stream running, the Linux client lists the shortcuts under **Keyboard 
 main menu, and the Windows client on a **Shortcuts** screen reached from its host list. Both list the
 microphone mute; the in-stream hint over the video doesn't, to stay one readable line.
 
+With a compatible client and host, held-key snapshots recover a lost key release when
+packets start arriving again. Sequence numbers prevent delayed packets from restoring an
+older key state. A disconnected network can still delay input and releases.
+
 ### On the other clients
 
 - **macOS** honours the release, mouse-mode, disconnect and stats combos, written

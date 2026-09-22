@@ -101,7 +101,9 @@ impl GrantClass {
 /// are plane-gated before decode (Mic / Gamepad / Pointer by construction).
 pub fn classify(kind: InputKind) -> GrantClass {
     match kind {
-        InputKind::KeyDown | InputKind::KeyUp | InputKind::TextInput => GrantClass::Keyboard,
+        InputKind::KeyDown | InputKind::KeyUp | InputKind::TextInput | InputKind::KeysHeld => {
+            GrantClass::Keyboard
+        }
         InputKind::MouseMove
         | InputKind::MouseMoveAbs
         | InputKind::MouseButtonDown
@@ -176,7 +178,10 @@ mod tests {
             };
             seen += 1;
             let want = match kind {
-                InputKind::KeyDown | InputKind::KeyUp | InputKind::TextInput => Keyboard,
+                InputKind::KeyDown
+                | InputKind::KeyUp
+                | InputKind::TextInput
+                | InputKind::KeysHeld => Keyboard,
                 InputKind::GamepadButton
                 | InputKind::GamepadAxis
                 | InputKind::GamepadState
@@ -187,7 +192,7 @@ mod tests {
             assert_eq!(classify(kind), want, "kind {kind:?}");
         }
         assert_eq!(
-            seen, 17,
+            seen, 18,
             "InputKind wire vocabulary grew — classify the new kind"
         );
     }
