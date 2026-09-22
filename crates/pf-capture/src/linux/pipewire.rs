@@ -1179,6 +1179,8 @@ fn consume_frame(
                 implausible = r.implausible,
                 hdr_pts_used = ud.hdr_pts_enabled,
                 held_drops = ud.held_drops,
+                // Session total of raw-passthrough frames that took the CPU copy instead.
+                cpu_fallbacks = ud.passthrough_fallbacks.frames,
                 pool_depth = ud.pool.live,
                 "capture wire-pts provenance"
             );
