@@ -642,6 +642,7 @@ fn kind_bit(kind: InputKind) -> u32 {
         InputKind::GamepadArrival => 14,
         InputKind::TextInput => 15,
         InputKind::Scroll => 16,
+        InputKind::KeysHeld => 17,
     };
     1 << i
 }
@@ -1009,7 +1010,8 @@ impl EiState {
             | InputKind::GamepadAxis
             | InputKind::GamepadRemove
             | InputKind::GamepadArrival
-            | InputKind::TextInput => emitted = false,
+            | InputKind::TextInput
+            | InputKind::KeysHeld => emitted = false,
         }
 
         if emitted {
@@ -1042,7 +1044,8 @@ fn capability_for(kind: InputKind) -> Option<DeviceCapability> {
         | InputKind::GamepadAxis
         | InputKind::GamepadRemove
         | InputKind::GamepadArrival
-        | InputKind::TextInput => return None,
+        | InputKind::TextInput
+        | InputKind::KeysHeld => return None,
     })
 }
 

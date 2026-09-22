@@ -35,6 +35,11 @@ impl HeldInput {
         }
     }
 
+    /// The keys held now, for a `KeysHeld` snapshot to reconcile against.
+    pub fn keys(&self) -> &HashSet<u32> {
+        &self.keys
+    }
+
     pub fn is_empty(&self) -> bool {
         self.buttons.is_empty() && self.keys.is_empty() && self.touch.is_empty()
     }

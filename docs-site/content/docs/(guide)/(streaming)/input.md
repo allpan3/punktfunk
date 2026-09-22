@@ -26,6 +26,10 @@ releases input and takes it back when you return. Keys and buttons you were hold
 the host, so nothing sticks. On Linux and Windows, controllers stop reaching the host too until
 you capture again.
 
+With a compatible client and host, a lost key release is recovered when packets start
+arriving again, so the key doesn't keep repeating on the host. A disconnected network can
+still delay input and releases.
+
 ### Keyboard shortcuts
 
 | Action | Linux · Windows | macOS | iPad keyboard | Android |

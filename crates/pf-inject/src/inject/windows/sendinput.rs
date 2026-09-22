@@ -203,6 +203,8 @@ impl InputInjector for SendInputInjector {
             | InputKind::GamepadState
             | InputKind::GamepadRemove
             | InputKind::GamepadArrival => Ok(()),
+            // Held-key snapshot: the host turns one into key ups before the injector.
+            InputKind::KeysHeld => Ok(()),
             // Wire touch → PT_TOUCH (design/pen-tablet-input.md).
             InputKind::TouchDown | InputKind::TouchMove | InputKind::TouchUp => {
                 if let Some(t) = self.ensure_touch() {

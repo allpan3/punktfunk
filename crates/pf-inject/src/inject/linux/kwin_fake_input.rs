@@ -427,6 +427,8 @@ impl InputInjector for KwinFakeInjector {
             }
             // Host-layout keycodes only; this backend does not advertise HOST_CAP_TEXT_INPUT.
             InputKind::TextInput => {}
+            // Held-key snapshot: the host turns one into key ups before the injector.
+            InputKind::KeysHeld => {}
             // Gamepads go through uinput, not the compositor.
             InputKind::GamepadState
             | InputKind::GamepadButton
