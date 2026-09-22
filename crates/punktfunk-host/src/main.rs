@@ -171,6 +171,7 @@ mod stats_recorder;
 mod store;
 mod stream_marker;
 mod update;
+mod version;
 // The browser plane (design/web-client-implementation-plan.md Phase 1). Runtime opt-in.
 mod webtransport;
 // Shim: virtual-display lives in `pf-vdisplay`; keep `crate::vdisplay::*` for this crate's callers.
@@ -378,7 +379,7 @@ fn real_main() -> Result<()> {
         args.first().map(String::as_str),
         Some("--version") | Some("-V") | Some("version")
     ) {
-        println!("punktfunk-host {}", env!("PUNKTFUNK_VERSION"));
+        println!("punktfunk-host {}", crate::version::get());
         return Ok(());
     }
 
@@ -387,7 +388,7 @@ fn real_main() -> Result<()> {
     if !management_cli {
         tracing::info!(
             "punktfunk-host {} (punktfunk_core ABI v{})",
-            env!("PUNKTFUNK_VERSION"),
+            crate::version::get(),
             punktfunk_core::ABI_VERSION
         );
     }

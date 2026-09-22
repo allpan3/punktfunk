@@ -43,7 +43,7 @@
 #    time, so no new DLL ships and non-Intel boxes are unaffected.
 #  - AMF (AMD, native SDK): unconditional, no feature and no build-time env — pf-encode-win loads
 #    amfrt64.dll from the AMD driver at run time.
-# CI never launches the exe, so no GPU is needed here — this is build + Windows clippy coverage only.
+# CI launches the exe only for `--version`, so no GPU is needed here.
 #
 # Two architectures from ONE x64 runner (#298), the client workflow's pattern: the x64 MSVC toolset
 # carries the ARM64 cross compiler and aarch64-pc-windows-msvc has host tools. The arm64 leg builds
@@ -185,6 +185,15 @@ jobs:
           "CARGO_TARGET_DIR=C:\t" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "CMAKE_POLICY_VERSION_MINIMUM=3.5" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      - name: Carry source mtimes (unchanged crates stay fresh)
+        shell: pwsh
+        continue-on-error: true
+        # Cargo judges path crates by mtime, and this checkout is new. Every job that builds
+        # into this target dir must run this first: scripts/ci/src-mtimes.rs.
+        run: |
+          rustc -O scripts/ci/src-mtimes.rs -o "$env:RUNNER_TEMP\src-mtimes.exe"; if ($LASTEXITCODE) { throw "src-mtimes build" }
+          & "$env:RUNNER_TEMP\src-mtimes.exe" $env:CARGO_TARGET_DIR; if ($LASTEXITCODE) { throw "src-mtimes" }
+
       - name: sccache preflight (a dead cache costs a cold build, not the leg)
         # Verbatim from the package job: storage.unom.io has answered the daemon's startup check
         # with a 401, which kills cargo at `rustc -vV` before a line compiles.
@@ -204,16 +213,11 @@ jobs:
         # pf-encode-win, pf-inject and pf-win-display are here because they appear in no other
         # workflow's -p list at all — their Windows `#[test]`s reached no compiler anywhere.
         # pf-encode-win takes nvenc,qsv and not pyrowave: this lane never builds the PyroWave
-        # C++ tree, and the drivers lane already compiles that backend.
+        # C++ tree, and the drivers lane already compiles that backend. Two runs, not eight:
+        # every extra feature set re-checks the crates the runs share.
         run: |
-          cargo clippy --release --locked -p punktfunk-host --features nvenc,qsv --target x86_64-pc-windows-msvc -- -D warnings; if ($LASTEXITCODE) { throw "host clippy" }
-          cargo clippy --release --locked -p pf-encode --all-targets --features nvenc,qsv --target x86_64-pc-windows-msvc -- -D warnings; if ($LASTEXITCODE) { throw "pf-encode clippy" }
-          cargo clippy --release --locked -p pf-encode-win --all-targets --features nvenc,qsv --target x86_64-pc-windows-msvc -- -D warnings; if ($LASTEXITCODE) { throw "pf-encode-win clippy" }
-          cargo clippy --release --locked -p pf-capture --all-targets --target x86_64-pc-windows-msvc -- -D warnings; if ($LASTEXITCODE) { throw "pf-capture clippy" }
-          cargo clippy --release --locked -p pf-vdisplay --all-targets --target x86_64-pc-windows-msvc -- -D warnings; if ($LASTEXITCODE) { throw "pf-vdisplay clippy" }
-          cargo clippy --release --locked -p pf-win-display --all-targets --target x86_64-pc-windows-msvc -- -D warnings; if ($LASTEXITCODE) { throw "pf-win-display clippy" }
-          cargo clippy --release --locked -p pf-inject --all-targets --target x86_64-pc-windows-msvc -- -D warnings; if ($LASTEXITCODE) { throw "pf-inject clippy" }
-          cargo clippy --release --locked -p punktfunk-tray --target x86_64-pc-windows-msvc -- -D warnings; if ($LASTEXITCODE) { throw "tray clippy" }
+          cargo clippy --release --locked -p punktfunk-host -p punktfunk-tray --features nvenc,qsv --target x86_64-pc-windows-msvc -- -D warnings; if ($LASTEXITCODE) { throw "host clippy" }
+          cargo clippy --release --locked -p pf-encode -p pf-encode-win -p pf-capture -p pf-vdisplay -p pf-win-display -p pf-inject --all-targets --features nvenc,qsv --target x86_64-pc-windows-msvc -- -D warnings; if ($LASTEXITCODE) { throw "subsystem clippy" }
 
       - name: Format check
         # Cheap, needs no compile, and the Linux lane cannot see these crates' Windows modules.
@@ -310,9 +314,19 @@ jobs:
             # Canary: <major>.<minor>.<run> — major.minor track one minor ahead of stable, run climbs monotonically.
             "$($pf.PF_MAJOR).$($pf.PF_MINOR).$($env:GITHUB_RUN_NUMBER)"
           }
+          # Not PUNKTFUNK_BUILD_VERSION: the packer stamps $v into the finished exe, so a new run
+          # number never recompiles the host (packaging/windows/stamp-version.ps1).
           "HOST_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "PUNKTFUNK_BUILD_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Output "host version $v"
+
+      - name: Carry source mtimes (unchanged crates stay fresh)
+        shell: pwsh
+        continue-on-error: true
+        # Cargo judges path crates by mtime, and this checkout is new. Every job that builds
+        # into this target dir must run this first: scripts/ci/src-mtimes.rs.
+        run: |
+          rustc -O scripts/ci/src-mtimes.rs -o "$env:RUNNER_TEMP\src-mtimes.exe"; if ($LASTEXITCODE) { throw "src-mtimes build" }
+          & "$env:RUNNER_TEMP\src-mtimes.exe" $env:CARGO_TARGET_DIR; if ($LASTEXITCODE) { throw "src-mtimes" }
 
       - name: sccache preflight (a dead cache costs a cold build, not the leg)
         shell: pwsh
@@ -339,6 +353,9 @@ jobs:
         # x64 = all-vendor host: NVENC (NVIDIA, direct SDK) + native QSV (Intel, static VPL
         # dispatcher) + native AMF (AMD, always compiled in).
         # arm64 = gamestream only; the driver's Media Foundation backend carries no feature.
+        # The fingerprint log names why each rebuilt unit was dirty; a fresh unit prints nothing.
+        env:
+          CARGO_LOG: cargo::core::compiler::fingerprint=info
         run: cargo build --release --locked -p punktfunk-host ${{ matrix.host_flags }} --target ${{ matrix.target }}
 
       - name: Build (release, status tray)
@@ -348,52 +365,16 @@ jobs:
 
       - name: Clippy (host + tray, Windows)
         shell: pwsh
-        # First-ever Windows lint coverage for the host (Linux CI never lints the windows-cfg code).
-        # --release is REQUIRED, not just faster: a default (debug) clippy compiles the whole dep tree
-        # into a SECOND target dir (C:\t\debug), which means a second full build of openh264-sys2's
-        # vendored C++ (the software-H.264 fallback in pf-encode) on top of the release copy the Build
-        # steps above already produced. That second cc-rs `cl.exe` fan-out tips this runner over into
-        # `cabac_decoder.cpp: fatal error C1069 (cannot read compiler command line)` — an environmental
-        # disk/temp exhaustion, NOT a source error (the identical file compiles fine in the release
-        # build minutes earlier). Linting in release reuses those native build-script artifacts (no
-        # openh264 rebuild), and keeps everything in one C:\t\release tree. Same reason
-        # pf-vkhdr-layer's clippy below runs --release.
-        #
-        # The subsystem crates are linted SEPARATELY with --all-targets so their Windows
-        # `#[cfg(test)]` modules are type-checked. NOTE the AMF C-ABI layout assertions, the QSV
-        # tests and the PyroWave-Windows smoke test moved to pf-encode-win in the 2026-09-03 split
-        # (b3f56f32a) — this step claimed them for months after they had left, which is how
-        # pf-encode-win, pf-inject and pf-win-display ended up in no -p list in any workflow.
-        # They are on the line below now. What stays here: pf-capture's `StallWatch`
-        # tests, the DXGI HDR self-tests and the cursor-conversion tables. The host lint above
-        # cannot cover them: `-p punktfunk-host` only builds those crates as dependencies, so their
-        # test targets are never compiled anywhere, and that blind spot is what let the Linux twin's
-        # tests rot to the wrong arity unnoticed. pf-capture has no cargo features, so it needs no
-        # feature juggling and pulls in no extra dep tree.
-        # NOTE: for the HOST and pf-encode, clippy (a check, no link step) is deliberately the
-        # vehicle — `cargo test` with `nvenc` cannot LINK on MSVC: nvidia-video-codec-sdk
-        # link-imports NvEncodeAPICreateInstance / NvEncodeAPIGetMaxSupportedVersion, which resolve
-        # only against the driver's import lib. (On Linux the same crate dlopens them, so ci.yml can
-        # and does run the tests there.) Running them here would need an `--features qsv` build
-        # without `nvenc`, i.e. a third full dep tree on a runner that already trips C1069 —
-        # not worth it while ci.yml executes the same tests.
-        #
-        # That reasoning does NOT extend to pf-capture: it has no encoder dependency at all
-        # (`cargo tree -p pf-capture` lists no nvidia/libvpl/pyrowave), so its test binary
-        # links against nothing this runner lacks, and it reuses the release artifacts the steps
-        # above already built. Its Windows `#[test]`s — StallWatch, the f16 conversions, the cursor
-        # truth table, the IDD generation masking — are Windows-only code that NO other job can
-        # execute, so linting them was leaving real coverage on the table. See the run step below.
+        # --release reuses the tree the Build steps made. A debug clippy builds a second one, and
+        # its second openh264 C++ build tips this runner into C1069 (disk/temp exhaustion).
+        # The subsystem crates take --all-targets so their Windows `#[cfg(test)]` modules are
+        # type-checked; `-p punktfunk-host` builds them only as dependencies. The host and
+        # pf-encode stay lint-only: with `nvenc` a test binary cannot link on MSVC.
+        # Two runs, not eight: every extra feature set re-checks the crates the runs share.
         run: |
           $t = '${{ matrix.target }}'
-          cargo clippy --release --locked -p punktfunk-host ${{ matrix.host_flags }} --target $t -- -D warnings; if ($LASTEXITCODE) { throw "host clippy" }
-          cargo clippy --release --locked -p pf-encode --all-targets ${{ matrix.encode_flags }} --target $t -- -D warnings; if ($LASTEXITCODE) { throw "pf-encode clippy" }
-          cargo clippy --release --locked -p pf-encode-win --all-targets ${{ matrix.encode_flags }} --target $t -- -D warnings; if ($LASTEXITCODE) { throw "pf-encode-win clippy" }
-          cargo clippy --release --locked -p pf-capture --all-targets --target $t -- -D warnings; if ($LASTEXITCODE) { throw "pf-capture clippy" }
-          cargo clippy --release --locked -p pf-vdisplay --all-targets --target $t -- -D warnings; if ($LASTEXITCODE) { throw "pf-vdisplay clippy" }
-          cargo clippy --release --locked -p pf-win-display --all-targets --target $t -- -D warnings; if ($LASTEXITCODE) { throw "pf-win-display clippy" }
-          cargo clippy --release --locked -p pf-inject --all-targets --target $t -- -D warnings; if ($LASTEXITCODE) { throw "pf-inject clippy" }
-          cargo clippy --release --locked -p punktfunk-tray --target $t -- -D warnings; if ($LASTEXITCODE) { throw "tray clippy" }
+          cargo clippy --release --locked -p punktfunk-host -p punktfunk-tray ${{ matrix.host_flags }} --target $t -- -D warnings; if ($LASTEXITCODE) { throw "host clippy" }
+          cargo clippy --release --locked -p pf-encode -p pf-encode-win -p pf-capture -p pf-vdisplay -p pf-win-display -p pf-inject --all-targets ${{ matrix.encode_flags }} --target $t -- -D warnings; if ($LASTEXITCODE) { throw "subsystem clippy" }
 
       - name: Test (pf-capture, Windows)
         if: matrix.arch == 'x64'
@@ -649,6 +630,11 @@ jobs:
             -Version $env:HOST_VERSION -TargetDir ${{ matrix.td }}\${{ matrix.target }}\release -OutDir ${{ matrix.td }}\out `
             -Arch ${{ matrix.arch }} -BunExe $env:BUN_SHIP_EXE
 
+      - name: sccache stats (visibility only)
+        if: always()
+        shell: pwsh
+        run: sccache --show-stats
+
       # WP3.3's smoke, now on the artifact that ships: the sandwich inspects, the file carries a
       # signature, and the packed exe's silent dry-run — the exact fielded updater spawn plus
       # --dry-run, no mutation on the shared runner — writes the expected plan into /LOG=.
@@ -667,6 +653,16 @@ jobs:
           $want = if ('${{ matrix.arch }}' -eq 'arm64') { 0xAA64 } else { 0x8664 }
           if ($machine -ne $want) { throw ("installer PE Machine is 0x{0:X4}, expected 0x{1:X4}" -f $machine, $want) }
           Write-Output ("installer: {0} MB, PE Machine 0x{1:X4}" -f [math]::Round((Get-Item $setup).Length / 1MB, 1), $machine)
+
+      - name: Smoke the stamped version
+        # The updater compares this string: a stamp the build folded away reads as an old
+        # build forever. x64 only: an arm64 exe cannot run here.
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $got = & '${{ matrix.td }}\out\punktfunk-host.exe' --version
+          if ($got -ne "punktfunk-host $env:HOST_VERSION") { throw "stamped exe reports '$got', not $env:HOST_VERSION" }
+          Write-Output $got
 
       - name: Smoke the installer (silent dry-run)
         # The exact fielded updater spawn plus --dry-run, no mutation on the shared runner. x64 only:

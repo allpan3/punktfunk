@@ -2,9 +2,8 @@
 # Build PunktfunkCore.xcframework on the Mac runner once per commit.
 #
 # apple.yml's swift, distribute and screenshots jobs need the same eight-slice bundle for the same
-# commit, and each gets a fresh checkout at a new path, which alone makes cargo recompile the
-# workspace's crates for every slice. The first job builds (into the persistent target dir, so
-# third-party crates stay fresh) and parks a copy under ~/ci/xcframework/<sha>; later jobs copy it.
+# commit. The first job builds into the persistent target dir and parks a copy under
+# ~/ci/xcframework/<sha>; later jobs copy it.
 # Parked copies older than two days are removed.
 #
 # Usage, from the repo root with GITHUB_SHA set: sh scripts/ci/mac-xcframework.sh
@@ -24,6 +23,10 @@ fi
 
 CARGO_TARGET_DIR="$(sh scripts/ci/mac-cargo-target.sh apple)"
 export CARGO_TARGET_DIR
+# Unchanged crates stay fresh across checkouts (scripts/ci/src-mtimes.rs). Every build into
+# this target dir goes through here, which is what the manifest needs.
+tool="${RUNNER_TEMP:-/tmp}/src-mtimes"
+rustc -O scripts/ci/src-mtimes.rs -o "$tool" && "$tool" "$CARGO_TARGET_DIR" || echo "src-mtimes skipped" >&2
 BUILD_IOS=1 BUILD_TVOS=1 bash scripts/build-xcframework.sh
 
 # Park it through a temp dir and a rename, so a half-written copy never looks complete.

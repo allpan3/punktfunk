@@ -228,10 +228,7 @@ fn fetch_manifest_blocking(channel: &str) -> Result<Manifest, FeedError> {
         &pf_update_check::feed::feed_base(),
         channel,
         &pinned_keys(),
-        &format!(
-            "punktfunk-host/{} (update-check)",
-            env!("PUNKTFUNK_VERSION")
-        ),
+        &format!("punktfunk-host/{} (update-check)", crate::version::get()),
     )
 }
 
@@ -275,7 +272,7 @@ pub(crate) fn refresh_blocking() -> Result<Checked, FeedError> {
                 detect::is_newer(
                     &checked.manifest.version,
                     checked.manifest.ci_run,
-                    env!("PUNKTFUNK_VERSION"),
+                    crate::version::get(),
                     channel,
                 )
             };
@@ -446,7 +443,7 @@ pub(crate) fn start_apply(force: bool, session_active: bool) -> Result<(), Apply
         if matches!(
             jobs::reconcile(
                 jobs::read_intent(&jobs::intent_path()),
-                env!("PUNKTFUNK_VERSION"),
+                crate::version::get(),
                 now_unix()
             ),
             jobs::Reconciled::StillApplying
@@ -459,7 +456,7 @@ pub(crate) fn start_apply(force: bool, session_active: bool) -> Result<(), Apply
         let newer = detect::is_newer(
             &checked.manifest.version,
             checked.manifest.ci_run,
-            env!("PUNKTFUNK_VERSION"),
+            crate::version::get(),
             channel,
         );
         if !newer {
@@ -544,7 +541,7 @@ pub(crate) fn start_apply(force: bool, session_active: bool) -> Result<(), Apply
             Err((stage_name, error)) => {
                 let record = jobs::ResultRecord {
                     ok: false,
-                    from: env!("PUNKTFUNK_VERSION").into(),
+                    from: crate::version::get().into(),
                     to: target_version.clone(),
                     finished_unix: now_unix(),
                     stage: Some(stage_name.into()),
@@ -575,7 +572,7 @@ enum PostApply {
 pub(crate) fn reconcile_at_boot() {
     let path = jobs::intent_path();
     let intent = jobs::read_intent(&path);
-    match jobs::reconcile(intent, env!("PUNKTFUNK_VERSION"), now_unix()) {
+    match jobs::reconcile(intent, crate::version::get(), now_unix()) {
         jobs::Reconciled::None | jobs::Reconciled::StillApplying => {}
         jobs::Reconciled::Success(record) => {
             tracing::info!(from = %record.from, to = %record.to, "host update applied");
@@ -621,7 +618,7 @@ impl Snapshot {
             return None;
         }
         let intent = jobs::read_intent(&jobs::intent_path())?;
-        match jobs::reconcile(Some(intent.clone()), env!("PUNKTFUNK_VERSION"), now_unix()) {
+        match jobs::reconcile(Some(intent.clone()), crate::version::get(), now_unix()) {
             jobs::Reconciled::StillApplying => Some(intent),
             _ => None,
         }

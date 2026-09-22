@@ -492,7 +492,7 @@ pub(crate) struct LocalSummary {
 pub(crate) async fn get_health() -> Json<Health> {
     Json(Health {
         status: "ok".into(),
-        version: env!("PUNKTFUNK_VERSION").into(),
+        version: crate::version::get().into(),
         abi_version: punktfunk_core::ABI_VERSION,
     })
 }
@@ -514,7 +514,7 @@ pub(crate) async fn get_host_info(State(st): State<Arc<MgmtState>>) -> Json<Host
         hostname: h.hostname.clone(),
         uniqueid: h.uniqueid.clone(),
         local_ip: h.local_ip().to_string(),
-        version: env!("PUNKTFUNK_VERSION").into(),
+        version: crate::version::get().into(),
         abi_version: punktfunk_core::ABI_VERSION,
         app_version: APP_VERSION.into(),
         gfe_version: GFE_VERSION.into(),
@@ -785,7 +785,7 @@ pub(crate) async fn get_local_summary(State(st): State<Arc<MgmtState>>) -> Json<
         .map(|n| (n.status().paired_clients, n.pending().len() as u32))
         .unwrap_or((0, 0));
     Json(LocalSummary {
-        version: env!("PUNKTFUNK_VERSION").into(),
+        version: crate::version::get().into(),
         // Either plane, like `/status`; GameStream flags alone miss a native session.
         video_streaming: st.app.streaming.load(Ordering::SeqCst) || !native.is_empty(),
         audio_streaming: st.app.audio_streaming.load(Ordering::SeqCst) || !native.is_empty(),

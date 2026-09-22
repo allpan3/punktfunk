@@ -247,6 +247,15 @@ jobs:
           "MSIX_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Output "MSIX version $v  arch ${{ matrix.arch }}  target ${{ matrix.target }}  target-dir ${{ matrix.td }}"
 
+      - name: Carry source mtimes (unchanged crates stay fresh)
+        shell: pwsh
+        continue-on-error: true
+        # Cargo judges path crates by mtime, and this checkout is new. Every job that builds
+        # into this target dir must run this first: scripts/ci/src-mtimes.rs.
+        run: |
+          rustc -O scripts/ci/src-mtimes.rs -o "$env:RUNNER_TEMP\src-mtimes.exe"; if ($LASTEXITCODE) { throw "src-mtimes build" }
+          & "$env:RUNNER_TEMP\src-mtimes.exe" $env:CARGO_TARGET_DIR; if ($LASTEXITCODE) { throw "src-mtimes" }
+
       - name: sccache preflight (a dead cache costs a cold build, not the leg)
         shell: pwsh
         # A daemon that cannot reach S3 fails cargo at `rustc -vV`, before a line compiles — and

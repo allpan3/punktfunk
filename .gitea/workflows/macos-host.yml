@@ -116,6 +116,14 @@ jobs:
           dir="$(sh scripts/ci/mac-cargo-target.sh macos-host)"
           echo "CARGO_TARGET_DIR=$dir" >> "$GITHUB_ENV"
 
+      # Cargo judges path crates by mtime, and this checkout is new. Every job that builds into
+      # this target dir must run this first: scripts/ci/src-mtimes.rs.
+      - name: Carry source mtimes (unchanged crates stay fresh)
+        continue-on-error: true
+        run: |
+          rustc -O scripts/ci/src-mtimes.rs -o "$RUNNER_TEMP/src-mtimes"
+          "$RUNNER_TEMP/src-mtimes" "$CARGO_TARGET_DIR"
+
       - name: sccache (self-healing install)
         run: sh scripts/ci/ensure-sccache.sh
 
