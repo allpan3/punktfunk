@@ -215,17 +215,11 @@ final class PresentPacingTests: XCTestCase {
 
     // MARK: - PresenterChoice
 
-    /// iOS defaults to the deadline link, tvOS to its decoded IOSurface video plane, and macOS to
-    /// arrival-paced Metal. No selection or an unknown value falls back to the platform choice.
+    /// iOS and tvOS default to the deadline link, macOS to arrival-paced Metal. No selection or an
+    /// unknown value falls back to the platform choice.
     func testPresenterChoiceFallsBackToPlatformDefault() {
-        #if os(iOS)
+        #if os(iOS) || os(tvOS)
         XCTAssertEqual(PresenterChoice.platformDefault, .stage4)
-        #elseif os(tvOS)
-        if #available(tvOS 17.4, *) {
-            XCTAssertEqual(PresenterChoice.platformDefault, .decoded)
-        } else {
-            XCTAssertEqual(PresenterChoice.platformDefault, .stage4)
-        }
         #else
         XCTAssertEqual(PresenterChoice.platformDefault, .stage2)
         #endif
@@ -440,6 +434,68 @@ final class PresentPacingTests: XCTestCase {
             _ = sparse.update(ptsNs: recoveryPts)
         }
         XCTAssertTrue(sparse.isSlotted, "sustained 60 fps returns to slots")
+    }
+
+    // MARK: - pf-present glass metrics
+
+    /// Fixed 240 Hz: intervals are multiples of the refresh. Adaptive 24–120 Hz with an 8.33 ms
+    /// step: 1 = the fastest refresh, 3 = 25 ms, 4 = 33 ms — the 35 fps alternation.
+    func testPanelGridUnits() {
+        let fixed = PanelInfo(minHz: 240, maxHz: 240)
+        XCTAssertFalse(fixed.isAdaptive)
+        XCTAssertEqual(fixed.gridUnits(interval: 1 / 240), 1)
+        XCTAssertEqual(fixed.gridUnits(interval: 2 / 240 + 0.0005), 2)
+        let adaptive = PanelInfo(minHz: 24, maxHz: 120, granularity: 1 / 120)
+        XCTAssertTrue(adaptive.isAdaptive)
+        XCTAssertEqual(adaptive.gridUnits(interval: 1 / 120), 1)
+        XCTAssertEqual(adaptive.gridUnits(interval: 0.025), 3)
+        XCTAssertEqual(adaptive.gridUnits(interval: 0.0333), 4)
+        XCTAssertEqual(PanelInfo(minHz: 0, maxHz: 0).gridUnits(interval: 0.02), 0)
+    }
+
+    /// 60 on 120: every interval two steps, judder 0. 35 on 120: a 3/4 alternation whose
+    /// minority share is the judder number; `cadErr` then says whether it follows the source.
+    func testGridHistogramNamesTheModeAndItsMinority() {
+        let panel = PanelInfo(minHz: 24, maxHz: 120, granularity: 1 / 120)
+        let even = PresentDebugStats.gridHistogram(
+            deltasMs: Array(repeating: 16.7, count: 60), panel: panel)
+        XCTAssertEqual(even.hist, "2:60")
+        XCTAssertEqual(even.judder, 0, accuracy: 0.001)
+        let alternating = PresentDebugStats.gridHistogram(
+            deltasMs: [25, 33.3, 25, 33.3, 25, 25, 33.3, 25, 25, 25], panel: panel)
+        XCTAssertEqual(alternating.hist, "3:7,4:3")
+        XCTAssertEqual(alternating.judder, 0.3, accuracy: 0.001)
+        XCTAssertEqual(PresentDebugStats.gridHistogram(deltasMs: [], panel: panel).hist, "")
+    }
+
+    /// Cadence error pairs consecutive on-glass frames against their source spacing; a repeat
+    /// carries no source cadence, so it is counted but never paired, and a dropped present
+    /// (no system stamp) leaves no glass sample at all.
+    func testCadenceErrorPairsGlassWithSourceAndSkipsRepeats() {
+        let stats = PresentDebugStats(cadence: nil, pace: { "test" }, linkPeriod: { 0 })
+        let ms: Int64 = 1_000_000
+        // Source 16.7 ms apart, glass 16.7 then 25 ms apart: errors 0 and 8.3.
+        stats.presented(atNs: 100 * ms, issuedNs: 95 * ms, ptsNs: 1_000 * UInt64(ms), decodedNs: 98 * ms)
+        stats.presented(
+            atNs: 116_700_000, issuedNs: 110 * ms, ptsNs: 1_016_700_000, decodedNs: 112 * ms)
+        stats.presented(
+            atNs: 141_700_000, issuedNs: 130 * ms, ptsNs: 1_033_400_000, decodedNs: 135 * ms)
+        // A repeat, then a fresh frame: neither pair has a source spacing.
+        stats.presented(
+            atNs: 150 * ms, issuedNs: 149 * ms, ptsNs: 1_045 * UInt64(ms), decodedNs: 149 * ms,
+            isRepeat: true)
+        stats.presented(atNs: 158_400_000, issuedNs: 158 * ms, ptsNs: 1_050_100_000, decodedNs: 158 * ms)
+        stats.presented(atNs: nil, issuedNs: 160 * ms, ptsNs: 1_066_800_000, decodedNs: 159 * ms)
+        stats.decoded(isRepeat: true)
+        stats.decoded(isRepeat: false)
+        let samples = stats.glassSamples()
+        XCTAssertEqual(samples.cadenceErrMs.count, 2)
+        XCTAssertEqual(samples.cadenceErrMs[0], 0, accuracy: 0.01)
+        XCTAssertEqual(samples.cadenceErrMs[1], 8.3, accuracy: 0.01)
+        XCTAssertEqual(samples.displayMs.count, 5)
+        XCTAssertEqual(samples.displayMs[0], 2, accuracy: 0.01)
+        XCTAssertEqual(samples.repeats.0, 1)
+        XCTAssertEqual(samples.repeats.1, 1)
     }
 
     /// The macOS display-link hint: VRR-on asks for the stream rate down to a 24 Hz floor with

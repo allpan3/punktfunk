@@ -48,7 +48,6 @@ extension SettingsView {
     /// override marker + Reset in the caption line while a preset is being edited — with the row
     /// it belongs to, which is the only place the state is legible. On a TV the caption goes to
     /// the pane's band instead (`SettingsCaptionBand`).
-    @ViewBuilder
     func described<Content: View>(
         _ caption: String, field: String? = nil, @ViewBuilder content: () -> Content
     ) -> some View {

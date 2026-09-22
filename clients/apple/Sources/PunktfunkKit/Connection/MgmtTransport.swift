@@ -293,7 +293,7 @@ final class MgmtConnection: @unchecked Sendable {
         timeout: TimeInterval
     ) async throws -> HTTPResponse {
         try await withCheckedThrowingContinuation { continuation in
-            queue.async {
+            queue.async { [self] in
                 guard self.phase != .dead else {
                     continuation.resume(throwing: MgmtTransportError.connection("connection closed"))
                     return
