@@ -92,7 +92,7 @@ pinned. The layers, from the outside in:
   arming pairing, removing devices, session control — is honored **only from the host machine
   itself**.
 - **The web console is the admin surface, and it stays on your network.** It answers peers on the
-  local network or a VPN (private and link-local addresses, Tailscale's `100.64.0.0/10`) and
+  local network or a VPN (private and link-local addresses, a Tailscale tailnet) and
   refuses the internet, because it performs those local-only actions on your behalf once you have
   logged in. Treat anyone who can reach port 47992 as a candidate administrator. To keep it to the
   host machine, set `PUNKTFUNK_UI_BIND=127.0.0.1` in `host.env`; the installers ask.
