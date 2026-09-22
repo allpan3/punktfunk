@@ -550,7 +550,14 @@ fn run(
     }
 
     // Reuse gated on HDR + cursor mode + pin. Depth is a PipeWire-negotiation property;
-    // mismatch needs a fresh session. Embed the pointer unless this backend composites it.
+    // mismatch needs a fresh session. The pointer follows the compositor that is up now.
+    #[cfg(target_os = "linux")]
+    let metadata_cursor =
+        match crate::vdisplay::compositor_for_kind(crate::vdisplay::detect_active_session().kind) {
+            Some(c) => host_composites_metadata_cursor(c, &cfg),
+            None => blend_capable_metadata_cursor(&cfg),
+        };
+    #[cfg(not(target_os = "linux"))]
     let metadata_cursor = blend_capable_metadata_cursor(&cfg);
     // Host-wide pin: without this, Moonlight gets whichever head the portal hands back.
     #[cfg(target_os = "linux")]
@@ -748,9 +755,9 @@ fn resolve_gs_app(app: Option<&super::apps::AppEntry>) -> Option<GsApp> {
     })
 }
 
-/// Cursor-as-metadata on a virtual output: only where the encoder composites `frame.cursor`
-/// and the compositor cannot embed the pointer itself. Gamescope carries no cursor either
-/// way. Shared by `set_hw_cursor`, the plan and `stream_body`'s blend flag so they cannot drift.
+/// Cursor-as-metadata only where the encoder composites `frame.cursor` and the compositor
+/// cannot embed the pointer itself. Gamescope carries no cursor either way. Shared by
+/// `set_hw_cursor`, the plan and `stream_body`'s blend flag on both sources so they cannot drift.
 fn host_composites_metadata_cursor(
     compositor: crate::vdisplay::Compositor,
     cfg: &StreamConfig,
@@ -761,9 +768,8 @@ fn host_composites_metadata_cursor(
 }
 
 /// Cursor-as-metadata only where this session's encode backend composites `frame.cursor`.
-/// The mirror source's whole answer (its compositor is the portal's pick); the virtual
-/// output adds the compositor via [`host_composites_metadata_cursor`]. GameStream has no
-/// cursor channel.
+/// The answer when no compositor is known; [`host_composites_metadata_cursor`] adds the
+/// compositor. GameStream has no cursor channel.
 fn blend_capable_metadata_cursor(cfg: &StreamConfig) -> bool {
     #[cfg(target_os = "linux")]
     {
