@@ -9,9 +9,14 @@
 //! A [`Kind::Scroll`] clips and offsets its children. A long list goes under it as a
 //! [`Kind::Virtual`], which builds only the items in view: a 2000-title grid laid out in
 //! full every frame is the one way to make this slow.
+//!
+//! Focus is the tree's too: a node marked [`El::focusable`] is a target, a [`Group`] is a
+//! container, and [`Tree::move_focus`] answers a direction from last frame's rects.
 
+mod focus;
 mod layout;
 
+pub use focus::{Group, Plate};
 pub use layout::{Frame, Tree};
 use skia_safe::{Canvas, Rect};
 pub use taffy::Style;
@@ -45,6 +50,9 @@ pub struct El<'a> {
     pub style: Style,
     pub kind: Kind<'a>,
     pub children: Vec<El<'a>>,
+    /// A focus target; the plate behind it rounds its corners by this many px.
+    pub focus: Option<f32>,
+    pub group: Option<Group>,
 }
 
 pub enum Kind<'a> {
@@ -74,6 +82,8 @@ impl<'a> El<'a> {
             style,
             kind,
             children: Vec::new(),
+            focus: None,
+            group: None,
         }
     }
 
@@ -146,6 +156,32 @@ impl<'a> El<'a> {
     pub fn id(mut self, id: Id) -> El<'a> {
         self.id = Some(id);
         self
+    }
+
+    /// A focus target. Needs an id; `corner` rounds the plate, px.
+    pub fn focusable(mut self, corner: f32) -> El<'a> {
+        self.focus = Some(corner);
+        self
+    }
+
+    /// A focus container. With an id, focus entering it returns to the child it left.
+    pub fn group(mut self, group: Group) -> El<'a> {
+        self.group = Some(group);
+        self
+    }
+
+    /// Out of the flow, at `r` relative to the parent's top-left.
+    pub fn place(self, r: Rect) -> El<'a> {
+        self.style(|s| {
+            s.position = taffy::Position::Absolute;
+            s.inset = taffy::Rect {
+                left: taffy::LengthPercentageAuto::length(r.left),
+                top: taffy::LengthPercentageAuto::length(r.top),
+                right: taffy::LengthPercentageAuto::auto(),
+                bottom: taffy::LengthPercentageAuto::auto(),
+            };
+        })
+        .size(r.width(), r.height())
     }
 
     /// Any style the named builders do not cover.

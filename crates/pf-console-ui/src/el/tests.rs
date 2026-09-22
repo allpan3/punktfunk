@@ -204,3 +204,106 @@ fn ids_are_stable_and_distinct() {
     assert_ne!(Id::new("row", 3), Id::new("row", 4));
     assert_ne!(Id::new("row", 3), Id::new("tab", 3));
 }
+
+fn target<'a>(name: &str, i: usize, r: Rect) -> El<'a> {
+    El::paint(|_, _| {})
+        .id(Id::new(name, i))
+        .focusable(8.0)
+        .place(r)
+}
+
+fn card(i: usize) -> Rect {
+    Rect::from_xywh(i as f32 * 120.0, 0.0, 100.0, 60.0)
+}
+
+/// A row of three over a lone target under the third, painted once so focus has rects.
+fn shelf(tree: &mut Tree, surface: &mut skia_safe::Surface) {
+    let row = El::column()
+        .id(Id::new("row", 0))
+        .group(Group::Row)
+        .children((0..3).map(|i| target("card", i, card(i))));
+    let root = El::column()
+        .child(row.place(Rect::from_xywh(0.0, 0.0, 340.0, 60.0)))
+        .child(target(
+            "below",
+            0,
+            Rect::from_xywh(240.0, 120.0, 100.0, 60.0),
+        ))
+        .child(target("far", 0, Rect::from_xywh(0.0, 400.0, 100.0, 60.0)));
+    let frame = tree.layout(root, Rect::from_xywh(0.0, 0.0, 600.0, 600.0));
+    tree.paint(surface.canvas(), frame);
+}
+
+#[test]
+fn focus_moves_by_geometry_overlap_first() {
+    use pf_client_core::menu_nav::MenuDir::*;
+    let mut surface = canvas();
+    let mut tree = Tree::new();
+    shelf(&mut tree, &mut surface);
+    tree.set_focus(Some(Id::new("card", 0)));
+    assert_eq!(tree.move_focus(Right), Some(Id::new("card", 1)));
+    assert_eq!(tree.move_focus(Left), Some(Id::new("card", 0)));
+    assert_eq!(tree.move_focus(Left), None, "nothing is left of the first");
+    assert_eq!(tree.focus(), Some(Id::new("card", 0)));
+    // "below" is nearer, but only "far" shares the first card's columns.
+    assert_eq!(tree.move_focus(Down), Some(Id::new("far", 0)));
+}
+
+#[test]
+fn a_group_hands_focus_back_to_the_child_it_left() {
+    use pf_client_core::menu_nav::MenuDir::*;
+    let mut surface = canvas();
+    let mut tree = Tree::new();
+    shelf(&mut tree, &mut surface);
+    tree.set_focus(Some(Id::new("card", 0)));
+    tree.set_focus(Some(Id::new("below", 0)));
+    // Straight up is card 2; the row remembers card 0.
+    assert_eq!(tree.move_focus(Up), Some(Id::new("card", 0)));
+    tree.set_focus(Some(Id::new("card", 2)));
+    assert_eq!(tree.move_focus(Down), Some(Id::new("below", 0)));
+}
+
+#[test]
+fn the_plate_travels_lands_and_sweeps() {
+    use pf_client_core::menu_nav::MenuDir::*;
+    let mut surface = canvas();
+    let mut tree = Tree::new();
+    let draw = |tree: &mut Tree, surface: &mut skia_safe::Surface| {
+        let root = El::column().children((0..3).map(|i| target("card", i, card(i))));
+        let frame = tree.layout(root, Rect::from_xywh(0.0, 0.0, 600.0, 600.0));
+        tree.paint_focus(surface.canvas(), frame, 1.0, 1.0 / 120.0, false);
+    };
+    tree.set_focus(Some(Id::new("card", 0)));
+    draw(&mut tree, &mut surface);
+    assert_eq!(
+        tree.plate_rect().map(|p| p.0.left),
+        Some(0.0),
+        "starts on its target"
+    );
+    tree.move_focus(Right);
+    draw(&mut tree, &mut surface);
+    let left = tree.plate_rect().unwrap().0.left;
+    assert!(
+        left > 0.0 && left < 120.0,
+        "moves the frame focus does: {left}"
+    );
+    let mut peak = 0.0f32;
+    for _ in 0..240 {
+        draw(&mut tree, &mut surface);
+        peak = peak.max(tree.plate_rect().unwrap().0.left);
+    }
+    assert!(peak > 120.0, "overshoots a little: {peak}");
+    assert_eq!(tree.plate_rect().unwrap().0.left, 120.0);
+    assert!(!tree.plate_busy(), "the sweep has run out");
+
+    crate::theme::set_reduce_motion(true);
+    tree.move_focus(Right);
+    draw(&mut tree, &mut surface);
+    crate::theme::set_reduce_motion(false);
+    assert_eq!(
+        tree.plate_rect().unwrap().0.left,
+        240.0,
+        "jumps under Reduce Motion"
+    );
+    assert!(tree.plate_busy(), "and fades in");
+}

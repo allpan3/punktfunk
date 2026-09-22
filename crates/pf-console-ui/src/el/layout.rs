@@ -1,8 +1,10 @@
 //! Layout, paint and hit-test for an [`El`] tree.
 
+use super::focus::{score, Group, Plate};
 use super::{Axis, El, Id, Kind, Painter, Virtual};
 use crate::anim::{springs, Spring};
 use crate::pointer::{Pointer, PointerKind};
+use pf_client_core::menu_nav::MenuDir;
 use skia_safe::{Canvas, Rect};
 use std::collections::HashMap;
 use taffy::{AvailableSpace, Dimension, NodeId, Size, TaffyTree};
@@ -16,13 +18,19 @@ const RUBBER: f32 = 0.5;
 /// ...halving again once the stretch reaches this fraction of the viewport.
 const RUBBER_SPAN: f32 = 0.25;
 
-/// What outlives a frame: scroll state and the rects last painted, keyed by [`Id`].
+/// What outlives a frame: scroll state, focus and the rects last painted, keyed by [`Id`].
 pub struct Tree {
     taffy: TaffyTree,
     /// Virtual items, each laid out as its own root at its item size.
     items: TaffyTree,
     scrolls: HashMap<Id, Scroll>,
     placed: Vec<Placed>,
+    /// Focus containers as last painted; [`Placed::group`] indexes here.
+    groups: Vec<GroupBox>,
+    focus: Option<Id>,
+    /// Per group id, the child that last had focus.
+    memory: HashMap<Id, Id>,
+    plate: Plate,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -53,12 +61,24 @@ struct Placed {
     visible: Rect,
     /// Set on a scroll viewport.
     axis: Option<Axis>,
+    /// Plate corner, px; set on a focus target.
+    focus: Option<f32>,
+    /// Innermost focus container around the node.
+    group: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+struct GroupBox {
+    id: Option<Id>,
+    kind: Group,
+    parent: Option<usize>,
 }
 
 /// One laid-out tree: nodes in paint order at content-space rects, before scroll offsets.
 pub struct Frame<'a> {
     nodes: Vec<Node<'a>>,
     scrolls: Vec<ScrollBox>,
+    groups: Vec<GroupBox>,
 }
 
 struct Node<'a> {
@@ -69,6 +89,8 @@ struct Node<'a> {
     /// Innermost scroll around the node, an index into [`Frame::scrolls`].
     scroll: Option<usize>,
     paint: Option<Painter<'a>>,
+    focus: Option<f32>,
+    group: Option<usize>,
 }
 
 struct ScrollBox {
@@ -98,6 +120,10 @@ impl Tree {
             items,
             scrolls: HashMap::new(),
             placed: Vec::new(),
+            groups: Vec::new(),
+            focus: None,
+            memory: HashMap::new(),
+            plate: Plate::default(),
         }
     }
 
@@ -113,6 +139,7 @@ impl Tree {
         let mut frame = Frame {
             nodes: Vec::new(),
             scrolls: Vec::new(),
+            groups: Vec::new(),
         };
         let mut walk = Walk {
             tree: &self.taffy,
@@ -120,7 +147,7 @@ impl Tree {
             scrolls: &mut self.scrolls,
             frame: &mut frame,
         };
-        walk.node(root, node, (rect.left, rect.top), None);
+        walk.node(root, node, (rect.left, rect.top), None, None);
         self.scrolls
             .retain(|id, _| frame.scrolls.iter().any(|s| s.id == *id));
         frame
@@ -129,7 +156,19 @@ impl Tree {
     /// Paint `frame` in tree order. Scrolled nodes shift and clip to their viewports;
     /// a node wholly outside them is skipped.
     pub fn paint(&mut self, canvas: &Canvas, frame: Frame<'_>) {
+        self.paint_inner(canvas, frame, None);
+    }
+
+    /// [`Self::paint`], with the focus plate advanced `dt` seconds toward this frame's
+    /// rect of the focused node and drawn behind its whole focus group. `k` scales the
+    /// plate's outset; `cheap` drops its blurred shadow.
+    pub fn paint_focus(&mut self, canvas: &Canvas, frame: Frame<'_>, k: f32, dt: f64, cheap: bool) {
+        self.paint_inner(canvas, frame, Some((k, dt, cheap)));
+    }
+
+    fn paint_inner(&mut self, canvas: &Canvas, frame: Frame<'_>, plate: Option<(f32, f64, bool)>) {
         self.placed.clear();
+        self.groups = frame.groups;
         // Per scroll: the summed offset of it and its ancestors, and its on-screen clip.
         let mut shift: Vec<(f32, f32)> = Vec::with_capacity(frame.scrolls.len());
         let mut clip: Vec<Rect> = Vec::with_capacity(frame.scrolls.len());
@@ -148,14 +187,45 @@ impl Tree {
             });
             clip.push(view);
         }
-        for n in frame.nodes {
+        // The plate goes under the first node of the focused node's group, so it never
+        // covers a neighbour.
+        let plate = plate.and_then(|look| {
+            let f = frame
+                .nodes
+                .iter()
+                .position(|n| n.id.is_some() && n.id == self.focus && n.focus.is_some())?;
+            let n = &frame.nodes[f];
+            let at = frame.nodes.iter().position(|m| m.group == n.group)?;
+            let (d, c) = n
+                .scroll
+                .map_or(((0.0, 0.0), None), |i| (shift[i], Some(clip[i])));
+            let space = n.scroll.map(|i| frame.scrolls[i].id);
+            Some((at, look, n.id?, n.rect, n.focus?, space, d, c))
+        });
+        for (i, n) in frame.nodes.into_iter().enumerate() {
+            if let Some((_, (k, dt, cheap), id, target, corner, space, d, c)) =
+                plate.filter(|p| p.0 == i)
+            {
+                canvas.save();
+                if let Some(c) = c {
+                    canvas.clip_rect(c, None, true);
+                }
+                self.plate.step(id, target, corner, dt, space, d);
+                self.plate.draw(canvas, k, cheap);
+                canvas.restore();
+            }
             let (d, c) = n
                 .scroll
                 .map_or(((0.0, 0.0), None), |i| (shift[i], Some(clip[i])));
             let rect = n.rect.with_offset((-d.0, -d.1));
             let mut visible = rect;
-            if c.is_some_and(|c| !visible.intersect(c)) {
+            let shown = c.is_none_or(|c| visible.intersect(c));
+            // A target out of view still answers a direction; it only stops taking a pointer.
+            if !shown && n.focus.is_none() {
                 continue;
+            }
+            if !shown {
+                visible = Rect::new_empty();
             }
             if let Some(id) = n.id {
                 self.placed.push(Placed {
@@ -163,16 +233,120 @@ impl Tree {
                     rect,
                     visible,
                     axis: n.axis,
+                    focus: n.focus,
+                    group: n.group,
                 });
             }
-            if let Some(p) = n.paint {
-                canvas.save();
-                if let Some(c) = c {
-                    canvas.clip_rect(c, None, true);
-                }
-                p(canvas, rect);
-                canvas.restore();
+            let Some(p) = n.paint.filter(|_| shown) else {
+                continue;
+            };
+            canvas.save();
+            if let Some(c) = c {
+                canvas.clip_rect(c, None, true);
             }
+            p(canvas, rect);
+            canvas.restore();
+        }
+        self.remember();
+    }
+
+    pub fn focus(&self) -> Option<Id> {
+        self.focus
+    }
+
+    pub fn set_focus(&mut self, id: Option<Id>) {
+        self.focus = id;
+        self.remember();
+    }
+
+    /// The plate is still moving: keep drawing frames.
+    pub fn plate_busy(&self) -> bool {
+        self.plate.busy()
+    }
+
+    /// Where the plate is this frame, before its outset, and its corner radius.
+    pub fn plate_rect(&self) -> Option<(Rect, f32)> {
+        self.plate.rect()
+    }
+
+    /// Move focus from the focused target one step `dir`, by last frame's rects. `None`
+    /// leaves focus alone: nothing is that way, or nothing was painted focused.
+    pub fn move_focus(&mut self, dir: MenuDir) -> Option<Id> {
+        let from = self
+            .placed
+            .iter()
+            .find(|p| Some(p.id) == self.focus && p.focus.is_some())?;
+        let targets = || {
+            self.placed
+                .iter()
+                .filter(move |p| p.focus.is_some() && p.id != from.id)
+        };
+        let nearest = |cands: &mut dyn Iterator<Item = &Placed>| {
+            cands
+                .filter_map(|p| score(from.rect, p.rect, dir).map(|s| (s, p.id)))
+                .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(_, id)| id)
+        };
+        let mut best = None;
+        let mut g = from.group;
+        while let Some(gi) = g {
+            if self.groups[gi].kind.holds(dir) {
+                best = nearest(&mut targets().filter(|p| self.inside(p.group, gi)));
+                if best.is_some() {
+                    break;
+                }
+            }
+            g = self.groups[gi].parent;
+        }
+        let to = best.or_else(|| nearest(&mut targets()))?;
+        let to = self.recall(from.group, to);
+        self.set_focus(Some(to));
+        Some(to)
+    }
+
+    /// Entering groups from outside lands on the child the outermost of them last had.
+    fn recall(&self, from: Option<usize>, to: Id) -> Id {
+        let Some(target) = self.placed.iter().find(|p| p.id == to) else {
+            return to;
+        };
+        let mut out = to;
+        let mut g = target.group;
+        while let Some(gi) = g {
+            if !self.inside(from, gi) {
+                let back = self.groups[gi]
+                    .id
+                    .and_then(|gid| self.memory.get(&gid))
+                    .filter(|m| self.placed.iter().any(|p| p.id == **m && p.focus.is_some()));
+                if let Some(back) = back {
+                    out = *back;
+                }
+            }
+            g = self.groups[gi].parent;
+        }
+        out
+    }
+
+    /// `group` is `outer` or nested in it.
+    fn inside(&self, mut group: Option<usize>, outer: usize) -> bool {
+        while let Some(g) = group {
+            if g == outer {
+                return true;
+            }
+            group = self.groups[g].parent;
+        }
+        false
+    }
+
+    fn remember(&mut self) {
+        let Some(p) = self.placed.iter().find(|p| Some(p.id) == self.focus) else {
+            return;
+        };
+        let (id, mut g) = (p.id, p.group);
+        while let Some(gi) = g {
+            if let Some(gid) = self.groups[gi].id {
+                self.memory.insert(gid, id);
+            }
+            g = self.groups[gi].parent;
         }
     }
 
@@ -333,7 +507,14 @@ struct Walk<'t, 'a> {
 }
 
 impl<'a> Walk<'_, 'a> {
-    fn node(&mut self, el: El<'a>, node: NodeId, origin: (f32, f32), scroll: Option<usize>) {
+    fn node(
+        &mut self,
+        el: El<'a>,
+        node: NodeId,
+        origin: (f32, f32),
+        scroll: Option<usize>,
+        group: Option<usize>,
+    ) {
         let l = *self.tree.layout(node).expect("laid-out node");
         let rect = Rect::from_xywh(
             origin.0 + l.location.x,
@@ -342,8 +523,28 @@ impl<'a> Walk<'_, 'a> {
             l.size.height,
         );
         let El {
-            id, kind, children, ..
+            id,
+            kind,
+            children,
+            focus,
+            group: own_group,
+            ..
         } = el;
+        debug_assert!(
+            focus.is_none() || id.is_some(),
+            "a focus target needs an id"
+        );
+        let inner_group = match own_group {
+            Some(kind) => {
+                self.frame.groups.push(GroupBox {
+                    id,
+                    kind,
+                    parent: group,
+                });
+                Some(self.frame.groups.len() - 1)
+            }
+            None => group,
+        };
         let mut inner = scroll;
         let mut items = None;
         let mut scroll_axis = None;
@@ -390,20 +591,28 @@ impl<'a> Walk<'_, 'a> {
                 rect,
                 scroll,
                 paint,
+                focus,
+                group,
             });
         }
         if let Some(v) = items {
-            self.virtual_items(v, rect, scroll);
+            self.virtual_items(v, rect, scroll, inner_group);
         }
         let kids = self.tree.children(node).expect("laid-out node");
         for (child, n) in children.into_iter().zip(kids) {
-            self.node(child, n, (rect.left, rect.top), inner);
+            self.node(child, n, (rect.left, rect.top), inner, inner_group);
         }
     }
 
     /// Build and lay out the items of `v` inside the scroll viewport, half a viewport of
     /// overscan each side: the offset may still move this frame.
-    fn virtual_items(&mut self, v: Virtual<'a>, rect: Rect, scroll: Option<usize>) {
+    fn virtual_items(
+        &mut self,
+        v: Virtual<'a>,
+        rect: Rect,
+        scroll: Option<usize>,
+        group: Option<usize>,
+    ) {
         // One items tree, so a virtual item cannot hold another Virtual.
         let Some(items) = self.items.as_deref_mut() else {
             debug_assert!(false, "a virtual item holds a Virtual");
@@ -449,7 +658,7 @@ impl<'a> Walk<'_, 'a> {
                 scrolls: &mut *self.scrolls,
                 frame: &mut *self.frame,
             }
-            .node(el, n, (x, y), scroll);
+            .node(el, n, (x, y), scroll, group);
         }
     }
 }
