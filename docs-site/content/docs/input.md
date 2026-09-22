@@ -71,7 +71,7 @@ microphone mute; the in-stream hint over the video doesn't, to stay one readable
   chord goes to the host while input is captured — ⌘Q reaches the host's compositor rather than
   quitting the app — unless you turn **Capture system shortcuts** off in
   [client settings](/docs/client-settings#input). ⌘⎋ and ⌃⌘F are held back either way, so there is
-  always a way out.
+  always a way out. Captured Control shortcuts such as ⌃C and ⌃R also go to the host.
 - **iPhone and iPad** with a hardware keyboard: **⌃⌥⇧Q** releases input while it is captured, and
   **⌘⎋** toggles capture in either direction. **⌃⌥⇧D** (disconnect) and **⌃⌥⇧S** (stats) come from
   the app's Stream shortcuts rather than from the stream itself; if they don't respond while you're
