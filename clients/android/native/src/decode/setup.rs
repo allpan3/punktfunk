@@ -286,12 +286,14 @@ pub(super) fn hdr_static(client: &NativeClient) -> Option<punktfunk_core::quic::
 }
 
 /// The decoder's configure format: the mode, an input buffer generous enough that a large keyframe
-/// AU is never truncated, the low-latency keys for `codec_name`, and the HDR static info.
+/// AU is never truncated, the HDR static info, and the low-latency keys for `codec_name`.
+/// `keys` is `Some(aggressive)` for [`configure_low_latency`]'s profile, `None` for no
+/// low-latency key at all. ACodec ignores a refused `max-input-size`, so that key stays.
 pub(super) fn low_latency_format(
     mime: &str,
     mode: &Mode,
     codec_name: &str,
-    aggressive: bool,
+    keys: Option<bool>,
     hdr_static: Option<&punktfunk_core::quic::HdrMeta>,
 ) -> MediaFormat {
     let mut format = MediaFormat::new();
@@ -302,7 +304,9 @@ pub(super) fn low_latency_format(
         "max-input-size",
         (mode.width * mode.height).max(2_000_000) as i32,
     );
-    configure_low_latency(&mut format, codec_name, aggressive);
+    if let Some(aggressive) = keys {
+        configure_low_latency(&mut format, codec_name, aggressive);
+    }
     if let Some(meta) = hdr_static {
         format.set_buffer("hdr-static-info", &android_hdr_static_info(meta));
     }

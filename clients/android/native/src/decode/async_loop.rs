@@ -72,21 +72,23 @@ pub(super) enum DecodeEvent {
     Error { fatal: bool },
 }
 
-/// The decoder bring-up rungs, in order, as `(present backend, aggressive low-latency keys)`.
+/// The decoder bring-up rungs, in order, as `(present backend, low-latency keys)`.
 /// The backend is `Some(overlay)` for ASC with that reader-usage profile (see
-/// [`AscBackend::create`]'s `overlay` doc), `None` for the SurfaceView presenter. See the ladder's
-/// comment in [`run_async`] for why these axes, and why in this order.
+/// [`AscBackend::create`]'s `overlay` doc), `None` for the SurfaceView presenter. The keys are
+/// `Some(aggressive)` for that key profile, `None` for no low-latency key at all. See
+/// [`bring_up`] for why these axes, and why in this order.
 ///
 /// Consecutive duplicates are collapsed: the `present_backend` sysprop and the low-latency toggle
 /// may each already have shed what a rung was going to shed, and re-running a configuration the
 /// codec just refused buys nothing but another failed `start`. The first rung is always exactly
 /// what the session asked for, so a device that works is never charged for this ladder.
-fn bring_up_rungs(asc_wanted: bool, low_latency: bool) -> Vec<(Option<bool>, bool)> {
+fn bring_up_rungs(asc_wanted: bool, low_latency: bool) -> Vec<(Option<bool>, Option<bool>)> {
     let mut rungs = vec![
-        (asc_wanted.then_some(true), low_latency),
-        (asc_wanted.then_some(false), low_latency),
-        (None, low_latency),
-        (None, false),
+        (asc_wanted.then_some(true), Some(low_latency)),
+        (asc_wanted.then_some(false), Some(low_latency)),
+        (None, Some(low_latency)),
+        (None, Some(false)),
+        (None, None),
     ];
     rungs.dedup();
     rungs
@@ -380,8 +382,8 @@ pub(super) fn run_async(
 /// `configure()` can succeed and `start()` still fail: start is where the codec negotiates
 /// buffers with its output consumer and allocates them, so a decoder that accepted the format
 /// can still refuse the surface it has to render into. A codec that failed `start` is in an error
-/// state and cannot be reconfigured, so each rung builds a fresh one. The rungs shed what a start
-/// can choke on, most-suspect first:
+/// state and cannot be reconfigured, so each rung builds a fresh one. The rungs shed what a
+/// configure or start can choke on, most-suspect first:
 ///
 ///   1. The ASC reader's `COMPOSER_OVERLAY` usage — overlay + GPU-sampled + vendor-vdec in one
 ///      allocation is what an old OMX-era gralloc refuses (see [`AscBackend::create`]'s `overlay`
@@ -390,6 +392,8 @@ pub(super) fn run_async(
 ///   2. The `AImageReader` entirely — an app-side BufferQueue consumer at all is the residual
 ///      suspect (a vendor OMX component keying on queues-to-composer).
 ///   3. The aggressive low-latency key set.
+///   4. Every low-latency key. ACodec fails `configure` when an OMX decoder refuses the standard
+///      `low-latency` key; Codec2 ignores that key instead.
 ///
 /// The rung that wins is logged: on a device that needs one, that line names the real culprit.
 fn bring_up(
@@ -409,13 +413,16 @@ fn bring_up(
         log::info!("decode: present backend = SurfaceView (present_backend sysprop)");
     }
     let rungs = bring_up_rungs(asc_wanted, opts.low_latency_mode);
-    for (rung, &(backend, aggressive)) in rungs.iter().enumerate() {
+    for (rung, &(backend, keys)) in rungs.iter().enumerate() {
         if rung > 0 {
             log::warn!(
-                "decode: decoder refused that configuration — retrying through {} with aggressive \
-                 low-latency keys {}",
+                "decode: decoder refused that configuration — retrying through {} with {}",
                 backend_label(backend),
-                if aggressive { "ON" } else { "OFF" }
+                match keys {
+                    Some(true) => "aggressive low-latency keys ON",
+                    Some(false) => "aggressive low-latency keys OFF",
+                    None => "no low-latency keys",
+                }
             );
         }
         let Some(mut codec) = create_codec(mime, opts.decoder_name.as_deref()) else {
@@ -435,7 +442,7 @@ fn bring_up(
         if !install_async_callbacks(&mut codec, ev_tx) {
             return None; // the platform refused async mode outright — no rung changes that
         }
-        let format = low_latency_format(mime, &mode, &codec_name, aggressive, hdr_static.as_ref());
+        let format = low_latency_format(mime, &mode, &codec_name, keys, hdr_static.as_ref());
         // The present backend. ASurfaceControl (default) drives its own `AImageReader` output
         // surface + compositor layer, scheduling against the panel's real present clock; the
         // SurfaceView presenter is the fallback for API < 29, an ASC init failure, the
@@ -1160,40 +1167,53 @@ pub(super) struct PartFeed {
 mod tests {
     use super::bring_up_rungs;
 
-    /// The ladder that turns a decoder which refuses to start from a permanent black screen into
-    /// a retry or two away from a picture (the 2026-08-27 Mi TV Stick case). Order and
-    /// de-duplication are the whole of its logic — everything else in the loop is MediaCodec I/O.
+    /// The ladder that turns a decoder which refuses to configure or start into a retry or two
+    /// away from a picture. Order and de-duplication are the whole of its logic — everything else
+    /// in the loop is MediaCodec I/O.
     #[test]
-    fn rungs_shed_the_overlay_then_asc_then_the_aggressive_keys_and_never_repeat_one() {
+    fn rungs_shed_the_overlay_then_asc_then_the_keys_and_never_repeat_one() {
         // The default: shed the reader's COMPOSER_OVERLAY usage first (keeping ASC — the whole
-        // point of the middle rung), then the `AImageReader` entirely, then the aggressive keys.
+        // point of the middle rung), then the `AImageReader` entirely, then the aggressive keys,
+        // then every low-latency key.
         assert_eq!(
             bring_up_rungs(true, true),
             [
-                (Some(true), true),
-                (Some(false), true),
-                (None, true),
-                (None, false)
+                (Some(true), Some(true)),
+                (Some(false), Some(true)),
+                (None, Some(true)),
+                (None, Some(false)),
+                (None, None)
             ]
         );
         // `present_backend=surfaceview` already shed ASC — both ASC rungs collapse away.
-        assert_eq!(bring_up_rungs(false, true), [(None, true), (None, false)]);
-        // Low-latency mode off ⇒ the keys are already the plain set; the backend is the only axis.
+        assert_eq!(
+            bring_up_rungs(false, true),
+            [(None, Some(true)), (None, Some(false)), (None, None)]
+        );
+        // Low-latency mode off ⇒ the keys are already the plain set; the aggressive rung collapses.
         assert_eq!(
             bring_up_rungs(true, false),
-            [(Some(true), false), (Some(false), false), (None, false)]
+            [
+                (Some(true), Some(false)),
+                (Some(false), Some(false)),
+                (None, Some(false)),
+                (None, None)
+            ]
         );
-        // Nothing left to shed: one attempt, and no pointless second `start` of the same thing.
-        assert_eq!(bring_up_rungs(false, false), [(None, false)]);
+        // Only the keys left to shed: one retry, and no second `start` of the same thing.
+        assert_eq!(
+            bring_up_rungs(false, false),
+            [(None, Some(false)), (None, None)]
+        );
 
         for asc in [true, false] {
             for ll in [true, false] {
                 let rungs = bring_up_rungs(asc, ll);
                 // A device that works must pay nothing for this ladder: rung 0 is always exactly
                 // what the session asked for.
-                assert_eq!(rungs[0], (asc.then_some(true), ll));
+                assert_eq!(rungs[0], (asc.then_some(true), Some(ll)));
                 // Every ladder ends at the most conservative configuration there is.
-                assert_eq!(*rungs.last().unwrap(), (None, false));
+                assert_eq!(*rungs.last().unwrap(), (None, None));
                 // Monotonic: a rung only ever sheds, never re-enables what an earlier one dropped
                 // (`Option<bool>`'s Ord: `None < Some(false) < Some(true)`), so the ladder always
                 // descends towards the conservative end.
