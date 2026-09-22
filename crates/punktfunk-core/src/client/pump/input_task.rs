@@ -5,7 +5,8 @@
 //! the 4 KiB send cap, so a lost edge would leave a held trigger stuck until the next
 //! change. Snapshots heal on the next send; seq drops stale reorders; a 100 ms refresh
 //! of every touched pad bounds loss to one interval (host rumble refresh is the same
-//! idea at 500 ms). Keyboard/mouse/touch pass through. An older host keeps the legacy
+//! idea at 500 ms). Keyboard/mouse/touch pass through; keys also snapshot the held set
+//! on the same refresh toward `HOST_CAP2_KEY_STATE`. An older host keeps the legacy
 //! per-transition gamepad events. `HOST_CAP_PAD_AUDIO` gates flags bits 8/9; without
 //! it the whole flags word is the pad index.
 //!
@@ -18,6 +19,7 @@
 
 use super::super::pad_mouse::{PadMouse, PadMouseShared, TICK};
 use super::*;
+use crate::input::key_state::KeyStateSender;
 use crate::input::scroll::ScrollOutput;
 use crate::input::{GamepadSnapshot, MAX_PADS};
 use std::sync::atomic::AtomicBool;
@@ -35,21 +37,28 @@ pub(super) struct MouseArgs {
     pub(super) normalized_scroll: bool,
 }
 
+/// Shared state for ordinary input and controller-mouse output
+struct InputOutput {
+    scroll: ScrollOutput,
+    keys: KeyStateSender,
+}
+
 /// The final outbound gate for every ordinary input event — raw embedder sends
 /// and controller-mouse output share it, so validation, the invert toggle and
 /// the old-host `MouseScroll` conversion each happen exactly once.
-fn send_input(conn: &quinn::Connection, out: &mut ScrollOutput, args: &MouseArgs, ev: InputEvent) {
+fn send_input(conn: &quinn::Connection, out: &mut InputOutput, args: &MouseArgs, ev: InputEvent) {
     let invert = args
         .scroll_invert
         .load(std::sync::atomic::Ordering::Relaxed);
-    if let Some(ev) = out.prepare(ev, invert) {
+    if let Some(mut ev) = out.scroll.prepare(ev, invert) {
+        out.keys.prepare(&mut ev);
         let _ = conn.send_datagram(ev.encode().to_vec().into());
     }
 }
 
 fn send_all(
     conn: &quinn::Connection,
-    out: &mut ScrollOutput,
+    out: &mut InputOutput,
     args: &MouseArgs,
     evs: Vec<InputEvent>,
 ) {
@@ -64,7 +73,7 @@ fn sync_mouse(
     conn: &quinn::Connection,
     mouse: &mut PadMouse,
     args: &MouseArgs,
-    out: &mut ScrollOutput,
+    out: &mut InputOutput,
     pads: &mut [Option<GamepadSnapshot>; MAX_PADS],
     dirty: &mut [bool; MAX_PADS],
 ) {
@@ -122,6 +131,9 @@ pub(super) async fn run(
     conn: quinn::Connection,
     mut input_rx: tokio::sync::mpsc::UnboundedReceiver<InputEvent>,
     gamepad_snapshots: bool,
+    // HOST_CAP2_KEY_STATE: only then does the host reconcile held keys against a
+    // snapshot. An older host ignores the tag, so sending it would only burn datagrams.
+    key_state: bool,
     // HOST_CAP_PAD_AUDIO: only then do arrivals carry flags 8/9. An older host
     // reads the whole flags word as the pad index and would drop the kind.
     pad_audio: bool,
@@ -136,7 +148,10 @@ pub(super) async fn run(
     // One seam for every outbound input event: Scroll stays whole toward a
     // normalized host, converts once to MouseScroll against an older one, and
     // the live invert flag applies to both plus controller-mouse output.
-    let mut scroll_out = ScrollOutput::new(mouse_args.normalized_scroll);
+    let mut output = InputOutput {
+        scroll: ScrollOutput::new(mouse_args.normalized_scroll),
+        keys: KeyStateSender::new(key_state),
+    };
     let mut mouse_tick = tokio::time::interval(TICK);
     mouse_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Unset while no stick is deflected, so a fresh push starts from one nominal tick.
@@ -172,7 +187,8 @@ pub(super) async fn run(
         let caps = caps_now(idx);
         crate::input::encode_gamepad_arrival(idx as u8, caps)
     };
-    let mut refresh = tokio::time::interval(Duration::from_millis(100));
+    let mut refresh =
+        tokio::time::interval(Duration::from_millis(crate::input::KEY_STATE_INTERVAL_MS));
     refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
@@ -186,11 +202,11 @@ pub(super) async fn run(
                     {
                         flush_dirty(&conn, &mut pads, &mut seq, &mut dirty);
                         let grants = mouse_args.grants.load(Ordering::Relaxed);
-                        send_all(&conn, &mut scroll_out, &mouse_args, mouse.fold(idx, &ev, grants));
+                        send_all(&conn, &mut output, &mouse_args, mouse.fold(idx, &ev, grants));
                         continue;
                     }
                     if ev.kind == InputKind::GamepadRemove && mouse.is_on(idx) {
-                        send_all(&conn, &mut scroll_out, &mouse_args, mouse.leave(idx));
+                        send_all(&conn, &mut output, &mouse_args, mouse.leave(idx));
                         mouse_args.shared.clear(idx);
                     }
                     if gamepad_snapshots
@@ -245,7 +261,7 @@ pub(super) async fn run(
                             continue;
                         }
                     }
-                    send_input(&conn, &mut scroll_out, &mouse_args, ev);
+                    send_input(&conn, &mut output, &mouse_args, ev);
                 }
                 flush_dirty(&conn, &mut pads, &mut seq, &mut dirty);
                 if !mouse.moving() {
@@ -257,7 +273,7 @@ pub(super) async fn run(
                 mouse_args.shared.set_live(live);
             }
             _ = mouse_args.shared.changed.notified() => {
-                sync_mouse(&conn, &mut mouse, &mouse_args, &mut scroll_out, &mut pads, &mut dirty);
+                sync_mouse(&conn, &mut mouse, &mouse_args, &mut output, &mut pads, &mut dirty);
                 flush_dirty(&conn, &mut pads, &mut seq, &mut dirty);
                 if !mouse.moving() {
                     last_mouse_tick = None;
@@ -269,11 +285,15 @@ pub(super) async fn run(
                 last_mouse_tick = Some(now);
                 let height = mouse_args.mode.lock().map(|m| m.height).unwrap_or(0);
                 let grants = mouse_args.grants.load(Ordering::Relaxed);
-                send_all(&conn, &mut scroll_out, &mouse_args, mouse.tick(dt.as_secs_f64(), height, grants));
+                send_all(&conn, &mut output, &mouse_args, mouse.tick(dt.as_secs_f64(), height, grants));
             }
             _ = refresh.tick() => {
+                // Keep the empty state alive too, so a loss burst cannot strand the last key
+                if let Some(snap) = output.keys.snapshot() {
+                    let _ = conn.send_datagram(snap.encode().to_vec().into());
+                }
                 // Grants arrive without a wake-up; losing the pointer grant ends mouse mode here.
-                sync_mouse(&conn, &mut mouse, &mouse_args, &mut scroll_out, &mut pads, &mut dirty);
+                sync_mouse(&conn, &mut mouse, &mouse_args, &mut output, &mut pads, &mut dirty);
                 for idx in 0..MAX_PADS {
                     // Caps moved after the burst drained: re-arm. Live declared pads only;
                     // a steady session sends nothing.
@@ -390,6 +410,129 @@ mod tests {
         }
     }
 
+    // Build an unsequenced embedder key event
+    fn key(kind: InputKind, code: u32) -> InputEvent {
+        InputEvent {
+            kind,
+            _pad: [0; 3],
+            code,
+            x: 0,
+            y: 0,
+            flags: 0,
+        }
+    }
+
+    // A lost release recovers from the periodically repeated empty state
+    #[tokio::test]
+    async fn held_keys_are_re_asserted_then_released_by_snapshot() {
+        let (_server, client_conn, host_conn) = loopback().await;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let caps = Arc::new(std::array::from_fn(|_| AtomicU8::new(0)));
+        let shared = Arc::new(PadMouseShared::default());
+        let task = tokio::spawn(run(
+            client_conn,
+            rx,
+            true,
+            true,
+            false,
+            caps,
+            mouse_args(&shared),
+        ));
+
+        tx.send(key(InputKind::KeyDown, 0x41)).unwrap();
+        let down = next_event(&host_conn, &[]).await;
+        assert_eq!((down.kind, down.code), (InputKind::KeyDown, 0x41));
+        let snap = next_event(&host_conn, &[]).await;
+        assert_eq!(snap.kind, InputKind::KeysHeld);
+        let (codes, n) = crate::input::keys_held_codes(&snap);
+        assert_eq!((&codes[..n], n), (&[0x41u8][..], 1));
+
+        tx.send(key(InputKind::KeyUp, 0x41)).unwrap();
+        loop {
+            let ev = next_event(&host_conn, &[]).await;
+            if ev.kind == InputKind::KeysHeld {
+                let (_, n) = crate::input::keys_held_codes(&ev);
+                assert_eq!(n, 0, "the emptied set is what releases the key");
+                break;
+            }
+            assert_eq!((ev.kind, ev.code), (InputKind::KeyUp, 0x41));
+        }
+        task.abort();
+    }
+
+    // Recovery includes keys generated after the embedder queue by controller mouse mode
+    #[tokio::test]
+    async fn keyboard_snapshots_include_controller_mouse_keys() {
+        let (_server, client_conn, host_conn) = loopback().await;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let caps = Arc::new(std::array::from_fn(|_| AtomicU8::new(0)));
+        let shared = Arc::new(PadMouseShared::default());
+        let task = tokio::spawn(run(
+            client_conn,
+            rx,
+            true,
+            true,
+            false,
+            caps,
+            mouse_args(&shared),
+        ));
+        tx.send(button(gamepad::BTN_A, 0)).unwrap();
+        next_event(&host_conn, &[]).await;
+        shared.request(1);
+        loop {
+            let ev = next_event(&host_conn, &[]).await;
+            if GamepadSnapshot::from_event(&ev).is_some_and(|s| s.buttons == 0) {
+                break;
+            }
+        }
+        tx.send(button(gamepad::BTN_B, 0)).unwrap();
+        let down = next_event(&host_conn, &[0]).await;
+        assert_eq!((down.kind, down.code), (InputKind::KeyDown, 0x1B));
+        assert_ne!(down.flags & crate::input::KEY_FLAG_SEQUENCE, 0);
+        let snap = next_event(&host_conn, &[0]).await;
+        assert_eq!(snap.kind, InputKind::KeysHeld);
+        let (codes, n) = crate::input::keys_held_codes(&snap);
+        assert_eq!(&codes[..n], &[0x1B]);
+
+        shared.request(0);
+        loop {
+            let ev = next_event(&host_conn, &[0]).await;
+            if ev.kind == InputKind::KeysHeld && crate::input::keys_held_codes(&ev).1 == 0 {
+                break;
+            }
+        }
+        task.abort();
+    }
+
+    // A host without the capability receives the original edges and no snapshots
+    #[tokio::test]
+    async fn legacy_hosts_receive_only_unmodified_key_edges() {
+        let (_server, client_conn, host_conn) = loopback().await;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let caps = Arc::new(std::array::from_fn(|_| AtomicU8::new(0)));
+        let shared = Arc::new(PadMouseShared::default());
+        let task = tokio::spawn(run(
+            client_conn,
+            rx,
+            true,
+            false,
+            false,
+            caps,
+            mouse_args(&shared),
+        ));
+        for kind in [InputKind::KeyDown, InputKind::KeyUp] {
+            let ev = key(kind, 0x41);
+            tx.send(ev).unwrap();
+            assert_eq!(next_event(&host_conn, &[]).await, ev);
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), host_conn.read_datagram())
+                .await
+                .is_err()
+        );
+        task.abort();
+    }
+
     /// Entering sends the pad neutral; its presses become keys while pad 1 still forwards.
     #[tokio::test]
     async fn a_mouse_pad_goes_neutral_and_its_buttons_become_keys() {
@@ -397,7 +540,15 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let caps = Arc::new(std::array::from_fn(|_| AtomicU8::new(0)));
         let shared = Arc::new(PadMouseShared::default());
-        let task = tokio::spawn(run(client_conn, rx, true, false, caps, mouse_args(&shared)));
+        let task = tokio::spawn(run(
+            client_conn,
+            rx,
+            true,
+            false,
+            false,
+            caps,
+            mouse_args(&shared),
+        ));
 
         tx.send(button(gamepad::BTN_A, 0)).unwrap();
         let held = next_event(&host_conn, &[]).await;
@@ -446,7 +597,15 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let caps = Arc::new(std::array::from_fn(|_| AtomicU8::new(0)));
         let shared = Arc::new(PadMouseShared::default());
-        let task = tokio::spawn(run(client_conn, rx, true, false, caps, mouse_args(&shared)));
+        let task = tokio::spawn(run(
+            client_conn,
+            rx,
+            true,
+            false,
+            false,
+            caps,
+            mouse_args(&shared),
+        ));
         let axes = [
             (gamepad::AXIS_LS_X, 1_000),
             (gamepad::AXIS_LS_Y, -2_000),
