@@ -37,6 +37,10 @@ pub(crate) const STANDING_TIME: Duration = Duration::from_millis(250);
 /// IDR re-anchors. Hits only a wedged consumer during the flush cooldown.
 const FRAME_QUEUE_HARD_CAP: usize = 90;
 
+/// AUs held for a decoder that has not popped yet: the opening IDR and its dependents.
+/// 48 ≈ 200 ms at 240 fps, 800 ms at 60. A slower decoder gets none and one keyframe.
+pub(crate) const PREROLL_AUS: usize = 48;
+
 /// Clock-based jump: completed frames this far behind the skew-corrected capture
 /// clock. 400 ms sits above handshake error (≈ RTT/2) plus delivery jitter so a
 /// healthy stream cannot trip; `clock_offset_ns == 0` disarms this path (same-clock
@@ -258,7 +262,7 @@ pub(crate) struct FrameChannel {
     inner: Mutex<FrameQueue>,
     ready: Condvar,
     /// Set by the first [`Self::pop`]. Until then no decoder exists (a console
-    /// launch hold keeps it away for up to 15 s) and the pump drops AUs unqueued.
+    /// launch hold keeps it away for up to 15 s) and the pump only [`Self::preroll`]s.
     consumer_seen: AtomicBool,
 }
 
@@ -294,11 +298,26 @@ impl FrameChannel {
         }
     }
 
-    /// Whether anything has ever popped. False = no decoder yet; queued AUs
-    /// would be reference-broken by the time one starts, so the pump keeps the
-    /// queue empty and asks for a keyframe when the first pop lands.
+    /// Whether anything has ever popped. False = no decoder yet: the pump holds
+    /// the opening GOP through [`Self::preroll`] instead of queueing.
     pub(crate) fn consumer_seen(&self) -> bool {
         self.consumer_seen.load(Ordering::Relaxed)
+    }
+
+    /// Hold `frame` for a decoder that has not popped yet, while fewer than [`PREROLL_AUS`]
+    /// AUs are held. At the bound the held GOP goes whole, since its dependents are useless
+    /// without its IDR. Returns the AUs dropped, `frame` included; 0 = held.
+    pub(crate) fn preroll(&self, frame: Frame) -> usize {
+        let mut st = self.inner.lock().unwrap();
+        let held = st.q.iter().filter(|f| f.complete).count();
+        if held >= PREROLL_AUS {
+            st.q.clear();
+            return held + usize::from(frame.complete);
+        }
+        st.q.push_back(frame);
+        drop(st);
+        self.ready.notify_one();
+        0
     }
 
     pub(crate) fn set_all_intra(&self, all_intra: bool) {
@@ -383,7 +402,7 @@ impl FrameChannel {
 
 #[cfg(test)]
 mod frame_channel_tests {
-    use super::{FrameChannel, FramePop, FRAME_QUEUE_HARD_CAP};
+    use super::{FrameChannel, FramePop, FRAME_QUEUE_HARD_CAP, PREROLL_AUS};
     use crate::session::Frame;
     use std::time::Duration;
 
@@ -424,6 +443,28 @@ mod frame_channel_tests {
             FramePop::Frame(f) => Some(f.frame_index),
             _ => None,
         }
+    }
+
+    #[test]
+    fn preroll_holds_the_opening_gop_then_drops_it_whole() {
+        let ch = FrameChannel::new();
+        for i in 0..PREROLL_AUS as u32 {
+            assert_eq!(ch.preroll(frame(i)), 0);
+        }
+        assert_eq!(ch.depth(), PREROLL_AUS);
+        assert!(!ch.consumer_seen(), "holding is not consuming");
+        assert_eq!(
+            popped(&ch),
+            Some(0),
+            "the decoder opens on the first AU held"
+        );
+
+        let ch = FrameChannel::new();
+        for i in 0..PREROLL_AUS as u32 {
+            ch.preroll(frame(i));
+        }
+        assert_eq!(ch.preroll(frame(PREROLL_AUS as u32)), PREROLL_AUS + 1);
+        assert_eq!(ch.depth(), 0, "a GOP without its IDR is not kept");
     }
 
     #[test]

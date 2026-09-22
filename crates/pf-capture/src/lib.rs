@@ -268,6 +268,13 @@ pub trait Capturer: Send {
         None
     }
 
+    /// Since the last call, the frame the encoder last read may be torn (a
+    /// producer re-sent a buffer this side still held). The stream loop
+    /// answers with one IDR. Default: never.
+    fn take_reference_risk(&mut self) -> bool {
+        false
+    }
+
     /// Live capture health for the operator surface (WP18). `None` = this
     /// capturer does not classify (Linux portal, synthetic sources).
     fn health(&self) -> Option<CaptureHealth> {

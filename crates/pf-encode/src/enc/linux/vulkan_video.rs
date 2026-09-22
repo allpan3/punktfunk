@@ -1217,9 +1217,13 @@ impl VulkanVideoEncoder {
                     (_, _, Some(RgbDirect { padded: true, .. })) =>
                         "active(padded-copy: mode is not 64x16-aligned — staging blit + edge \
                          duplication instead of the direct import)",
-                    (Ok(_), false, None) =>
-                        "available(off: PUNKTFUNK_VULKAN_RGB_DIRECT=0, or a cursor-blend session \
-                         — =1 forces)",
+                    (Ok(_), false, None) => match rgb_request() {
+                        Some(false) => "available(off: PUNKTFUNK_VULKAN_RGB_DIRECT=0)",
+                        _ =>
+                            "available(off: this session composites the pointer, which EFC \
+                             cannot — a cursor channel or a compositor that embeds it restores \
+                             RGB-direct; =1 does not)",
+                    },
                     (Err(e), _, None) => e,
                     (Ok(_), true, None) => unreachable!("rgb gate and cfg disagree"),
                 },

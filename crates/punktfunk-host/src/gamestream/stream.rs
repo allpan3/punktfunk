@@ -532,9 +532,7 @@ fn run(
         return stream_body(
             &mut capturer,
             Some(&rebuild),
-            // Gamescope capture carries no cursor either way; Mutter embed never paints.
-            compositor != crate::vdisplay::Compositor::Gamescope
-                && blend_capable_metadata_cursor(&cfg),
+            host_composites_metadata_cursor(compositor, &cfg),
             &sock,
             cfg,
             running,
@@ -552,7 +550,14 @@ fn run(
     }
 
     // Reuse gated on HDR + cursor mode + pin. Depth is a PipeWire-negotiation property;
-    // mismatch needs a fresh session. Embed the pointer unless this backend composites it.
+    // mismatch needs a fresh session. The pointer follows the compositor that is up now.
+    #[cfg(target_os = "linux")]
+    let metadata_cursor =
+        match crate::vdisplay::compositor_for_kind(crate::vdisplay::detect_active_session().kind) {
+            Some(c) => host_composites_metadata_cursor(c, &cfg),
+            None => blend_capable_metadata_cursor(&cfg),
+        };
+    #[cfg(not(target_os = "linux"))]
     let metadata_cursor = blend_capable_metadata_cursor(&cfg);
     // Host-wide pin: without this, Moonlight gets whichever head the portal hands back.
     #[cfg(target_os = "linux")]
@@ -750,9 +755,21 @@ fn resolve_gs_app(app: Option<&super::apps::AppEntry>) -> Option<GsApp> {
     })
 }
 
+/// Cursor-as-metadata only where the encoder composites `frame.cursor` and the compositor
+/// cannot embed the pointer itself. Gamescope carries no cursor either way. Shared by
+/// `set_hw_cursor`, the plan and `stream_body`'s blend flag on both sources so they cannot drift.
+fn host_composites_metadata_cursor(
+    compositor: crate::vdisplay::Compositor,
+    cfg: &StreamConfig,
+) -> bool {
+    compositor != crate::vdisplay::Compositor::Gamescope
+        && !crate::session_plan::compositor_embeds_pointer(compositor)
+        && blend_capable_metadata_cursor(cfg)
+}
+
 /// Cursor-as-metadata only where this session's encode backend composites `frame.cursor`.
-/// Shared by the mirror and virtual-output sources so `set_hw_cursor` and `stream_body`'s
-/// blend flag cannot drift. GameStream has no cursor channel.
+/// The answer when no compositor is known; [`host_composites_metadata_cursor`] adds the
+/// compositor. GameStream has no cursor channel.
 fn blend_capable_metadata_cursor(cfg: &StreamConfig) -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -815,11 +832,7 @@ fn open_gs_virtual_source(
         }
     };
     let mut vd = crate::vdisplay::open(compositor).context("open virtual display")?;
-    // Mutter virtual never paints an embedded pointer. Gamescope stays off: no metadata
-    // either way, and the request would cost the native-NV12 shape for nothing.
-    vd.set_hw_cursor(
-        compositor != crate::vdisplay::Compositor::Gamescope && blend_capable_metadata_cursor(&cfg),
-    );
+    vd.set_hw_cursor(host_composites_metadata_cursor(compositor, &cfg));
     // Per-session, not a process-global env: concurrent sessions must not stomp launch targets.
     vd.set_launch_command(launch.and_then(|t| t.command.clone()));
     // Same reason: a process env let either plane retarget the other's `create`.
@@ -845,10 +858,7 @@ fn open_gs_virtual_source(
     )
     .context("create virtual output at client resolution")?;
     // Linux virtual-output capture is SDR-only (Mutter RecordVirtual); HDR is portal mirror.
-    let plan = gs_session_plan(
-        &cfg,
-        compositor != crate::vdisplay::Compositor::Gamescope && blend_capable_metadata_cursor(&cfg),
-    );
+    let plan = gs_session_plan(&cfg, host_composites_metadata_cursor(compositor, &cfg));
     let mut capturer = capture::capture_virtual_output(
         vout,
         capture::VirtualCaptureRequest {
@@ -1489,6 +1499,10 @@ fn stream_body(
             }
         }
         if force_idr.swap(false, Ordering::SeqCst) {
+            want_keyframe = true;
+        }
+        // A re-held PipeWire buffer may have torn the reference the encoder last read.
+        if capturer.take_reference_risk() {
             want_keyframe = true;
         }
         if want_keyframe {
