@@ -218,6 +218,13 @@ impl StreamState {
             self.last_forced_idr = Some(std::time::Instant::now());
             announce_pipeline_gap(&self.gap_tx, outage_ms);
         }
+        if self.capturer.take_reference_risk() {
+            tracing::info!(
+                "capture re-held a re-sent buffer — forcing an IDR over the reference it may \
+                 have torn"
+            );
+            want_kf = true;
+        }
         while self.keyframe.try_recv().is_ok() {
             want_kf = true;
         }

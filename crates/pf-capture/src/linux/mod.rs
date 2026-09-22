@@ -94,10 +94,10 @@ struct CaptureSignals {
     broken: Arc<AtomicBool>,
     /// The stream reached `Error` (e.g. "no more input formats"). Terminal: it never delivers.
     errored: Arc<AtomicBool>,
-    /// The producer sent a buffer this capture still holds, so the pool's ownership is broken:
-    /// pw_stream takes that buffer back once, its busy count never clears, and the pool is a
-    /// buffer short for good. Never cleared; only a new stream gets a whole pool back.
-    resent: Arc<AtomicBool>,
+    /// Buffers the producer sent again while this capture still held them (PipeWire < 1.6,
+    /// no `node.reliable`). Each is re-held under a new generation; the count rides the
+    /// provenance line, and [`Capturer::take_reference_risk`] turns a step into one IDR.
+    resent: Arc<std::sync::atomic::AtomicU64>,
     hdr_negotiated: Arc<AtomicBool>,
     /// Thread actually advertised the EGL→CUDA dmabuf-only offer. `plan.build_importer`
     /// is not enough: a failed importer means no dmabuf was offered, so a
@@ -139,7 +139,7 @@ impl CaptureSignals {
             driving: Arc::new(AtomicBool::new(false)),
             broken: Arc::new(AtomicBool::new(false)),
             errored: Arc::new(AtomicBool::new(false)),
-            resent: Arc::new(AtomicBool::new(false)),
+            resent: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             hdr_negotiated: Arc::new(AtomicBool::new(false)),
             gpu_dmabuf_offer: Arc::new(AtomicBool::new(false)),
             cursor_live: Arc::new(std::sync::Mutex::new(None)),
@@ -158,6 +158,8 @@ pub struct PortalCapturer {
     /// nothing. Sender dies with the PipeWire thread (`Disconnected`).
     wake: Receiver<()>,
     signals: CaptureSignals,
+    /// `signals.resent` as of the last [`Capturer::take_reference_risk`].
+    resent_acked: u64,
     /// First drop out of `Streaming` with no frame. Grace for a transient
     /// renegotiation; cleared on a frame or when `Streaming` again.
     stall_since: Option<std::time::Instant>,
@@ -399,6 +401,7 @@ impl PwHandles {
             slot: self.slot,
             wake: self.wake,
             signals: self.signals,
+            resent_acked: 0,
             stall_since: None,
             vaapi_dmabuf: self.vaapi_dmabuf,
             import_policy: self.import_policy,
@@ -586,13 +589,6 @@ impl Capturer for PortalCapturer {
                 self.node_id
             ));
         }
-        if self.signals.resent.load(Ordering::Relaxed) {
-            return Err(anyhow!(
-                "producer re-sent a held buffer (node {}): the pool is a buffer short until the \
-                 stream is rebuilt — rebuilding capture",
-                self.node_id
-            ));
-        }
         // Drain wakeup edges first — stale ones must not make the next
         // `wait_arrival` return early. `Disconnected` is a dead thread;
         // a leftover frame is still served first.
@@ -651,9 +647,17 @@ impl Capturer for PortalCapturer {
     /// static desktop stays `Streaming` (no buffers) and is not reported dead.
     fn is_alive(&self) -> bool {
         !self.signals.broken.load(Ordering::Relaxed)
-            && !self.signals.resent.load(Ordering::Relaxed)
             && self.signals.streaming.load(Ordering::Relaxed)
             && self.join.as_ref().is_some_and(|j| !j.is_finished())
+    }
+
+    /// A re-sent buffer since the last call: the frame encoded from the earlier read may be
+    /// torn, so the loop refreshes the reference with one IDR.
+    fn take_reference_risk(&mut self) -> bool {
+        let n = self.signals.resent.load(Ordering::Relaxed);
+        let risk = n != self.resent_acked;
+        self.resent_acked = n;
+        risk
     }
 
     /// Standard HDR10 default block once 10-bit PQ negotiated. Neither Linux
