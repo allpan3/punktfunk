@@ -170,10 +170,12 @@ fn binding(mode: TargetMode, keep_default: bool, seat: bool) -> (bool, bool) {
 }
 
 /// First reopen wait after a transient failure. Doubles per miss up to [`REOPEN_BACKOFF_CAP`];
-/// resets on success or an endpoint-set change. Do not retry flat at 2 s — each attempt re-runs
-/// the wiring pass, IPolicyConfig included.
+/// resets after an attempt that lived [`REOPEN_STABLE_AFTER`] or an endpoint-set change. Do not
+/// retry flat at 2 s — each attempt re-runs the wiring pass, IPolicyConfig included.
 const REOPEN_BACKOFF_START: Duration = Duration::from_secs(2);
 const REOPEN_BACKOFF_CAP: Duration = Duration::from_secs(60);
+/// An attempt this old streamed: its death is a new failure, not the next miss of a failing open.
+const REOPEN_STABLE_AFTER: Duration = Duration::from_secs(5);
 /// Fingerprint poll while backing off or waiting out an unsatisfiable plan: enumerate-and-hash
 /// only. A change ends the wait immediately so a re-arrived endpoint is not stuck behind the cap.
 const ENDPOINT_POLL_EVERY: Duration = Duration::from_secs(2);
@@ -222,6 +224,7 @@ fn capture_thread(
     // Outlives every reopen: the pins stay while the capture re-plans, and go at the end.
     let mut voice = voice_route::VoiceRoute::default();
     while !stop.load(Ordering::Relaxed) {
+        let attempt = Instant::now();
         match capture_once(
             &tx,
             &stop,
@@ -280,6 +283,10 @@ fn capture_thread(
                     }
                 } else {
                     unsat_logged = None;
+                    if attempt.elapsed() >= REOPEN_STABLE_AFTER {
+                        failures = 0;
+                        backoff = REOPEN_BACKOFF_START;
+                    }
                     failures += 1;
                     if failures.is_power_of_two() {
                         tracing::warn!(error = %format!("{e:#}"), count = failures,
