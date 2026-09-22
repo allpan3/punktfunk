@@ -270,9 +270,12 @@ public enum PresentPacing: Sendable, Equatable {
 /// The renderer owns each sample after enqueue. Sendable because AVSampleBufferVideoRenderer
 /// explicitly permits background-thread enqueueing.
 final class DecodedVideoSink: @unchecked Sendable {
-    private struct Stamp {
+    struct Stamp {
         let ptsNs: UInt64
         let decodedNs: Int64
+        /// Client CLOCK_REALTIME at enqueue — the pf-present `latchMs` origin on this path.
+        let submittedNs: Int64
+        let isRepeat: Bool
     }
 
     private let renderer: AVSampleBufferVideoRenderer
@@ -301,21 +304,23 @@ final class DecodedVideoSink: @unchecked Sendable {
         lock.lock()
         // More than one second of unmatched 60 fps surfaces cannot yield a live latency sample.
         if stamps.count >= 64 { stamps.removeAll(keepingCapacity: true) }
-        stamps[surfaceID] = Stamp(ptsNs: frame.ptsNs, decodedNs: frame.decodedNs)
+        stamps[surfaceID] = Stamp(
+            ptsNs: frame.ptsNs, decodedNs: frame.decodedNs,
+            submittedNs: Stage2Pipeline.realtimeNs(forDisplayLinkTimestamp: CACurrentMediaTime()),
+            isRepeat: frame.flags & PunktfunkConnection.userFlagRepeat != 0)
         lock.unlock()
         renderer.enqueue(sample)
         return true
     }
 
-    func takeDisplayedStamp() -> (ptsNs: UInt64, decodedNs: Int64)? {
+    func takeDisplayedStamp() -> Stamp? {
         guard #available(macOS 14.4, iOS 17.4, tvOS 17.4, *),
               let pixelBuffer = renderer.displayedPixelBuffer(),
               let surfaceID = Self.surfaceID(pixelBuffer)
         else { return nil }
         lock.lock()
         defer { lock.unlock() }
-        guard let stamp = stamps.removeValue(forKey: surfaceID) else { return nil }
-        return (stamp.ptsNs, stamp.decodedNs)
+        return stamps.removeValue(forKey: surfaceID)
     }
 
     private static func surfaceID(_ pixelBuffer: CVPixelBuffer) -> IOSurfaceID? {
@@ -677,6 +682,9 @@ public final class Stage2Pipeline {
     /// Deadline pacing's staged CAMetalDisplayLink frame-rate hint (see `FrameRateHint`).
     /// Created unconditionally (cheap); only the deadline link thread drains it.
     private let frameRateHint = FrameRateHint()
+    /// The pf-present line, on every pacing. Built in `init` so the decode callback can count
+    /// decoder output; `start` names the pace once the session's policy is resolved.
+    private let debugStats: PresentDebugStats
 
     /// The Metal layer the hosting view installs + sizes.
     public var layer: CAMetalLayer { presenter.layer }
@@ -729,6 +737,18 @@ public final class Stage2Pipeline {
         let phaseReporter = phaseReporter
         let cadence = cadence
         let rateHint = frameRateHint
+        let vsyncClock = vsyncClock
+        #if os(macOS)
+        // The windowed mechanism can flip mid-session (fullscreen ↔ composited), so the suffix
+        // is read live per line rather than baked into the resolved name.
+        let paceName = { presenter.presentsComposited ? rateHint.pace() + "(composited)" : rateHint.pace() }
+        #else
+        let paceName = { rateHint.pace() }
+        #endif
+        let debugStats = PresentDebugStats(
+            cadence: cadence, pace: paceName,
+            linkPeriod: { vsyncClock.lastPeriod() }, panel: { rateHint.panel() })
+        self.debugStats = debugStats
         self.decoder = VideoDecoder(
             onDecoded: { frame in
                 // Decode stage = received→decoded, both client CLOCK_REALTIME (offset 0 — no
@@ -736,6 +756,8 @@ public final class Stage2Pipeline {
                 // including ones the re-anchor gate withholds or the newest-wins ring drops.
                 hud.decoded(
                     ptsNs: frame.ptsNs, receivedNs: frame.receivedNs, decodedNs: frame.decodedNs)
+                debugStats.decoded(
+                    isRepeat: frame.flags & PunktfunkConnection.userFlagRepeat != 0)
                 // Same interval, reported to the core bitrate controller so Automatic caps at this
                 // device's real decode limit instead of the network link ceiling. Every decoded
                 // frame (not just presented ones), so a newest-wins drop can't hide the backlog.
@@ -751,7 +773,10 @@ public final class Stage2Pipeline {
                 guard gate.onDecoded(flags: frame.flags) else { return }
                 if case .video(_, let isHDR) = frame.image { frameHDR.note(isHDR) }
                 if let decodedSink {
-                    decodedSink.submit(frame)
+                    let submitStarted = CACurrentMediaTime()
+                    let submitted = decodedSink.submit(frame)
+                    debugStats.renderReturned(
+                        ok: submitted, tookMs: (CACurrentMediaTime() - submitStarted) * 1000)
                     return
                 }
                 // Decoder OUTPUT is where the cadence loop is sampled — the instant the frame
@@ -959,8 +984,6 @@ public final class Stage2Pipeline {
         pumpJoinable = true
         thread.start()
 
-        if decodedSink != nil { return }
-
         // Present policy, resolved once per session before the stats so each line names it.
         // Adaptive-refresh latency chooses immediate sparse or slotted dense input. The env selects
         // slot, immediate or legacy scheduled V-Sync explicitly for A/B.
@@ -972,27 +995,17 @@ public final class Stage2Pipeline {
         let fixedVsync = presentMode == "vsync"
             || (presentMode != "immediate" && connection.settings.vsync)
         let vsyncClock = vsyncClock
-        let pace = pacing == .deadline ? "deadline"
-            : adaptiveSlot ? "adaptive" : fixedSlot ? "slot" : fixedVsync ? "vsync" : "immediate"
-        #if os(macOS)
-        // The windowed mechanism can flip mid-session (fullscreen ↔ composited), so the suffix
-        // is read live per line rather than baked into the resolved name.
-        let paceName = { presenter.presentsComposited ? pace + "(composited)" : pace }
-        #else
-        let paceName = { pace }
-        #endif
+        frameRateHint.stagePace(
+            pacing == .decoded ? "decoded" : pacing == .deadline ? "deadline"
+                : adaptiveSlot ? "adaptive" : fixedSlot ? "slot" : fixedVsync ? "vsync" : "immediate")
+        // The video plane has no present thread: `renderTick` stamps and flushes its line.
+        let debugStats: PresentDebugStats? = self.debugStats
+        if decodedSink != nil { return }
 
         // The present half. Deadline pacing (stage-4) swaps it wholesale: a CAMetalDisplayLink
         // vends the drawables and its per-refresh updates co-drive the render thread — see
         // startDeadlinePresenter. The V-Sync policy above doesn't apply there (the link deadline-
-        // times every present). Deadline sessions ALWAYS carry the stats (their pf-present line
-        // streams to Console.app via presentLog — the on-device pacing decomposition).
-        let debugStats =
-            (presentDebug || pacing == .deadline)
-            ? PresentDebugStats(
-                cadence: cadence, pace: paceName,
-                linkPeriod: { vsyncClock.lastPeriod() })
-            : nil
+        // times every present).
         if pacing == .deadline {
             startDeadlinePresenter(debugStats: debugStats)
             return
@@ -1092,7 +1105,10 @@ public final class Stage2Pipeline {
                     // Display stage = decoded → on-glass. Both instants are client CLOCK_REALTIME,
                     // so no skew offset applies.
                     hud.displayed(ptsNs: frame.ptsNs, decodedNs: frame.decodedNs, atNs: atNs)
-                    debugStats?.presented(atNs: presentedNs, issuedNs: issuedNs)
+                    debugStats?.presented(
+                        atNs: presentedNs, issuedNs: issuedNs, ptsNs: frame.ptsNs,
+                        decodedNs: frame.decodedNs,
+                        isRepeat: frame.flags & PunktfunkConnection.userFlagRepeat != 0)
                 }
                 // One present tail, two decode sources: the VideoToolbox biplanar buffer or the
                 // PyroWave Metal planes — the ring, pacing and meters are agnostic to which.
@@ -1343,7 +1359,10 @@ public final class Stage2Pipeline {
                         ?? Stage2Pipeline.realtimeNs(forDisplayLinkTimestamp: CACurrentMediaTime())
                     endToEndMeter?.record(ptsNs: frame.ptsNs, atNs: atNs, offsetNs: clockOffset())
                     hud.displayed(ptsNs: frame.ptsNs, decodedNs: frame.decodedNs, atNs: atNs)
-                    debugStats?.presented(atNs: presentedNs, issuedNs: issuedNs)
+                    debugStats?.presented(
+                        atNs: presentedNs, issuedNs: issuedNs, ptsNs: frame.ptsNs,
+                        decodedNs: frame.decodedNs,
+                        isRepeat: frame.flags & PunktfunkConnection.userFlagRepeat != 0)
                 }
                 let rendered: Bool
                 switch frame.image {
@@ -1389,9 +1408,21 @@ public final class Stage2Pipeline {
             let atNs = Self.realtimeNs(forDisplayLinkTimestamp: displayedMediaTime)
             endToEndMeter?.record(ptsNs: stamp.ptsNs, atNs: atNs, offsetNs: clockOffset())
             hud.displayed(ptsNs: stamp.ptsNs, decodedNs: stamp.decodedNs, atNs: atNs)
+            debugStats.presented(
+                atNs: atNs, issuedNs: stamp.submittedNs, ptsNs: stamp.ptsNs,
+                decodedNs: stamp.decodedNs, isRepeat: stamp.isRepeat)
         }
         #endif
-        if pacing != .decoded { renderSignal.signal() }
+        if pacing != .decoded {
+            renderSignal.signal()
+        } else {
+            debugStats.flushIfDue(ring: ring, gate: nil)
+        }
+    }
+
+    /// MAIN thread: the hosting panel, for the pf-present line's grid and `panel=` field.
+    public func setPanel(_ info: PanelInfo) {
+        frameRateHint.stagePanel(info)
     }
 
     /// MAIN thread (SessionPresenter — session start + every layout/Reconfigure): hint the

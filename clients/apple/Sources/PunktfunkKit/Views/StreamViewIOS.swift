@@ -862,6 +862,9 @@ public final class StreamViewController: StreamViewControllerBase {
     /// an attached monitor — at that surface's render scale (see SessionPresenter.layout).
     private func layoutMetalLayer() {
         videoLayer.videoGravity = SessionPresenter.gravity(VideoFit(name: connection?.settings.videoFit))
+        // UIKit exposes only the ceiling; the range and step stay unknown (min = max).
+        let maxHz = Double((streamView.window?.screen ?? UIScreen.main).maximumFramesPerSecond)
+        presenter.setPanel(PanelInfo(minHz: maxHz, maxHz: maxHz))
         #if os(iOS)
         if onExternal {
             let scale = externalVideo.traitCollection.displayScale

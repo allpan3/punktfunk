@@ -229,6 +229,14 @@ final class SessionPresenter {
     private var pump: StreamPump?
     private var stage2: Stage2Pipeline?
     private var stage2Link: CADisplayLink?
+    private var panel = PanelInfo(minHz: 0, maxHz: 0)
+
+    /// The hosting screen's refresh range and granularity, from the view on start and every
+    /// layout (a window can move screens). Main thread. Diagnostics only.
+    func setPanel(_ info: PanelInfo) {
+        panel = info
+        stage2?.setPanel(info)
+    }
     private var metalLayer: CAMetalLayer?
     #if os(macOS)
     /// The windowed present MECHANISM this session runs while composited (resolved once per
@@ -376,6 +384,7 @@ final class SessionPresenter {
                 stage2Link = link
             }
             syncFrameRate(hz: connection.currentMode().refreshHz)
+            pipeline.setPanel(panel)
             pipeline.start(
                 connection: connection, onFrame: onFrame, onSessionEnd: onSessionEnd,
                 onDecodedSize: onDecodedSize, onFrameHDR: onFrameHDR)

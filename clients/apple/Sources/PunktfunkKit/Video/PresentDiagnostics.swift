@@ -71,8 +71,42 @@ public final class PresentLinkInfo: @unchecked Sendable {
     }
 }
 
+/// What the hosting screen can do, read by the view that owns the window: the refresh range and
+/// the step the refresh INTERVAL moves in between the two (`NSScreen.displayUpdateGranularity`;
+/// 0 = any interval). A fixed panel has `minHz == maxHz`. iOS exposes only the ceiling.
+public struct PanelInfo: Equatable, Sendable {
+    public var minHz: Double
+    public var maxHz: Double
+    public var granularity: Double
+
+    public init(minHz: Double, maxHz: Double, granularity: Double = 0) {
+        self.minHz = minHz
+        self.maxHz = maxHz
+        self.granularity = granularity
+    }
+
+    public var isAdaptive: Bool { maxHz - minHz > 0.5 }
+    /// The shortest refresh interval, seconds; 0 when unknown.
+    public var minInterval: Double { maxHz > 0 ? 1 / maxHz : 0 }
+
+    /// A glass interval in panel steps: 1 = the fastest refresh. An adaptive panel with a
+    /// granularity steps its interval up from the minimum in that unit; anything else is a
+    /// multiple of the fastest refresh. 0 when the panel is unknown.
+    public func gridUnits(interval: Double) -> Int {
+        guard minInterval > 0 else { return 0 }
+        if isAdaptive, granularity > 0 {
+            return max(0, 1 + Int(((interval - minInterval) / granularity).rounded()))
+        }
+        return max(0, Int((interval / minInterval).rounded()))
+    }
+
+    public var description: String {
+        String(format: "%.0f-%.0fHz g=%.2f", minHz, maxHz, granularity * 1000)
+    }
+}
+
 /// Deadline pacing's staged frame-rate hint, and — on every pacing — the session's nominal source
-/// interval (`sourceIntervalNs`). SessionPresenter pushes the stream rate from the
+/// interval (`sourceIntervalNs`) and the hosting panel. SessionPresenter pushes the stream rate from the
 /// MAIN thread (session start + every layout/Reconfigure); the link's own thread drains and
 /// applies it, so the CAMetalDisplayLink is only ever touched from the thread that runs it. The
 /// floor is PINNED at the stream rate — no idle ramp-down: with a low floor the link idles toward
@@ -84,6 +118,30 @@ final class FrameRateHint: @unchecked Sendable {
     private var pending: CAFrameRateRange?
     private var streamHz: Float = 0
     private var boosted = false
+    private var panelInfo = PanelInfo(minHz: 0, maxHz: 0)
+    private var paceName = "starting"
+    /// The hosting panel, staged from main on start and every layout (a window can move screens).
+    func stagePanel(_ info: PanelInfo) {
+        lock.lock()
+        panelInfo = info
+        lock.unlock()
+    }
+    func panel() -> PanelInfo {
+        lock.lock()
+        defer { lock.unlock() }
+        return panelInfo
+    }
+    /// The session's resolved present policy name, for the pf-present `pace=` field.
+    func stagePace(_ name: String) {
+        lock.lock()
+        paceName = name
+        lock.unlock()
+    }
+    func pace() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return paceName
+    }
     func stage(hz: Float) {
         guard hz > 0 else { return }
         lock.lock()
@@ -239,22 +297,29 @@ final class PhaseReporter: @unchecked Sendable {
     }
 }
 
-/// PUNKTFUNK_PRESENT_DEBUG=1 aggregation: one printed line per second from the render thread with
-/// the decode rate, render outcomes, the slowest render call (≈ nextDrawable wait) and the deltas
-/// between system-reported on-glass times (vsync-aligned presents show clean refresh-period
-/// multiples; immediate flips scatter). Lock-guarded — `presented` lands on a Metal callback thread.
+/// The once-a-second `pf-present` line, on every pacing: decode rate, render outcomes, the
+/// slowest render call (≈ nextDrawable wait), and what glass did — on-glass intervals as a
+/// histogram in panel steps (`judder` = the share outside the modal step), how far each interval
+/// strayed from the source's own spacing (`cadErrMs`), and decoded→glass (`displayMs`).
+/// Always to os_log; stdout under PUNKTFUNK_PRESENT_DEBUG=1. Lock-guarded — `presented` lands
+/// on a Metal callback thread, the tvOS video plane's on main.
 final class PresentDebugStats: @unchecked Sendable {
     /// The session's cadence loop, for the line's `cadence` segment — `nil` under the latency
-    /// intent, and then the line is emitted exactly as it was before source-timestamp playout
-    /// existed. `late` is the number WP8 gates on: a due time already past when the frame became
+    /// intent. `late` is the number WP8 gates on: a due time already past when the frame became
     /// presentable is the direct signal that the cushion is too small.
     private let cadence: CadenceClock?
     private let lock = NSLock()
     private var last = CACurrentMediaTime()
+    private var decoded = 0, decodedRepeats = 0, shownRepeats = 0
     private var ok = 0, failed = 0, empty = 0, dropped = 0, gated = 0, noDrawable = 0
     private var maxRenderMs = 0.0
     private var lastGlassNs: Int64 = 0
+    /// The previous on-glass frame's source pts, for `cadErrMs`; 0 = no cadence reference (a
+    /// repeat, or a frame whose pts did not survive).
+    private var lastGlassPtsNs: UInt64 = 0
     private var glassDeltasMs: [Double] = []
+    private var cadenceErrMs: [Double] = []
+    private var displayMs: [Double] = []
     /// Present-issue → on-glass delay per frame (system presentedTime minus the render call's
     /// start) — the DIRECT decomposition of the display stage: ring/pairing wait lives upstream
     /// of it, queue + present-pipeline cost inside it. Standing queue reads as ~n×period here;
@@ -276,14 +341,26 @@ final class PresentDebugStats: @unchecked Sendable {
     /// The ordinary link's last reported period in seconds, for `linkMs` — 0 before the first
     /// tick and under deadline pacing (no ordinary link).
     private let linkPeriod: () -> CFTimeInterval
+    /// The hosting panel, read live per line — a window can move to another screen.
+    private let panel: () -> PanelInfo
 
     init(
         cadence: CadenceClock?, pace: @escaping () -> String,
-        linkPeriod: @escaping () -> CFTimeInterval
+        linkPeriod: @escaping () -> CFTimeInterval,
+        panel: @escaping () -> PanelInfo = { PanelInfo(minHz: 0, maxHz: 0) }
     ) {
         self.cadence = cadence
         self.pace = pace
         self.linkPeriod = linkPeriod
+        self.panel = panel
+    }
+
+    /// Decoder output, every frame on every pacing — before the re-anchor gate and the store.
+    func decoded(isRepeat: Bool) {
+        lock.lock()
+        decoded += 1
+        if isRepeat { decodedRepeats += 1 }
+        lock.unlock()
     }
 
     func emptyWake() { lock.lock(); empty += 1; lock.unlock() }
@@ -314,17 +391,58 @@ final class PresentDebugStats: @unchecked Sendable {
         lock.unlock()
     }
 
-    func presented(atNs: Int64?, issuedNs: Int64) {
+    /// One frame reached glass (`atNs`, system-stamped; nil = dropped). `ptsNs`/`decodedNs` are
+    /// the frame's own stamps; a repeat carries no source cadence, so it ends a `cadErr` pair.
+    func presented(
+        atNs: Int64?, issuedNs: Int64, ptsNs: UInt64 = 0, decodedNs: Int64 = 0,
+        isRepeat: Bool = false
+    ) {
         lock.lock()
         inFlight = max(0, inFlight - 1) // clamp: the handler can beat renderReturned's increment
+        if isRepeat { shownRepeats += 1 }
         if let atNs {
-            if lastGlassNs > 0 { glassDeltasMs.append(Double(atNs - lastGlassNs) / 1e6) }
+            if lastGlassNs > 0 {
+                let glassDeltaNs = atNs - lastGlassNs
+                glassDeltasMs.append(Double(glassDeltaNs) / 1e6)
+                if lastGlassPtsNs > 0, ptsNs > lastGlassPtsNs, !isRepeat {
+                    let srcDeltaNs = Int64(ptsNs - lastGlassPtsNs)
+                    cadenceErrMs.append(Double(abs(glassDeltaNs - srcDeltaNs)) / 1e6)
+                }
+            }
             lastGlassNs = atNs
+            lastGlassPtsNs = isRepeat ? 0 : ptsNs
             latchMs.append(Double(atNs - issuedNs) / 1e6)
+            if decodedNs > 0 { displayMs.append(Double(atNs - decodedNs) / 1e6) }
         } else {
             dropped += 1
         }
         lock.unlock()
+    }
+
+    /// Glass intervals bucketed in panel steps, largest bucket first (`3:210,4:130`), and the
+    /// share outside the modal step. A 35 fps source on a 120 Hz grid legitimately alternates
+    /// 3/4; `cadErrMs` says whether that alternation follows the source.
+    static func gridHistogram(deltasMs: [Double], panel: PanelInfo) -> (hist: String, judder: Double) {
+        guard !deltasMs.isEmpty, panel.minInterval > 0 else { return ("", 0) }
+        var counts: [Int: Int] = [:]
+        for d in deltasMs { counts[panel.gridUnits(interval: d / 1000), default: 0] += 1 }
+        let sorted = counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+        let hist = sorted.prefix(4).map { "\($0.key):\($0.value)" }.joined(separator: ",")
+        return (hist, 1 - Double(sorted[0].value) / Double(deltasMs.count))
+    }
+
+    /// The window's per-frame samples so far, for tests.
+    func glassSamples() -> (cadenceErrMs: [Double], displayMs: [Double], repeats: (Int, Int)) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (cadenceErrMs, displayMs, (decodedRepeats, shownRepeats))
+    }
+
+    private static func percentiles(_ values: [Double]) -> (p50: Double, p95: Double, max: Double) {
+        guard !values.isEmpty else { return (0, 0, 0) }
+        let sorted = values.sorted()
+        return (sorted[sorted.count / 2], sorted[min(sorted.count - 1, sorted.count * 95 / 100)],
+                sorted[sorted.count - 1])
     }
 
     func flushIfDue(ring: FrameStore<ReadyFrame>, gate: PresentGate?) {
@@ -332,7 +450,7 @@ final class PresentDebugStats: @unchecked Sendable {
         let now = CACurrentMediaTime()
         guard now - last >= 1 else { lock.unlock(); return }
         last = now
-        let decoded = ring.drainSubmitted()
+        _ = ring.drainSubmitted() // the window's store submits; `decoded=` counts decoder output
         let smoothing = ring.drainSmoothing()
         let deltas = glassDeltasMs.sorted()
         let p50 = deltas.isEmpty ? 0 : deltas[deltas.count / 2]
@@ -344,6 +462,16 @@ final class PresentDebugStats: @unchecked Sendable {
         let vendP50 = vends.isEmpty ? 0 : vends[vends.count / 2]
         let vendMax = vends.last ?? 0
         let inflightMax = maxInFlight
+        let panel = panel()
+        let (hist, judder) = Self.gridHistogram(deltasMs: glassDeltasMs, panel: panel)
+        let cadErr = Self.percentiles(cadenceErrMs)
+        let display = Self.percentiles(displayMs)
+        let glassLine = String(
+            format: " displayMs p50=%.1f p95=%.1f cadErrMs p50=%.2f p95=%.2f n=%d "
+                + "grid=%.2f hist=%@ judder=%.2f repeats=%d/%d panel=%@",
+            display.p50, display.p95, cadErr.p50, cadErr.p95, cadenceErrMs.count,
+            panel.minInterval * 1000, hist, judder, decodedRepeats, shownRepeats,
+            panel.description)
         // Loop health, appended only where a loop exists — `late`/`frames` is WP8's cushion
         // criterion and `reanchor` says whether the estimate is tracking at all.
         let loop = cadence?.health()
@@ -364,11 +492,14 @@ final class PresentDebugStats: @unchecked Sendable {
             decoded, ok, failed, empty, gated, noDrawable, dropped,
             smoothing.overflowDrops, smoothing.underflows, maxRenderMs, inflightMax,
             gate?.drainForced() ?? 0, p50, dMax, deltas.count, latchP50, latchMax,
-            vendP50, vendMax) + cadenceLine
+            vendP50, vendMax) + glassLine + cadenceLine
+        decoded = 0; decodedRepeats = 0; shownRepeats = 0
         ok = 0; failed = 0; empty = 0; dropped = 0; gated = 0; noDrawable = 0
         maxRenderMs = 0
         maxInFlight = inFlight // the window peak restarts from the live depth
         glassDeltasMs.removeAll(keepingCapacity: true)
+        cadenceErrMs.removeAll(keepingCapacity: true)
+        displayMs.removeAll(keepingCapacity: true)
         latchMs.removeAll(keepingCapacity: true)
         vendLeadMs.removeAll(keepingCapacity: true)
         lock.unlock()
