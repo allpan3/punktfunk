@@ -264,9 +264,9 @@ pub(super) struct SwDeviceProfile<'a> {
     pub usb_mi: Option<u8>,
     pub description: &'a str,
     /// The `SWD\<enumerator>\<instance>` namespace. hidclass names the HID child after it, so a
-    /// PlayStation pad uses its USB interface id (`VID_054C&PID_0CE6&MI_03`): Steam merges a
-    /// pad's USB and HID devnodes by that token in the path, and under `punktfunk` it listed
-    /// the same pad twice.
+    /// pad Steam must recognise carries its VID/PID here (`VID_054C&PID_0CE6&MI_03`,
+    /// `VID_045E&PID_0B13`): Steam merges a pad's views by that token in the path, and under
+    /// `punktfunk` it listed the same pad twice.
     pub enumerator: &'a str,
 }
 
