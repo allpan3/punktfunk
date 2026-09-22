@@ -33,21 +33,10 @@ WEB=0; [ -f "$HOME/.config/systemd/user/punktfunk-web.service" ] && WEB=1
 
 if [ "${1:-}" = "--pull" ]; then
     [ -d "$SRC/.git" ] || die "$SRC is not a git checkout — rsync new source then run without --pull"
-    # web/bun.nix and sdk/bun.nix are GENERATED (bun2nix, a pure function of the matching bun.lock —
-    # packaging/nix/README.md) yet COMMITTED, because the Nix build fetches node_modules only from
-    # them. Until the --ignore-scripts fix below, web's `bun install` here ran its `postinstall`
-    # (`bun2nix -o bun.nix`) and rewrote that tracked file on every single update. That is invisible
-    # while the committed file is in sync — but main carried a STALE web/bun.nix from 1db8f763 to
-    # b79d90b4, so any Deck updated in that window had the file rewritten to the *correct* content
-    # and has been sitting dirty ever since. The next `git pull --ff-only` that touches it then dies
-    # with "Your local changes to the following files would be overwritten by merge", and the update
-    # stops before a single service is restarted.
-    #
-    # Restore ONLY these two derived paths. Not a blanket `git reset --hard`: $SRC is the operator's
-    # own checkout (they may have patched a source file, or be carrying a cherry-pick), and silently
-    # deleting that to save an update is a far worse trade than one legible error. Discarding these
-    # two is provably lossless — regenerating them from the lockfiles is exactly what bun2nix does.
-    git -C "$SRC" checkout -- web/bun.nix sdk/bun.nix 2>/dev/null || true
+    # A build regenerates these committed files (bun2nix, cbindgen). When main carries a stale
+    # copy, the rebuild dirties it and the next pull that touches it aborts. Restoring derived
+    # paths is lossless. Not `reset --hard`: this is the operator's own checkout.
+    git -C "$SRC" checkout -- web/bun.nix sdk/bun.nix include/punktfunk_core.h 2>/dev/null || true
     log "git pull"
     git -C "$SRC" pull --ff-only \
         || die "git pull --ff-only failed in $SRC. If it named locally-modified files, this checkout
