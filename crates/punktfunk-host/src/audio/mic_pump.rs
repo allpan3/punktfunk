@@ -213,6 +213,8 @@ where
                         let drop_n = batch.len() - DRAIN_KEEP;
                         drain_drops += drop_n as u64;
                         batch.drain(..drop_n);
+                        // Dropped on purpose: concealing those seqs would put the latency back.
+                        jitter.reset_stream();
                     }
                     frames_seen += batch.len() as u64;
                     if last_push.elapsed() > tuning.stale_gap {
@@ -375,11 +377,18 @@ mod pump_tests {
         polled: Arc<AtomicBool>,
         pushed: Arc<AtomicUsize>,
         discards: Arc<AtomicUsize>,
+        /// While set, `push` stalls after counting the call: a backlog builds behind it.
+        gate: Arc<AtomicBool>,
+        calls: Arc<AtomicUsize>,
     }
     impl VirtualMic for MockMic {
         fn push(&self, pcm: &[f32]) -> bool {
             if !self.alive.load(Ordering::Acquire) {
                 return false;
+            }
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            while self.gate.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(1));
             }
             self.pushed.fetch_add(pcm.len(), Ordering::Relaxed);
             true
@@ -402,6 +411,8 @@ mod pump_tests {
         polled: Arc<AtomicBool>,
         pushed: Arc<AtomicUsize>,
         discards: Arc<AtomicUsize>,
+        gate: Arc<AtomicBool>,
+        calls: Arc<AtomicUsize>,
         join: std::thread::JoinHandle<()>,
     }
 
@@ -414,6 +425,8 @@ mod pump_tests {
         let polled = Arc::new(AtomicBool::new(false));
         let pushed = Arc::new(AtomicUsize::new(0));
         let discards = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
         let (opens2, alive2, polled2, pushed2, discards2) = (
             opens.clone(),
             alive.clone(),
@@ -421,6 +434,7 @@ mod pump_tests {
             pushed.clone(),
             discards.clone(),
         );
+        let (gate2, calls2) = (gate.clone(), calls.clone());
         let tuning = PumpTuning {
             backoff_start: Duration::from_millis(10),
             backoff_cap: Duration::from_millis(40),
@@ -443,6 +457,8 @@ mod pump_tests {
                         polled: polled2.clone(),
                         pushed: pushed2.clone(),
                         discards: discards2.clone(),
+                        gate: gate2.clone(),
+                        calls: calls2.clone(),
                     }) as Box<dyn VirtualMic>)
                 },
                 tuning,
@@ -455,6 +471,8 @@ mod pump_tests {
             polled,
             pushed,
             discards,
+            gate,
+            calls,
             join,
         }
     }
@@ -508,6 +526,38 @@ mod pump_tests {
             pts_ns: seq as u64 * 20_000_000,
             opus: opus_frame(),
         }
+    }
+
+    /// A backlog the pump drains is skipped, not concealed: only the kept frames reach the mic.
+    #[test]
+    fn drained_backlog_is_not_concealed() {
+        let h = start(0);
+        wait_until("pump polled", || h.polled.load(Ordering::Acquire));
+        // Encode first: the stall must stay well inside `stale_gap`.
+        let backlog: Vec<MicFrame> = (1..=MIC_QUEUE_CAP as u32).map(mic_frame).collect();
+        h.gate.store(true, Ordering::Release);
+        h.tx.send(mic_frame(0)).unwrap();
+        wait_until("pump stalled in push", || {
+            h.calls.load(Ordering::SeqCst) >= 1
+        });
+        for f in backlog {
+            h.tx.try_send(f)
+                .expect("queue has room for the whole backlog");
+        }
+        h.gate.store(false, Ordering::Release);
+        let frame = 960 * MIC_CHANNELS as usize; // one 20 ms stereo frame
+        let want = (1 + DRAIN_KEEP) * frame;
+        wait_until("kept frames pushed", || {
+            h.pushed.load(Ordering::SeqCst) >= want
+        });
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(
+            h.pushed.load(Ordering::SeqCst) / frame,
+            1 + DRAIN_KEEP,
+            "frame 0 plus the newest DRAIN_KEEP, with no concealment for the drained seqs"
+        );
+        drop(h.tx);
+        h.join.join().unwrap();
     }
 
     #[test]
