@@ -343,7 +343,9 @@ final class SessionPresenter {
                vsyncPaced: vsyncPaced,
                adaptiveSlotPaced: adaptiveSlotPaced) {
             pipeline.onPresentWedged = { [weak self] in
-                DispatchQueue.main.async { self?.rebuildPresentation() }
+                // The presenter lives on main; the hop only carries the reference back there.
+                nonisolated(unsafe) let presenter = self
+                DispatchQueue.main.async { presenter?.rebuildPresentation() }
             }
             let metal = pipeline.layer
             // Metal pacing overlays the idle video layer. The decoded path leaves the backing

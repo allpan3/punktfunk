@@ -250,10 +250,13 @@ public final class Sc2Capture {
         let resign = UIApplication.willResignActiveNotification
         let activate = UIApplication.didBecomeActiveNotification
         #endif
+        // Both observers run on main, where `start` put this object; the weak reference crosses
+        // no thread.
+        nonisolated(unsafe) weak let weakSelf = self
         observers.append(NotificationCenter.default.addObserver(
             forName: resign, object: nil, queue: .main
-        ) { [weak self] _ in
-            guard let self else { return }
+        ) { _ in
+            guard let self = weakSelf else { return }
             // A wired or Puck pad keeps streaming across focus changes: on macOS this
             // notification fires whenever another window takes focus, and dropping the
             // capture there kills the pad mid-game. The radio rationale below is BLE's alone.
@@ -268,8 +271,8 @@ public final class Sc2Capture {
         })
         observers.append(NotificationCenter.default.addObserver(
             forName: activate, object: nil, queue: .main
-        ) { [weak self] _ in
-            guard let self else { return }
+        ) { _ in
+            guard let self = weakSelf else { return }
             self.lock.lock()
             self.suspended = false
             let dead = self.stopped

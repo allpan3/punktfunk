@@ -46,8 +46,9 @@ public final class GamepadCapture {
 
     /// One forwarded controller: the open device plus the last wire state for its pad index (the
     /// diff base — also what `flush` unwinds). Held per Slot so two controllers never clobber each
-    /// other's held buttons/axes/fingers. Mirrors pf-client-core's `Slot`.
-    private final class Slot {
+    /// other's held buttons/axes/fingers. Mirrors pf-client-core's `Slot`. Main-actor like its
+    /// owner, so the main-run-loop timers that fire on it may hold it.
+    @MainActor private final class Slot {
         let controller: GCController
         /// Wire pad index (GamepadManager's stable lowest-free assignment), threaded onto every
         /// event this controller sends — the low byte of `flags`.
@@ -575,7 +576,7 @@ public final class GamepadCapture {
 
     /// A sector, once engaged, keeps the stick until the angle is this far past its 30° edge — a
     /// thumb resting on the boundary between two slots would otherwise flicker between them.
-    static let sectorOverlapDeg = 5.0
+    nonisolated static let sectorOverlapDeg = 5.0
 
     /// The ring slot the left stick points at, given the sector already engaged: past the dead
     /// zone by MAGNITUDE (a diagonal counts) the angle falls into one of six 60° sectors centred

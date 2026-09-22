@@ -62,17 +62,19 @@ final class Sc2MenuPad {
     @MainActor
     func start() {
         guard observers.isEmpty else { return }
+        // Both observers run on main, like `start`; the weak reference crosses no thread.
+        nonisolated(unsafe) weak let weakSelf = self
         observers.append(NotificationCenter.default.addObserver(
             forName: UIApplication.willResignActiveNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            guard let self else { return }
+        ) { _ in
+            guard let self = weakSelf else { return }
             self.detach(reason: "app inactive")
             self.link.stop()
         })
         observers.append(NotificationCenter.default.addObserver(
             forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            self?.link.start()
+        ) { _ in
+            weakSelf?.link.start()
         })
         link.start()
     }
