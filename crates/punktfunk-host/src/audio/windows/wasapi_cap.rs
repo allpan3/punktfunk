@@ -670,6 +670,7 @@ fn capture_once(
     // if nothing was lost) sizes missing audio in the device clock.
     let mut last_packet: Option<Instant> = None;
     let mut next_index: u64 = 0;
+    let index_hz = u64::from(engine_hz.filter(|&hz| hz > 0).unwrap_or(open_hz).max(1));
     let mut fight = FightDamper::new(Instant::now());
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -698,13 +699,18 @@ fn capture_once(
                         // Packet-ready then zero frames: a spinning tap looks like a quiet desktop.
                         stats.missed_dequeues += 1;
                     } else {
-                        if info.flags.data_discontinuity && flowing {
+                        // A SILENT packet's lost stretch was silence: an idling loopback delivers
+                        // them on the 100 ms timeout, each flagged discontinuous.
+                        if info.flags.data_discontinuity && flowing && !info.flags.silent {
                             let lost = info.index.saturating_sub(next_index);
                             stats.observe_gap(Duration::from_micros(
-                                lost.saturating_mul(1_000_000) / open_hz.max(1) as u64,
+                                lost.saturating_mul(1_000_000) / index_hz,
                             ));
                         }
-                        next_index = info.index.saturating_add(frames);
+                        // `index` counts engine frames, `frames` counts frames at `open_hz`.
+                        next_index = info
+                            .index
+                            .saturating_add(frames * index_hz / u64::from(open_hz.max(1)));
                         last_packet = Some(now);
                     }
                 }
