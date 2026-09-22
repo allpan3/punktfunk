@@ -323,6 +323,48 @@ fn ensure_all(identity: &'static AudioIdentity) -> Result<MintedAudio> {
     Ok(out)
 }
 
+/// Put either minted mic pin back on the stamped 16-bit stereo 48 kHz device format. Steam's
+/// driver hands render bytes to the capture pin raw, so a pin at another depth or width turns
+/// the mic into noise. A property stamp is only served after an audio-service restart;
+/// `SetDeviceFormat` is served at once. Runs before the virtual mic opens its stream.
+pub(crate) fn repair_mic_formats() {
+    let Some(m) = provisioned() else {
+        return;
+    };
+    for id in [m.mic_render.as_deref(), m.mic_capture.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        let served = pe::served_blob(id, &pe::PKEY_DEVICE_FORMAT);
+        if served
+            .as_deref()
+            .is_some_and(|f| same_pcm_shape(f, &WFX_PCM16_2CH_48K))
+        {
+            continue;
+        }
+        let pcm16 = [(16, 16, wasapi::SampleType::Int)];
+        match audio_control::set_endpoint_format(id, 2, 48_000, &[0x3], &pcm16) {
+            Ok(()) => {
+                tracing::warn!(endpoint = id,
+                "virtual mic pin was not on 16-bit stereo 48 kHz — put it back (a mismatched pin \
+                 turns the mic into noise)")
+            }
+            Err(e) => tracing::warn!(endpoint = id, error = %format!("{e:#}"),
+                "virtual mic pin is off its format and couldn't be put back — the mic may carry \
+                 noise until the pin is set to 16-bit stereo 48 kHz"),
+        }
+    }
+}
+
+/// Same channels, rate, sample depth and subtype (the fields the driver's raw copy depends
+/// on). Byte equality would also compare fields the audio service rewrites on its own.
+fn same_pcm_shape(served: &[u8], want: &[u8; 40]) -> bool {
+    let field = |b: &[u8], r: std::ops::Range<usize>| b.get(r).map(<[u8]>::to_vec);
+    [2..4, 4..8, 14..16, 24..40]
+        .into_iter()
+        .all(|r| field(served, r.clone()).is_some() && field(served, r.clone()) == field(want, r))
+}
+
 /// Reuses this identity's healthy marker pair or creates it, then restores changed defaults.
 fn ensure_role(
     identity: &'static AudioIdentity,
@@ -832,5 +874,29 @@ mod seat_tests {
         assert!(!markers_match(&seat_a, Role::Speakers, Some(2), marker_a));
         assert!(!markers_match(&seat_a, Role::Speakers, None, None));
         assert!(markers_match(&seat_b, Role::Mic, Some(2), marker_b));
+    }
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+
+    /// Depth, width and rate each make a different pin; a rewritten byte rate alone does not.
+    #[test]
+    fn only_the_raw_copy_fields_decide_the_mic_shape() {
+        assert!(same_pcm_shape(&WFX_PCM16_2CH_48K, &WFX_PCM16_2CH_48K));
+        let mut deep = WFX_PCM16_2CH_48K;
+        deep[14] = 24;
+        assert!(!same_pcm_shape(&deep, &WFX_PCM16_2CH_48K));
+        let mut rate = WFX_PCM16_2CH_48K;
+        rate[4..8].copy_from_slice(&44_100u32.to_le_bytes());
+        assert!(!same_pcm_shape(&rate, &WFX_PCM16_2CH_48K));
+        assert!(!same_pcm_shape(
+            &WFX_PCM16_2CH_48K[..18],
+            &WFX_PCM16_2CH_48K
+        ));
+        let mut avg = WFX_PCM16_2CH_48K;
+        avg[8] ^= 1;
+        assert!(same_pcm_shape(&avg, &WFX_PCM16_2CH_48K));
     }
 }

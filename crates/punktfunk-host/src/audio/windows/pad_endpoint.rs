@@ -745,6 +745,22 @@ pub(crate) fn stamps_served(endpoint_id: &str, stamps: &[Stamp]) -> bool {
     stamps.iter().all(|s| stamp_served(&store, s))
 }
 
+/// One served property's raw blob (a format, say), or `None` when unreadable or not a blob.
+pub(crate) fn served_blob(endpoint_id: &str, key: &PROPERTYKEY) -> Option<Vec<u8>> {
+    let dev = open_mmdevice(endpoint_id).ok()?;
+    // SAFETY: read-only property store on a COM-initialized thread.
+    let store = unsafe { dev.OpenPropertyStore(STGM_READ) }.ok()?;
+    // SAFETY: the key is a valid PROPERTYKEY; GetValue returns an owned variant that is
+    // cleared below, exactly once.
+    let mut pv = unsafe { store.GetValue(key) }.ok()?;
+    let out = pv_bytes(&pv);
+    // SAFETY: `pv` owns store-allocated memory; cleared exactly once, then dropped inert.
+    unsafe {
+        let _ = PropVariantClear(&mut pv);
+    }
+    out
+}
+
 /// Idempotent pad-audio provision for one slot: reuse or create the devnode,
 /// bind SSS, wait, stamp DualSense identity, undo a default-playback flip.
 /// Host startup, not per session. COM thread; WASAPI objects never leave it.
