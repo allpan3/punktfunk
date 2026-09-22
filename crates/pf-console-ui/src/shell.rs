@@ -384,6 +384,8 @@ pub(crate) struct Shell {
     pub(crate) gpu_cache_bytes: usize,
     t0: Instant,
     last_frame: Option<Instant>,
+    /// Last menu, pointer, key or text input — the idle clock ([`crate::console::IDLE_AFTER`]).
+    last_input: Instant,
     /// Test-only `(t, step)`: clock reads `t` and each frame adds `step`.
     /// The aurora phase *is* the clock; wall time never agrees across dumps.
     #[cfg(test)]
@@ -469,6 +471,7 @@ impl Shell {
             gpu_cache_bytes: opts.gpu_cache_bytes,
             t0: Instant::now(),
             last_frame: None,
+            last_input: Instant::now(),
             #[cfg(test)]
             fake_clock: None,
             field: RefCell::new(None),
@@ -502,10 +505,20 @@ impl Shell {
     /// Host pointer events through the shared touch model ([`Touch`]): a finger acts
     /// on its lift or scrolls, a mouse acts on press.
     pub(crate) fn pointer_input(&mut self, input: pf_client_core::console::PointerInput) -> bool {
+        self.last_input = Instant::now();
+        let now = self.t();
         let mut touch = std::mem::take(&mut self.touch);
-        let consumed = touch.feed(input, self.last_k, |p| self.pointer(p));
+        let consumed = touch.feed(input, self.last_k, now, |p| self.pointer(p));
         self.touch = touch;
         consumed
+    }
+
+    /// Once a frame: a finger held still becomes a long press.
+    pub(crate) fn tick_touch(&mut self) {
+        let now = self.t();
+        let mut touch = std::mem::take(&mut self.touch);
+        touch.tick(now, |p| self.pointer(p));
+        self.touch = touch;
     }
 
     /// Host session edge. `Connecting` is a no-op: the shell already showed
@@ -527,6 +540,16 @@ impl Shell {
             return t;
         }
         self.t0.elapsed().as_secs_f64()
+    }
+
+    /// Nothing to back out of: one screen, no modal, no takeover. A host whose Back belongs
+    /// to the system when the console does not want it (tvOS's Menu) asks before it binds.
+    pub(crate) fn at_root(&self) -> bool {
+        self.stack.len() == 1
+            && self.connecting.is_none()
+            && self.launching.is_none()
+            && self.wake.is_none()
+            && self.speed.is_none()
     }
 
     pub(crate) fn editing(&self) -> bool {
@@ -576,6 +599,11 @@ impl Shell {
     /// pad as menu events, masked off the wire.
     pub(crate) fn holds_stream(&self) -> bool {
         self.launching.is_some()
+    }
+
+    /// No input for [`crate::console::IDLE_AFTER`].
+    pub(crate) fn idle(&self) -> bool {
+        self.last_input.elapsed() >= crate::console::IDLE_AFTER
     }
 
     pub(crate) fn take_action(&mut self) -> Option<OverlayAction> {
@@ -1009,6 +1037,7 @@ impl Shell {
     }
 
     pub(crate) fn handle_menu(&mut self, ev: MenuEvent) -> Option<MenuPulse> {
+        self.last_input = Instant::now();
         self.sync();
         // The launch hold owns the buttons while it is up: before the dial lands B
         // cancels it, as the connect card's B does; after, any press shows the stream.
@@ -1155,6 +1184,22 @@ impl Shell {
         if !matches!(self.motion, Motion::None) {
             return true;
         }
+        match p.kind {
+            // The pad's Secondary on whatever the finger rests on: hover it, then press.
+            PointerKind::LongPress => {
+                self.screen_pointer(Pointer {
+                    kind: PointerKind::Move,
+                    ..p
+                });
+                self.handle_menu(MenuEvent::Secondary);
+                return true;
+            }
+            // A drag on a screen's menu list pans it; anywhere else it scrolls by ticks.
+            PointerKind::PanStart { .. } | PointerKind::Pan { .. } | PointerKind::Fling { .. } => {
+                return self.stack.last_mut().is_some_and(|s| s.pan(p));
+            }
+            _ => {}
+        }
         if p.press() {
             if let Some((key, _)) = self.hint_rects.iter().find(|(_, r)| p.hits(*r)) {
                 // Click only hints that name an action. Shoulders/Adjust name
@@ -1177,7 +1222,11 @@ impl Shell {
                 return true;
             }
         }
+        self.screen_pointer(p)
+    }
 
+    /// The top screen's turn at a pointer already in safe-area space.
+    fn screen_pointer(&mut self, p: Pointer) -> bool {
         let mut fx = Outbox::default();
         let consumed = {
             let mut ctx = Ctx {
@@ -1214,6 +1263,7 @@ impl Shell {
     /// `shift` only affects Tab.
     pub(crate) fn key(&mut self, key: crate::input::Key, shift: bool, repeat: bool) -> bool {
         use crate::input::Key as S;
+        self.last_input = Instant::now();
         self.input_source = Some(crate::console::InputSource::Keys);
         if self.editing() {
             let mut ctx = Ctx {
@@ -1261,6 +1311,7 @@ impl Shell {
     }
 
     pub(crate) fn text_input(&mut self, text: &str) {
+        self.last_input = Instant::now();
         if let Some(top) = self.stack.last_mut() {
             top.text_input(text);
         }
