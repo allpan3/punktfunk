@@ -614,6 +614,15 @@ fn capture_once(
         .filter(|id| *id != dev_id);
     if let Some(id) = &host_out {
         voice.arm(id);
+    } else if voice_route::wanted() {
+        static NOTED: std::sync::Once = std::sync::Once::new();
+        NOTED.call_once(|| {
+            tracing::warn!(
+                "voice chat on the host is set, but this capture parked no host output to pin \
+                 voice apps to (PUNKTFUNK_KEEP_DEFAULT, a seat, or the default already was the \
+                 sink) — voice apps stay on the default and reach the stream"
+            )
+        });
     }
     // Only when the capture is silent on the host: a plan that fell back to real hardware
     // is already audible, and a second render would play the mix twice.
