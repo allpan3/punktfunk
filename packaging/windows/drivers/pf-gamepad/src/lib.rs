@@ -620,12 +620,12 @@ const DS4_NEUTRAL_REPORT: [u8; 64] = {
     r
 };
 // Neutral Steam Deck input frame (unnumbered): header [0x01, 0x00, ID_CONTROLLER_DECK_STATE=0x09,
-// payload-len 0x3C], everything released.
+// length 64], everything released. SDL drops a Deck frame whose length byte is not 64.
 const DECK_NEUTRAL_REPORT: [u8; 64] = {
     let mut r = [0u8; 64];
     r[0] = 0x01;
     r[2] = 0x09;
-    r[3] = 0x3C;
+    r[3] = 0x40;
     r
 };
 // Neutral Xbox input report 0x01: both sticks centred (0x8000 on a 0..65535 axis), triggers 0,

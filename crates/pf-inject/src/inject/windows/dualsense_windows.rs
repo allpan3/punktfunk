@@ -639,9 +639,7 @@ pub fn deck_spike_hold(index: u8, secs: u64) -> Result<()> {
     let boot_name = pf_driver_proto::gamepad::pad_boot_name(index);
     let mut channel = PadChannel::create(boot_name, SHM_SIZE)?;
     let base = channel.data_base();
-    // Neutral Deck frame: [0x01, 0x00, ID_CONTROLLER_DECK_STATE=0x09, 0x3C], all released.
-    let mut neutral = [0u8; 64];
-    (neutral[0], neutral[2], neutral[3]) = (0x01, 0x09, 0x3C);
+    let neutral = super::steam_proto::neutral_deck_report();
     // SAFETY: base points at SHM_SIZE writable bytes; the OFF_* offsets are in range. Device-type
     // FIRST, magic LAST — the same publish order the session pads use.
     unsafe {
