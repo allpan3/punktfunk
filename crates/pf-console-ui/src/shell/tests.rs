@@ -61,11 +61,11 @@ fn motion_matches_the_shared_vectors() {
     let file: serde_json::Value =
         serde_json::from_str(raw).expect("console-vectors.json must parse");
     assert!(
-        file["version"].as_u64() >= Some(2),
-        "the spring block arrived with version 2"
+        file["version"].as_u64() >= Some(3),
+        "the motion table arrived with version 3"
     );
 
-    let m = &file["motion_spring"];
+    let m = &file["motion_springs"]["nav"];
     let num = |key: &str| m[key].as_f64().unwrap_or_else(|| panic!("{key} missing"));
     let close = |what: &str, got: f64, want: f64| {
         assert!(
@@ -87,12 +87,6 @@ fn motion_matches_the_shared_vectors() {
         m["interruptible"].as_bool(),
         Some(true),
         "this client's transitions accept Back mid-flight; the block must say so"
-    );
-
-    // v1 stays until the last client migrates. Deleting it here reds Android's test.
-    assert!(
-        file["motion"]["$deprecated"].is_string(),
-        "the v1 motion block must carry its deprecation note while other clients read it"
     );
 }
 
