@@ -198,6 +198,8 @@ const BUTTON_D: f64 = 32.0;
 const BUTTON_PITCH: f64 = 40.0;
 
 pub const ROW_H: f64 = 50.0;
+/// Full blur under the chrome, design units: Glur's radius on the Apple gamepad trays.
+const BLEED_SIGMA: f64 = 14.0;
 const ROW_GAP: f64 = 6.0;
 const HEADER_H: f64 = 34.0;
 pub const ROW_MAX_W: f64 = 620.0;
@@ -315,6 +317,9 @@ pub struct MenuList {
     /// True once nothing is still moving. `false` until the first render so a
     /// fresh list always asks for a frame.
     settled: bool,
+    /// Rows scroll on past the list's rect to the layer's edges, under whatever the screen
+    /// draws after the list, and blur there. The resting layout does not move.
+    pub bleed: bool,
 }
 
 impl Default for MenuList {
@@ -346,6 +351,7 @@ impl MenuList {
             buttons_geom: Vec::new(),
             tracks_geom: Vec::new(),
             settled: false,
+            bleed: false,
         }
     }
 
@@ -632,10 +638,27 @@ impl MenuList {
         };
         let snap = std::mem::take(&mut self.snap);
         self.tree.get_mut().tick(dt as f32);
+        // Bleeding, the viewport reaches the layer's edges and pads back to `rect`.
+        let view = if self.bleed {
+            let clip = canvas.local_clip_bounds().unwrap_or(rect);
+            Rect::from_ltrb(
+                rect.left,
+                clip.top.min(rect.top),
+                rect.right,
+                clip.bottom.max(rect.bottom),
+            )
+        } else {
+            rect
+        };
+        let (pad_top, pad_bottom) = (rect.top - view.top, view.bottom - rect.bottom);
         let this = &*self;
         let root = El::scroll(list, Axis::Vertical)
             .gap((ROW_GAP * k) as f32)
-            .style(|s| s.align_items = Some(taffy::AlignItems::CENTER))
+            .style(|s| {
+                s.align_items = Some(taffy::AlignItems::CENTER);
+                s.padding.top = taffy::LengthPercentage::length(pad_top);
+                s.padding.bottom = taffy::LengthPercentage::length(pad_bottom);
+            })
             .children(rows.iter().enumerate().map(|(i, row)| {
                 let cell = El::paint(move |canvas, cell| {
                     this.paint_row(canvas, fonts, i, row, cell, k, dot_gutter);
@@ -650,12 +673,13 @@ impl MenuList {
                 }
             }));
         let mut tree = this.tree.borrow_mut();
-        let frame = tree.layout(root, rect);
-        // Centre the focused row, eased, while the list follows focus and no finger has it.
-        let (view, max) = frame.scroll(list).expect("the list is a scroll");
-        let target = frame.rect(row_id(this.cursor)).map_or(0.0, |r| {
-            (r.center_y() - view.top - view.height() / 2.0).clamp(0.0, max)
-        });
+        let frame = tree.layout(root, view);
+        // Centre the focused row in `rect`, eased, while the list follows focus and no finger
+        // has it.
+        let (_, max) = frame.scroll(list).expect("the list is a scroll");
+        let target = frame
+            .rect(row_id(this.cursor))
+            .map_or(0.0, |r| (r.center_y() - rect.center_y()).clamp(0.0, max));
         let following = this.follow && !tree.moving(list);
         if following {
             let next = if snap {
@@ -671,8 +695,37 @@ impl MenuList {
             tree.set_offset(list, next);
         }
         let scroll_settled = !tree.moving(list) && (!following || tree.offset(list) == target);
+        let offset = tree.offset(list);
         tree.paint(canvas, frame);
         drop(tree);
+        // Rows past `rect` blur more the further they go, from nothing at its edge.
+        if self.bleed {
+            let sigma = (BLEED_SIGMA * k) as f32;
+            if offset > 0.0 && pad_top > 0.0 {
+                let band = Rect::from_ltrb(view.left, view.top, view.right, rect.top);
+                crate::blur::backdrop(
+                    canvas,
+                    band,
+                    crate::blur::Band {
+                        edge: view.top,
+                        clear: rect.top,
+                        sigma,
+                    },
+                );
+            }
+            if offset < max && pad_bottom > 0.0 {
+                let band = Rect::from_ltrb(view.left, rect.bottom, view.right, view.bottom);
+                crate::blur::backdrop(
+                    canvas,
+                    band,
+                    crate::blur::Band {
+                        edge: view.bottom,
+                        clear: rect.bottom,
+                        sigma,
+                    },
+                );
+            }
+        }
 
         // What a pointer hits: the cells as painted, not the drawing's ease.
         let tree = self.tree.get_mut();

@@ -505,7 +505,11 @@ impl SettingsScreen {
 
     fn with_presets(presets: Vec<(String, String)>) -> SettingsScreen {
         SettingsScreen {
-            list: MenuList::new(),
+            list: {
+                let mut list = MenuList::new();
+                list.bleed = true;
+                list
+            },
             strip: TabStrip::new(),
             tab: 0,
             tab_cursors: [0; TABS.len()],
@@ -638,6 +642,11 @@ impl SettingsScreen {
         if self.list.cursor >= len {
             self.list.jump_to(len.saturating_sub(1));
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn strip_focus_for_test(&self) -> bool {
+        self.strip_focus
     }
 
     #[cfg(test)]
@@ -948,20 +957,10 @@ impl SettingsScreen {
         fonts: &Fonts,
         ctx: &mut Ctx,
     ) {
-        // Strip on top, explainer under the list; rows get the band between.
+        // Strip on top, explainer under the list; rows get the band between and scroll on
+        // under both, so the list draws first.
         let detail_h = 34.0 * k;
         let strip_h = TAB_STRIP_H * k;
-        let labels: Vec<&str> = TABS.iter().map(|(name, _)| *name).collect();
-        self.strip.render(
-            canvas,
-            Rect::from_ltrb(rect.left, rect.top, rect.right, rect.top + strip_h as f32),
-            &labels,
-            self.tab,
-            self.strip_focus,
-            fonts,
-            k,
-            dt,
-        );
         let seat = self
             .keyboard
             .seat(self.custom_bitrate.is_some() && !ctx.deck, dt);
@@ -1004,6 +1003,17 @@ impl SettingsScreen {
             dt,
             // No row focus ring while the tray or the strip holds it.
             self.custom_bitrate.is_none() && !self.strip_focus,
+        );
+        let labels: Vec<&str> = TABS.iter().map(|(name, _)| *name).collect();
+        self.strip.render(
+            canvas,
+            Rect::from_ltrb(rect.left, rect.top, rect.right, rect.top + strip_h as f32),
+            &labels,
+            self.tab,
+            self.strip_focus,
+            fonts,
+            k,
+            dt,
         );
         let detail = ids
             .get(self.list.cursor)

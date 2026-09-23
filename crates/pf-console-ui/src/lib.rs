@@ -32,6 +32,7 @@
 
 pub mod anim;
 pub mod art_stats;
+mod blur;
 pub mod brand;
 pub mod bridge;
 // The sort/group policy moved to pf-client-core so the GTK and WinUI dialogs share it rather
