@@ -23,6 +23,7 @@ import {
 	Schedule,
 } from "effect";
 import { spawn, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -551,7 +552,13 @@ const runSandboxed = (
 		if (refused.length > 0)
 			log(`[runner] ${id}: not sharing ${refused.join(", ")} — no plugin gets those`, "warn");
 		const runtime = process.env.XDG_RUNTIME_DIR ?? "/tmp";
-		const socket = path.join(runtime, "punktfunk", `plugin-${id}.sock`);
+		// One per attempt: a restart's new proxy binds while the old one is still closing, and a
+		// shared name would let the old close delete the new socket.
+		const socket = path.join(
+			runtime,
+			"punktfunk",
+			`plugin-${id}-${randomBytes(4).toString("hex")}.sock`,
+		);
 		const url = options.connect?.url ?? publishedMgmtUrl() ?? "https://127.0.0.1:47990";
 		// The host's cert is self-signed: a bare `fetch` fails TLS and every plugin 502s at connect.
 		const pinned = options.sandboxFetch
