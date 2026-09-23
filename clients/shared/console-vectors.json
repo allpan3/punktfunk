@@ -1,6 +1,6 @@
 {
   "$comment": "Cross-client CONSOLE-UI parity vectors: the background palette table, the settings section tabs, and the screen-transition motion contract. Consumed by pf-console-ui's Rust tests, the Android app's ConsoleVectorsTest, and the Apple client's ConsoleVectorsTests -- so the three hand-copies of these tables can no longer drift in silence. Sibling of deeplink-vectors.json, same rules: this file is the contract, and a value absent here is a value no client may assume.",
-  "version": 2,
+  "version": 3,
   "cell_ramp": [
     0.1,
     -0.06,
@@ -1927,6 +1927,21 @@
       ]
     }
   ],
+  "shell_tabs": [
+    {
+      "id": "hosts",
+      "name": "Hosts"
+    },
+    {
+      "id": "games",
+      "name": "Games"
+    },
+    {
+      "id": "settings",
+      "name": "Settings"
+    }
+  ],
+  "$shell_tabs": "Version 3: the console's top-level tabs, in strip order. The Skia shell draws them on every platform, so its Rust twin pins them; Apple and Android hold no copy. Players joins between Games and Settings when the controllers screen becomes it.",
   "tabs": [
     {
       "name": "Stream"

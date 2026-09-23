@@ -109,6 +109,8 @@ pub(crate) struct Outbox {
     pub toast: Option<String>,
     /// Clipboard text. Rides the run loop, not the command bus: SDL owns the clipboard.
     pub copy: Option<String>,
+    /// Switch to this tab (a pad shortcut).
+    pub tab: Option<crate::shell::Tab>,
 }
 
 impl Outbox {

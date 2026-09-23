@@ -4,8 +4,9 @@
 //! Every tile is a focus target in an [`el::Tree`] row; Left and Right ask the tree,
 //! and the focus plate travels behind the tile it lands on. The cursor is the index;
 //! the sprung position chases it. Focus scale, brightness, and fade read off the live
-//! sprung distance so the look matches the strip mid-motion. A connects, wakes, or
-//! pairs; Y opens a paired library; X or Down open Settings; B pops the root (quit).
+//! sprung distance so the look matches the strip mid-motion. OK connects, wakes, or
+//! pairs; Y (OK held on a remote) opens the card's menu; X jumps to Settings; Up is
+//! the tab strip's; B at the root leaves.
 //!
 //! Discovery churns the list; focus follows the tile key, not the index. A
 //! press on a side tile only retargets the cursor — Confirm starts a session.
@@ -113,6 +114,13 @@ impl HomeScreen {
         hosts.get(self.cursor as usize)
     }
 
+    /// The focused tile's key: a host's, or an action tile's sentinel.
+    pub(crate) fn focused_key(&self) -> Option<&str> {
+        self.keys
+            .get(self.cursor.max(0) as usize)
+            .map(String::as_str)
+    }
+
     fn slot<'h>(&self, hosts: &'h [HostRow]) -> Slot<'h> {
         slot_at(self.cursor.max(0) as usize, hosts)
     }
@@ -196,41 +204,8 @@ impl HomeScreen {
                 }
                 Some(MenuPulse::Confirm)
             }
+            // The card's menu: Y on a pad, OK held on a remote.
             MenuEvent::Secondary => match self.focused(ctx.hosts) {
-                Some(h) if h.paired && h.saved => {
-                    fx.cmds.push(ConsoleCmd::FetchLibrary {
-                        addr: h.addr.clone(),
-                        mgmt: h.mgmt_port,
-                        fp_hex: h.fp_hex.clone(),
-                    });
-                    // Sample the epoch before the fetch drains so the shelf can tell
-                    // its titles from the model's.
-                    fx.push(Screen::Library(super::library::LibraryScreen::new(
-                        h,
-                        ctx.library.fetch_epoch(),
-                    )));
-                    Some(MenuPulse::Confirm)
-                }
-                Some(_) => {
-                    fx.toast = Some("Pair with this host to browse its library".into());
-                    Some(MenuPulse::Boundary)
-                }
-                None => None,
-            },
-            // Sector is the ring; this carousel steps on `Move`.
-            MenuEvent::Sector(_) => None,
-            MenuEvent::Tertiary => {
-                fx.push(Screen::Settings(super::settings::SettingsScreen::new(
-                    ctx.store,
-                )));
-                Some(MenuPulse::Confirm)
-            }
-            MenuEvent::Back => {
-                fx.pop(); // root pop is quit (shell rule)
-                None
-            }
-            // The strip is horizontal, so up is the free direction (host menu).
-            MenuEvent::Move(MenuDir::Up) => match self.focused(ctx.hosts) {
                 Some(h) if super::host_options::HostOptionsScreen::available(h) => {
                     fx.push(Screen::HostOptions(
                         super::host_options::HostOptionsScreen::new(h),
@@ -239,13 +214,18 @@ impl HomeScreen {
                 }
                 _ => Some(MenuPulse::Boundary),
             },
-            // A D-pad remote never sends X; Down is the only route to Settings.
-            MenuEvent::Move(MenuDir::Down) => {
-                fx.push(Screen::Settings(super::settings::SettingsScreen::new(
-                    ctx.store,
-                )));
+            // Sector is the ring; this carousel steps on `Move`.
+            MenuEvent::Sector(_) => None,
+            MenuEvent::Tertiary => {
+                fx.tab = Some(crate::shell::Tab::Settings);
                 Some(MenuPulse::Confirm)
             }
+            MenuEvent::Back => {
+                fx.pop(); // root pop is quit (shell rule)
+                None
+            }
+            // Up is the tab strip's; nothing sits below the row yet.
+            MenuEvent::Move(MenuDir::Up | MenuDir::Down) => Some(MenuPulse::Boundary),
         }
     }
 
@@ -337,21 +317,13 @@ impl HomeScreen {
             }
             Slot::Host(_) => hints.push(Hint::new(HintKey::Confirm, "Connect")),
         }
-        if self.focused(ctx.hosts).is_some_and(|h| h.paired && h.saved) {
-            hints.push(Hint::new(HintKey::Secondary, "Library"));
-        }
         if self
             .focused(ctx.hosts)
             .is_some_and(super::host_options::HostOptionsScreen::available)
         {
-            hints.push(Hint::new(HintKey::Up, "Options"));
+            hints.push(Hint::new(HintKey::Secondary, "Options"));
         }
-        // Down opens Settings for everyone; only the legend changes. A TV remote has no X.
-        hints.push(if ctx.pads.is_empty() {
-            Hint::new(HintKey::Down, "Settings")
-        } else {
-            Hint::new(HintKey::Tertiary, "Settings")
-        });
+        hints.push(Hint::new(HintKey::Tertiary, "Settings"));
         hints.push(Hint::new(HintKey::Back, "Quit"));
         hints
     }
@@ -1008,10 +980,10 @@ mod tests {
         ));
     }
 
-    /// D-pad, OK, and Back must reach Settings and the host menu. With no pad the
-    /// legend names Down, not X.
+    /// Up and Down are the shell's: Up lands on the tab strip, and nothing sits below the
+    /// row. The host menu is the hold (Secondary), which a remote reaches by holding OK.
     #[test]
-    fn a_remote_reaches_settings_and_options_without_face_buttons() {
+    fn up_and_down_leave_the_row_and_the_hold_opens_the_menu() {
         let mut settings = ctx_settings();
         let hosts = [host("paired", true, true, false)];
         let pads: Vec<pf_client_core::menu_nav::PadInfo> = Vec::new();
@@ -1032,37 +1004,16 @@ mod tests {
             t: 0.0,
         };
         let mut s = HomeScreen::new();
-
+        for dir in [MenuDir::Up, MenuDir::Down] {
+            let mut fx = Outbox::default();
+            let pulse = s.menu(MenuEvent::Move(dir), &mut ctx, &mut fx);
+            assert!(matches!(pulse, Some(MenuPulse::Boundary)) && fx.nav.is_none());
+        }
         let mut fx = Outbox::default();
-        s.menu(MenuEvent::Move(MenuDir::Down), &mut ctx, &mut fx);
-        assert!(
-            matches!(fx.nav, Some(crate::screens::Nav::Push(ref sc)) if matches!(**sc, Screen::Settings(_))),
-            "down must open Settings"
-        );
-        let mut fx = Outbox::default();
-        s.menu(MenuEvent::Move(MenuDir::Up), &mut ctx, &mut fx);
+        s.menu(MenuEvent::Secondary, &mut ctx, &mut fx);
         assert!(
             matches!(fx.nav, Some(crate::screens::Nav::Push(ref sc)) if matches!(**sc, Screen::HostOptions(_))),
-            "up must open the host options menu"
-        );
-        assert!(
-            s.hints(&ctx).iter().any(|h| h.key == HintKey::Down),
-            "a padless device is told about down"
-        );
-        let pads = vec![pf_client_core::menu_nav::PadInfo {
-            name: "Pad".into(),
-            key: "045e:028e:Pad".into(),
-            pref: punktfunk_core::config::GamepadPref::Xbox360,
-            steam_virtual: false,
-            battery: None,
-            detail: "045E:028E · gamepad".into(),
-            forwarded: true,
-            rumble: false,
-        }];
-        ctx.pads = &pads;
-        assert!(
-            s.hints(&ctx).iter().any(|h| h.key == HintKey::Tertiary),
-            "a pad is told about X"
+            "the hold opens the host options menu"
         );
     }
 

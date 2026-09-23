@@ -12,9 +12,11 @@ use skia_safe::{Canvas, Rect};
 use std::time::Instant;
 
 use super::{
-    Motion, NavKind, Shell, BOTTOM_BAND, NAV_ENTER_SCALE, NAV_EXIT_SCALE, NAV_REVEAL_ALPHA,
-    NAV_SLIDE_DP, TOP_BAND,
+    Motion, NavKind, Shell, Tab, BOTTOM_BAND, NAV_ENTER_SCALE, NAV_EXIT_SCALE, NAV_REVEAL_ALPHA,
+    NAV_SLIDE_DP, TABS, TOP_BAND,
 };
+use crate::el::{El, Id, Tree};
+use crate::glyphs::{Hint, HintKey};
 
 impl Shell {
     #[allow(clippy::too_many_arguments)]
@@ -69,6 +71,7 @@ impl Shell {
         fonts.begin_frame();
         self.sync();
         self.tick_touch();
+        self.tick_ok();
         // Publish ink before any draw. Widgets read `theme::set_ink`; skipping this
         // paints the previous palette's text on the new field.
         crate::theme::set_ink(self.ink);
@@ -149,7 +152,13 @@ impl Shell {
             });
             (w - 2.0 * EDGE_INSET * k - chip_w - 12.0 * k).max(w * 0.35)
         };
+        let games_ok = self.games_host().is_some();
+        let (tab, strip_focus) = (self.tab, self.strip_focus);
         let mut env = LayerEnv {
+            strip: &mut self.strip,
+            tab,
+            strip_focus,
+            games_ok,
             canvas,
             w,
             h,
@@ -182,7 +191,9 @@ impl Shell {
         self.hint_rects.clear();
         // Reduced motion keeps the crossfade (an instant swap loses the only spatial
         // cue) and drops slide/scale.
-        let slide = |dy: f64| if reduce { 0.0 } else { dy };
+        let slide = |d: f64| if reduce { 0.0 } else { d };
+        // A tab's root shows the strip where a pushed screen shows its title.
+        let band = |i: usize| if i == 0 { Band::Strip } else { Band::Title };
         let zoom = |s: f64| if reduce { 1.0 } else { s };
         match (&mut self.motion, motion_p) {
             (
@@ -200,14 +211,28 @@ impl Shell {
                 if let Some(replaced) = leaving.as_mut() {
                     // REPLACE paints the swapped-out screen. Painting stack n-2 recedes its
                     // parent, so "Edit…" would flash the host list under the incoming editor.
-                    env.paint(replaced.as_mut(), 1.0 - p, 0.0, recede);
-                    env.paint(&mut self.stack[n - 1], p, enter_slide, enter_scale);
+                    env.paint(replaced.as_mut(), 1.0 - p, 0.0, 0.0, recede, band(n - 1));
+                    env.paint(
+                        &mut self.stack[n - 1],
+                        p,
+                        0.0,
+                        enter_slide,
+                        enter_scale,
+                        band(n - 1),
+                    );
                 } else if n >= 2 {
                     let (below, top) = self.stack.split_at_mut(n - 1);
-                    env.paint(&mut below[n - 2], 1.0 - p, 0.0, recede);
-                    env.paint(&mut top[0], p, enter_slide, enter_scale);
+                    env.paint(&mut below[n - 2], 1.0 - p, 0.0, 0.0, recede, band(n - 2));
+                    env.paint(&mut top[0], p, 0.0, enter_slide, enter_scale, Band::Title);
                 } else {
-                    env.paint(&mut self.stack[0], p, enter_slide, enter_scale);
+                    env.paint(
+                        &mut self.stack[0],
+                        p,
+                        0.0,
+                        enter_slide,
+                        enter_scale,
+                        Band::Strip,
+                    );
                 }
             }
             (
@@ -223,13 +248,32 @@ impl Shell {
                     &mut self.stack[n - 1],
                     NAV_REVEAL_ALPHA + (1.0 - NAV_REVEAL_ALPHA) * p,
                     0.0,
+                    0.0,
                     zoom(NAV_EXIT_SCALE + (1.0 - NAV_EXIT_SCALE) * p),
+                    band(n - 1),
                 );
-                env.paint(leaving.as_mut(), 1.0 - p, slide(NAV_SLIDE_DP * k * p), 1.0);
+                let dy = slide(NAV_SLIDE_DP * k * p);
+                env.paint(leaving.as_mut(), 1.0 - p, 0.0, dy, 1.0, Band::Title);
+            }
+            // A tab switch: the new root slides in a quarter width from the side it sits on.
+            (Motion::Tab { from, .. }, Some(p)) => {
+                let dir = if from.index() < tab.index() {
+                    1.0
+                } else {
+                    -1.0
+                };
+                let dx = |x: f64| slide(x * w / 4.0);
+                if let Some(old) = self.parked[from.index()].as_mut() {
+                    env.paint(old, 1.0 - p, dx(-dir * p), 0.0, 1.0, Band::Empty);
+                }
+                let n = self.stack.len();
+                let root = &mut self.stack[n - 1];
+                env.paint(root, p, dx(dir * (1.0 - p)), 0.0, 1.0, Band::Strip);
             }
             _ => {
                 let n = self.stack.len();
-                self.hint_rects = env.paint(&mut self.stack[n - 1], 1.0, 0.0, 1.0);
+                self.hint_rects =
+                    env.paint(&mut self.stack[n - 1], 1.0, 0.0, 0.0, 1.0, band(n - 1));
             }
         }
 
@@ -291,8 +335,48 @@ fn chip_width(fonts: &Fonts, chip: &str, has_battery: bool, k: f64) -> f64 {
     pad_x + mark_w + gap + tw + pip_w + pad_x
 }
 
+/// What a layer draws in the band above its content.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Band {
+    Title,
+    Strip,
+    /// A tab root leaving: the entering one carries the strip.
+    Empty,
+}
+
+pub(super) fn pill_id(tab: Tab) -> Id {
+    Id::new(tab.id(), 0)
+}
+
+/// The legend keeps the shortcuts the device in hand has: Y, X, the shoulders (tabs, on a
+/// root) and named keys. OK and the directions are what the focus plate already says; a
+/// pad's Back is on the pad. A remote has none of these, so it shows no bar. A keyboard
+/// keeps Back: for a mouse the legend is the only exit.
+fn shortcuts(hints: Vec<Hint>, glyphs: GlyphStyle, root: bool) -> Vec<Hint> {
+    if glyphs == GlyphStyle::Remote {
+        return Vec::new();
+    }
+    let mut kept: Vec<Hint> = hints
+        .into_iter()
+        .filter(|h| match h.key {
+            HintKey::Secondary | HintKey::Tertiary | HintKey::Key(_) => true,
+            HintKey::Back => glyphs == GlyphStyle::Keyboard,
+            _ => false,
+        })
+        .collect();
+    if root {
+        kept.insert(0, Hint::new(HintKey::Shoulders, "Tabs"));
+    }
+    kept
+}
+
 /// One screen layer's paint args, so each `paint` borrows `Shell` fields disjointly.
 struct LayerEnv<'a> {
+    strip: &'a mut Tree,
+    tab: Tab,
+    strip_focus: bool,
+    /// Games has a paired host to show.
+    games_ok: bool,
     canvas: &'a Canvas,
     w: f64,
     h: f64,
@@ -322,12 +406,15 @@ impl LayerEnv<'_> {
     /// One screen as a unit: fade, vertical slide, scale about centre. Title and
     /// hint bar ride inside the layer so chrome travels with content. Hit-boxes
     /// are only worth keeping on a settled top screen (see `Shell::render`).
+    #[allow(clippy::too_many_arguments)]
     fn paint(
         &mut self,
         screen: &mut Screen,
         alpha: f64,
+        dx: f64,
         dy: f64,
         scale: f64,
+        band: Band,
     ) -> Vec<(crate::glyphs::HintKey, Rect)> {
         let canvas = self.canvas;
         // Raise a layer only when alpha/scale/slide actually change. Unbounded
@@ -340,7 +427,7 @@ impl LayerEnv<'_> {
             // Save anyway: the transform below is undone by the same `restore`.
             canvas.save();
         }
-        canvas.translate((0.0, dy as f32));
+        canvas.translate((dx as f32, dy as f32));
         let (cx, cy) = ((self.w / 2.0) as f32, (self.h / 2.0) as f32);
         canvas.translate((cx, cy));
         canvas.scale((scale as f32, scale as f32));
@@ -361,19 +448,29 @@ impl LayerEnv<'_> {
             device_name: self.device_name,
             t: self.t,
         };
-        self.fonts.heading(
-            canvas,
-            &screen.title(&ctx),
-            W::Bold,
-            30.0 * self.k,
-            fg(1.0),
-            EDGE_INSET * self.k,
-            18.0 * self.k,
-            self.title_max_w,
-        );
+        // Content first: a list scrolls up under the band drawn over it.
         screen.render(canvas, self.content, self.k, self.dt, self.fonts, &mut ctx);
-        let rects = if self.show_hints {
-            let hints = screen.hints(&ctx);
+        let cheap =
+            crate::screens::settings::reduce_ui_res(ctx.settings, ctx.platform, ctx.fallback_ui);
+        let title = (band == Band::Title).then(|| screen.title(&ctx));
+        let hints = self
+            .show_hints
+            .then(|| shortcuts(screen.hints(&ctx), self.glyphs, band == Band::Strip));
+        if let Some(title) = title {
+            self.fonts.heading(
+                canvas,
+                &title,
+                W::Bold,
+                30.0 * self.k,
+                fg(1.0),
+                EDGE_INSET * self.k,
+                18.0 * self.k,
+                self.title_max_w,
+            );
+        } else if band == Band::Strip {
+            self.draw_strip(canvas, cheap);
+        }
+        let rects = if let Some(hints) = hints {
             hint_bar(
                 canvas,
                 self.fonts,
@@ -389,6 +486,68 @@ impl LayerEnv<'_> {
         };
         canvas.restore();
         rects
+    }
+
+    /// The tab pills where a root's title would be, text aligned with the title. The plate
+    /// sits behind the current tab while the strip has focus.
+    fn draw_strip(&mut self, canvas: &Canvas, cheap: bool) {
+        let k = self.k;
+        let (size, pad, gap, h, top) = (18.0 * k, 16.0 * k, 4.0 * k, 40.0 * k, 16.0 * k);
+        let mut x = EDGE_INSET * k - pad;
+        let mut row = El::column();
+        for tab in TABS {
+            let w = f64::from(self.fonts.measure(tab.name(), W::SemiBold, size)) + 2.0 * pad;
+            let r = Rect::from_xywh(x as f32, top as f32, w as f32, h as f32);
+            let look = Pill {
+                selected: tab == self.tab,
+                focused: self.strip_focus,
+                enabled: tab != Tab::Games || self.games_ok,
+            };
+            let fonts = self.fonts;
+            row = row.child(
+                El::paint(move |canvas, r| look.paint(canvas, fonts, tab.name(), r, size))
+                    .id(pill_id(tab))
+                    .focusable((h / 2.0) as f32)
+                    .place(r),
+            );
+            x += w + gap;
+        }
+        let frame = self
+            .strip
+            .layout(row, Rect::from_xywh(0.0, 0.0, self.w as f32, self.h as f32));
+        self.strip.set_focus(Some(pill_id(self.tab)));
+        if self.strip_focus {
+            self.strip
+                .paint_focus(canvas, frame, k as f32, self.dt, cheap);
+        } else {
+            self.strip.paint(canvas, frame);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Pill {
+    selected: bool,
+    focused: bool,
+    enabled: bool,
+}
+
+impl Pill {
+    fn paint(self, canvas: &Canvas, fonts: &Fonts, label: &str, r: Rect, size: f64) {
+        // Resting on content, the current tab keeps a quiet chip; focused, the plate is it.
+        if self.selected && !self.focused {
+            let rr = skia_safe::RRect::new_rect_xy(r, r.height() / 2.0, r.height() / 2.0);
+            canvas.draw_rrect(rr, &crate::theme::fill(fg(0.10)));
+        }
+        let ink = match (self.enabled, self.selected) {
+            (false, _) => fg(0.28),
+            (true, true) => fg(1.0),
+            (true, false) => fg(0.6),
+        };
+        let tw = f64::from(fonts.measure(label, W::SemiBold, size));
+        let x = f64::from(r.center_x()) - tw / 2.0;
+        let y = f64::from(r.center_y()) + size * 0.36;
+        fonts.draw(canvas, label, x, y, W::SemiBold, size, ink);
     }
 }
 

@@ -17,6 +17,7 @@ use crate::platform::Platform;
 #[cfg(test)]
 use crate::pointer::DRAG_TICK_DP;
 use crate::pointer::{Pointer, PointerKind, Touch};
+use crate::screens::home::HomeScreen;
 use crate::screens::{Bg, ConnectIntent, Ctx, Nav, Outbox, Screen};
 use crate::store::SettingsStore;
 use anyhow::{anyhow, Result};
@@ -54,6 +55,50 @@ const NAV_INPUT_OPENS: f64 = 0.85;
 /// Chrome bands, design units: pinned title above, hints below.
 const TOP_BAND: f64 = 64.0;
 const BOTTOM_BAND: f64 = 86.0;
+/// Seconds OK stays down on a remote before it opens the focused card's menu instead.
+const HOLD_S: f64 = 0.5;
+
+/// Top-level tabs, in strip order.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Tab {
+    Hosts,
+    Games,
+    Settings,
+}
+
+pub(crate) const TABS: [Tab; 3] = [Tab::Hosts, Tab::Games, Tab::Settings];
+
+impl Tab {
+    /// The id `console-vectors.json` pins; also the pill's element id.
+    pub(crate) fn id(self) -> &'static str {
+        match self {
+            Tab::Hosts => "hosts",
+            Tab::Games => "games",
+            Tab::Settings => "settings",
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Tab::Hosts => "Hosts",
+            Tab::Games => "Games",
+            Tab::Settings => "Settings",
+        }
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    /// The tab a root screen belongs to.
+    fn of(root: &Screen) -> Tab {
+        match root {
+            Screen::Library(_) | Screen::Collections(_) => Tab::Games,
+            Screen::Settings(_) => Tab::Settings,
+            _ => Tab::Hosts,
+        }
+    }
+}
 
 /// Long edge of the reduced backdrop's offscreen, px. The field is a pure function of
 /// `xy/u_res`, so a small buffer holds the same picture — the per-pixel exp/sin/Bézier
@@ -87,6 +132,11 @@ enum Motion {
         /// carries one. A REPLACE does too: `n - 2` would be the replaced
         /// screen's parent. A plain push does not — the parent stays at `n - 2`.
         leaving: Option<Box<Screen>>,
+    },
+    /// A tab switch: the new root slides in a quarter width over the parked one.
+    Tab {
+        spring: Spring,
+        from: Tab,
     },
 }
 
@@ -302,7 +352,19 @@ pub const DEFAULT_GPU_CACHE_BYTES: usize = 160 << 20;
 pub const MIN_GPU_CACHE_BYTES: usize = 96 << 20;
 
 pub(crate) struct Shell {
+    /// `stack[0]` is [`Self::tab`]'s root.
     stack: Vec<Screen>,
+    tab: Tab,
+    /// The other tabs' roots, kept while another tab is up. Indexed by [`Tab::index`].
+    parked: [Option<Screen>; TABS.len()],
+    /// The host key the Games root was built for.
+    games_key: Option<String>,
+    /// Focus is on the tab strip, not the screen.
+    strip_focus: bool,
+    /// The strip's pills and focus plate.
+    strip: crate::el::Tree,
+    /// OK down on a remote: when, and whether the hold already fired.
+    ok_down: Option<(f64, bool)>,
     motion: Motion,
     console: ConsoleShared,
     library: LibraryShared,
@@ -425,7 +487,13 @@ impl Shell {
             Bg::Form => 1.0,
         };
         Ok(Shell {
+            tab: Tab::of(&stack[0]),
             stack,
+            parked: [None, None, None],
+            games_key: None,
+            strip_focus: false,
+            strip: crate::el::Tree::new(),
+            ok_down: None,
             motion: Motion::None,
             console,
             library,
@@ -494,6 +562,13 @@ impl Shell {
         if stack.is_empty() {
             return;
         }
+        let tab = Tab::of(&stack[0]);
+        if tab != self.tab {
+            self.parked[self.tab.index()] = self.stack.drain(..).next();
+        }
+        self.parked[tab.index()] = None;
+        self.tab = tab;
+        self.strip_focus = false;
         self.stack = stack;
         self.motion = Motion::None;
         self.bg_mix = match self.stack.last().expect("non-empty").background() {
@@ -574,6 +649,9 @@ impl Shell {
             || self.speed.is_some()
         {
             return None;
+        }
+        if self.strip_focus && self.stack.len() == 1 {
+            return Some(format!("{} tab", self.tab.name()));
         }
         let t = self.t();
         let screen = self.stack.last()?;
@@ -992,15 +1070,8 @@ impl Shell {
             self.first_pair = Some(key);
             return;
         };
-        self.bus.send(ConsoleCmd::FetchLibrary {
-            addr: row.addr.clone(),
-            mgmt: row.mgmt_port,
-            fp_hex: row.fp_hex.clone(),
-        });
-        let epoch = self.library.fetch_epoch();
-        self.apply_nav(Nav::Push(Box::new(Screen::Library(
-            crate::screens::library::LibraryScreen::new(&row, epoch),
-        ))));
+        let root = self.shelf_root(&row);
+        self.mount(Tab::Games, root);
     }
 
     pub(crate) fn start_connect(&mut self, intent: ConnectIntent) {
@@ -1034,6 +1105,152 @@ impl Shell {
             request_access: intent.request_access,
             preset: intent.preset,
         });
+    }
+
+    /// The strip's share of a menu event: L1/R1 from anywhere but a text field, every
+    /// direction while the strip has focus. `None` leaves the event to the screen.
+    fn tab_menu(&mut self, ev: MenuEvent) -> Option<Option<MenuPulse>> {
+        let editing = self.stack.last().is_some_and(Screen::editing);
+        match ev {
+            MenuEvent::JumpBack if !editing => return Some(self.step_tab(-1)),
+            MenuEvent::JumpForward if !editing => return Some(self.step_tab(1)),
+            _ if !self.strip_focus || self.stack.len() > 1 => return None,
+            _ => {}
+        }
+        match ev {
+            MenuEvent::Move(MenuDir::Left) => Some(self.step_tab(-1)),
+            MenuEvent::Move(MenuDir::Right) => Some(self.step_tab(1)),
+            MenuEvent::Move(MenuDir::Down) | MenuEvent::Confirm => {
+                self.strip_focus = false;
+                Some(Some(MenuPulse::Move))
+            }
+            MenuEvent::Move(MenuDir::Up) => Some(Some(MenuPulse::Boundary)),
+            // The root's Back: out of the console.
+            MenuEvent::Back => None,
+            _ => Some(None),
+        }
+    }
+
+    /// The next tab `delta` along the strip that has something to show.
+    fn step_tab(&mut self, delta: i32) -> Option<MenuPulse> {
+        let mut i = self.tab.index() as i32;
+        loop {
+            i += delta;
+            let Some(&tab) = usize::try_from(i).ok().and_then(|i| TABS.get(i)) else {
+                return Some(MenuPulse::Boundary);
+            };
+            if self.switch_tab(tab) {
+                return Some(MenuPulse::Move);
+            }
+        }
+    }
+
+    /// Make `to` the active tab. `false` when it has nothing to show.
+    fn switch_tab(&mut self, to: Tab) -> bool {
+        if to == self.tab {
+            return false;
+        }
+        match self.tab_root(to) {
+            Some(root) => {
+                self.mount(to, root);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `root` becomes the stack; the current root parks and a pushed screen is dropped.
+    fn mount(&mut self, to: Tab, root: Screen) {
+        self.stack.truncate(1);
+        self.parked[self.tab.index()] = self.stack.pop();
+        self.stack.push(root);
+        let from = std::mem::replace(&mut self.tab, to);
+        self.motion = Motion::Tab {
+            spring: Spring::rest(0.0),
+            from,
+        };
+    }
+
+    /// `tab`'s parked root, or a fresh one. Games needs a paired host and follows the one
+    /// focused on Hosts.
+    fn tab_root(&mut self, tab: Tab) -> Option<Screen> {
+        let parked = self.parked[tab.index()].take();
+        match tab {
+            Tab::Hosts => Some(parked.unwrap_or_else(|| Screen::Home(HomeScreen::new()))),
+            Tab::Settings => Some(parked.unwrap_or_else(|| {
+                Screen::Settings(crate::screens::settings::SettingsScreen::new(&*self.store))
+            })),
+            Tab::Games => {
+                let Some(host) = self.games_host() else {
+                    self.parked[tab.index()] = parked;
+                    return None;
+                };
+                match parked {
+                    Some(root) if self.games_key.as_deref() == Some(host.key.as_str()) => {
+                        Some(root)
+                    }
+                    _ => Some(self.shelf_root(&host)),
+                }
+            }
+        }
+    }
+
+    /// The host Games shows: the one focused on Hosts when it is paired, else the first
+    /// paired one.
+    fn games_host(&self) -> Option<HostRow> {
+        let home = self
+            .stack
+            .first()
+            .into_iter()
+            .chain(self.parked[Tab::Hosts.index()].as_ref())
+            .find_map(|s| match s {
+                Screen::Home(h) => Some(h),
+                _ => None,
+            });
+        let usable = |h: &&HostRow| h.paired && h.saved;
+        home.and_then(HomeScreen::focused_key)
+            .and_then(|k| self.hosts.iter().find(|h| h.key == k))
+            .filter(usable)
+            .or_else(|| self.hosts.iter().find(usable))
+            .cloned()
+    }
+
+    /// A fresh shelf for `host`, its fetch sent after the epoch it compares against.
+    fn shelf_root(&mut self, host: &HostRow) -> Screen {
+        let epoch = self.library.fetch_epoch();
+        self.bus.send(ConsoleCmd::FetchLibrary {
+            addr: host.addr.clone(),
+            mgmt: host.mgmt_port,
+            fp_hex: host.fp_hex.clone(),
+        });
+        self.games_key = Some(host.key.clone());
+        Screen::Library(crate::screens::library::LibraryScreen::new(host, epoch))
+    }
+
+    /// OK from a remote, both edges. A press acts on release; held [`HOLD_S`] it opens the
+    /// focused card's menu, as Y does on a pad.
+    pub(crate) fn ok(&mut self, down: bool) -> Option<MenuPulse> {
+        self.last_input = Instant::now();
+        let t = self.t();
+        if down {
+            // A fresh press restarts the hold, so a lost release cannot strand it.
+            self.ok_down = Some((t, false));
+            return None;
+        }
+        match self.ok_down.take() {
+            Some((_, false)) => self.handle_menu(MenuEvent::Confirm),
+            _ => None,
+        }
+    }
+
+    /// Once a frame: an OK held long enough becomes the hold.
+    fn tick_ok(&mut self) {
+        if let Some((t0, false)) = self.ok_down {
+            if self.t() - t0 >= HOLD_S {
+                self.ok_down = Some((t0, true));
+                self.handle_menu(MenuEvent::Secondary);
+            }
+        }
     }
 
     pub(crate) fn handle_menu(&mut self, ev: MenuEvent) -> Option<MenuPulse> {
@@ -1114,6 +1331,9 @@ impl Shell {
                 return None;
             }
         }
+        if let Some(pulse) = self.tab_menu(ev) {
+            return pulse;
+        }
 
         let mut fx = Outbox::default();
         let pulse = {
@@ -1137,7 +1357,16 @@ impl Shell {
                 .expect("non-empty stack")
                 .menu(ev, &mut ctx, &mut fx)
         };
+        // Up past a root screen's first row lands on its tab.
+        let to_strip = self.stack.len() == 1
+            && ev == MenuEvent::Move(MenuDir::Up)
+            && matches!(pulse, Some(MenuPulse::Boundary))
+            && fx.nav.is_none();
         self.apply(fx);
+        if to_strip {
+            self.strip_focus = true;
+            return Some(MenuPulse::Move);
+        }
         pulse
     }
 
@@ -1209,11 +1438,6 @@ impl Shell {
                     crate::glyphs::HintKey::Back => Some(MenuEvent::Back),
                     crate::glyphs::HintKey::Secondary => Some(MenuEvent::Secondary),
                     crate::glyphs::HintKey::Tertiary => Some(MenuEvent::Tertiary),
-                    // Home carousel: Up is "open this tile's menu", not nav.
-                    // Without this the host-link copy path is pad-only.
-                    crate::glyphs::HintKey::Up => Some(MenuEvent::Move(MenuDir::Up)),
-                    // Home carousel: Down is "open Settings", not nav.
-                    crate::glyphs::HintKey::Down => Some(MenuEvent::Move(MenuDir::Down)),
                     _ => None,
                 };
                 if let Some(ev) = ev {
@@ -1222,7 +1446,24 @@ impl Shell {
                 return true;
             }
         }
+        if let Some(tab) = self.pill_at(p) {
+            if p.press() {
+                self.strip_focus = false;
+                self.switch_tab(tab);
+            }
+            return true;
+        }
+        if p.press() {
+            self.strip_focus = false;
+        }
         self.screen_pointer(p)
+    }
+
+    /// The strip pill under `p`, when the strip is up.
+    fn pill_at(&self, p: Pointer) -> Option<Tab> {
+        let id = self.strip.hit(p.x as f32, p.y as f32)?;
+        (self.stack.len() == 1).then_some(())?;
+        TABS.into_iter().find(|t| render::pill_id(*t) == id)
     }
 
     /// The top screen's turn at a pointer already in safe-area space.
@@ -1417,6 +1658,9 @@ impl Shell {
         if let Some(intent) = fx.connect {
             self.start_connect(intent);
         }
+        if let Some(tab) = fx.tab {
+            self.switch_tab(tab);
+        }
         if let Some(nav) = fx.nav {
             self.apply_nav(nav);
         }
@@ -1495,7 +1739,7 @@ impl Shell {
     fn nav_pos(&self) -> f64 {
         match &self.motion {
             Motion::None => 1.0,
-            Motion::Nav { spring, .. } => spring.pos,
+            Motion::Nav { spring, .. } | Motion::Tab { spring, .. } => spring.pos,
         }
     }
 
@@ -1546,6 +1790,11 @@ impl Shell {
                 // `settle` snaps to rest, so inequality is exact — and the
                 // only way out of Nav.
                 (spring.pos != *target || spring.vel != 0.0).then_some(spring.pos)
+            }
+            Motion::Tab { spring, .. } => {
+                spring.step_spec(1.0, spec, dt);
+                spring.settle(1.0, 0.001, 0.01);
+                (spring.pos != 1.0 || spring.vel != 0.0).then_some(spring.pos)
             }
         };
         if p.is_none() {

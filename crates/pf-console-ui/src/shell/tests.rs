@@ -35,9 +35,8 @@ fn motion_matches_the_shared_vectors() {
     let raw = include_str!("../../../../clients/shared/console-vectors.json");
     let file: serde_json::Value =
         serde_json::from_str(raw).expect("console-vectors.json must parse");
-    assert_eq!(
-        file["version"].as_u64(),
-        Some(2),
+    assert!(
+        file["version"].as_u64() >= Some(2),
         "the spring block arrived with version 2"
     );
 
@@ -70,6 +69,21 @@ fn motion_matches_the_shared_vectors() {
         file["motion"]["$deprecated"].is_string(),
         "the v1 motion block must carry its deprecation note while other clients read it"
     );
+}
+
+/// Pins `shell_tabs` (vectors v3): the strip's ids, names and order.
+#[test]
+fn tabs_match_the_shared_vectors() {
+    let raw = include_str!("../../../../clients/shared/console-vectors.json");
+    let file: serde_json::Value = serde_json::from_str(raw).expect("vectors parse");
+    let want: Vec<(&str, &str)> = file["shell_tabs"]
+        .as_array()
+        .expect("shell_tabs")
+        .iter()
+        .map(|t| (t["id"].as_str().unwrap(), t["name"].as_str().unwrap()))
+        .collect();
+    let have: Vec<(&str, &str)> = TABS.iter().map(|t| (t.id(), t.name())).collect();
+    assert_eq!(have, want);
 }
 
 /// Shared throwaway config dir. Settings SAVE on adjust; a second `OnceLock` here
@@ -153,26 +167,64 @@ fn shell(stack: Vec<Screen>) -> (Shell, ConsoleShared, LibraryShared) {
     (shell, console, library)
 }
 
+/// A remote's whole lap: Up from the host row lands on the strip, Left and Right walk the
+/// tabs, Down returns to the screen, L1/R1 jump from content, and Back at a root leaves.
 #[test]
 fn navigation_lap() {
     let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
     s.sync();
-    s.handle_menu(MenuEvent::Tertiary);
-    assert_eq!(s.stack.len(), 2);
-    finish_motion(&mut s);
-    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    assert_eq!(
+        s.handle_menu(MenuEvent::Move(MenuDir::Up))
+            .map(|p| format!("{p:?}")),
+        Some("Move".into())
+    );
+    assert!(s.strip_focus, "up from the host row lands on its tab");
     s.handle_menu(MenuEvent::Move(MenuDir::Right));
-    s.handle_menu(MenuEvent::Back);
+    assert_eq!(s.tab, Tab::Games);
+    assert!(matches!(s.stack.as_slice(), [Screen::Library(_)]));
     finish_motion(&mut s);
-    assert_eq!(s.stack.len(), 1);
-    s.handle_menu(MenuEvent::Secondary);
-    assert_eq!(s.stack.len(), 2);
+    s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    assert_eq!(s.tab, Tab::Settings);
     finish_motion(&mut s);
-    s.handle_menu(MenuEvent::Back);
+    assert!(matches!(
+        s.handle_menu(MenuEvent::Move(MenuDir::Right)),
+        Some(MenuPulse::Boundary)
+    ));
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    assert!(!s.strip_focus, "down returns to the screen");
+    s.handle_menu(MenuEvent::JumpBack);
     finish_motion(&mut s);
-    assert_eq!(s.stack.len(), 1);
+    s.handle_menu(MenuEvent::JumpBack);
+    finish_motion(&mut s);
+    assert!(matches!(s.stack.as_slice(), [Screen::Home(_)]));
     s.handle_menu(MenuEvent::Back);
     assert!(matches!(s.take_action(), Some(OverlayAction::Quit)));
+}
+
+/// OK on a remote acts on release; held, it is the card's menu and the release does
+/// nothing more.
+#[test]
+fn a_held_ok_opens_the_card_menu() {
+    let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    s.sync();
+    s.fake_clock = Some((10.0, 0.0));
+    s.ok(true);
+    s.fake_clock = Some((10.2, 0.0));
+    s.ok(false);
+    assert!(
+        matches!(s.take_action(), Some(OverlayAction::Launch { .. })),
+        "a click connects"
+    );
+    s.connecting = None;
+    s.ok(true);
+    s.fake_clock = Some((10.8, 0.0));
+    s.tick_ok();
+    assert!(matches!(s.stack.last(), Some(Screen::HostOptions(_))));
+    s.ok(false);
+    assert!(
+        s.take_action().is_none(),
+        "the release after a hold does nothing"
+    );
 }
 
 #[test]
@@ -242,7 +294,7 @@ fn a_pinned_cards_library_launches_with_its_preset() {
 
     // Pinned card sits immediately after its host's primary tile.
     s.handle_menu(MenuEvent::Move(MenuDir::Right));
-    s.handle_menu(MenuEvent::Secondary);
+    s.handle_menu(MenuEvent::JumpForward);
     finish_motion(&mut s);
     match s.stack.last() {
         Some(Screen::Library(l)) => assert_eq!(
@@ -250,7 +302,7 @@ fn a_pinned_cards_library_launches_with_its_preset() {
             "Living Room PC \u{b7} HDR",
             "the shelf names the preset it will launch with"
         ),
-        _ => panic!("Y on a pinned card opens its library"),
+        _ => panic!("Games on a pinned card opens its shelf"),
     }
 
     library.set_games(vec![crate::library::LibraryGame {
@@ -287,7 +339,7 @@ fn a_pinned_cards_library_launches_with_its_preset() {
 fn a_primary_tiles_library_leaves_the_preset_to_the_binding() {
     let (mut s, _console, library) = shell(vec![Screen::Home(HomeScreen::new())]);
     s.sync();
-    s.handle_menu(MenuEvent::Secondary); // paired+online host focused first
+    s.handle_menu(MenuEvent::JumpForward); // Games, on the focused host's shelf
     finish_motion(&mut s);
     library.set_games(vec![crate::library::LibraryGame {
         id: "steam:570".into(),
@@ -334,35 +386,31 @@ fn wake_gates_input_in_the_same_press() {
     assert!(s.handle_menu(MenuEvent::Move(MenuDir::Left)).is_some());
 }
 
-/// Tab / Shift+Tab change section even with a pad attached. The legend names
-/// PgUp/PgDn only when no pad is present, so keyboard users otherwise have no way in.
+/// Tab / Shift+Tab walk the console's tabs, the keyboard's L1/R1.
 #[test]
-fn tab_and_shift_tab_change_section() {
+fn tab_and_shift_tab_change_tabs() {
     use crate::input::Key as Scancode;
     let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
-    s.handle_menu(MenuEvent::Tertiary); // X → Settings
-    s.motion = Motion::None; // skip the push transition, which drops input
-    let tab = |s: &Shell| match s.stack.last() {
-        Some(Screen::Settings(st)) => st.tab_for_test(),
-        _ => panic!("the settings screen is on top"),
-    };
-    assert_eq!(tab(&s), 0);
+    s.sync();
     assert!(s.key(Scancode::Tab, false, false), "Tab is consumed");
-    assert_eq!(tab(&s), 1, "Tab goes forward");
+    assert_eq!(s.tab, Tab::Games, "Tab goes forward");
+    s.motion = Motion::None;
+    s.key(Scancode::Tab, false, false);
+    assert_eq!(s.tab, Tab::Settings);
+    s.motion = Motion::None;
     assert!(s.key(Scancode::Tab, true, false));
-    assert_eq!(tab(&s), 0, "Shift+Tab goes back");
-    s.key(Scancode::Tab, true, false);
-    assert_eq!(tab(&s), crate::screens::settings::TAB_COUNT - 1);
-    let before = tab(&s);
+    assert_eq!(s.tab, Tab::Games, "Shift+Tab goes back");
+    s.motion = Motion::None;
     s.key(Scancode::Tab, false, true);
-    assert_eq!(tab(&s), before, "held Tab doesn't skip sections");
+    assert_eq!(s.tab, Tab::Games, "held Tab doesn't skip tabs");
 }
 
 /// A right-click is Back on every screen, so a pointer always has a way out.
 #[test]
 fn a_secondary_press_goes_back() {
     let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
-    s.handle_menu(MenuEvent::Tertiary); // X → Settings
+    s.sync();
+    s.handle_menu(MenuEvent::Secondary); // Y → the host's menu
     s.motion = Motion::None;
     assert_eq!(s.stack.len(), 2);
     assert!(s.pointer(crate::pointer::Pointer {
@@ -387,7 +435,8 @@ fn a_secondary_press_goes_back() {
 #[test]
 fn a_replace_carries_the_screen_it_replaced() {
     let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
-    s.handle_menu(MenuEvent::Move(MenuDir::Up));
+    s.sync();
+    s.handle_menu(MenuEvent::Secondary);
     assert!(matches!(s.stack.last(), Some(Screen::HostOptions(_))));
     finish_motion(&mut s);
 
@@ -425,9 +474,10 @@ fn a_replace_carries_the_screen_it_replaced() {
 }
 
 #[test]
-fn up_opens_host_options_for_saved_tiles_only() {
+fn y_opens_host_options_for_saved_tiles_only() {
     let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
-    s.handle_menu(MenuEvent::Move(MenuDir::Up));
+    s.sync();
+    s.handle_menu(MenuEvent::Secondary);
     assert!(
         matches!(s.stack.last(), Some(Screen::HostOptions(_))),
         "the first tile is a saved host"
@@ -438,11 +488,20 @@ fn up_opens_host_options_for_saved_tiles_only() {
     // The third fixture host is discovered-only (`saved: false`).
     s.handle_menu(MenuEvent::Move(MenuDir::Right));
     s.handle_menu(MenuEvent::Move(MenuDir::Right));
-    s.handle_menu(MenuEvent::Move(MenuDir::Up));
+    s.handle_menu(MenuEvent::Secondary);
     assert!(
         matches!(s.stack.last(), Some(Screen::Home(_))),
         "an unsaved host has nothing to edit or forget"
     );
+}
+
+/// The next Settings section the remote's way: up onto the section strip, right, down.
+fn next_section(s: &mut Shell) {
+    while !matches!(s.stack.last(), Some(Screen::Settings(st)) if st.strip_focus_for_test()) {
+        s.handle_menu(MenuEvent::Move(MenuDir::Up));
+    }
+    s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
 }
 
 #[test]
@@ -453,6 +512,7 @@ fn every_settings_tab_rasters() {
     let mut surface = skia_safe::surfaces::raster_n32_premul((w as i32, h as i32)).unwrap();
     let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
     s.handle_menu(MenuEvent::Tertiary); // X → Settings
+    finish_motion(&mut s);
 
     let mut frame = |s: &mut Shell| {
         s.render(
@@ -473,7 +533,7 @@ fn every_settings_tab_rasters() {
             s.handle_menu(MenuEvent::Move(MenuDir::Down));
         }
         frame(&mut s);
-        s.handle_menu(MenuEvent::JumpForward);
+        next_section(&mut s);
     }
     // 640×400: pills are measured text, so a too-small width must clamp, not overflow.
     s.render(surface.canvas(), 640, 400, &fonts, None, None, &pads);
@@ -554,7 +614,7 @@ fn a_finger_pans_and_flings_the_settings_list() {
     use pf_client_core::console::{PointerButton, PointerInput};
     let (mut s, _) = rendered_settings();
     for _ in 0..5 {
-        s.handle_menu(MenuEvent::JumpForward);
+        next_section(&mut s);
     }
     // A short window, so the nine rows overflow the list by a few rows.
     let fonts = crate::theme::build_fonts().unwrap();
@@ -734,7 +794,7 @@ fn a_canceled_touch_never_acts() {
 fn back_mid_push_turns_the_screen_around() {
     let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
     s.sync();
-    s.handle_menu(MenuEvent::Tertiary); // X → Settings
+    s.handle_menu(MenuEvent::Secondary); // Y → the host's menu
     assert_eq!(s.stack.len(), 2);
 
     let mut before = 0.0;
@@ -788,7 +848,7 @@ fn back_mid_push_at_the_root_is_left_to_the_normal_path() {
 fn mid_pop_refuses_confirm_but_honours_another_back() {
     let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
     s.sync();
-    s.handle_menu(MenuEvent::Tertiary); // → Settings
+    s.handle_menu(MenuEvent::Secondary); // → the host's menu
     finish_motion(&mut s);
     s.handle_menu(MenuEvent::Move(MenuDir::Down)); // a row that would push if activated
     s.handle_menu(MenuEvent::Back); // start the pop
@@ -818,7 +878,7 @@ fn a_completed_pop_frees_its_screen_and_republishes_hints() {
     let mut surface = skia_safe::surfaces::raster_n32_premul((w as i32, h as i32)).unwrap();
     let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
     s.sync();
-    s.handle_menu(MenuEvent::Tertiary);
+    s.handle_menu(MenuEvent::Secondary);
     finish_motion(&mut s);
     s.handle_menu(MenuEvent::Back);
 
@@ -956,7 +1016,7 @@ fn collections_drill_in_reaches_one_platform_and_backs_out() {
     let (mut s, _console, library) = shell(vec![Screen::Home(HomeScreen::new())]);
     s.sync();
     mixed_library(&library);
-    s.handle_menu(MenuEvent::Secondary); // Y at home → this host's library
+    s.handle_menu(MenuEvent::JumpForward); // R1 → Games, this host's shelf
     finish_motion(&mut s);
     assert!(matches!(s.stack.last(), Some(Screen::Library(_))));
 
@@ -1033,7 +1093,7 @@ fn collections_is_offered_only_when_there_is_something_to_browse() {
             running: false,
         },
     ]);
-    s.handle_menu(MenuEvent::Secondary);
+    s.handle_menu(MenuEvent::JumpForward);
     finish_motion(&mut s);
     assert!(matches!(s.stack.last(), Some(Screen::Library(_))));
     let depth = s.stack.len();
@@ -1237,11 +1297,16 @@ fn dump_console_screens() {
     s.handle_menu(MenuEvent::Move(MenuDir::Left));
     dump(&mut s, 40, 8, "_settle-plate", true);
 
-    // Up on the focused saved tile. Eyeball with 01-home: that frame carries the Options hint.
-    s.handle_menu(MenuEvent::Move(MenuDir::Up));
+    // Y on the focused saved tile. Eyeball with 01-home: that frame carries the Options hint.
+    s.handle_menu(MenuEvent::Secondary);
     dump(&mut s, 40, 8, "01b-host-options", true);
     s.handle_menu(MenuEvent::Back);
     dump(&mut s, 20, 8, "_settle0", true);
+    // Up from the row: the plate on the Hosts pill.
+    s.handle_menu(MenuEvent::Move(MenuDir::Up));
+    dump(&mut s, 40, 8, "01e-strip", true);
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    dump(&mut s, 20, 8, "_settle-strip", true);
 
     // A few fast frames land around p ≈ 0.4 — both layers visible.
     s.handle_menu(MenuEvent::Tertiary);
@@ -1252,17 +1317,43 @@ fn dump_console_screens() {
     // so reordering the table cannot shoot the wrong one. Accent, ink and scrim move
     // together: pale palettes need dark text on them.
     for _ in 0..5 {
-        s.handle_menu(MenuEvent::JumpForward);
+        next_section(&mut s);
     }
     for id in ["violet", "oled", "ember", "abyss", "holo", "sunset", "mint"] {
         s.settings.ui_palette = id.to_string();
         dump(&mut s, 40, 8, &format!("03-settings-{id}"), true);
     }
-    for _ in 0..5 {
-        s.handle_menu(MenuEvent::JumpBack);
+    // Deep in the longest section: the rows run on under the strips, blurring as they go.
+    s.settings.ui_palette = "violet".to_string();
+    for _ in 0..12 {
+        s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    }
+    // A short window, so the rows overflow into both bands.
+    let mut short = skia_safe::surfaces::raster_n32_premul((w, 480)).unwrap();
+    for _ in 0..60 {
+        s.render(short.canvas(), w as u32, 480, &fonts, None, None, &pads);
+    }
+    let png = short
+        .image_snapshot()
+        .encode(None, skia_safe::EncodedImageFormat::PNG, 100)
+        .unwrap();
+    std::fs::write(format!("{dir}/03b-settings-blur.png"), png.as_bytes()).unwrap();
+    for _ in 0..6 {
+        s.handle_menu(MenuEvent::Move(MenuDir::Up));
+    }
+    for _ in 0..60 {
+        s.render(short.canvas(), w as u32, 480, &fonts, None, None, &pads);
+    }
+    let png = short
+        .image_snapshot()
+        .encode(None, skia_safe::EncodedImageFormat::PNG, 100)
+        .unwrap();
+    std::fs::write(format!("{dir}/03c-settings-blur-mid.png"), png.as_bytes()).unwrap();
+    for _ in 5..crate::screens::settings::TAB_COUNT {
+        next_section(&mut s);
     }
     // Home at full contrast under a few palettes: the backdrop's loudest form.
-    s.handle_menu(MenuEvent::Back);
+    s.switch_tab(Tab::Hosts);
     dump(&mut s, 20, 8, "_settle", true);
     for id in ["nebula", "sunset", "holo"] {
         s.settings.ui_palette = id.to_string();
@@ -1274,7 +1365,7 @@ fn dump_console_screens() {
     dump(&mut s, 20, 8, "_settle3", true);
 
     // Add Host with the keyboard tray; no pad so the glyphs are keyboard-style.
-    s.handle_menu(MenuEvent::Back);
+    s.switch_tab(Tab::Hosts);
     dump(&mut s, 40, 8, "_back", true);
     for _ in 0..3 {
         s.handle_menu(MenuEvent::Move(MenuDir::Right));
