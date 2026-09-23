@@ -23,6 +23,7 @@ import {
 	Schedule,
 } from "effect";
 import { spawn, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -34,10 +35,12 @@ import { type ConnectOptions, configDir, hostFetch, publishedMgmtUrl } from "./c
 import { connect, type PluginDef } from "./index.js";
 import {
 	bwrapArgv,
+	expandHome,
 	grantedRoots,
 	netlinkFilter,
 	type PluginManifest,
 	readManifest,
+	refusedRoot,
 	sandboxEnv,
 	sandboxProbe,
 } from "./sandbox.js";
@@ -452,20 +455,59 @@ export const discoverUnits = (
 export const sandboxMode = (): "on" | "off" =>
 	/^(0|off|false)$/i.test(process.env.PUNKTFUNK_PLUGIN_SANDBOX ?? "") ? "off" : "on";
 
-/** Write this plugin's own token under its state dir for the sandbox's read-only bind. */
-const writePluginToken = (config: string, stateDir: string, id: string): string | undefined => {
-	const file = path.join(stateDir, ".plugin-token");
+/**
+ * Move `<state>/<id>/` up into `<state>/`: 0.39 bound the state dir one level too high, so a
+ * sandboxed plugin wrote there. On a clash the nested file is the newer one; the older is kept
+ * beside it as `<name>.pre-sandbox`.
+ */
+export const adoptNestedState = (stateDir: string, id: string, log: LogSink): void => {
+	const nested = path.join(stateDir, id);
+	let names: string[];
+	try {
+		if (!fs.lstatSync(nested).isDirectory()) return;
+		names = fs.readdirSync(nested);
+	} catch {
+		return;
+	}
+	for (const name of names) {
+		const to = path.join(stateDir, name);
+		try {
+			if (fs.existsSync(to)) fs.renameSync(to, `${to}.pre-sandbox`);
+			fs.renameSync(path.join(nested, name), to);
+		} catch (e) {
+			log(`[runner] ${id}: state ${name} stayed in ${nested}: ${e}`, "warn");
+			return;
+		}
+	}
+	try {
+		fs.rmdirSync(nested);
+	} catch {}
+	log(`[runner] ${id}: moved its state up from ${nested}`);
+};
+
+/**
+ * Write this plugin's own token under its state dir for the sandbox's read-only bind. A missing
+ * token and an unwritable state dir are different faults and say so.
+ */
+const writePluginToken = (config: string, stateDir: string, id: string): string | Error => {
+	let token: string | undefined;
 	try {
 		const tokens = JSON.parse(
 			fs.readFileSync(path.join(config, "plugin-run", "plugin-tokens.json"), "utf8"),
 		) as Record<string, string>;
-		const token = tokens[id];
-		if (token === undefined) return undefined;
+		token = tokens[id];
+	} catch {}
+	if (token === undefined)
+		return new Error(
+			`No API credential exists for ${id} yet. Restart the host if this persists.`,
+		);
+	const file = path.join(stateDir, ".plugin-token");
+	try {
 		fs.mkdirSync(stateDir, { recursive: true });
 		fs.writeFileSync(file, `PUNKTFUNK_PLUGIN_TOKEN=${token}\n`, { mode: 0o600 });
 		return file;
-	} catch {
-		return undefined;
+	} catch (e) {
+		return new Error(`Couldn't write the credential for ${id} into ${stateDir} — ${e}`);
 	}
 };
 
@@ -487,15 +529,10 @@ const runSandboxed = (
 		const id = manifest.id ?? unit.name;
 		const config = options.configDir ?? configDir();
 		const stateDir = path.join(config, "plugin-state", id);
+		adoptNestedState(stateDir, id, log);
 		const tokenFile = writePluginToken(config, stateDir, id);
-		if (!tokenFile) {
-			resume(
-				Effect.fail(
-					new Error(
-						`No API credential exists for ${id} yet. Restart the host if this persists.`,
-					),
-				),
-			);
+		if (tokenFile instanceof Error) {
+			resume(Effect.fail(tokenFile));
 			return;
 		}
 		const filter = netlinkFilter();
@@ -503,8 +540,25 @@ const runSandboxed = (
 			resume(Effect.fail(new Error(`no sandbox syscall filter for ${process.arch}`)));
 			return;
 		}
+		const home = os.homedir();
+		const grants = grantedRoots(config, id);
+		const refused = [
+			...(manifest.reads ?? []),
+			...(manifest.writes ?? []),
+			...grants.map((g) => g.path),
+		]
+			.map((p) => expandHome(p, home))
+			.filter((p) => path.isAbsolute(p) && refusedRoot(p, home));
+		if (refused.length > 0)
+			log(`[runner] ${id}: not sharing ${refused.join(", ")} — no plugin gets those`, "warn");
 		const runtime = process.env.XDG_RUNTIME_DIR ?? "/tmp";
-		const socket = path.join(runtime, "punktfunk", `plugin-${id}.sock`);
+		// One per attempt: a restart's new proxy binds while the old one is still closing, and a
+		// shared name would let the old close delete the new socket.
+		const socket = path.join(
+			runtime,
+			"punktfunk",
+			`plugin-${id}-${randomBytes(4).toString("hex")}.sock`,
+		);
 		const url = options.connect?.url ?? publishedMgmtUrl() ?? "https://127.0.0.1:47990";
 		// The host's cert is self-signed: a bare `fetch` fails TLS and every plugin 502s at connect.
 		const pinned = options.sandboxFetch
@@ -525,9 +579,9 @@ const runSandboxed = (
 					pluginsDir: options.pluginsDir ?? path.join(config, "plugins"),
 					bun: process.execPath,
 					runner: runnerEntry(),
-					home: os.homedir(),
+					home,
 				},
-				grantedRoots(config, id),
+				grants,
 			),
 			process.execPath,
 			runnerEntry(),
@@ -539,7 +593,14 @@ const runSandboxed = (
 		const child = spawn("bwrap", argv, {
 			env: sandboxEnv(os.homedir()),
 			// fd 3 is `--add-seccomp-fd 3`.
-			stdio: ["ignore", "inherit", "inherit", "pipe"],
+			stdio: ["ignore", "inherit", "pipe", "pipe"],
+		});
+		// stderr still reaches the journal; its tail also names why the sandbox exited, since
+		// bwrap's own errors come before the plugin can ship a log line.
+		let stderrTail = "";
+		child.stderr?.on("data", (chunk: Buffer) => {
+			process.stderr.write(chunk);
+			stderrTail = (stderrTail + chunk.toString()).slice(-2000);
 		});
 		// A bwrap that dies before reading surfaces through `exit`, not an EPIPE here.
 		(child.stdio[3] as Writable).on("error", () => {}).end(filter);
@@ -549,13 +610,19 @@ const runSandboxed = (
 		});
 		child.on("exit", (code, signal) => {
 			proxy.close();
-			if (code === 0) resume(Effect.succeed("plugin" as const));
-			else
-				resume(
-					Effect.fail(
-						new Error(`sandboxed plugin exited ${signal ? `on ${signal}` : `with ${code}`}`),
-					),
-				);
+			if (code === 0) {
+				resume(Effect.succeed("plugin" as const));
+				return;
+			}
+			const last = stderrTail
+				.split("\n")
+				.filter((line) => line.trim() !== "")
+				.slice(-3)
+				.join(" | ");
+			const how = signal ? `on ${signal}` : `with ${code}`;
+			resume(
+				Effect.fail(new Error(`sandboxed plugin exited ${how}${last ? ` — ${last}` : ""}`)),
+			);
 		});
 		return Effect.sync(() => {
 			// Interruption (shutdown): SIGTERM lets the plugin's finalizers run; `--die-with-parent`
@@ -621,6 +688,27 @@ const attemptUnit = (
 	});
 
 /**
+ * The first lines of what actually failed. `Effect.tryPromise` wraps a rejection in an
+ * `UnknownError` whose own message says nothing, so the wrapper is peeled off.
+ */
+export const describeFailure = (cause: Cause.Cause<unknown>): string => {
+	let err: unknown = Cause.squash(cause);
+	while (
+		typeof err === "object" &&
+		err !== null &&
+		(err as { _tag?: unknown })._tag === "UnknownError" &&
+		"cause" in err
+	)
+		err = (err as { cause: unknown }).cause;
+	const text = err instanceof Error ? err.message || err.name : String(err);
+	return text
+		.split("\n")
+		.filter((line) => line.trim() !== "")
+		.slice(0, 6)
+		.join(" | ");
+};
+
+/**
  * A unit under supervision: plugins restart on failure (capped exponential backoff, jittered);
  * a clean completion ends the unit; bare scripts are one-shot either way. Never fails the
  * runner — every outcome is logged.
@@ -654,12 +742,7 @@ export const superviseUnit = (
 			),
 		),
 		Effect.tapCause((cause) =>
-			Effect.sync(() =>
-				log(
-					`[${unit.name}] failed: ${Cause.pretty(cause).split("\n")[0]}`,
-					"error",
-				),
-			),
+			Effect.sync(() => log(`[${unit.name}] failed: ${describeFailure(cause)}`, "error")),
 		),
 		Effect.retry(restart),
 		Effect.catchCause((cause) =>
@@ -694,9 +777,7 @@ export const runOneUnit = (
 			),
 		),
 		Effect.tapCause((cause) =>
-			Effect.sync(() =>
-				log(`[${unit.name}] failed: ${Cause.pretty(cause).split("\n")[0]}`, "error"),
-			),
+			Effect.sync(() => log(`[${unit.name}] failed: ${describeFailure(cause)}`, "error")),
 		),
 		Effect.asVoid,
 	);

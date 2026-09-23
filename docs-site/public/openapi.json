@@ -2548,6 +2548,16 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "A plugin reported another plugin's titles",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
           }
         }
       }
@@ -2632,6 +2642,16 @@
           },
           "401": {
             "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A plugin toggled another plugin's source",
             "content": {
               "application/json": {
                 "schema": {

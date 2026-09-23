@@ -142,9 +142,9 @@ plugin's `package.json` (below), so a plugin without one does not start; update 
 
 That needs **bubblewrap** (`bwrap`), which the packages depend on. If a host cannot build a sandbox
 — no bwrap, or a kernel with unprivileged user namespaces switched off — no plugin runs at all, and
-Troubleshooting says which of the two it is. `PUNKTFUNK_PLUGIN_SANDBOX=off` in `host.env` runs them
-in the runner's own process instead: that is your whole account, and the console says so while it
-is set.
+Troubleshooting says which of the two it is. `Environment=PUNKTFUNK_PLUGIN_SANDBOX=off` on the
+runner (`systemctl --user edit punktfunk-scripting`, under `[Service]`) runs them in its own process
+instead: that is your whole account, and the console says so while it is set.
 
 On **Windows** the runner is a low-privilege account (`NT AUTHORITY\LocalService`) rather than a
 sandbox, and plugins share it.

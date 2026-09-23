@@ -133,6 +133,12 @@ pub(super) fn disable() -> Result<()> {
     Ok(())
 }
 
+/// Shown while systemd keeps restarting a runner that dies at start — "switched off" would send
+/// the operator to a switch that is already on.
+#[cfg(target_os = "linux")]
+const RUNNER_FAILING: &str =
+    "The plugin runner keeps failing to start. Troubleshooting → Plugins shows why.";
+
 #[cfg(target_os = "linux")]
 pub(super) fn runtime_status() -> RuntimeStatus {
     let enabled_raw = systemctl_output(&["is-enabled", UNIT]);
@@ -141,16 +147,21 @@ pub(super) fn runtime_status() -> RuntimeStatus {
     // is the other half of "can we install plugins".
     let unit_known = enabled_raw.as_deref().is_some_and(|s| s != "not-found");
     let installed = unit_known || runner_command().is_ok();
+    let failing = active == "failed"
+        || systemctl_output(&["show", UNIT, "-p", "SubState", "--value"]).as_deref()
+            == Some("auto-restart");
     RuntimeStatus {
         installed,
         enabled: enabled_raw.as_deref() == Some("enabled"),
         running: active == "active",
         unit: UNIT,
         principal: None,
-        detail: if installed {
-            String::new()
-        } else {
+        detail: if !installed {
             RUNNER_MISSING.into()
+        } else if failing {
+            RUNNER_FAILING.into()
+        } else {
+            String::new()
         },
     }
 }
@@ -200,6 +211,23 @@ fn systemctl_output(args: &[&str]) -> Option<String> {
     }
 }
 
+/// Is `PUNKTFUNK_PLUGIN_SANDBOX` off in the runner unit's own environment? The host's
+/// environment says nothing about it: the runner reads only what its unit sets.
+#[cfg(target_os = "linux")]
+pub(super) fn runner_sandbox_off() -> bool {
+    systemctl_output(&["show", UNIT, "-p", "Environment", "--value"]).is_some_and(|env| {
+        env.split_whitespace().any(|kv| {
+            kv.strip_prefix("PUNKTFUNK_PLUGIN_SANDBOX=")
+                .is_some_and(|v| matches!(v.trim_matches('"'), "0" | "off" | "false"))
+        })
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn runner_sandbox_off() -> bool {
+    false
+}
+
 #[cfg(target_os = "linux")]
 pub(super) fn restart_runtime() -> Result<()> {
     run_systemctl(&["restart", UNIT])
@@ -226,7 +254,8 @@ pub(super) fn converge_runner_roots(
         return Ok(false);
     }
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    let tmp = dir.join(format!("{ROOTS_DROPIN}.tmp"));
+    // Per process: a CLI grant and the serving host may converge at the same moment.
+    let tmp = dir.join(format!("{ROOTS_DROPIN}.{}.tmp", std::process::id()));
     std::fs::write(&tmp, &body).with_context(|| format!("write {}", tmp.display()))?;
     std::fs::rename(&tmp, &path).with_context(|| format!("replace {}", path.display()))?;
     run_systemctl(&["daemon-reload"])?;
@@ -234,9 +263,10 @@ pub(super) fn converge_runner_roots(
     Ok(true)
 }
 
-/// One self-bind per root the unit would otherwise hide or keep read-only; a read outside the
-/// home is visible already. A `src:dst` pair fails the unit's `+` ExecStartPre. systemd drops a
-/// bind whose path holds a quote, and a control character would end the line: left out.
+/// One self-bind per root the unit would otherwise hide or keep read-only. `ProtectHome` hides
+/// `/home` and `/root` (not just this `home`); a read anywhere else is visible already. A
+/// `src:dst` pair fails the unit's `+` ExecStartPre. systemd drops a bind whose path holds a
+/// quote, and a control character would end the line: left out.
 #[cfg(any(test, target_os = "linux"))]
 fn render_roots(roots: &[access::RunnerRoot], home: &std::path::Path) -> String {
     let mut out = String::from(
@@ -257,7 +287,14 @@ fn render_roots(roots: &[access::RunnerRoot], home: &std::path::Path) -> String 
             );
             continue;
         }
-        let key = match (r.path.starts_with(home), r.write) {
+        let hidden = [
+            home,
+            std::path::Path::new("/home"),
+            std::path::Path::new("/root"),
+        ]
+        .iter()
+        .any(|h| r.path.starts_with(h));
+        let key = match (hidden, r.write) {
             (true, true) => "BindPaths",
             (true, false) => "BindReadOnlyPaths",
             (false, true) => "ReadWritePaths",
@@ -446,6 +483,7 @@ mod tests {
                 root("/h/saves", true),
                 root("/mnt/games", false),
                 root("/mnt/out", true),
+                root("/home/other/Games", false),
             ],
             Path::new("/h"),
         );
@@ -457,6 +495,8 @@ mod tests {
                 r#"BindReadOnlyPaths="-/h/My 100%% Games:x\\y""#,
                 r#"BindPaths="-/h/saves""#,
                 r#"ReadWritePaths="-/mnt/out""#,
+                // ProtectHome hides every home, not only the operator's.
+                r#"BindReadOnlyPaths="-/home/other/Games""#,
             ]
         );
         assert!(body.starts_with("# Written by punktfunk-host"));

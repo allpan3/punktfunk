@@ -40,7 +40,21 @@ pub fn main(args: &[String]) -> Result<()> {
             if !listing {
                 plat::require_elevation("installing or removing plugins")?;
             }
+            // A removed plugin's titles leave with it; its id is gone once its files are.
+            let removing: Vec<String> = match args.first().map(String::as_str) {
+                Some("remove") | Some("rm") | Some("uninstall") => args[1..]
+                    .iter()
+                    .filter(|a| !a.starts_with('-'))
+                    .filter_map(|pkg| manifest::id_of_package(pkg))
+                    .collect(),
+                _ => Vec::new(),
+            };
             forward_to_runner(args)?;
+            for provider in removing {
+                if let Err(e) = crate::library::delete_provider(&provider) {
+                    println!("Couldn't remove the library titles of {provider}: {e:#}");
+                }
+            }
             if !listing {
                 // The runner hands each plugin its token from this file; a running host picks
                 // the new set up on the plugin's first request.
@@ -323,6 +337,11 @@ pub(crate) fn runtime_status() -> RuntimeStatus {
     plat::runtime_status()
 }
 
+/// Has the operator turned the per-plugin sandbox off for the runner? Linux only.
+pub(crate) fn runner_sandbox_off() -> bool {
+    plat::runner_sandbox_off()
+}
+
 /// [`enable`]/[`disable`], also `POST /store/runtime`. Windows: the SYSTEM service
 /// already clears the elevation bar the CLI checks.
 pub(crate) fn set_runtime_enabled(enabled: bool) -> Result<()> {
@@ -418,6 +437,9 @@ pub(crate) fn converge_runner_roots() {
     if cfg!(test) || !cfg!(target_os = "linux") || !runtime_status().installed {
         return;
     }
+    // Two quick decisions must not race: the later one reads the grants the earlier wrote.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let Some(home) = manifest::home_dir() else {
         return;
     };
