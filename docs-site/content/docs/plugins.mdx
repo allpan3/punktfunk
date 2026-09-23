@@ -361,7 +361,7 @@ doesn't is that difference, and the env var is the fix.
 
 **A plugin can't read one of its folders** — open its Library source. A valid request appears with
 the exact path; allow it there. Missing drives and protected paths are refused by the host and
-never appear. The host's admin token and identity key stay out of reach either way — see
+never appear; the host log names each one (`plugin folder request refused`). The host's admin token and identity key stay out of reach either way — see
 [Security](/docs/security).
 
 **A plugin's interface won't load** — see
