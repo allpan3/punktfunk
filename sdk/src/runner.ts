@@ -586,7 +586,14 @@ const runSandboxed = (
 		const child = spawn("bwrap", argv, {
 			env: sandboxEnv(os.homedir()),
 			// fd 3 is `--add-seccomp-fd 3`.
-			stdio: ["ignore", "inherit", "inherit", "pipe"],
+			stdio: ["ignore", "inherit", "pipe", "pipe"],
+		});
+		// stderr still reaches the journal; its tail also names why the sandbox exited, since
+		// bwrap's own errors come before the plugin can ship a log line.
+		let stderrTail = "";
+		child.stderr?.on("data", (chunk: Buffer) => {
+			process.stderr.write(chunk);
+			stderrTail = (stderrTail + chunk.toString()).slice(-2000);
 		});
 		// A bwrap that dies before reading surfaces through `exit`, not an EPIPE here.
 		(child.stdio[3] as Writable).on("error", () => {}).end(filter);
@@ -596,13 +603,19 @@ const runSandboxed = (
 		});
 		child.on("exit", (code, signal) => {
 			proxy.close();
-			if (code === 0) resume(Effect.succeed("plugin" as const));
-			else
-				resume(
-					Effect.fail(
-						new Error(`sandboxed plugin exited ${signal ? `on ${signal}` : `with ${code}`}`),
-					),
-				);
+			if (code === 0) {
+				resume(Effect.succeed("plugin" as const));
+				return;
+			}
+			const last = stderrTail
+				.split("\n")
+				.filter((line) => line.trim() !== "")
+				.slice(-3)
+				.join(" | ");
+			const how = signal ? `on ${signal}` : `with ${code}`;
+			resume(
+				Effect.fail(new Error(`sandboxed plugin exited ${how}${last ? ` — ${last}` : ""}`)),
+			);
 		});
 		return Effect.sync(() => {
 			// Interruption (shutdown): SIGTERM lets the plugin's finalizers run; `--die-with-parent`
@@ -668,6 +681,27 @@ const attemptUnit = (
 	});
 
 /**
+ * The first lines of what actually failed. `Effect.tryPromise` wraps a rejection in an
+ * `UnknownError` whose own message says nothing, so the wrapper is peeled off.
+ */
+export const describeFailure = (cause: Cause.Cause<unknown>): string => {
+	let err: unknown = Cause.squash(cause);
+	while (
+		typeof err === "object" &&
+		err !== null &&
+		(err as { _tag?: unknown })._tag === "UnknownError" &&
+		"cause" in err
+	)
+		err = (err as { cause: unknown }).cause;
+	const text = err instanceof Error ? err.message || err.name : String(err);
+	return text
+		.split("\n")
+		.filter((line) => line.trim() !== "")
+		.slice(0, 6)
+		.join(" | ");
+};
+
+/**
  * A unit under supervision: plugins restart on failure (capped exponential backoff, jittered);
  * a clean completion ends the unit; bare scripts are one-shot either way. Never fails the
  * runner — every outcome is logged.
@@ -701,12 +735,7 @@ export const superviseUnit = (
 			),
 		),
 		Effect.tapCause((cause) =>
-			Effect.sync(() =>
-				log(
-					`[${unit.name}] failed: ${Cause.pretty(cause).split("\n")[0]}`,
-					"error",
-				),
-			),
+			Effect.sync(() => log(`[${unit.name}] failed: ${describeFailure(cause)}`, "error")),
 		),
 		Effect.retry(restart),
 		Effect.catchCause((cause) =>
@@ -741,9 +770,7 @@ export const runOneUnit = (
 			),
 		),
 		Effect.tapCause((cause) =>
-			Effect.sync(() =>
-				log(`[${unit.name}] failed: ${Cause.pretty(cause).split("\n")[0]}`, "error"),
-			),
+			Effect.sync(() => log(`[${unit.name}] failed: ${describeFailure(cause)}`, "error")),
 		),
 		Effect.asVoid,
 	);

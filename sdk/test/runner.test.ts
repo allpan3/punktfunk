@@ -7,6 +7,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import {
 	adoptNestedState,
+	describeFailure,
 	discoverUnits,
 	runner,
 	spawnAgainIfKilled,
@@ -185,6 +186,16 @@ describe("discovery", () => {
 			JSON.stringify({ name: "plugins", dependencies: {} }),
 		);
 		expect(discoverUnits(d)).toEqual([]);
+	});
+});
+
+describe("describeFailure", () => {
+	test("names the rejection a tryPromise wrapped, not the wrapper", async () => {
+		const exit = await Effect.runPromiseExit(
+			Effect.tryPromise(() => Promise.reject(new Error("connect refused\n\nat host.sock"))),
+		);
+		if (exit._tag !== "Failure") throw new Error("expected a failure");
+		expect(describeFailure(exit.cause)).toBe("connect refused | at host.sock");
 	});
 });
 
