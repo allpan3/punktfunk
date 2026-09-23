@@ -69,11 +69,8 @@ pub(crate) fn score(from: Rect, to: Rect, dir: MenuDir) -> Option<(u8, f32, f32)
     (ahead > 0.5).then_some((u8::from(across <= 0.0), gap.max(0.0), off.abs()))
 }
 
-/// The plate's travel: response 0.32, damping 0.78 — a slight overshoot on arrival.
-pub const TRAVEL: SpringSpec = SpringSpec {
-    response: 0.32,
-    damping: 0.78,
-};
+/// The plate's travel: the focus spring.
+pub const TRAVEL: SpringSpec = crate::anim::springs::FOCUS;
 /// Seconds the arrival sweep takes to cross the rim.
 const SWEEP_S: f64 = 0.6;
 /// Plate growth past its target, design units.
@@ -98,6 +95,8 @@ pub struct Plate {
     armed: bool,
     /// Reduce Motion fade, 0..1.
     shown: f64,
+    /// OK went down: the plate's scale, springing back to 1.
+    press: Option<Spring>,
 }
 
 impl Plate {
@@ -153,6 +152,11 @@ impl Plate {
                 s.settle(g, 0.25, 4.0);
             }
         }
+        if let Some(p) = self.press.as_mut() {
+            p.step_spec(1.0, crate::anim::springs::PRESS, dt);
+            p.settle(1.0, 0.0005, 0.01);
+        }
+        self.press = self.press.filter(|p| p.pos != 1.0 || p.vel != 0.0);
         let landed = edges
             .iter()
             .zip(goal)
@@ -163,9 +167,20 @@ impl Plate {
         }
     }
 
-    /// Still travelling, fading or sweeping: the frame loop must keep drawing.
+    /// Still travelling, fading, pressed or sweeping: the frame loop must keep drawing.
     pub fn busy(&self) -> bool {
-        self.armed || self.shown < 1.0 || self.sweep.is_some_and(|s| self.t - s < SWEEP_S)
+        self.armed
+            || self.shown < 1.0
+            || self.press.is_some()
+            || self.sweep.is_some_and(|s| self.t - s < SWEEP_S)
+    }
+
+    /// OK went down on the focused node: the plate dips and springs back. Reduce Motion
+    /// keeps it still; the release acts either way.
+    pub(crate) fn press(&mut self) {
+        if !crate::theme::reduce_motion() {
+            self.press = Some(Spring::rest(crate::anim::PRESS_SCALE));
+        }
     }
 
     /// The plate on screen this frame, before its outset.
@@ -177,9 +192,12 @@ impl Plate {
             e[2].pos as f32,
             e[3].pos as f32,
         );
+        let s = self.press.map_or(1.0, |p| p.pos) as f32;
+        let (dx, dy) = (r.width() * (1.0 - s) / 2.0, r.height() * (1.0 - s) / 2.0);
         Some((
-            r.with_offset((-self.shift.0, -self.shift.1)),
-            e[4].pos.max(0.0) as f32,
+            r.with_inset((dx, dy))
+                .with_offset((-self.shift.0, -self.shift.1)),
+            e[4].pos.max(0.0) as f32 * s,
         ))
     }
 
@@ -259,4 +277,29 @@ fn linear(r: &Rect, colors: &[Color4f], pos: Option<&[f32]>) -> Option<skia_safe
         ),
         None,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// OK down dips the plate around its centre, and the spring brings it back whole.
+    #[test]
+    fn a_press_dips_the_plate_and_it_springs_back() {
+        let mut p = Plate::default();
+        let id = super::super::Id::new("t", 0);
+        let r = Rect::from_xywh(0.0, 0.0, 100.0, 50.0);
+        let frame = |p: &mut Plate| p.step(id, r, 8.0, 1.0 / 60.0, None, (0.0, 0.0));
+        frame(&mut p);
+        p.press();
+        frame(&mut p);
+        let (dipped, _) = p.rect().unwrap();
+        assert!(dipped.width() < 100.0 && dipped.center_x() == 50.0);
+        assert!(p.busy(), "a dipping plate keeps the frames coming");
+        for _ in 0..120 {
+            frame(&mut p);
+        }
+        assert_eq!(p.rect().unwrap().0, r);
+        assert!(p.press.is_none());
+    }
 }

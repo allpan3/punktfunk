@@ -206,6 +206,21 @@ impl Screen {
         }
     }
 
+    /// OK went down on a remote: what has focus dips now, before the release acts on it.
+    pub(crate) fn press(&mut self) {
+        match self {
+            Screen::Home(s) => s.press(),
+            Screen::Settings(s) => s.press(),
+            Screen::AddHost(s) => s.list.dip(),
+            Screen::Pair(s) => s.list.dip(),
+            Screen::PinHosts(s) => s.list.dip(),
+            Screen::BindPreset(s) => s.list.dip(),
+            Screen::CardMenu(s) => s.list.dip(),
+            Screen::Customize(s) => s.list.dip(),
+            _ => {}
+        }
+    }
+
     /// A finger drag, offered to what the screen scrolls: its menu list, or the library
     /// grid. `false` scrolls it by ticks, as on the carousels or over a keyboard tray.
     pub(crate) fn pan(&mut self, p: Pointer) -> bool {

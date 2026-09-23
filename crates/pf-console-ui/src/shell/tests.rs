@@ -28,6 +28,31 @@ use punktfunk_core::config::GamepadPref;
 /// Pins `motion_spring` (vectors v2). v1 `motion` still exists for other clients; this
 /// transition is a spring, not that ease-out, so sampling v1 would pass a curve we do not run.
 ///
+/// The redesign's motion table vs `motion_springs` in `console-vectors.json`.
+#[test]
+fn the_motion_table_matches_the_shared_vectors() {
+    use crate::anim::springs;
+    let raw = include_str!("../../../../clients/shared/console-vectors.json");
+    let file: serde_json::Value = serde_json::from_str(raw).unwrap();
+    let m = &file["motion_springs"];
+    let num = |a: &str, b: &str| m[a][b].as_f64().unwrap_or_else(|| panic!("{a}.{b}"));
+    for (name, spec) in [
+        ("focus", springs::FOCUS),
+        ("press", springs::PRESS),
+        ("nav", springs::NAV),
+        ("modal", springs::MODAL),
+    ] {
+        assert_eq!(spec.response, num(name, "response"), "{name}");
+        assert_eq!(spec.damping, num(name, "damping"), "{name}");
+    }
+    assert_eq!(crate::anim::PRESS_SCALE, num("press", "scale"));
+    assert_eq!(TAB_SLIDE, num("tab", "slide_fraction"));
+    let e = crate::anim::entrances::CARDS;
+    assert_eq!(e.stagger, num("entrance", "stagger_s"));
+    assert_eq!(crate::library::ENTER_SCALE, num("entrance", "scale"));
+    assert_eq!(crate::library::ENTER_RISE, num("entrance", "rise_dp"));
+}
+
 /// Springs are integrator-dependent: two runtimes that honour `response`/`damping` agree
 /// to the eye and disagree in the third decimal. Pin the parameters, not sampled positions.
 #[test]

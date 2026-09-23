@@ -1973,6 +1973,15 @@
     { "id": "opal", "pair": [[0.87, 0.93, 0.99], [0.99, 0.96, 0.88]] }
   ],
   "$backdrop_pairs": "Version 3: each palette's two dominant colours, the pools of the Skia console's field. Only its Rust twin draws the field, so only it pins this; the 16-cell meshes above stay for the native shells until they go.",
+  "motion_springs": {
+    "focus": { "response": 0.32, "damping": 0.78 },
+    "press": { "response": 0.16, "damping": 0.65, "scale": 0.97 },
+    "nav": { "response": 0.42, "damping": 0.88 },
+    "modal": { "response": 0.42, "damping": 0.88 },
+    "tab": { "slide_fraction": 0.25 },
+    "entrance": { "stagger_s": 0.04, "scale": 0.96, "rise_dp": 12.0 }
+  },
+  "$motion_springs": "Version 3: the redesign's motion table (design section 3), parameters not samples, as motion_spring pins its one spring. The Skia shell animates every screen, so its Rust twin pins it; the native shells keep motion_spring until they go.",
   "tabs": [
     {
       "name": "Stream"

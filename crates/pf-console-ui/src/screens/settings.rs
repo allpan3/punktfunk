@@ -681,6 +681,13 @@ impl SettingsScreen {
         self.strip_focus
     }
 
+    /// OK went down on the focused row: it dips before the release acts.
+    pub(crate) fn press(&mut self) {
+        if !self.strip_focus && self.custom_bitrate.is_none() {
+            self.list.dip();
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn rail_for_test(&self) -> bool {
         self.rail

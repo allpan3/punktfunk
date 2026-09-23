@@ -254,6 +254,11 @@ impl Tree {
         self.focus
     }
 
+    /// OK went down on the focused node: its plate dips.
+    pub fn press(&mut self) {
+        self.plate.press();
+    }
+
     pub fn set_focus(&mut self, id: Option<Id>) {
         self.focus = id;
         self.remember();

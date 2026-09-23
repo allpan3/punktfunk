@@ -171,6 +171,13 @@ impl HomeScreen {
         }
     }
 
+    /// OK went down: the focused card's plate dips, or the games' focused row.
+    pub(crate) fn press(&mut self) {
+        if !self.below {
+            self.tree.press();
+        }
+    }
+
     /// A finger drag on the games scrolls them.
     pub(crate) fn pan(&mut self, p: Pointer) -> bool {
         self.below && self.shelf.as_mut().is_some_and(|s| s.pan(p))

@@ -212,7 +212,7 @@ impl Shell {
             if crate::theme::reduce_motion() {
                 toast.seat = crate::anim::Spring::rest(1.0);
             } else {
-                toast.seat.step_spec(1.0, springs::INDICATOR, dt);
+                toast.seat.step_spec(1.0, springs::MODAL, dt);
                 toast.seat.settle(1.0, 0.001, 0.01);
             }
             // Seat springs the slide. Fade stays linear: dismissal is a 4 s deadline, not a gesture.

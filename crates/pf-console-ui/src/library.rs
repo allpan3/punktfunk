@@ -31,8 +31,8 @@ pub const RECEDE_DIM: f64 = 0.10;
 /// Refused-move recoil, px against the push.
 pub const BUMP_PX: f64 = 16.0;
 /// Mount entrance ([`crate::anim::Entrance`]): arrival scale, rise (design units), yaw. Shared with the home carousel.
-pub const ENTER_SCALE: f64 = 0.74;
-pub const ENTER_RISE: f64 = 34.0;
+pub const ENTER_SCALE: f64 = 0.96;
+pub const ENTER_RISE: f64 = 12.0;
 pub const ENTER_TURN_DEG: f64 = 62.0;
 pub const JUMP: i32 = 5;
 

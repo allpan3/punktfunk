@@ -55,6 +55,8 @@ const NAV_INPUT_OPENS: f64 = 0.85;
 /// Chrome bands, design units: pinned title above, hints below.
 const TOP_BAND: f64 = 64.0;
 const BOTTOM_BAND: f64 = 86.0;
+/// A tab switch slides the new root this share of the width.
+pub(crate) const TAB_SLIDE: f64 = 0.25;
 /// Seconds OK stays down on a remote before it opens the focused card's menu instead.
 const HOLD_S: f64 = 0.5;
 
@@ -1274,6 +1276,12 @@ impl Shell {
         if down {
             // A fresh press restarts the hold, so a lost release cannot strand it.
             self.ok_down = Some((t, false));
+            let modal = self.connecting.is_some() || self.launching.is_some();
+            if !self.strip_focus && !modal {
+                if let Some(s) = self.stack.last_mut() {
+                    s.press();
+                }
+            }
             return None;
         }
         match self.ok_down.take() {

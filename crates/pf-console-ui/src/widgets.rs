@@ -254,7 +254,7 @@ const SLIP_DP: f64 = 14.0;
 /// Cap so a held repeat is one travel, not a value thrown off the row.
 const SLIP_MAX: f64 = 22.0;
 /// Confirm-dip floor (visual sibling of the haptic).
-const PRESS_DIP: f64 = 0.97;
+const PRESS_DIP: f64 = crate::anim::PRESS_SCALE;
 /// Mount rise, design units. A twelfth of the carousel travel — same language, smaller.
 const ROW_RISE: f64 = 12.0;
 
@@ -400,8 +400,9 @@ impl MenuList {
         None
     }
 
-    /// Confirm dip. Separate from [`Self::armed`]: an action row still presses.
-    fn dip(&mut self) {
+    /// Confirm dip; also OK going down on a remote. Separate from [`Self::armed`]: an
+    /// action row still presses.
+    pub fn dip(&mut self) {
         self.press.pos = PRESS_DIP;
     }
 

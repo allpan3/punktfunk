@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use super::{
     Motion, NavKind, Shell, Tab, BOTTOM_BAND, NAV_ENTER_SCALE, NAV_EXIT_SCALE, NAV_REVEAL_ALPHA,
-    NAV_SLIDE_DP, TABS, TOP_BAND,
+    NAV_SLIDE_DP, TABS, TAB_SLIDE, TOP_BAND,
 };
 use crate::el::{El, Id, Tree};
 use crate::glyphs::{Hint, HintKey};
@@ -262,7 +262,7 @@ impl Shell {
                 } else {
                     -1.0
                 };
-                let dx = |x: f64| slide(x * w / 4.0);
+                let dx = |x: f64| slide(x * w * TAB_SLIDE);
                 if let Some(old) = self.parked[from.index()].as_mut() {
                     env.paint(old, 1.0 - p, dx(-dir * p), 0.0, 1.0, Band::Empty);
                 }
