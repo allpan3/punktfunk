@@ -1,6 +1,6 @@
 //! The card menu: what a hold (OK held on a remote, Y, a long press, a right click) opens
 //! on a host card or a poster, and Host details, where everything else a saved host
-//! offers lives in sections. One screen in three modes; the subject names the object and
+//! offers lives in section tabs. One screen in three modes; the subject names the object and
 //! [`CardMenu::actions`] owns the verbs.
 //!
 //! A host card's menu is five rows at most, a pinned card's three, a discovered one's two,
@@ -15,8 +15,8 @@ use crate::pointer::Pointer;
 use crate::screens::{Ctx, Outbox, Screen};
 use crate::store::SettingsStore;
 use crate::theme::{edge, fg, Fonts, W};
-use crate::widgets::{blurb, ListMsg, MenuList, RowSpec};
-use pf_client_core::menu_nav::{MenuEvent, MenuPulse};
+use crate::widgets::{blurb, column, ListMsg, MenuList, RowSpec, TabStrip, TAB_STRIP_H};
+use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuPulse};
 use pf_client_core::start;
 use skia_safe::{Canvas, Image, Rect};
 
@@ -90,6 +90,12 @@ pub(crate) struct CardMenu {
     /// A destructive row armed on the first press fires on the second. `Option<Action>`:
     /// arming Forget must not fire Restart if the cursor moved.
     armed: Option<Action>,
+    /// A host's details, one section per tab: the tab shown, its strip, and whether the
+    /// D-pad stands on the strip rather than the rows. Boxed: the screen is a variant of
+    /// one enum.
+    tab: usize,
+    strip: Box<TabStrip>,
+    strip_focus: bool,
 }
 
 impl CardMenu {
@@ -129,6 +135,42 @@ impl CardMenu {
             mode,
             list: MenuList::new(),
             armed: None,
+            tab: 0,
+            strip: Box::new(TabStrip::new()),
+            strip_focus: false,
+        }
+    }
+
+    /// A host's details, which sit in section tabs; a title's stay one card.
+    fn tabbed(&self) -> bool {
+        self.mode == Mode::Details && matches!(self.subject, Subject::Host(_))
+    }
+
+    /// The details' sections in order, the empty ones dropped.
+    fn sections(&self, store: &dyn SettingsStore) -> Vec<&'static str> {
+        let mut out: Vec<&'static str> = Vec::new();
+        for a in self.details(self.host(), store) {
+            if !out.contains(&Self::section(a)) {
+                out.push(Self::section(a));
+            }
+        }
+        out
+    }
+
+    /// Show section `tab` of `n`, wrapping, from its first row.
+    fn show_tab(&mut self, tab: i32, n: usize) -> Option<MenuPulse> {
+        self.tab = tab.rem_euclid(n.max(1) as i32) as usize;
+        self.list.jump_to(0);
+        self.armed = None;
+        Some(MenuPulse::Move)
+    }
+
+    /// OK went down: the plate under the focused tab or row dips.
+    pub(crate) fn press(&mut self) {
+        if self.strip_focus {
+            self.strip.press();
+        } else {
+            self.list.dip();
         }
     }
 
@@ -214,7 +256,11 @@ impl CardMenu {
         };
         let wake = host.can_wake && !host.online;
         if self.mode == Mode::Details {
-            return self.details(host, store);
+            let sections = self.sections(store);
+            let shown = sections[self.tab.min(sections.len() - 1)];
+            let mut rows = self.details(host, store);
+            rows.retain(|a| Self::section(*a) == shown);
+            return rows;
         }
         if host.pin.is_some() {
             return vec![Action::Browse, Action::CopyLink, Action::Unpin];
@@ -263,7 +309,7 @@ impl CardMenu {
         a
     }
 
-    /// The section a details row sits in; its first row carries the header.
+    /// The section, and so the tab, a details row sits in.
     fn section(a: Action) -> &'static str {
         match a {
             Action::BindPreset | Action::Pin(_) => "Presets",
@@ -404,12 +450,46 @@ impl CardMenu {
             fx.pop();
             return None;
         }
+        if self.tabbed() {
+            // Up from the first row stands on the section tabs; there Left and Right walk
+            // them and Down or OK returns. L1/R1 walk them from anywhere.
+            let n = self.sections(ctx.store).len();
+            let tab = self.tab as i32;
+            match (ev, self.strip_focus) {
+                (MenuEvent::JumpBack, _) => return self.show_tab(tab - 1, n),
+                (MenuEvent::JumpForward, _) => return self.show_tab(tab + 1, n),
+                (MenuEvent::Move(MenuDir::Up), false) if self.list.cursor == 0 => {
+                    self.strip_focus = true;
+                    return Some(MenuPulse::Move);
+                }
+                (MenuEvent::Move(MenuDir::Left), true) => return self.show_tab(tab - 1, n),
+                (MenuEvent::Move(MenuDir::Right), true) => return self.show_tab(tab + 1, n),
+                (MenuEvent::Move(MenuDir::Down) | MenuEvent::Confirm, true) => {
+                    self.strip_focus = false;
+                    return Some(MenuPulse::Move);
+                }
+                (MenuEvent::Move(_), true) => return Some(MenuPulse::Boundary),
+                (_, true) => return None,
+                _ => {}
+            }
+        }
         let actions = self.actions(ctx.store);
         let (msg, pulse) = self.list.menu(ev, actions.len());
         self.dispatch(msg, pulse, &actions, ctx, fx)
     }
 
     pub(crate) fn pointer(&mut self, p: Pointer, ctx: &mut Ctx, fx: &mut Outbox) -> bool {
+        if self.tabbed() {
+            if let Some(tab) = self.strip.pointer(p) {
+                if p.press() {
+                    self.show_tab(tab as i32, self.sections(ctx.store).len());
+                }
+                return true;
+            }
+            if p.press() {
+                self.strip_focus = false;
+            }
+        }
         let actions = self.actions(ctx.store);
         let (msg, pulse) = self.list.pointer(p, actions.len());
         if matches!(msg, ListMsg::None) && pulse.is_none() {
@@ -732,22 +812,36 @@ impl CardMenu {
         if let (Subject::Game { game, cover, .. }, Mode::Details) = (&self.subject, self.mode) {
             list_rect = title_card(canvas, fonts, game, cover.as_ref(), rect, k);
         }
+        let sections = if self.tabbed() {
+            self.sections(ctx.store)
+        } else {
+            Vec::new()
+        };
+        self.tab = self.tab.min(sections.len().saturating_sub(1));
+        let strip_h = if sections.is_empty() {
+            0.0
+        } else {
+            TAB_STRIP_H * k
+        };
+        let strip_top = list_rect.top;
+        list_rect.top += strip_h as f32;
         let actions = self.actions(ctx.store);
-        let mut last = "";
         let rows: Vec<RowSpec> = actions
             .iter()
-            .map(|&a| {
-                let row =
-                    RowSpec::action(self.label(a, ctx), self.enabled(a)).with_icon(self.icon(a));
-                if self.mode != Mode::Details || Self::section(a) == last {
-                    return row;
-                }
-                last = Self::section(a);
-                row.with_header(last)
-            })
+            .map(|&a| RowSpec::action(self.label(a, ctx), self.enabled(a)).with_icon(self.icon(a)))
             .collect();
+        let active = !self.strip_focus;
         self.list
-            .render(canvas, list_rect, &rows, fonts, k, dt, true);
+            .render(canvas, list_rect, &rows, fonts, k, dt, active);
+        if !sections.is_empty() {
+            // The tabs on the rows' inner column, as Settings' sections sit.
+            let inner = f64::from(column(list_rect, k).left) + 16.0 * k;
+            let bottom = strip_top + strip_h as f32;
+            let r = Rect::from_ltrb((inner - edge(k)) as f32, strip_top, rect.right, bottom);
+            let (tab, focused) = (self.tab, self.strip_focus);
+            self.strip
+                .render(canvas, r, &sections, tab, focused, fonts, k, dt);
+        }
     }
 }
 
@@ -865,6 +959,18 @@ mod tests {
 
     fn details(h: &HostRow) -> CardMenu {
         CardMenu::on(Subject::Host(h.clone()), Mode::Details)
+    }
+
+    /// `h`'s details tab by tab, as the D-pad meets them.
+    fn tabs(h: &HostRow) -> Vec<Vec<Action>> {
+        let n = details(h).sections(crate::store::file_store()).len();
+        (0..n)
+            .map(|tab| rows(&CardMenu { tab, ..details(h) }))
+            .collect()
+    }
+
+    fn all_rows(h: &HostRow) -> Vec<Action> {
+        tabs(h).concat()
     }
 
     fn host() -> HostRow {
@@ -1033,15 +1139,22 @@ mod tests {
         );
     }
 
-    /// Details groups the rest: the speed test, logs and wake need what they always
-    /// needed, and removal comes last.
+    /// Details holds the rest, one section per tab: the speed test, logs and wake need what
+    /// they always needed, and removal is the last tab.
     #[test]
-    fn details_holds_everything_else_in_sections() {
-        let s = details(&HostRow {
+    fn details_holds_everything_else_in_section_tabs() {
+        let h = HostRow {
             id: Some("rec-1".into()),
             ..host()
-        });
-        let r = rows(&s);
+        };
+        for tab in tabs(&h) {
+            let sections: Vec<&str> = tab.iter().map(|a| CardMenu::section(*a)).collect();
+            assert!(
+                sections.windows(2).all(|w| w[0] == w[1]),
+                "one per tab: {sections:?}"
+            );
+        }
+        let r = all_rows(&h);
         for a in [
             Action::BindPreset,
             Action::SpeedTest,
@@ -1054,42 +1167,50 @@ mod tests {
             assert!(r.contains(&a), "{a:?} missing");
         }
         assert_eq!(r.last(), Some(&Action::Forget));
-        let sections: Vec<&str> = r.iter().map(|a| CardMenu::section(*a)).collect();
-        let mut sorted = sections.clone();
-        sorted.dedup();
-        let mut unique = sorted.clone();
-        unique.sort();
-        unique.dedup();
-        assert_eq!(
-            sorted.len(),
-            unique.len(),
-            "a section's rows sit together: {sections:?}"
-        );
 
-        let offline = details(&HostRow {
+        let offline = all_rows(&HostRow {
             online: false,
             can_wake: true,
             ..host()
         });
-        let r = rows(&offline);
-        assert!(r.contains(&Action::Wake));
-        assert!(!r.contains(&Action::SpeedTest) && !r.contains(&Action::SendLogs));
-        let unpaired = details(&HostRow {
+        assert!(offline.contains(&Action::Wake));
+        assert!(!offline.contains(&Action::SpeedTest) && !offline.contains(&Action::SendLogs));
+        let unpaired = all_rows(&HostRow {
             paired: false,
             id: Some("rec-1".into()),
             ..host()
         });
-        assert!(!rows(&unpaired).contains(&Action::MakeDefault));
+        assert!(!unpaired.contains(&Action::MakeDefault));
+    }
+
+    /// Up from a tab's first row stands on the tabs, Right shows the next section from its
+    /// top, and Down goes back to the rows.
+    #[test]
+    fn the_details_tabs_walk_by_dpad() {
+        let mut s = details(&host());
+        with_ctx(|ctx| {
+            let mut fx = Outbox::default();
+            let mut go = |s: &mut CardMenu, ev| s.menu(ev, ctx, &mut fx);
+            let up = go(&mut s, MenuEvent::Move(MenuDir::Up));
+            assert!(matches!(up, Some(MenuPulse::Move)));
+            assert!(s.strip_focus);
+            go(&mut s, MenuEvent::Move(MenuDir::Right));
+            assert_eq!((s.tab, s.list.cursor), (1, 0));
+            go(&mut s, MenuEvent::Move(MenuDir::Down));
+            assert!(!s.strip_focus);
+            go(&mut s, MenuEvent::JumpBack);
+            assert_eq!(s.tab, 0, "L1 walks back from the rows");
+        });
     }
 
     #[test]
     fn host_actions_appear_only_when_the_host_offered_them() {
-        assert!(!rows(&details(&host()))
+        assert!(!all_rows(&host())
             .iter()
             .any(|a| matches!(a, Action::Host(_))));
         let s = details(&powered());
         assert_eq!(
-            rows(&s)
+            all_rows(&powered())
                 .iter()
                 .filter(|a| matches!(a, Action::Host(_)))
                 .count(),

@@ -217,7 +217,7 @@ impl Screen {
             Screen::Pair(s) => s.list.dip(),
             Screen::PinHosts(s) => s.list.dip(),
             Screen::BindPreset(s) => s.list.dip(),
-            Screen::CardMenu(s) => s.list.dip(),
+            Screen::CardMenu(s) => s.press(),
             Screen::Customize(s) => s.list.dip(),
             _ => {}
         }
