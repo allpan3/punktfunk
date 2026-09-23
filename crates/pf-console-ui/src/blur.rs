@@ -86,6 +86,9 @@ thread_local! {
     static BLUR: OnceCell<Option<RuntimeEffect>> = const { OnceCell::new() };
     static PIXEL: OnceCell<Option<RuntimeEffect>> = const { OnceCell::new() };
     static OVERRIDE: std::cell::Cell<Option<Style>> = const { std::cell::Cell::new(None) };
+    /// The shell is painting a screen into a transition layer. A copy of the surface
+    /// cannot see that layer, so a band drawn inside it would blur the field behind.
+    static IN_LAYER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn blur_effect() -> Option<RuntimeEffect> {
@@ -159,8 +162,17 @@ pub fn active() -> bool {
     style() != Style::Off
 }
 
-/// Soften what `canvas` already holds under `rect` by `band`.
+/// Set while the shell paints a screen into a layer; bands inside it are skipped.
+pub fn set_in_layer(on: bool) {
+    IN_LAYER.with(|c| c.set(on));
+}
+
+/// Soften what `canvas` already holds under `rect` by `band`. Inside a transition layer
+/// the surface holds none of the screen, so the band is left off for those frames.
 pub fn backdrop(canvas: &Canvas, rect: Rect, band: Band) {
+    if IN_LAYER.with(std::cell::Cell::get) {
+        return;
+    }
     match style() {
         Style::Off => {}
         Style::Blur => blur(canvas, rect, band),

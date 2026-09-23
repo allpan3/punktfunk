@@ -474,6 +474,9 @@ impl LayerEnv<'_> {
             // Save anyway: the transform below is undone by the same `restore`.
             canvas.save();
         }
+        // A list's own soft edges copy the surface, which has none of this layer: they
+        // would blur the field behind it over the rows. Off for the transition.
+        crate::blur::set_in_layer(layered);
         canvas.translate((dx as f32, dy as f32));
         let (cx, cy) = ((self.w / 2.0) as f32, (self.h / 2.0) as f32);
         canvas.translate((cx, cy));
@@ -524,6 +527,7 @@ impl LayerEnv<'_> {
             Vec::new()
         };
         canvas.restore();
+        crate::blur::set_in_layer(false);
         Chrome {
             alpha,
             band,
