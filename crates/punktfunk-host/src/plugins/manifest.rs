@@ -96,8 +96,9 @@ impl PluginManifest {
             .collect()
     }
 
-    /// Is `candidate` inside one of the declared roots? Lexical on a normalized path: a `..`
-    /// segment is refused outright rather than resolved, so this needs no filesystem.
+    /// Is `candidate` inside one of the declared roots or grants? Lexical: a `..` segment is
+    /// refused outright rather than resolved, so this needs no filesystem. Windows compares the
+    /// way grants are stored (`\\?\`, either slash, any case).
     pub fn confines(&self, candidate: &Path) -> bool {
         if !candidate.is_absolute()
             || candidate
@@ -106,7 +107,9 @@ impl PluginManifest {
         {
             return false;
         }
-        self.roots().iter().any(|root| candidate.starts_with(root))
+        self.roots()
+            .iter()
+            .any(|root| super::access::within(candidate, root))
     }
 }
 

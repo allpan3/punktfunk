@@ -159,6 +159,7 @@ fn windows_path(path: &Path) -> String {
     let text = path.to_string_lossy();
     text.strip_prefix(r"\\?\")
         .unwrap_or(&text)
+        .replace('/', "\\")
         .to_ascii_lowercase()
 }
 
@@ -177,14 +178,16 @@ fn same_path(a: &str, b: &str) -> bool {
     path_eq(Path::new(a), Path::new(b))
 }
 
+/// Is `path` at or below `base`? On Windows the `\\?\` a canonical grant carries, the slash
+/// direction, and the case do not count.
 #[cfg(windows)]
-fn within(path: &Path, base: &Path) -> bool {
+pub(crate) fn within(path: &Path, base: &Path) -> bool {
     let (path, base) = (windows_path(path), windows_path(base));
     path == base || path.starts_with(&format!("{base}\\"))
 }
 
 #[cfg(not(windows))]
-fn within(path: &Path, base: &Path) -> bool {
+pub(crate) fn within(path: &Path, base: &Path) -> bool {
     path.starts_with(base)
 }
 
