@@ -2,7 +2,8 @@
 //!
 //! One screen on the shell stack. B pops to the host list; A launches the
 //! focused title in this window. The shell owns aurora, chrome, and the
-//! connecting overlay.
+//! connecting overlay. On the Games tab the grid sits under the sections
+//! ([`games`]); a shelf drilled from Collections is the plain grid.
 //!
 //! `host.pin` is load-bearing: a pinned card launches with that preset.
 //! Posters decode here ([`decode_poster`]) so collections and this screen
@@ -30,6 +31,10 @@ use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuPulse};
 use skia_safe::{Canvas, Color4f, Data, Image, Matrix, Point, RRect, Rect, TileMode, M44};
 use std::cell::RefCell;
 use std::collections::HashMap;
+
+mod games;
+pub(crate) use games::CustomizeScreen;
+use games::Zone;
 
 const GRID_MARGIN: f64 = 48.0;
 /// The grid's scroll node, and title `i`'s cell in it.
@@ -295,6 +300,74 @@ fn draw_running_badge(canvas: &Canvas, fonts: &Fonts, rect: Rect, k: f64) {
     );
 }
 
+/// A grid cover in `cell`: the poster cropped to fill, or the placeholder. `alpha` is the
+/// poster's own; a placeholder fades only inside a layer.
+fn paint_cover(
+    canvas: &Canvas,
+    fonts: &Fonts,
+    game: &LibraryGame,
+    art: Option<&Image>,
+    cell: Rect,
+    k: f64,
+    alpha: f32,
+) {
+    let rr = RRect::new_rect_xy(cell, (12.0 * k) as f32, (12.0 * k) as f32);
+    let Some(img) = art else {
+        canvas.save();
+        canvas.clip_rrect(rr, None, true);
+        draw_poster_placeholder(canvas, fonts, Some(game), cell, k);
+        canvas.restore();
+        return;
+    };
+    let (iw, ih) = (img.width() as f32, img.height() as f32);
+    let aspect = cell.width() / cell.height();
+    let src = if iw / ih > aspect {
+        let sw = ih * aspect;
+        Rect::from_xywh((iw - sw) / 2.0, 0.0, sw, ih)
+    } else {
+        let sh = iw / aspect;
+        Rect::from_xywh(0.0, (ih - sh) / 2.0, iw, sh)
+    };
+    // Shader rrect, not clip+image: coverage AA, no clip-stack per card.
+    let (sx, sy) = (cell.width() / src.width(), cell.height() / src.height());
+    let mut local = Matrix::scale((sx, sy));
+    local.post_translate((cell.left - src.left * sx, cell.top - src.top * sy));
+    if let Some(shader) = img.to_shader(
+        (TileMode::Clamp, TileMode::Clamp),
+        art_sampling(),
+        Some(&local),
+    ) {
+        // Opaque: Skia modulates the shader by paint alpha; 0 draws nothing.
+        let mut p = crate::theme::shaded();
+        p.set_shader(shader);
+        p.set_alpha_f(alpha);
+        canvas.draw_rrect(rr, &p);
+    }
+}
+
+/// Stream `h` itself, launching nothing — asking a host to launch what it is already
+/// showing is how a second copy starts. The takeover names the running game when there
+/// is one, the host otherwise; a pinned card's preset rides along.
+fn desk_intent(h: &HostRow) -> ConnectIntent {
+    let subject = if h.running.is_empty() {
+        &h.name
+    } else {
+        &h.running
+    };
+    ConnectIntent {
+        addr: h.addr.clone(),
+        port: h.port,
+        fp_hex: h.fp_hex.clone(),
+        launch: None,
+        title: match &h.pin {
+            Some(p) => format!("{subject} \u{b7} {}", p.name),
+            None => subject.clone(),
+        },
+        request_access: false,
+        preset: h.pin.as_ref().map(|p| p.id.clone()),
+    }
+}
+
 /// Write `library_sort` only. Screens re-read it each frame; assigning the field reverts.
 pub(super) fn store_sort(sort: crate::collate::SortKey, ctx: &mut Ctx) {
     ctx.settings.library_sort = sort.id().to_string();
@@ -425,6 +498,16 @@ pub(crate) struct LibraryScreen {
     /// Fan origin. [`Entrance`] wants item distance; the grid measures cells.
     entrance_anchor: usize,
     ready_at: Option<f64>,
+    /// `library_sections`, re-read each frame.
+    sections: Vec<(crate::library::Section, bool)>,
+    /// Where the D-pad is on the Games tab ([`games`]); the grid's own cursor is `cursor`.
+    zone: Zone,
+    /// The zone has had its arrival placement.
+    seated: bool,
+    /// Each band's horizontal scroll.
+    band_x: Vec<Spring>,
+    /// Chips and band items as last drawn, for the pointer and the line handoff.
+    hits: Vec<(Zone, Rect)>,
 }
 
 impl LibraryScreen {
@@ -466,6 +549,11 @@ impl LibraryScreen {
             entrance_armed: false,
             entrance_anchor: 0,
             ready_at: None,
+            sections: crate::library::sections(""),
+            zone: Zone::Grid,
+            seated: false,
+            band_x: Vec::new(),
+            hits: Vec::new(),
         }
     }
 
@@ -511,10 +599,19 @@ impl LibraryScreen {
             self.recollate();
         }
         let view = LibraryView::parse(&ctx.settings.library_view);
-        if view != self.view_mode {
+        let sections = crate::library::sections(&ctx.settings.library_sections);
+        if view != self.view_mode || sections != self.sections {
+            if view != self.view_mode {
+                // Shelf scroll is horizontal; grid is vertical. Seat, do not glide from the other.
+                self.snap_scroll = true;
+            }
             self.view_mode = view;
-            // Shelf scroll is horizontal; grid is vertical. Seat, do not glide from the other.
-            self.snap_scroll = true;
+            self.sections = sections;
+            // Which titles a band holds out of the grid follows both.
+            self.recollate();
+        }
+        if !self.seated && matches!(self.phase, LibraryPhase::Ready) && self.sectioned() {
+            self.seat_zone(ctx);
         }
         // The row was cloned when the shelf opened; what the host has UP moves under it.
         // Only that field: the rest is frozen on purpose (a pin the carousel dropped must
@@ -550,7 +647,10 @@ impl LibraryScreen {
 
     /// Rebuild display order. Clamp the cursor; identity follow is [`Self::sync`]'s job.
     fn recollate(&mut self) {
-        self.view = crate::collate::filtered(&self.games, self.sort, self.filter.as_ref());
+        let view = crate::collate::filtered(&self.games, self.sort, self.filter.as_ref());
+        self.view = (view.into_iter())
+            .filter(|&i| !self.banded(&self.games[i]))
+            .collect();
         self.cursor = self.cursor.clamp(0, (self.view.len() as i32 - 1).max(0));
         self.seat_grid_col();
     }
@@ -784,21 +884,12 @@ impl LibraryScreen {
         }
         match &self.phase {
             // Grid spends up/down on rows and shoulders on pages; shelf has those spare.
-            LibraryPhase::Ready if self.view_mode == LibraryView::Grid => match ev {
-                MenuEvent::Move(MenuDir::Left) => self.grid_move(GridDir::Left),
-                MenuEvent::Move(MenuDir::Right) => self.grid_move(GridDir::Right),
-                // Top row only, from the same `GridShape` the renderer laid out.
-                MenuEvent::Move(MenuDir::Up) => match self.grid_shape() {
-                    Some(shape) if shape.cell_of(self.cursor.max(0) as usize).0 == 0 => {
-                        self.focus_bar()
-                    }
-                    _ => self.grid_move(GridDir::Up),
-                },
-                MenuEvent::Move(MenuDir::Down) => self.grid_move(GridDir::Down),
-                MenuEvent::JumpBack => self.grid_move(GridDir::PageBack),
-                MenuEvent::JumpForward => self.grid_move(GridDir::PageForward),
-                _ => self.ready_action(ev, fx),
-            },
+            LibraryPhase::Ready if self.view_mode == LibraryView::Grid => {
+                if let Some(pulse) = self.zone_menu(ev, ctx, fx) {
+                    return pulse;
+                }
+                self.grid_menu(ev, fx)
+            }
             LibraryPhase::Ready => match ev {
                 MenuEvent::Move(MenuDir::Left) => self.step(-1, false),
                 MenuEvent::Move(MenuDir::Right) => self.step(1, false),
@@ -831,6 +922,25 @@ impl LibraryScreen {
                 }
                 None
             }
+        }
+    }
+
+    /// The grid's own D-pad: rows, pages, and the bar above its top row.
+    fn grid_menu(&mut self, ev: MenuEvent, fx: &mut Outbox) -> Option<MenuPulse> {
+        match ev {
+            MenuEvent::Move(MenuDir::Left) => self.grid_move(GridDir::Left),
+            MenuEvent::Move(MenuDir::Right) => self.grid_move(GridDir::Right),
+            // Top row only, from the same `GridShape` the renderer laid out.
+            MenuEvent::Move(MenuDir::Up) => match self.grid_shape() {
+                Some(shape) if shape.cell_of(self.cursor.max(0) as usize).0 == 0 => {
+                    self.focus_bar()
+                }
+                _ => self.grid_move(GridDir::Up),
+            },
+            MenuEvent::Move(MenuDir::Down) => self.grid_move(GridDir::Down),
+            MenuEvent::JumpBack => self.grid_move(GridDir::PageBack),
+            MenuEvent::JumpForward => self.grid_move(GridDir::PageForward),
+            _ => self.ready_action(ev, fx),
         }
     }
 
@@ -945,23 +1055,22 @@ impl LibraryScreen {
         }
     }
 
-    /// Stream the host itself, launching nothing — asking a host to launch what it is
-    /// already showing is how a second copy starts. The takeover names the running game
-    /// when there is one, the host otherwise: the verb lives on the tile.
+    /// This shelf's host itself ([`desk_intent`]).
     fn desktop_intent(&self) -> ConnectIntent {
-        let subject = if self.host.running.is_empty() {
-            &self.host.name
-        } else {
-            &self.host.running
-        };
+        desk_intent(&self.host)
+    }
+
+    /// Launch `g` on this shelf's host. Pinned card: that preset as a one-off; primary
+    /// tile: the host's default.
+    fn launch_intent(&self, g: &LibraryGame) -> ConnectIntent {
         ConnectIntent {
             addr: self.host.addr.clone(),
             port: self.host.port,
             fp_hex: self.host.fp_hex.clone(),
-            launch: None,
+            launch: Some(g.id.clone()),
             title: match &self.host.pin {
-                Some(p) => format!("{subject} \u{b7} {}", p.name),
-                None => subject.clone(),
+                Some(p) => format!("{} \u{b7} {}", g.title, p.name),
+                None => g.title.clone(),
             },
             request_access: false,
             preset: self.host.pin.as_ref().map(|p| p.id.clone()),
@@ -979,19 +1088,7 @@ impl LibraryScreen {
                     fx.connect = Some(self.desktop_intent());
                     return Some(MenuPulse::Confirm);
                 }
-                fx.connect = Some(ConnectIntent {
-                    addr: self.host.addr.clone(),
-                    port: self.host.port,
-                    fp_hex: self.host.fp_hex.clone(),
-                    launch: Some(g.id.clone()),
-                    title: match &self.host.pin {
-                        Some(p) => format!("{} \u{b7} {}", g.title, p.name),
-                        None => g.title.clone(),
-                    },
-                    request_access: false,
-                    // Pinned card: that preset as a one-off. Primary tile: host default.
-                    preset: self.host.pin.as_ref().map(|p| p.id.clone()),
-                });
+                fx.connect = Some(self.launch_intent(g));
                 Some(MenuPulse::Confirm)
             }
             // The poster's menu: Y on a pad, OK held on a remote.
@@ -1041,14 +1138,24 @@ impl LibraryScreen {
             }
             // Hover focuses, so the press that follows opens the card rather than reaching
             // it. A touchscreen sends Press with no Move first, so its two-press path stands.
-            PointerKind::Move => match self.card_under(p) {
-                Some(i) if i != self.cursor as usize => {
-                    self.cursor = i as i32;
-                    self.seat_grid_col();
-                    true
+            PointerKind::Move => {
+                if let Some(same) = self
+                    .sectioned()
+                    .then(|| self.zone_pointer(p, false))
+                    .flatten()
+                {
+                    return !same;
                 }
-                _ => false,
-            },
+                match self.card_under(p) {
+                    Some(i) if i != self.cursor as usize || self.zone != Zone::Grid => {
+                        self.cursor = i as i32;
+                        self.zone = Zone::Grid;
+                        self.seat_grid_col();
+                        true
+                    }
+                    _ => false,
+                }
+            }
             PointerKind::Press => {
                 // Pills sit over the field. `TabStrip` keeps last-drawn geometry; faded pills must not hit.
                 let (sort_hit, view_hit) = if self.bar_shown() && self.bar.focus {
@@ -1073,13 +1180,24 @@ impl LibraryScreen {
                     store_view(view, ctx);
                     return true;
                 }
+                if let Some(ok) = self
+                    .sectioned()
+                    .then(|| self.zone_pointer(p, true))
+                    .flatten()
+                {
+                    if ok {
+                        self.menu(MenuEvent::Confirm, ctx, fx);
+                    }
+                    return true;
+                }
                 match self.card_under(p) {
-                    Some(i) if i == self.cursor as usize => {
+                    Some(i) if i == self.cursor as usize && self.zone == Zone::Grid => {
                         self.menu(MenuEvent::Confirm, ctx, fx);
                         true
                     }
                     Some(i) => {
                         self.cursor = i as i32;
+                        self.zone = Zone::Grid;
                         self.seat_grid_col();
                         true
                     }
@@ -1137,13 +1255,16 @@ impl LibraryScreen {
 
     /// What a screen reader speaks: the bar names both its pills, a tile its detail-band
     /// title. Nothing while the shelf is still loading — there is no focus to name yet.
-    pub(crate) fn announcement(&self) -> Option<String> {
+    pub(crate) fn announcement(&self, ctx: &Ctx) -> Option<String> {
         if !matches!(self.phase, LibraryPhase::Ready) {
             return None;
         }
         if self.bar.focus && self.bar_shown() {
             let (sort, view) = (self.sort.label(), self.view_mode.label());
             return Some(format!("Sort {sort}, view {view}"));
+        }
+        if let Some(title) = self.zone_title(ctx) {
+            return Some(title);
         }
         let game = self.focused()?;
         Some(if game.id == crate::library::DESKTOP_ID {
@@ -1153,7 +1274,7 @@ impl LibraryScreen {
         })
     }
 
-    pub(crate) fn hints(&self, _ctx: &Ctx) -> Vec<Hint> {
+    pub(crate) fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
         // Replace the field legend; extending it advertises Play/Options that go nowhere.
         if self.bar.focus && self.bar_shown() {
             return vec![
@@ -1161,6 +1282,11 @@ impl LibraryScreen {
                 Hint::new(HintKey::Confirm, "View"),
                 Hint::new(HintKey::Back, "Done"),
             ];
+        }
+        if matches!(self.phase, LibraryPhase::Ready) {
+            if let Some(hints) = self.zone_hints(ctx) {
+                return hints;
+            }
         }
         match &self.phase {
             LibraryPhase::Ready => {
@@ -1273,7 +1399,7 @@ impl LibraryScreen {
                 );
                 match self.view_mode {
                     LibraryView::Shelf => self.draw_carousel(canvas, field, k, fonts, ctx.t),
-                    LibraryView::Grid => self.draw_grid(canvas, field, k, dt, fonts, ctx.t),
+                    LibraryView::Grid => self.draw_grid(canvas, field, k, dt, fonts, ctx),
                 }
                 // After the cards. Bounded layer: unbounded allocates a surface-sized offscreen.
                 if reveal > 0.01 {
@@ -1288,7 +1414,8 @@ impl LibraryScreen {
                     self.draw_bar(canvas, bar, k, fonts, dt);
                     canvas.restore();
                 }
-                self.draw_detail_band(canvas, rect, k, fonts);
+                let title = self.zone_title(ctx);
+                self.draw_detail_band(canvas, rect, k, fonts, title);
                 self.evict_art();
             }
             LibraryPhase::Loading => draw_loading(canvas, rect, k, fonts, ctx.t),
@@ -1434,7 +1561,16 @@ impl LibraryScreen {
     }
 
     /// Same cursor, order, detail band, and art cache as the shelf; only placement differs.
-    fn draw_grid(&mut self, canvas: &Canvas, rect: Rect, k: f64, dt: f64, fonts: &Fonts, t: f64) {
+    fn draw_grid(
+        &mut self,
+        canvas: &Canvas,
+        rect: Rect,
+        k: f64,
+        dt: f64,
+        fonts: &Fonts,
+        ctx: &Ctx,
+    ) {
+        let t = ctx.t;
         let cols = self.grid_cols(rect, k);
         // Navigation reads last-drawn columns. A resize is a different grid; re-seat.
         if self.grid_cols_last != Some(cols) {
@@ -1460,15 +1596,45 @@ impl LibraryScreen {
             row as f64 * pitch_y + heading_h + section_gap
         };
 
-        // Matching bottom inset lives in `content_h`; the clamp only knows this number.
-        let content_h = row_top(shape.rows().saturating_sub(1)) + ch + heading_h;
         let view_h = f64::from(rect.height()) - DETAIL_BAND * k;
+        let grid_w = cols as f64 * pitch_x - GRID_GAP * k * fit;
+        let gap_y = pitch_y - ch;
+        // On the Games tab the grid is one line among chips and bands ([`games`]).
+        let sectioned = self.sectioned();
+        let (bands, before) = self.bands(ctx);
+        let grid_on = !sectioned || self.len() > 0;
+        let band_h: Vec<f64> = bands.iter().map(|b| Self::band_h(b, ch, k)).collect();
+        let lead_h = match sectioned {
+            true => Self::chips_h(k) + band_h[..before].iter().sum::<f64>(),
+            false => 0.0,
+        };
+        let grid_h = match (grid_on, sectioned) {
+            (false, _) => 0.0,
+            (true, air) => {
+                row_top(shape.rows().saturating_sub(1)) + ch + if air { gap_y } else { 0.0 }
+            }
+        };
+        let after_top = lead_h + grid_h;
+        // Matching bottom inset lives in `content_h`; the clamp only knows this number.
+        let content_h = after_top + band_h[before..].iter().sum::<f64>() + heading_h;
         let (focus_row, _) = shape.cell_of(self.cursor.max(0) as usize);
+        let target = match self.zone {
+            _ if !sectioned => row_top(focus_row),
+            Zone::Chip(_) => 0.0,
+            Zone::Band { band, .. } if band < before => {
+                Self::chips_h(k) + band_h[..band].iter().sum::<f64>()
+            }
+            Zone::Band { band, .. } if band < bands.len() => {
+                after_top + band_h[before..band].iter().sum::<f64>()
+            }
+            _ => lead_h + row_top(focus_row),
+        };
         // 0.34 keeps a row of context above and below the focus.
-        let want = (row_top(focus_row) - view_h * 0.34).clamp(0.0, (content_h - view_h).max(0.0));
+        let want = (target - view_h * 0.34).clamp(0.0, (content_h - view_h).max(0.0));
         let grid = Id::new(GRID, 0);
         let snap = std::mem::take(&mut self.snap_scroll);
         self.follow |= snap;
+        self.step_bands(&bands, grid_w, cw, k, snap);
         let tree = self.grid.get_mut();
         tree.tick(dt as f32);
         // Follow focus while no finger has the grid. After a pan the spring starts from
@@ -1493,8 +1659,6 @@ impl LibraryScreen {
         } else {
             (bump, 0.0)
         };
-        let grid_w = cols as f64 * pitch_x - GRID_GAP * k * fit;
-        let gap_y = pitch_y - ch;
         let viewport = Rect::from_xywh(rect.left, rect.top, rect.width(), (view_h.max(0.0)) as f32);
         let (anchor_row, anchor_col) =
             shape.cell_of(self.entrance_anchor.min(self.len().saturating_sub(1)));
@@ -1521,7 +1685,7 @@ impl LibraryScreen {
             El::paint(move |canvas, slot| {
                 painted.borrow_mut().push(i);
                 let ent = this.entrance_at(anchor_row.abs_diff(row) + anchor_col.abs_diff(col), t);
-                let f = if i == this.cursor.max(0) as usize {
+                let f = if i == this.cursor.max(0) as usize && this.zone == Zone::Grid {
                     1.0
                 } else {
                     0.0
@@ -1542,57 +1706,15 @@ impl LibraryScreen {
 
                 crate::theme::focus_halo(canvas, cell, 12.0, k as f32, f as f32);
                 let art = this.art.get(&id);
-                let rr = RRect::new_rect_xy(cell, (12.0 * k) as f32, (12.0 * k) as f32);
                 // Layer only for multi-piece fades (placeholder, focus ring). Paint alpha otherwise.
                 let layered = ent.fade < 1.0 && (art.is_none() || f > 0.0);
                 if layered {
                     canvas.save_layer_alpha_f(cell, ent.fade as f32);
                 }
-                match art {
-                    Some(img) => {
-                        let (iw, ih) = (img.width() as f32, img.height() as f32);
-                        let aspect = cell.width() / cell.height();
-                        let src = if iw / ih > aspect {
-                            let sw = ih * aspect;
-                            Rect::from_xywh((iw - sw) / 2.0, 0.0, sw, ih)
-                        } else {
-                            let sh = iw / aspect;
-                            Rect::from_xywh(0.0, (ih - sh) / 2.0, iw, sh)
-                        };
-                        // Shader rrect, not clip+image: coverage AA, no clip-stack per card.
-                        let (sx, sy) = (cell.width() / src.width(), cell.height() / src.height());
-                        let mut local = Matrix::scale((sx, sy));
-                        local.post_translate((cell.left - src.left * sx, cell.top - src.top * sy));
-                        if let Some(shader) = img.to_shader(
-                            (TileMode::Clamp, TileMode::Clamp),
-                            art_sampling(),
-                            Some(&local),
-                        ) {
-                            // Opaque: Skia modulates the shader by paint alpha; 0 draws nothing.
-                            let mut p = crate::theme::shaded();
-                            p.set_shader(shader);
-                            if !layered {
-                                p.set_alpha_f(ent.fade as f32);
-                            }
-                            canvas.draw_rrect(rr, &p);
-                        }
-                    }
-                    None => {
-                        canvas.save();
-                        canvas.clip_rrect(rr, None, true);
-                        draw_poster_placeholder(canvas, fonts, this.game(i), cell, k);
-                        canvas.restore();
-                    }
-                }
+                let alpha = if layered { 1.0 } else { ent.fade as f32 };
+                paint_cover(canvas, fonts, game, art, cell, k, alpha);
                 if f > 0.0 {
-                    crate::theme::panel(
-                        canvas,
-                        cell,
-                        12.0,
-                        None,
-                        crate::theme::PanelStroke::Brand(0.9),
-                        k as f32,
-                    );
+                    crate::theme::focus_ring(canvas, cell, 12.0, k as f32);
                 }
                 if running {
                     draw_running_badge(canvas, fonts, cell, k);
@@ -1621,21 +1743,39 @@ impl LibraryScreen {
             )
             .width(grid_w as f32)
         };
+        let hits = RefCell::new(Vec::new());
+        let hits = &hits;
+        let band =
+            |b: usize| this.band_el(&bands[b], b, fonts, grid_w, (cw, ch), viewport, k, hits);
         let mut root = El::scroll(grid, Axis::Vertical)
             .style(|s| s.align_items = Some(taffy::AlignItems::CENTER));
+        if sectioned {
+            root = root.child(this.chips_el(ctx.hosts, fonts, grid_w, k, hits));
+            root = root.children((0..before).map(band));
+        }
+        let top = |label| heading(label, heading_h * 0.62).size(grid_w as f32, heading_h as f32);
         root = match split_row {
+            _ if !grid_on => root,
             Some(split) => root
-                .child(heading("LAUNCHERS", heading_h * 0.62).size(grid_w as f32, heading_h as f32))
+                .child(top("LAUNCHERS"))
                 .child(rows(0, split))
                 .child(
                     heading("GAMES", gap_y + heading_h * 0.62)
                         .size(grid_w as f32, (gap_y + heading_h) as f32),
                 )
                 .child(rows(split, shape.rows())),
+            // Among the Games tab's sections, the grid is named like the rest.
+            None if sectioned => root.child(top("GAMES")).child(rows(0, shape.rows())),
             None => root
                 .child(El::column().size(grid_w as f32, heading_h as f32))
                 .child(rows(0, shape.rows())),
         };
+        if sectioned && grid_on {
+            root = root.child(El::column().size(grid_w as f32, gap_y as f32));
+        }
+        if sectioned {
+            root = root.children((before..bands.len()).map(band));
+        }
         root = root.child(El::column().size(grid_w as f32, heading_h as f32));
         let mut tree = this.grid.borrow_mut();
         let frame = tree.layout(root, viewport);
@@ -1653,6 +1793,15 @@ impl LibraryScreen {
         for i in painted {
             if let Some(id) = self.game(i).map(|g| g.id.clone()) {
                 self.art_seen.insert(id, self.frame);
+            }
+        }
+        self.hits = hits.take();
+        for (z, _) in &self.hits {
+            let Zone::Band { band, item } = *z else {
+                continue;
+            };
+            if let Some(games::Item::Game(g)) = bands[band].items.get(item) {
+                self.art_seen.insert(self.games[*g].id.clone(), self.frame);
             }
         }
     }
@@ -1818,7 +1967,14 @@ impl LibraryScreen {
     }
 
     /// Shared by shelf and grid so the title line cannot drift between arrangements.
-    fn draw_detail_band(&self, canvas: &Canvas, rect: Rect, k: f64, fonts: &Fonts) {
+    fn draw_detail_band(
+        &self,
+        canvas: &Canvas,
+        rect: Rect,
+        k: f64,
+        fonts: &Fonts,
+        zone: Option<String>,
+    ) {
         // Cache note describes the shelf, not the focused title — leading, not centred, and
         // above it: the title is anchored by its TOP edge, so its line reaches the band's
         // floor and anything placed under it lands inside the glyphs.
@@ -1833,13 +1989,14 @@ impl LibraryScreen {
                 fg(0.55),
             );
         }
-        let Some(g) = self.focused() else { return };
         // The desktop tile's own caption names what the press does — "Resume <title>"
-        // once the host has something up. Every other tile is its title.
-        let title = if g.id == crate::library::DESKTOP_ID {
-            self.desktop_caption()
-        } else {
-            g.title.clone()
+        // once the host has something up. Every other tile is its title; off the grid,
+        // the band item or chip.
+        let title = match (zone, self.focused()) {
+            (Some(title), _) => title,
+            (None, Some(g)) if g.id == crate::library::DESKTOP_ID => self.desktop_caption(),
+            (None, Some(g)) => g.title.clone(),
+            (None, None) => return,
         };
         let w = f64::from(rect.width());
         let cx = f64::from(rect.left) + w / 2.0;
@@ -1891,8 +2048,16 @@ mod tests {
         }
     }
 
-    /// Live model + armed entrance. `menu` re-syncs; a hand-built shelf is wiped.
-    /// Titles are not A–Z, so a sort actually changes display order.
+    /// The coverflow arrangement, which these tests were written against.
+    fn shelf_settings() -> pf_client_core::trust::Settings {
+        pf_client_core::trust::Settings {
+            library_view: LibraryView::Shelf.id().to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Live model + armed entrance, in the coverflow. `menu` re-syncs; a hand-built shelf
+    /// is wiped. Titles are not A–Z, so a sort actually changes display order.
     fn live_shelf() -> (LibraryScreen, LibraryShared) {
         // Bar steps save settings; point the store at a throwaway HOME first.
         crate::screens::settings::tests::fake_home();
@@ -1917,6 +2082,7 @@ mod tests {
                 .collect(),
         );
         let mut s = LibraryScreen::new(&host(), 0);
+        s.view_mode = LibraryView::Shelf;
         s.sync(&library);
         s.entrance_armed = true;
         (s, library)
@@ -1969,7 +2135,7 @@ mod tests {
     #[test]
     fn the_bar_owns_the_pad_and_confirm_cannot_launch_from_it() {
         let (mut s, library) = live_shelf();
-        let mut settings = pf_client_core::trust::Settings::default();
+        let mut settings = shelf_settings();
         let (pulse, _) = press(
             &mut s,
             &library,
@@ -1996,16 +2162,22 @@ mod tests {
     #[test]
     fn the_announcement_names_the_tile_then_the_bar() {
         let (mut s, library) = live_shelf();
-        let mut settings = pf_client_core::trust::Settings::default();
+        let mut settings = shelf_settings();
         // The leading tile is the desktop, and it speaks the caption it draws.
-        assert_eq!(s.announcement().as_deref(), Some("Desktop"));
+        assert_eq!(
+            s.announcement(&ctx(&library, &mut settings)).as_deref(),
+            Some("Desktop")
+        );
         press(
             &mut s,
             &library,
             &mut settings,
             MenuEvent::Move(MenuDir::Right),
         );
-        assert_eq!(s.announcement().as_deref(), Some("Zeta"));
+        assert_eq!(
+            s.announcement(&ctx(&library, &mut settings)).as_deref(),
+            Some("Zeta")
+        );
         press(
             &mut s,
             &library,
@@ -2013,7 +2185,7 @@ mod tests {
             MenuEvent::Move(MenuDir::Up),
         );
         assert_eq!(
-            s.announcement().as_deref(),
+            s.announcement(&ctx(&library, &mut settings)).as_deref(),
             Some("Sort Default, view Shelf")
         );
     }
@@ -2021,7 +2193,7 @@ mod tests {
     #[test]
     fn the_field_does_not_move_while_the_bar_is_up() {
         let (mut s, library) = live_shelf();
-        let mut settings = pf_client_core::trust::Settings::default();
+        let mut settings = shelf_settings();
         press(
             &mut s,
             &library,
@@ -2044,7 +2216,7 @@ mod tests {
     #[test]
     fn stepping_the_bar_writes_the_setting_and_the_field_follows() {
         let (mut s, library) = live_shelf();
-        let mut settings = pf_client_core::trust::Settings::default();
+        let mut settings = shelf_settings();
         press(
             &mut s,
             &library,
@@ -2104,7 +2276,7 @@ mod tests {
     #[test]
     fn the_shoulders_swap_the_arrangement_and_stop_at_the_ends() {
         let (mut s, library) = live_shelf();
-        let mut settings = pf_client_core::trust::Settings::default();
+        let mut settings = shelf_settings();
         press(
             &mut s,
             &library,
@@ -2134,7 +2306,7 @@ mod tests {
     #[test]
     fn back_leaves_the_bar_before_it_leaves_the_library() {
         let (mut s, library) = live_shelf();
-        let mut settings = pf_client_core::trust::Settings::default();
+        let mut settings = shelf_settings();
         press(
             &mut s,
             &library,
@@ -2151,10 +2323,11 @@ mod tests {
         );
     }
 
-    /// Up from row 0 reaches the bar; anywhere else it is a row move.
+    /// On a plain grid, Up from row 0 reaches the bar; anywhere else it is a row move.
     #[test]
     fn up_reaches_the_bar_from_the_grids_top_row_only() {
         let (mut s, library) = live_shelf();
+        s.all_titles();
         let mut settings = pf_client_core::trust::Settings {
             library_view: LibraryView::Grid.id().to_string(),
             ..Default::default()
@@ -2204,10 +2377,122 @@ mod tests {
         assert!(s.bar.focus, "…and from the top row it reaches the bar");
     }
 
+    /// The Games tab's lines: the desktop leaves the grid for its band, focus arrives on
+    /// the band, Down enters the grid's top row, and above the band sit the chips, then
+    /// the bar. Every step is a direction.
+    #[test]
+    fn the_games_tab_walks_chips_bands_and_grid_as_lines() {
+        let (mut s, library) = live_shelf();
+        let mut settings = pf_client_core::trust::Settings {
+            library_view: LibraryView::Grid.id().to_string(),
+            ..Default::default()
+        };
+        s.grid_cols_last = Some(3);
+        let dir = |d| MenuEvent::Move(d);
+        press(&mut s, &library, &mut settings, dir(MenuDir::Down));
+        assert_eq!(
+            s.zone,
+            Zone::Grid,
+            "arrival on the Desktops band, Down into the grid"
+        );
+        assert_eq!(s.focused().map(|g| g.title.as_str()), Some("Zeta"));
+        assert!(
+            !s.view
+                .iter()
+                .any(|&i| s.games[i].id == crate::library::DESKTOP_ID),
+            "the desktop tile left the grid for its band"
+        );
+        press(&mut s, &library, &mut settings, dir(MenuDir::Down));
+        assert_eq!(s.cursor, 3, "inside the grid, Down is a row");
+        press(&mut s, &library, &mut settings, dir(MenuDir::Up));
+        press(&mut s, &library, &mut settings, dir(MenuDir::Up));
+        assert_eq!(
+            s.zone,
+            Zone::Band { band: 0, item: 0 },
+            "the top row hands up"
+        );
+        let (_, fx) = press(&mut s, &library, &mut settings, MenuEvent::Confirm);
+        let desk = fx.connect.expect("OK on a desktop tile streams");
+        assert_eq!(desk.launch, None, "and launches nothing");
+        press(&mut s, &library, &mut settings, dir(MenuDir::Up));
+        assert_eq!(s.zone, Zone::Chip(0));
+        press(&mut s, &library, &mut settings, dir(MenuDir::Up));
+        assert!(s.bar.focus, "Up from the chips reaches the bar");
+        press(&mut s, &library, &mut settings, dir(MenuDir::Down));
+        assert!(
+            !s.bar.focus && s.zone == Zone::Chip(0),
+            "and Down comes back"
+        );
+        // No other paired host here, so the only chip is Customize.
+        let (_, fx) = press(&mut s, &library, &mut settings, MenuEvent::Confirm);
+        assert!(matches!(
+            fx.nav,
+            Some(crate::screens::Nav::Push(ref screen)) if matches!(**screen, Screen::Customize(_))
+        ));
+    }
+
+    /// A band holds its titles out of the grid only while it shows; Recently played is
+    /// newest first and skips what was never played.
+    #[test]
+    fn a_band_holds_its_titles_out_of_the_grid_only_while_it_shows() {
+        crate::screens::settings::tests::fake_home();
+        let library = LibraryShared::default();
+        let mut list = games(&[
+            ("Steam", None),
+            ("Old", None),
+            ("New", None),
+            ("Never", None),
+        ]);
+        list[0].launcher = true;
+        let played = |at| {
+            Some(pf_client_core::library::GameStats {
+                last_played_unix_ms: at,
+                ..Default::default()
+            })
+        };
+        list[1].stats = played(5);
+        list[2].stats = played(9);
+        library.set_games(list);
+        let mut s = LibraryScreen::new(&host(), 0);
+        s.sync(&library);
+        let mut settings = pf_client_core::trust::Settings::default();
+        let titles = |s: &LibraryScreen, band: &games::Band| -> Vec<String> {
+            (band.items.iter())
+                .map(|it| match it {
+                    games::Item::Game(i) => s.games[*i].title.clone(),
+                    games::Item::Desktop(h) => h.name.clone(),
+                })
+                .collect()
+        };
+        s.adopt_settings(&ctx(&library, &mut settings));
+        let (bands, before) = s.bands(&ctx(&library, &mut settings));
+        let sections: Vec<_> = bands.iter().map(|b| b.section).collect();
+        use crate::library::Section;
+        assert_eq!(
+            sections,
+            vec![Section::Desktops, Section::Recent, Section::Launchers]
+        );
+        assert_eq!(
+            before, 3,
+            "all three sit above the grid, favorites hidden empty"
+        );
+        assert_eq!(titles(&s, &bands[1]), vec!["New", "Old"]);
+        assert!(!s.view.iter().any(|&i| s.games[i].launcher));
+
+        settings.library_sections = "-launchers".into();
+        s.adopt_settings(&ctx(&library, &mut settings));
+        let (bands, _) = s.bands(&ctx(&library, &mut settings));
+        assert!(bands.iter().all(|b| b.section != Section::Launchers));
+        assert!(
+            s.view.iter().any(|&i| s.games[i].launcher),
+            "switched off, the launchers rejoin the grid"
+        );
+    }
+
     #[test]
     fn the_legend_swaps_with_the_focus() {
         let (mut s, library) = live_shelf();
-        let mut settings = pf_client_core::trust::Settings::default();
+        let mut settings = shelf_settings();
         let closed = hint_keys(&s, &library, &mut settings);
         assert!(closed.contains(&HintKey::Up), "nothing leads to the bar");
         assert!(closed.contains(&HintKey::Confirm) && closed.contains(&HintKey::Secondary));
@@ -2236,7 +2521,7 @@ mod tests {
     fn there_is_no_bar_until_there_is_a_field() {
         let (mut s, library) = live_shelf();
         s.entrance_armed = false;
-        let mut settings = pf_client_core::trust::Settings::default();
+        let mut settings = shelf_settings();
         assert!(!hint_keys(&s, &library, &mut settings).contains(&HintKey::Up));
         let (pulse, _) = press(
             &mut s,
@@ -2470,6 +2755,8 @@ mod tests {
         let spec: Vec<(&str, Option<&str>)> = titles.iter().map(|t| (t.as_str(), None)).collect();
         library.set_games(games(&spec));
         let mut s = LibraryScreen::new(&host(), 0);
+        // The plain grid, as Collections' "All titles" opens it: no sections above.
+        s.all_titles();
         s.sync(&library);
         s.entrance_armed = true;
         let settings = pf_client_core::trust::Settings {
@@ -2785,7 +3072,7 @@ mod tests {
     #[test]
     fn confirm_on_the_desktop_tile_launches_nothing() {
         let (mut s, library) = live_shelf();
-        let mut settings = pf_client_core::trust::Settings::default();
+        let mut settings = shelf_settings();
         assert_eq!(
             s.focused().map(|g| g.id.as_str()),
             Some(crate::library::DESKTOP_ID),
@@ -2816,7 +3103,7 @@ mod tests {
         s.entrance_armed = true;
         assert!(matches!(s.phase, LibraryPhase::Empty));
 
-        let mut settings = pf_client_core::trust::Settings::default();
+        let mut settings = shelf_settings();
         let (pulse, fx) = press(&mut s, &library, &mut settings, MenuEvent::Confirm);
         assert!(matches!(pulse, Some(MenuPulse::Confirm)));
         let intent = fx.connect.expect("a connect intent");

@@ -321,8 +321,8 @@ fn a_pinned_cards_library_launches_with_its_preset() {
         stats: None,
         running: false,
     }]);
-    // Past the desktop tile, which leads every shelf and launches nothing.
-    s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    // Down past the Desktops band, which arrives focused and launches nothing.
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
     s.handle_menu(MenuEvent::Confirm);
     match s.take_action() {
         Some(OverlayAction::Launch { launch, preset, .. }) => {
@@ -1059,8 +1059,8 @@ fn collections_drill_in_reaches_one_platform_and_backs_out() {
     };
     assert_eq!(
         shelf.len_for_test(),
-        7,
-        "the whole library again, led by the desktop tile"
+        5,
+        "the whole library again; the desktop and the launcher sit in their bands"
     );
 }
 
@@ -1427,10 +1427,11 @@ fn dump_console_screens() {
         .collect(),
     );
     // Fresh shell per scene: entrance and bar focus are per-shell and cannot be rewound.
+    // The coverflow, which these scenes were drawn against; the Games tab has its own.
     let shelf_shell = || {
         let console2 = ConsoleShared::default();
         console2.set_hosts(hosts());
-        Shell::new(
+        let mut shell = Shell::new(
             console2,
             library.clone(),
             ConsoleBus::default(),
@@ -1440,7 +1441,9 @@ fn dump_console_screens() {
                 Screen::Library(LibraryScreen::new(&hosts()[0], 0)),
             ],
         )
-        .unwrap()
+        .unwrap();
+        shell.settings.library_view = "shelf".into();
+        shell
     };
     let mut s2 = shelf_shell();
     s2.handle_menu(MenuEvent::Move(MenuDir::Right));
@@ -1476,6 +1479,79 @@ fn dump_console_screens() {
         dump(&mut s4, 80, 8, "_07c-settle", true);
         s4.handle_menu(MenuEvent::Move(MenuDir::Up));
         dump(&mut s4, 20, 8, name, true);
+    }
+
+    // The Games tab with every section full: two played titles, a favorite, a launcher.
+    // Then Customize, a row picked up.
+    {
+        let games_lib = LibraryShared::default();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let played = |ago: u64| {
+            Some(pf_client_core::library::GameStats {
+                last_played_unix_ms: now - ago,
+                ..Default::default()
+            })
+        };
+        let titles = [
+            "Steam",
+            "Hades II",
+            "Elden Ring",
+            "Hollow Knight",
+            "Celeste",
+            "Tunic",
+        ];
+        let mut list: Vec<crate::library::LibraryGame> = (titles.iter().enumerate())
+            .map(|(i, t)| crate::library::LibraryGame {
+                id: format!("steam:{i}"),
+                title: (*t).to_string(),
+                store: "steam".into(),
+                launcher: i == 0,
+                icon: if i == 0 {
+                    "steam".into()
+                } else {
+                    String::new()
+                },
+                platform: None,
+                developer: None,
+                year: None,
+                genres: Vec::new(),
+                stats: None,
+                running: false,
+            })
+            .collect();
+        list[2].stats = played(2 * 3_600_000);
+        list[3].stats = played(3 * 86_400_000);
+        games_lib.set_games(list);
+        let console6 = ConsoleShared::default();
+        console6.set_hosts(hosts());
+        let mut s6 = Shell::new(
+            console6,
+            games_lib,
+            ConsoleBus::default(),
+            test_options(),
+            vec![
+                Screen::Home(HomeScreen::new()),
+                Screen::Library(LibraryScreen::new(&hosts()[0], 0)),
+            ],
+        )
+        .unwrap();
+        crate::library::toggle_favorite(&mut s6.settings, &hosts()[0].fp_hex, "steam:4");
+        dump(&mut s6, 80, 8, "_07g-settle", true);
+        s6.handle_menu(MenuEvent::Move(MenuDir::Down)); // Recently played
+        dump(&mut s6, 40, 8, "07g-games-tab", true);
+        s6.handle_menu(MenuEvent::Move(MenuDir::Up));
+        s6.handle_menu(MenuEvent::Move(MenuDir::Up)); // the chips
+        for _ in 0..3 {
+            s6.handle_menu(MenuEvent::Move(MenuDir::Right)); // to Customize
+        }
+        s6.handle_menu(MenuEvent::Confirm);
+        finish_motion(&mut s6);
+        s6.handle_menu(MenuEvent::Move(MenuDir::Down));
+        s6.handle_menu(MenuEvent::Confirm); // pick up Recently played
+        dump(&mut s6, 40, 8, "07h-customize", true);
     }
 
     // `adopt_art` is a one-shot at the Y press: push art and give the shelf frames to

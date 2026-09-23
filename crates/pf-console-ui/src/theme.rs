@@ -377,6 +377,13 @@ pub fn panel_highlight(canvas: &Canvas, rect: Rect, corner: f32, k: f32) {
     canvas.draw_rrect(RRect::new_rect_xy(inset, r, r), &p);
 }
 
+/// The accent hairline round a focused card, with no glass: a poster under it keeps its
+/// brightness. `corner` is design units.
+pub fn focus_ring(canvas: &Canvas, rect: Rect, corner: f32, k: f32) {
+    let rr = RRect::new_rect_xy(rect, corner * k, corner * k);
+    canvas.draw_rrect(rr, &stroke(accent(0.9), 1.0));
+}
+
 /// [`focus_halo`] growth past the card, design units. Applied to both rect and corner radius.
 const HALO_OUTSET: f32 = 4.0;
 
@@ -412,7 +419,12 @@ pub fn focus_halo(canvas: &Canvas, rect: Rect, corner: f32, k: f32, f: f32) {
     // Radius grows by the same `d` as the rect or the arcs do not share a centre
     // and the halo reads squarer than the card at the corners.
     let r = (corner + HALO_OUTSET) * k;
+    // The blur's nine-patch can seam across the card's middle; glass would show it.
+    canvas.save();
+    let card = RRect::new_rect_xy(rect, corner * k, corner * k);
+    canvas.clip_rrect(card, skia_safe::ClipOp::Difference, true);
     canvas.draw_rrect(RRect::new_rect_xy(spread, r, r), &p);
+    canvas.restore();
 }
 
 pub fn drop_shadow(canvas: &Canvas, rect: Rect, corner: f32, k: f32, alpha: f32) {

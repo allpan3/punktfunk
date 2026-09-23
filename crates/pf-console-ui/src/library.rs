@@ -92,17 +92,17 @@ pub fn step_cursor(cursor: i32, len: usize, delta: i32, clamp: bool) -> StepResu
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum LibraryView {
-    #[default]
     Shelf,
+    #[default]
     Grid,
 }
 
 impl LibraryView {
-    /// Persisted `library_view`. Unknown → [`LibraryView::Shelf`] (a newer client's name).
+    /// Persisted `library_view`. Unset or unknown (a newer client's name) is the grid.
     pub fn parse(s: &str) -> LibraryView {
         match s {
-            "grid" => LibraryView::Grid,
-            _ => LibraryView::Shelf,
+            "shelf" => LibraryView::Shelf,
+            _ => LibraryView::Grid,
         }
     }
 
@@ -1653,9 +1653,9 @@ mod tests {
     fn library_view_parses_leniently() {
         assert_eq!(LibraryView::parse("grid"), LibraryView::Grid);
         assert_eq!(LibraryView::parse("shelf"), LibraryView::Shelf);
-        assert_eq!(LibraryView::parse("coverwall"), LibraryView::Shelf);
-        assert_eq!(LibraryView::parse(""), LibraryView::Shelf);
-        assert_eq!(LibraryView::default(), LibraryView::Shelf);
+        assert_eq!(LibraryView::parse("coverwall"), LibraryView::Grid);
+        assert_eq!(LibraryView::parse(""), LibraryView::Grid);
+        assert_eq!(LibraryView::default(), LibraryView::Grid);
         for v in LibraryView::ALL {
             assert_eq!(LibraryView::parse(v.id()), v, "{} round-trips", v.label());
         }

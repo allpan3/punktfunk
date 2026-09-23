@@ -749,7 +749,7 @@ fn draw_action_tile(canvas: &Canvas, fonts: &Fonts, rect: Rect, k: f64, kind: Ac
 /// Substitution, not addition: unknown or empty `os` keeps the monogram. The
 /// mark is decorative — the name beside it already states the host.
 #[allow(clippy::too_many_arguments)]
-fn draw_badge(
+pub(crate) fn draw_badge(
     canvas: &Canvas,
     fonts: &Fonts,
     name: &str,

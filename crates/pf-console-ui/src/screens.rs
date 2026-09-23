@@ -167,6 +167,8 @@ pub(crate) enum Screen {
     RingEditor(Box<ring_editor::RingEditorScreen>),
     ShortcutEditor(shortcut_editor::ShortcutEditorScreen),
     CardMenu(card_menu::CardMenu),
+    /// The Games tab's sections: order and switches.
+    Customize(library::CustomizeScreen),
 }
 
 impl Screen {
@@ -189,6 +191,7 @@ impl Screen {
             Screen::BindPreset(s) => s.menu(ev, ctx, fx),
             Screen::Players(s) => s.menu(ev, ctx, fx),
             Screen::CardMenu(s) => s.menu(ev, ctx, fx),
+            Screen::Customize(s) => s.menu(ev, ctx, fx),
         }
     }
 
@@ -205,6 +208,7 @@ impl Screen {
             Screen::PinHosts(s) => s.list.pan(p),
             Screen::BindPreset(s) => s.list.pan(p),
             Screen::CardMenu(s) => s.list.pan(p),
+            Screen::Customize(s) => s.list.pan(p),
             Screen::ShortcutEditor(s) => s.pan_list().is_some_and(|l| l.pan(p)),
             Screen::RingEditor(s) => s.pan_list().pan(p),
             Screen::Library(s) => s.pan(p),
@@ -229,6 +233,7 @@ impl Screen {
             Screen::BindPreset(s) => s.pointer(p, ctx, fx),
             Screen::Players(s) => s.pointer(p, ctx, fx),
             Screen::CardMenu(s) => s.pointer(p, ctx, fx),
+            Screen::Customize(s) => s.pointer(p, ctx, fx),
         }
     }
 
@@ -289,6 +294,7 @@ impl Screen {
             Screen::BindPreset(s) => s.heading(),
             Screen::Players(_) => "Players".into(),
             Screen::CardMenu(s) => s.title(),
+            Screen::Customize(_) => "Customize".into(),
         }
     }
 
@@ -297,7 +303,8 @@ impl Screen {
     pub(crate) fn announcement(&self, ctx: &Ctx) -> Option<String> {
         match self {
             Screen::Home(s) => s.announcement(ctx.hosts),
-            Screen::Library(s) => s.announcement(),
+            Screen::Library(s) => s.announcement(ctx),
+            Screen::Customize(s) => s.announcement(ctx),
             Screen::Settings(s) => s.announcement(ctx),
             Screen::Players(s) => s.announcement(ctx),
             _ => None,
@@ -318,6 +325,7 @@ impl Screen {
             Screen::BindPreset(s) => s.hints(ctx),
             Screen::Players(s) => s.hints(ctx),
             Screen::CardMenu(s) => s.hints(ctx),
+            Screen::Customize(s) => s.hints(ctx),
         }
     }
 
@@ -344,6 +352,7 @@ impl Screen {
             Screen::BindPreset(s) => s.render(canvas, rect, k, dt, fonts, ctx),
             Screen::Players(s) => s.render(canvas, rect, k, dt, fonts, ctx),
             Screen::CardMenu(s) => s.render(canvas, rect, k, dt, fonts, ctx),
+            Screen::Customize(s) => s.render(canvas, rect, k, dt, fonts, ctx),
         }
     }
 }
