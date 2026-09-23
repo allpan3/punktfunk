@@ -1,19 +1,23 @@
-//! The Games tab: the Mac Library's sections over the shelf's grid, and Customize.
+//! The Games tab: the Apple library's rows over the shelf's field, and Customize.
 //!
-//! Host chips and a Customize chip lead. The enabled sections follow in `library_sections`
-//! order; Games is the shelf's own grid, and an empty section hides. Desktops and Launchers
-//! leave the grid while their bands show. Focus walks chips, bands and grid as lines; the
-//! grid keeps its own cursor and hands off at its top and bottom rows.
+//! Focus walks lines top to bottom: the sort/view pills, the host chips and a Customize
+//! chip, the enabled sections in `library_sections` order, and the Games field (grid or
+//! shelf) where Games sits among them. An empty section hides. Desktops and Launchers
+//! leave the field while their rows show. A list that failed, is empty or still loading
+//! keeps the chips and the Desktops row, with the state's action where the field was.
+//! A shelf drilled from Collections has only the pills and its field.
 
-use super::{desk_intent, draw_running_badge, paint_cover, LibraryScreen};
+use super::bar::{pill_id, Pill};
+use super::card::{self, Card, DESK_H, DESK_W};
+use super::{desk_intent, store_sort, store_view, LibraryScreen};
 use crate::el::{El, Id};
 use crate::glyphs::{Hint, HintKey};
-use crate::library::{LibraryGame, LibraryView, Section, DESKTOP_ID, GRID_GAP};
+use crate::library::{LibraryGame, LibraryPhase, LibraryView, Section, DESKTOP_ID, GRID_GAP};
 use crate::model::{ConsoleCmd, HostRow};
 use crate::pointer::Pointer;
 use crate::screens::card_menu::CardMenu;
 use crate::screens::{Ctx, Outbox, Screen};
-use crate::theme::{fg, fill, Fonts, PanelStroke, W};
+use crate::theme::{fg, Fonts, W};
 use crate::widgets::{button, button_w, text_tab, ListMsg, MenuList, RowSpec};
 use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuPulse};
 use skia_safe::{Canvas, Rect};
@@ -23,26 +27,28 @@ use std::cell::RefCell;
 const RECENT_MAX: usize = 12;
 // Design units. A band is its heading, its row, then air.
 const HEADING_H: f64 = 30.0;
-const BAND_AIR: f64 = 18.0;
-const CAPTION_H: f64 = 24.0;
+const BAND_AIR: f64 = 22.0;
 const CHIP_H: f64 = 38.0;
 /// A host chip's label size and side padding, as a section tab's.
 const TAB_TEXT: f64 = 16.0;
 const TAB_PAD: f64 = 10.0;
-const TOP_AIR: f64 = 12.0;
-const DESKTOP_W: f64 = 300.0;
-const DESKTOP_H: f64 = 96.0;
+const TOP_AIR: f64 = 4.0;
 
-/// Where the D-pad is on the Games tab. The sort bar keeps its own flag on the shelf.
+/// Where the D-pad is. The field keeps its own cursor under [`Zone::Grid`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Zone {
+    /// The field: the grid or the shelf.
     Grid,
+    /// Pill `i` of the sort/view row.
+    Bar(usize),
     /// A host chip; the one past the last is Customize.
     Chip(usize),
     Band {
         band: usize,
         item: usize,
     },
+    /// The action a failed or empty list offers.
+    State,
 }
 
 pub(super) fn chip_id(i: usize) -> Id {
@@ -53,12 +59,18 @@ pub(super) fn band_item_id(band: usize, item: usize) -> Id {
     Id::new("games-band", band * 10_000 + item)
 }
 
-/// The focus target for `zone`, with the grid's cursor at `cell`.
-pub(super) fn zone_id(zone: Zone, cell: Id) -> Id {
+pub(super) fn state_id() -> Id {
+    Id::new("games-state", 0)
+}
+
+/// The focus target for `zone`, with the field's focused node `field`.
+pub(super) fn zone_id(zone: Zone, field: Id) -> Id {
     match zone {
-        Zone::Grid => cell,
+        Zone::Grid => field,
+        Zone::Bar(i) => pill_id(i),
         Zone::Chip(i) => chip_id(i),
         Zone::Band { band, item } => band_item_id(band, item),
+        Zone::State => state_id(),
     }
 }
 
@@ -74,18 +86,42 @@ pub(super) struct Band {
 }
 
 /// One row of focus, top to bottom.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Line {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Line {
+    Bar,
     Chips,
     Band(usize),
     Grid,
+    State,
 }
 
-fn line_of(z: Zone) -> Line {
+pub(super) fn line_of(z: Zone) -> Line {
     match z {
+        Zone::Bar(_) => Line::Bar,
         Zone::Chip(_) => Line::Chips,
         Zone::Band { band, .. } => Line::Band(band),
         Zone::Grid => Line::Grid,
+        Zone::State => Line::State,
+    }
+}
+
+/// Where focus lands on arrival: the state's action, else the first band above the field,
+/// else the field, else the first line there is.
+pub(super) fn seat(lines: &[Line]) -> Zone {
+    let above = || lines.iter().take_while(|l| **l != Line::Grid);
+    let line = (lines.iter().find(|l| **l == Line::State))
+        .or_else(|| above().find(|l| matches!(l, Line::Band(_))))
+        .or_else(|| lines.iter().find(|l| **l == Line::Grid))
+        .or_else(|| lines.first());
+    match line {
+        Some(Line::Band(band)) => Zone::Band {
+            band: *band,
+            item: 0,
+        },
+        Some(Line::Chips) => Zone::Chip(0),
+        Some(Line::Bar) => Zone::Bar(0),
+        Some(Line::State) => Zone::State,
+        _ => Zone::Grid,
     }
 }
 
@@ -97,9 +133,10 @@ fn chip_hosts(hosts: &[HostRow]) -> impl Iterator<Item = &HostRow> {
 }
 
 impl LibraryScreen {
-    /// The shelf lays out as the Games tab. A shelf drilled from Collections stays a grid.
+    /// The shelf lays out as the Games tab: not drilled from Collections, not under the
+    /// Hosts row.
     pub(super) fn sectioned(&self) -> bool {
-        self.view_mode == LibraryView::Grid && !self.drilled && !self.embedded
+        !self.drilled && !self.embedded
     }
 
     /// `h` is this shelf's host; a pinned card's shelf counts its primary row.
@@ -111,7 +148,7 @@ impl LibraryScreen {
         self.sections.iter().any(|&(x, on)| x == s && on)
     }
 
-    /// A band shows this title, so the grid does not. Under the Hosts row the card above
+    /// A band shows this title, so the field does not. Under the Hosts row the card above
     /// is the desk, and launchers follow the Games tab.
     pub(super) fn banded(&self, g: &LibraryGame) -> bool {
         if self.embedded {
@@ -123,20 +160,22 @@ impl LibraryScreen {
                 || (g.launcher && self.shows(Section::Launchers)))
     }
 
-    /// The bands with something in them, in order; `.1` of them sit above the grid.
+    /// The bands with something in them, in order; `.1` of them sit above the field. Until
+    /// the list is ready only Desktops, which needs no list, shows.
     pub(super) fn bands(&self, ctx: &Ctx) -> (Vec<Band>, usize) {
         let mut out = Vec::new();
         let mut before = None;
         if !self.sectioned() {
             return (out, 0);
         }
+        let ready = matches!(self.phase, LibraryPhase::Ready);
         let favorites = crate::library::favorites(ctx.settings, &self.host.fp_hex);
         for &(section, on) in &self.sections {
             if section == Section::Games {
                 before = Some(out.len());
                 continue;
             }
-            if !on {
+            if !on || (!ready && section != Section::Desktops) {
                 continue;
             }
             let items: Vec<Item> = match section {
@@ -186,83 +225,137 @@ impl LibraryScreen {
         (out, before)
     }
 
-    /// Focus on arrival: the first band above the grid, else the grid.
-    pub(super) fn seat_zone(&mut self, ctx: &Ctx) {
-        let (_, before) = self.bands(ctx);
-        self.zone = if before > 0 {
-            Zone::Band { band: 0, item: 0 }
+    /// Every line this frame draws, top to bottom. The state card is one while the list is
+    /// not ready, focusable only when it offers an action ([`Self::focus_lines`]). A plain
+    /// shelf shows a spinner until its entrance, so its pills wait for that too.
+    pub(super) fn lines(&self, bands: &[Band], before: usize) -> Vec<Line> {
+        let ready = matches!(self.phase, LibraryPhase::Ready);
+        let field = ready && self.len() > 0;
+        let mut out = Vec::new();
+        if field && !self.embedded && (self.sectioned() || self.entrance_armed) {
+            out.push(Line::Bar);
+        }
+        if self.sectioned() {
+            out.push(Line::Chips);
+        }
+        out.extend((0..before).map(Line::Band));
+        if field {
+            out.push(Line::Grid);
+        }
+        if !ready {
+            out.push(Line::State);
+        }
+        out.extend((before..bands.len()).map(Line::Band));
+        out
+    }
+
+    /// The lines focus can stand on.
+    fn focus_lines(&self, mut lines: Vec<Line>) -> Vec<Line> {
+        if self.state_action().is_none() || self.embedded {
+            lines.retain(|l| *l != Line::State);
+        }
+        lines
+    }
+
+    /// This frame's bands and lines, the zone moved onto one that exists. Until the list is
+    /// ready and seated, the zone is where focus lands on arrival ([`seat`]).
+    pub(super) fn place_zone(&mut self, ctx: &Ctx) -> (Vec<Band>, Vec<Line>) {
+        let (bands, before) = self.bands(ctx);
+        let lines = self.lines(&bands, before);
+        let focus = self.focus_lines(lines.clone());
+        let chips = chip_hosts(ctx.hosts).count() + 1;
+        self.zone = if self.seated {
+            self.clamp_zone(&focus, &bands, chips)
         } else {
-            Zone::Grid
+            seat(&focus)
         };
-        self.seated = true;
+        if matches!(self.phase, LibraryPhase::Ready) {
+            self.seated = true;
+        }
+        (bands, lines)
     }
 
     /// The zone, moved onto something that still exists: bands come and go with the data.
-    fn clamp_zone(&self, bands: &[Band], chips: usize, grid: bool) -> Zone {
+    fn clamp_zone(&self, lines: &[Line], bands: &[Band], chips: usize) -> Zone {
+        let has = |l: Line| lines.contains(&l);
         match self.zone {
-            Zone::Chip(i) => Zone::Chip(i.min(chips - 1)),
-            Zone::Band { band, item } if band < bands.len() => Zone::Band {
+            Zone::Chip(i) if has(Line::Chips) => Zone::Chip(i.min(chips - 1)),
+            Zone::Band { band, item } if has(Line::Band(band)) => Zone::Band {
                 band,
                 item: item.min(bands[band].items.len() - 1),
             },
-            _ if grid => Zone::Grid,
-            _ if !bands.is_empty() => Zone::Band { band: 0, item: 0 },
-            _ => Zone::Chip(0),
+            Zone::Bar(i) if has(Line::Bar) => Zone::Bar(i.min(Pill::all(true).len() - 1)),
+            z @ (Zone::Grid | Zone::State) if has(line_of(z)) => z,
+            _ => seat(lines),
         }
     }
 
-    /// The D-pad across chips, bands and the grid's edges. `None` leaves it to the grid.
+    /// The field hands a vertical move to the next line: always on the shelf, from the
+    /// grid's top or bottom row. Undrawn, the grid hands off whole.
+    fn field_edge(&self, down: bool) -> bool {
+        if self.view_mode == LibraryView::Shelf {
+            return true;
+        }
+        self.grid_shape().is_none_or(|shape| {
+            let row = shape.cell_of(self.cursor.max(0) as usize).0;
+            if down {
+                row + 1 >= shape.rows()
+            } else {
+                row == 0
+            }
+        })
+    }
+
+    /// The D-pad across the lines and the field's edges. `None` leaves it to the field.
     pub(super) fn zone_menu(
         &mut self,
         ev: MenuEvent,
         ctx: &mut Ctx,
         fx: &mut Outbox,
     ) -> Option<Option<MenuPulse>> {
-        if !self.sectioned() {
-            return None;
-        }
         if matches!(ev, MenuEvent::Move(_)) {
             self.follow = true;
         }
-        let (bands, before) = self.bands(ctx);
+        let (bands, lines) = self.place_zone(ctx);
+        let lines = self.focus_lines(lines);
         let chips = chip_hosts(ctx.hosts).count() + 1;
-        let grid = self.len() > 0;
-        self.zone = self.clamp_zone(&bands, chips, grid);
-        let mut lines = vec![Line::Chips];
-        lines.extend((0..before).map(Line::Band));
-        lines.extend(grid.then_some(Line::Grid));
-        lines.extend((before..bands.len()).map(Line::Band));
-        let at = lines.iter().position(|&l| l == line_of(self.zone))?;
+        let ready = matches!(self.phase, LibraryPhase::Ready);
+        let Some(at) = lines.iter().position(|&l| l == line_of(self.zone)) else {
+            // Nothing to stand on: Up still reaches the tabs, Back still leaves.
+            return Some(match ev {
+                MenuEvent::Move(MenuDir::Up) => Some(MenuPulse::Boundary),
+                MenuEvent::Back => {
+                    fx.pop();
+                    None
+                }
+                _ => None,
+            });
+        };
         match ev {
             MenuEvent::Move(dir @ (MenuDir::Up | MenuDir::Down)) => {
                 let down = dir == MenuDir::Down;
-                // Undrawn, the grid has no rows to walk yet: it hands off whole.
-                if let (Zone::Grid, Some(shape)) = (self.zone, self.grid_shape()) {
-                    let row = shape.cell_of(self.cursor.max(0) as usize).0;
-                    if (down && row + 1 < shape.rows()) || (!down && row > 0) {
-                        return None;
-                    }
+                if self.zone == Zone::Grid && !self.field_edge(down) {
+                    return None;
                 }
                 let next = if down {
                     lines.get(at + 1).copied()
                 } else {
                     at.checked_sub(1).map(|i| lines[i])
                 };
-                Some(match next {
-                    Some(line) => {
-                        self.enter(line, down, &bands, chips);
-                        Some(MenuPulse::Move)
-                    }
-                    None if down => Some(MenuPulse::Boundary),
-                    None => self.focus_bar().or(Some(MenuPulse::Boundary)),
-                })
+                let Some(line) = next else {
+                    return Some(Some(MenuPulse::Boundary));
+                };
+                self.enter(line, down, &bands, chips);
+                self.seated = true;
+                Some(Some(MenuPulse::Move))
             }
             _ if self.zone == Zone::Grid => None,
             MenuEvent::Move(dir) => {
                 let (i, len) = match self.zone {
                     Zone::Chip(i) => (i, chips),
+                    Zone::Bar(i) => (i, Pill::all(true).len()),
                     Zone::Band { band, item } => (item, bands[band].items.len()),
-                    Zone::Grid => return None,
+                    Zone::Grid | Zone::State => (0, 1),
                 };
                 let to = match dir {
                     MenuDir::Left => i.checked_sub(1),
@@ -273,8 +366,10 @@ impl LibraryScreen {
                 };
                 self.zone = match self.zone {
                     Zone::Band { band, .. } => Zone::Band { band, item: to },
+                    Zone::Bar(_) => Zone::Bar(to),
                     _ => Zone::Chip(to),
                 };
+                self.seated = true;
                 Some(Some(MenuPulse::Move))
             }
             MenuEvent::Confirm => Some(match self.zone {
@@ -286,6 +381,8 @@ impl LibraryScreen {
                     });
                     Some(MenuPulse::Confirm)
                 }
+                Zone::Bar(i) => self.apply_pill(i, ctx),
+                Zone::State => self.state_confirm(fx),
                 _ => self.chip_confirm(ctx, fx),
             }),
             MenuEvent::Secondary => {
@@ -298,10 +395,11 @@ impl LibraryScreen {
                             fx.options(CardMenu::for_game(&self.host, g, cover));
                         }
                     },
-                    _ => match self.chip_host(ctx) {
+                    Zone::Chip(_) => match self.chip_host(ctx) {
                         Some(h) => fx.options(CardMenu::for_host(h)),
                         None => return Some(Some(MenuPulse::Boundary)),
                     },
+                    _ => return Some(Some(MenuPulse::Boundary)),
                 }
                 Some(Some(MenuPulse::Confirm))
             }
@@ -309,10 +407,34 @@ impl LibraryScreen {
                 fx.pop();
                 Some(None)
             }
-            // Collections, from anywhere on the tab.
-            MenuEvent::Tertiary => None,
+            // Collections, from anywhere on a ready tab.
+            MenuEvent::Tertiary if ready => None,
+            MenuEvent::Tertiary => Some(Some(MenuPulse::Boundary)),
             MenuEvent::JumpBack | MenuEvent::JumpForward | MenuEvent::Sector(_) => Some(None),
         }
+    }
+
+    /// Pill `i`'s sort or arrangement, written to the setting; the screen adopts it next.
+    fn apply_pill(&mut self, i: usize, ctx: &mut Ctx) -> Option<MenuPulse> {
+        match Pill::all(true)[i] {
+            Pill::Sort(s) if s == self.sort => Some(MenuPulse::Boundary),
+            Pill::View(v) if v == self.view_mode => Some(MenuPulse::Boundary),
+            Pill::Sort(s) => {
+                store_sort(s, ctx);
+                Some(MenuPulse::Confirm)
+            }
+            Pill::View(v) => {
+                store_view(v, ctx);
+                Some(MenuPulse::Confirm)
+            }
+        }
+    }
+
+    /// The sort's pill and the arrangement's, in row order.
+    pub(super) fn applied(&self) -> [usize; 2] {
+        let all = Pill::all(true);
+        let at = |p: Pill| all.iter().position(|&x| x == p).unwrap_or(0);
+        [at(Pill::Sort(self.sort)), at(Pill::View(self.view_mode))]
     }
 
     fn chip_host<'h>(&self, ctx: &Ctx<'h>) -> Option<&'h HostRow> {
@@ -345,12 +467,13 @@ impl LibraryScreen {
     }
 
     /// Focus `line`, on what was drawn nearest the old focus's centre; by index when
-    /// nothing there was drawn.
+    /// nothing there was drawn. The shelf keeps its own cursor.
     fn enter(&mut self, line: Line, down: bool, bands: &[Band], chips: usize) {
         let x = self.focus_x();
         let index = match self.zone {
-            Zone::Chip(i) | Zone::Band { item: i, .. } => i,
+            Zone::Chip(i) | Zone::Bar(i) | Zone::Band { item: i, .. } => i,
             Zone::Grid => self.grid_col,
+            Zone::State => 0,
         };
         let nearest = |drawn: Vec<(usize, Rect)>| -> Option<usize> {
             let x = x?;
@@ -365,19 +488,25 @@ impl LibraryScreen {
             (self.hits.iter())
                 .filter(|(z, _)| line_of(*z) == want)
                 .map(|&(z, r)| match z {
-                    Zone::Chip(i) | Zone::Band { item: i, .. } => (i, r),
-                    Zone::Grid => (0, r),
+                    Zone::Chip(i) | Zone::Bar(i) | Zone::Band { item: i, .. } => (i, r),
+                    Zone::Grid | Zone::State => (0, r),
                 })
                 .collect()
         };
+        let pick = |len: usize| nearest(drawn(line)).unwrap_or(index).min(len - 1);
         self.zone = match line {
-            Line::Chips => Zone::Chip(nearest(drawn(line)).unwrap_or(index).min(chips - 1)),
+            Line::Chips => Zone::Chip(pick(chips)),
+            Line::Bar => Zone::Bar(pick(Pill::all(true).len())),
             Line::Band(band) => Zone::Band {
                 band,
-                item: (nearest(drawn(line)).unwrap_or(index)).min(bands[band].items.len() - 1),
+                item: pick(bands[band].items.len()),
             },
+            Line::State => Zone::State,
             Line::Grid => {
-                if let Some(shape) = self.grid_shape() {
+                if let Some(shape) = self
+                    .grid_shape()
+                    .filter(|_| self.view_mode == LibraryView::Grid)
+                {
                     let row = if down { 0 } else { shape.rows() - 1 };
                     let start = shape.row_start(row);
                     let cells = (start..start + shape.row_len(row))
@@ -386,8 +515,8 @@ impl LibraryScreen {
                     let col = index.min(shape.row_len(row) - 1);
                     self.cursor = nearest(cells).unwrap_or(start + col) as i32;
                     self.seat_grid_col();
-                    self.follow = true;
                 }
+                self.follow = true;
                 Zone::Grid
             }
         };
@@ -402,24 +531,27 @@ impl LibraryScreen {
         (!r.is_empty()).then(|| r.center_x())
     }
 
-    /// A pointer over a chip or a band item: hover focuses it, a press on the focused one
-    /// is OK. `None` when it is over neither.
+    /// A pointer over a pill, a chip, a band item or the state's button: hover focuses it,
+    /// a press on the focused one is OK. A pill or a button acts on the first press. `None`
+    /// when it is over none of them.
     pub(super) fn zone_pointer(&mut self, p: Pointer, press: bool) -> Option<bool> {
-        let z = self.hits.iter().find(|(_, r)| p.hits(*r))?.0;
-        if z == self.zone {
+        let z = self.hits.iter().rev().find(|(_, r)| p.hits(*r))?.0;
+        let direct = press && matches!(z, Zone::Bar(_) | Zone::State);
+        if z == self.zone || direct {
+            self.zone = z;
+            self.seated = true;
             return Some(press);
         }
         self.zone = z;
+        self.seated = true;
         Some(false)
     }
 
-    /// What the focused chip or band item is called; `None` on the grid.
+    /// What the focused line item is called, for the title band; `None` on the field and
+    /// the pills.
     pub(super) fn zone_title(&self, ctx: &Ctx) -> Option<String> {
-        if !self.sectioned() {
-            return None;
-        }
         match self.zone {
-            Zone::Grid => None,
+            Zone::Grid | Zone::Bar(_) | Zone::State => None,
             Zone::Chip(_) => Some(self.chip_host(ctx).map_or("Customize", |h| &h.name).into()),
             Zone::Band { band, item } => {
                 let (bands, _) = self.bands(ctx);
@@ -434,14 +566,24 @@ impl LibraryScreen {
         }
     }
 
-    /// The legend off the grid; `None` on it.
-    pub(super) fn zone_hints(&self, ctx: &Ctx) -> Option<Vec<Hint>> {
-        if !self.sectioned() {
+    /// The band item's title under focus, for the provenance line.
+    pub(super) fn zone_game(&self, ctx: &Ctx) -> Option<&LibraryGame> {
+        let Zone::Band { band, item } = self.zone else {
             return None;
+        };
+        match self.bands(ctx).0.get(band)?.items.get(item)? {
+            Item::Game(i) => self.games.get(*i),
+            Item::Desktop(_) => None,
         }
+    }
+
+    /// The legend off the field; `None` on it.
+    pub(super) fn zone_hints(&self, ctx: &Ctx) -> Option<Vec<Hint>> {
         let (bands, _) = self.bands(ctx);
         let ok = match self.zone {
             Zone::Grid => return None,
+            Zone::Bar(_) => "Select",
+            Zone::State => self.state_action()?,
             Zone::Chip(_) if self.chip_host(ctx).is_none() => "Customize",
             Zone::Chip(_) => "Open",
             Zone::Band { band, item } => match bands.get(band)?.items.get(item)? {
@@ -455,6 +597,12 @@ impl LibraryScreen {
         let mut hints = vec![Hint::new(HintKey::Confirm, ok)];
         if matches!(self.zone, Zone::Band { .. }) || self.chip_host(ctx).is_some() {
             hints.push(Hint::new(HintKey::Secondary, "Options"));
+        }
+        if matches!(self.phase, LibraryPhase::Ready)
+            && !self.drilled
+            && crate::collate::worth_browsing(&self.games)
+        {
+            hints.push(Hint::new(HintKey::Tertiary, "Collections"));
         }
         hints.push(Hint::new(HintKey::Back, "Back"));
         Some(hints)
@@ -490,7 +638,7 @@ impl LibraryScreen {
         }
     }
 
-    /// The chips line, as a child of the grid's scroll.
+    /// The chips line, as a child of the screen's scroll.
     pub(super) fn chips_el<'a>(
         &'a self,
         hosts: &'a [HostRow],
@@ -531,7 +679,7 @@ impl LibraryScreen {
         row
     }
 
-    /// Band `b`, as a child of the grid's scroll: its heading, then its row at its own
+    /// Band `b`, as a child of the screen's scroll: its heading, then its row at its own
     /// horizontal scroll. Items past `view`'s sides are not drawn.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn band_el<'a>(
@@ -545,18 +693,10 @@ impl LibraryScreen {
         k: f64,
         hits: &'a RefCell<Vec<(Zone, Rect)>>,
     ) -> El<'a> {
-        let label = band.section.label().to_uppercase();
+        let label = band.section.label();
         let heading = El::paint(move |canvas, r| {
-            fonts.draw_tracked(
-                canvas,
-                &label,
-                f64::from(r.left),
-                f64::from(r.top) + HEADING_H * 0.62 * k,
-                W::SemiBold,
-                12.0 * k,
-                1.4 * k,
-                fg(0.45),
-            );
+            let base = f64::from(r.top) + HEADING_H * 0.62 * k;
+            card::heading(canvas, fonts, label, f64::from(r.left), base, k);
         })
         .place(Rect::from_xywh(
             0.0,
@@ -567,9 +707,9 @@ impl LibraryScreen {
         let (iw, pitch) = item_pitch(band, cw, k);
         let off = self.band_x.get(b).map_or(0.0, |s| s.pos);
         let corner = if band.section == Section::Desktops {
-            18.0
+            14.0
         } else {
-            12.0
+            card::COVER_CORNER
         };
         let mut el = El::column()
             .size(width as f32, Self::band_h(band, ch, k) as f32)
@@ -590,30 +730,24 @@ impl LibraryScreen {
                         return;
                     }
                     hits.borrow_mut().push((z, slot));
-                    let on = self.zone == z;
                     match it {
-                        Item::Desktop(h) => desktop_tile(canvas, fonts, h, slot, k),
+                        Item::Desktop(h) => card::desk_tile(canvas, fonts, h, slot, k),
                         Item::Game(g) => {
-                            self.band_poster(canvas, fonts, band.section, *g, slot, ch, k, on)
+                            self.band_card(canvas, fonts, band.section, *g, slot, ch, k, z)
                         }
                     }
                 })
                 .id(band_item_id(b, i))
                 .focusable((corner * k) as f32)
-                .size(iw as f32, ch.min(f64::from(slot.height())) as f32)
-                .place(match it {
-                    Item::Desktop(_) => slot,
-                    Item::Game(_) => Rect::from_xywh(slot.left, slot.top, slot.width(), ch as f32),
-                }),
+                .place(slot),
             );
         }
         el
     }
 
-    /// A poster in a band: the grid's cover, with a caption under it — when it was
-    /// played in Recently played, its title elsewhere.
+    /// A card in a band; Recently played captions it with when it was played.
     #[allow(clippy::too_many_arguments)]
-    fn band_poster(
+    fn band_card(
         &self,
         canvas: &Canvas,
         fonts: &Fonts,
@@ -622,106 +756,44 @@ impl LibraryScreen {
         slot: Rect,
         ch: f64,
         k: f64,
-        on: bool,
+        z: Zone,
     ) {
         let g = &self.games[i];
-        let cell = Rect::from_xywh(slot.left, slot.top, slot.width(), ch as f32);
-        paint_cover(canvas, fonts, g, self.art.get(&g.id), cell, k, 1.0);
-        if g.running {
-            draw_running_badge(canvas, fonts, cell, k);
-        }
         let played = g.stats.as_ref().map_or(0, |s| s.last_played_unix_ms);
-        let caption = if section == Section::Recent && played > 0 {
+        let caption = (section == Section::Recent && played > 0).then(|| {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_millis() as u64);
             crate::library::ago(now.saturating_sub(played))
-        } else {
-            g.title.clone()
+        });
+        let card = Card {
+            game: g,
+            art: self.art.get(&g.id),
+            title: &g.title,
+            host: &self.host,
+            caption: caption.as_deref(),
+            focused: self.zone == z && !self.quiet,
         };
-        fonts.draw_clipped(
-            canvas,
-            &caption,
-            f64::from(slot.left),
-            f64::from(slot.top) + ch + 18.0 * k,
-            W::Regular,
-            12.0 * k,
-            fg(if on { 0.9 } else { 0.55 }),
-            f64::from(slot.width()),
-        );
+        card.paint(canvas, fonts, slot, ch, k, 1.0);
     }
 }
 
-/// A band's row height at grid cell height `ch`.
+/// A band's row height at grid poster height `ch`. Recently played holds a caption line.
 fn row_h(band: &Band, ch: f64, k: f64) -> f64 {
-    if band.section == Section::Desktops {
-        DESKTOP_H * k
-    } else {
-        ch + CAPTION_H * k
+    match band.section {
+        Section::Desktops => DESK_H * k,
+        s => ch + card::text_h(s == Section::Recent) * k,
     }
 }
 
 /// An item's width and the distance to the next, at grid cell width `cw`.
 fn item_pitch(band: &Band, cw: f64, k: f64) -> (f64, f64) {
     let w = if band.section == Section::Desktops {
-        DESKTOP_W * k
+        DESK_W * k
     } else {
         cw
     };
     (w, w + GRID_GAP * k)
-}
-
-/// A host's desk in the Desktops band: its badge, its name, what OK does, presence.
-fn desktop_tile(canvas: &Canvas, fonts: &Fonts, h: &HostRow, r: Rect, k: f64) {
-    crate::theme::panel(canvas, r, 18.0, None, PanelStroke::Plain(0.08), k as f32);
-    let pad = 22.0 * k;
-    let badge_y = f64::from(r.center_y()) - 26.0 * k;
-    crate::screens::home::draw_badge(
-        canvas,
-        fonts,
-        &h.name,
-        &h.os,
-        true,
-        f64::from(r.left) + pad,
-        badge_y,
-        k,
-    );
-    let x = f64::from(r.left) + pad + 52.0 * k + 14.0 * k;
-    let w = f64::from(r.right) - x - pad;
-    let cy = f64::from(r.center_y());
-    fonts.draw_clipped(
-        canvas,
-        &h.name,
-        x,
-        cy - 2.0 * k,
-        W::Bold,
-        18.0 * k,
-        fg(1.0),
-        w,
-    );
-    let (line, ink) = if h.running.is_empty() {
-        ("Desktop".to_string(), fg(0.6))
-    } else {
-        (format!("Resume {}", h.running), crate::theme::live())
-    };
-    // Online reads as the home card's green dot before the line.
-    let mut lx = x;
-    if h.online {
-        let r = 3.5 * k;
-        let dot = ((lx + r) as f32, (cy + 13.4 * k) as f32);
-        canvas.draw_circle(dot, r as f32, &fill(crate::theme::live()));
-        lx += 2.0 * r + 6.0 * k;
-    }
-    fonts.draw_clipped(
-        canvas,
-        &line,
-        lx,
-        cy + 18.0 * k,
-        W::SemiBold,
-        13.0 * k,
-        ink,
-        w - (lx - x),
-    );
 }
 
 /// Customize: the sections' order and switches, stored as `library_sections`. OK picks a

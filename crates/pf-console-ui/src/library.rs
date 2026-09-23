@@ -14,20 +14,24 @@ use std::sync::{Arc, Mutex};
 
 // --- Geometry (GTK launcher / Apple coverflow parity) ---
 
-/// 2:3 covers. Sized so the focused poster, detail panel and hint bar fit 1280×800 with air.
-pub const POSTER_W: f64 = 220.0;
-pub const POSTER_H: f64 = 330.0;
-pub const FOCUS_GAP: f64 = 230.0;
-/// Center-to-center between successive side cards; tighter than projected width so they overlap.
-pub const SIDE_SPACING: f64 = 104.0;
-pub const VISIBLE_RANGE: f64 = 5.5;
+/// The shelf's largest 2:3 cover, design units. The height fits the field between
+/// [`SHELF_COVER_MIN`] and this, as the Apple coverflow's does.
+pub const POSTER_W: f64 = 240.0;
+pub const POSTER_H: f64 = 360.0;
+pub const SHELF_COVER_MIN: f64 = 140.0;
+/// Air between two covers on the shelf, and a cover's corner, design units.
+pub const SHELF_SPACING: f64 = 34.0;
+pub const SHELF_CORNER: f64 = 16.0;
+/// One step off focus a cover keeps `1 − RECEDE_SCALE` of its size and `1 − RECEDE_FADE`
+/// of its opacity, turned [`ROTATE_DEG`].
 pub const RECEDE_SCALE: f64 = 0.24;
-/// Side-card yaw about its own vertical axis; inner edge recedes behind the focus.
+pub const RECEDE_FADE: f64 = 0.38;
+/// Side-cover yaw about the edge facing focus; the outer edge swings toward the eye.
 pub const ROTATE_DEG: f64 = 38.0;
-/// Perspective depth for the tilt, px (CSS `perspective()` semantics).
+/// The shelf's eye sits `cover height / SHELF_EYE` away (SwiftUI's perspective 0.55).
+pub const SHELF_EYE: f64 = 0.55;
+/// Perspective depth for the launch hold's tilt, px (CSS `perspective()` semantics).
 pub const PERSPECTIVE: f64 = 800.0;
-/// Recede-veil max opacity — overlap separator, not distance. Washes toward `theme::shade`.
-pub const RECEDE_DIM: f64 = 0.10;
 /// Refused-move recoil, px against the push.
 pub const BUMP_PX: f64 = 16.0;
 /// Mount entrance ([`crate::anim::Entrance`]): arrival scale, rise (design units), yaw. Shared with the home carousel.
@@ -297,6 +301,41 @@ pub fn card_matrix(
     let t2 = translate(-w / 2.0, -h / 2.0);
     let m = mat_mul(&mat_mul(&mat_mul(&mat_mul(&t1, &p), &r), &s), &t2);
     core::array::from_fn(|i| m[i] as f32)
+}
+
+/// A shelf cover's transform, card-local (0..w, 0..h) to screen: scaled about its centre,
+/// then turned `angle_deg` about its vertical edge at `pivot_x` (0 or `w`, the side facing
+/// focus) with the eye `depth` px away. A positive turn swings the left edge toward the eye.
+pub fn shelf_matrix(
+    (cx, cy): (f64, f64),
+    (w, h): (f64, f64),
+    scale: f64,
+    angle_deg: f64,
+    pivot_x: f64,
+    depth: f64,
+) -> [f64; 16] {
+    let place = translate(cx - w / 2.0, cy - h / 2.0);
+    let turn = mat_mul(
+        &mat_mul(
+            &mat_mul(&translate(pivot_x, h / 2.0), &perspective(depth)),
+            &rotate_y(angle_deg.to_radians()),
+        ),
+        &translate(-pivot_x, -h / 2.0),
+    );
+    let grow = mat_mul(
+        &mat_mul(&translate(w / 2.0, h / 2.0), &scale_xy(scale)),
+        &translate(-w / 2.0, -h / 2.0),
+    );
+    mat_mul(&mat_mul(&place, &turn), &grow)
+}
+
+/// Card-local `(x, y)` through `m` to screen, perspective divide included.
+pub fn project(m: &[f64; 16], x: f64, y: f64) -> (f64, f64) {
+    let w = m[12] * x + m[13] * y + m[15];
+    (
+        (m[0] * x + m[1] * y + m[3]) / w,
+        (m[4] * x + m[5] * y + m[7]) / w,
+    )
 }
 
 fn translate(x: f64, y: f64) -> [f64; 16] {
@@ -2056,6 +2095,26 @@ mod tests {
         let tilt_right = project(&tilted, POSTER_W as f32, POSTER_H as f32 / 2.0);
         // Tilt narrows the card's projected width (it turned away from the viewer).
         assert!((tilt_right - tilt_left) < (flat_right - flat_left) * 0.95);
+    }
+
+    /// Unturned, a cover is its rect. Turned about the edge facing focus, that edge stays
+    /// put and the outer edge swings toward the eye, taller than the inner one.
+    #[test]
+    fn a_shelf_cover_turns_about_the_edge_facing_focus() {
+        let (w, h) = (POSTER_W, POSTER_H);
+        let depth = h / SHELF_EYE;
+        let flat = shelf_matrix((640.0, 400.0), (w, h), 1.0, 0.0, w, depth);
+        let (x, y) = super::project(&flat, 0.0, 0.0);
+        assert!((x - (640.0 - w / 2.0)).abs() < 1e-6 && (y - (400.0 - h / 2.0)).abs() < 1e-6);
+        // Left of focus: the right edge faces it and is the pivot.
+        let left = shelf_matrix((300.0, 400.0), (w, h), 1.0, ROTATE_DEG, w, depth);
+        let (px, py) = super::project(&left, w, 0.0);
+        assert!((px - (300.0 + w / 2.0)).abs() < 1e-6 && (py - (400.0 - h / 2.0)).abs() < 1e-6);
+        let tall = |m: &[f64; 16], x: f64| super::project(m, x, h).1 - super::project(m, x, 0.0).1;
+        assert!(
+            tall(&left, 0.0) > tall(&left, w),
+            "the outer edge comes forward"
+        );
     }
 
     #[test]
