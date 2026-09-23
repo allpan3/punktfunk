@@ -13,7 +13,6 @@ use crate::library::LibraryGame;
 use crate::model::{ConsoleCmd, HostRow};
 use crate::pointer::Pointer;
 use crate::screens::{Ctx, Outbox, Screen};
-use crate::shell::Tab;
 use crate::store::SettingsStore;
 use crate::theme::{fg, Fonts, EDGE_INSET, W};
 use crate::widgets::{ListMsg, MenuList, RowSpec, ROW_MAX_W};
@@ -501,8 +500,11 @@ impl CardMenu {
                     fx.pop();
                 }
             }
-            // The shell drops this menu as it switches; Games follows the focused card.
-            Action::Browse => fx.tab = Some(Tab::Games),
+            // The games under the row; the shell falls back to the Games tab.
+            Action::Browse => {
+                fx.browse = true;
+                fx.pop();
+            }
             Action::Wake => {
                 fx.cmds.push(ConsoleCmd::Wake {
                     key,
@@ -983,15 +985,12 @@ mod tests {
     }
 
     #[test]
-    fn browse_switches_to_games_without_popping_the_new_root() {
+    fn browse_closes_the_menu_onto_the_games_below() {
         let mut s = CardMenu::for_host(&host());
         let mut fx = Outbox::default();
         run_action(&mut s, Action::Browse, &mut fx);
-        assert_eq!(fx.tab, Some(Tab::Games));
-        assert!(
-            fx.nav.is_none(),
-            "a pop after the switch would leave the console"
-        );
+        assert!(fx.browse && fx.tab.is_none());
+        assert!(matches!(fx.nav, Some(Nav::Pop)));
     }
 
     #[test]

@@ -363,6 +363,8 @@ pub(crate) struct Shell {
     parked: [Option<Screen>; TABS.len()],
     /// The host key the Games root was built for.
     games_key: Option<String>,
+    /// Whose list the shared library holds: the host of the last `FetchLibrary` sent.
+    library_fp: Option<String>,
     /// Focus is on the tab strip, not the screen.
     strip_focus: bool,
     /// The strip's pills and focus plate.
@@ -495,6 +497,7 @@ impl Shell {
             stack,
             parked: [None, None, None, None],
             games_key: None,
+            library_fp: None,
             strip_focus: false,
             strip: crate::el::Tree::new(),
             ok_down: None,
@@ -846,7 +849,7 @@ impl Shell {
         // Stack survives a stream, so nothing else refreshes the running set:
         // without this the Resume badge still names the title they just quit.
         // Catalog is left alone — a re-fetch would swap the shelf for a spinner.
-        if let Some(Screen::Library(lib)) = self.stack.last() {
+        if let Some(lib) = self.stack.last().and_then(Screen::shelf) {
             self.bus.send(ConsoleCmd::RefreshRunning {
                 addr: lib.host_addr().to_string(),
                 mgmt: lib.host_mgmt_port(),
@@ -1020,7 +1023,30 @@ impl Shell {
         }
 
         self.collections_handover();
+        self.home_shelf();
         self.tick_launch();
+    }
+
+    /// Fetch the games under the Hosts row once it rests on a host. Lives here, like
+    /// [`Self::collections_handover`]: a screen cannot send while it draws.
+    fn home_shelf(&mut self) {
+        let Some(Screen::Home(home)) = self.stack.last_mut() else {
+            return;
+        };
+        let Some(host) = home.wants_shelf(&self.hosts, self.library_fp.as_deref()) else {
+            return;
+        };
+        let host = host.clone();
+        let epoch = self.library.fetch_epoch();
+        self.library_fp = Some(host.fp_hex.clone());
+        self.bus.send(ConsoleCmd::FetchLibrary {
+            addr: host.addr.clone(),
+            mgmt: host.mgmt_port,
+            fp_hex: host.fp_hex.clone(),
+        });
+        home.set_shelf(crate::screens::library::LibraryScreen::embedded(
+            &host, epoch,
+        ));
     }
 
     /// Swap a library shelf for the collections screen once it holds more
@@ -1081,8 +1107,8 @@ impl Shell {
     pub(crate) fn start_connect(&mut self, intent: ConnectIntent) {
         // A game launch comes off a shelf, which knows both the host's management
         // port and where it just drew the tile.
-        let launch = match (&intent.launch, self.stack.last()) {
-            (Some(id), Some(Screen::Library(lib))) => Some((
+        let launch = match (&intent.launch, self.stack.last().and_then(Screen::shelf)) {
+            (Some(id), Some(lib)) => Some((
                 LaunchHost {
                     id: id.clone(),
                     addr: intent.addr.clone(),
@@ -1194,8 +1220,11 @@ impl Shell {
                     self.parked[tab.index()] = parked;
                     return None;
                 };
+                // The shared list is one host's: a root whose host is not the last fetched
+                // would show another host's games.
+                let mine = self.library_fp.as_deref() == Some(host.fp_hex.as_str());
                 match parked {
-                    Some(root) if self.games_key.as_deref() == Some(host.key.as_str()) => {
+                    Some(root) if mine && self.games_key.as_deref() == Some(host.key.as_str()) => {
                         Some(root)
                     }
                     _ => Some(self.shelf_root(&host)),
@@ -1233,6 +1262,7 @@ impl Shell {
             fp_hex: host.fp_hex.clone(),
         });
         self.games_key = Some(host.key.clone());
+        self.library_fp = Some(host.fp_hex.clone());
         Screen::Library(crate::screens::library::LibraryScreen::new(host, epoch))
     }
 
@@ -1625,6 +1655,9 @@ impl Shell {
 
     fn apply(&mut self, fx: Outbox) {
         for cmd in fx.cmds {
+            if let ConsoleCmd::FetchLibrary { fp_hex, .. } = &cmd {
+                self.library_fp = Some(fp_hex.clone());
+            }
             // Gate wake in this call, like `connecting`. First WakeStatus is
             // ~100 ms–1 s away; without a placeholder the cursor keeps moving
             // and a fast wake never shows "Waking…". `sync` supersedes it.
@@ -1672,6 +1705,16 @@ impl Shell {
         }
         if let Some(nav) = fx.nav {
             self.apply_nav(nav);
+        }
+        if fx.browse {
+            let hosts = &self.hosts;
+            let below = match self.stack.first_mut() {
+                Some(Screen::Home(home)) => home.browse(hosts),
+                _ => false,
+            };
+            if !below {
+                self.switch_tab(Tab::Games);
+            }
         }
     }
 

@@ -508,6 +508,10 @@ pub(crate) struct LibraryScreen {
     band_x: Vec<Spring>,
     /// Chips and band items as last drawn, for the pointer and the line handoff.
     hits: Vec<(Zone, Rect)>,
+    /// Under the Hosts row on the combined home: the plain grid, no bar.
+    embedded: bool,
+    /// Embedded, with the row holding focus: no focused card, no title line.
+    quiet: bool,
 }
 
 impl LibraryScreen {
@@ -554,7 +558,36 @@ impl LibraryScreen {
             seated: false,
             band_x: Vec::new(),
             hits: Vec::new(),
+            embedded: false,
+            quiet: false,
         }
+    }
+
+    /// The focused host's shelf under the Hosts row. It never hands over to Collections:
+    /// the home is not its to replace.
+    pub(crate) fn embedded(host: &HostRow, entry_epoch: u64) -> LibraryScreen {
+        LibraryScreen {
+            embedded: true,
+            quiet: true,
+            pending_collections: false,
+            ..LibraryScreen::new(host, entry_epoch)
+        }
+    }
+
+    /// The row has focus (`true`) or has handed it down.
+    pub(crate) fn set_quiet(&mut self, quiet: bool) {
+        self.quiet = quiet;
+    }
+
+    /// Titles to walk: Down from the row has somewhere to land.
+    pub(crate) fn has_titles(&self) -> bool {
+        matches!(self.phase, LibraryPhase::Ready) && self.len() > 0
+    }
+
+    /// The cursor is on the grid's top row, where Up leaves an embedded shelf.
+    pub(crate) fn at_top(&self) -> bool {
+        self.grid_shape()
+            .is_none_or(|s| s.cell_of(self.cursor.max(0) as usize).0 == 0)
     }
 
     /// Arm once neighbourhood posters exist, or after 400 ms (art-less libraries still enter).
@@ -598,7 +631,10 @@ impl LibraryScreen {
             self.sort = sort;
             self.recollate();
         }
-        let view = LibraryView::parse(&ctx.settings.library_view);
+        let view = match self.embedded {
+            true => LibraryView::Grid,
+            false => LibraryView::parse(&ctx.settings.library_view),
+        };
         let sections = crate::library::sections(&ctx.settings.library_sections);
         if view != self.view_mode || sections != self.sections {
             if view != self.view_mode {
@@ -946,7 +982,7 @@ impl LibraryScreen {
 
     /// Bar is on screen. Draw, pad, pointer, and legend all read this.
     fn bar_shown(&self) -> bool {
-        matches!(self.phase, LibraryPhase::Ready) && self.entrance_armed
+        matches!(self.phase, LibraryPhase::Ready) && self.entrance_armed && !self.embedded
     }
 
     fn focus_bar(&mut self) -> Option<MenuPulse> {
@@ -1414,8 +1450,10 @@ impl LibraryScreen {
                     self.draw_bar(canvas, bar, k, fonts, dt);
                     canvas.restore();
                 }
-                let title = self.zone_title(ctx);
-                self.draw_detail_band(canvas, rect, k, fonts, title);
+                if !self.quiet {
+                    let title = self.zone_title(ctx);
+                    self.draw_detail_band(canvas, rect, k, fonts, title);
+                }
                 self.evict_art();
             }
             LibraryPhase::Loading => draw_loading(canvas, rect, k, fonts, ctx.t),
@@ -1685,11 +1723,12 @@ impl LibraryScreen {
             El::paint(move |canvas, slot| {
                 painted.borrow_mut().push(i);
                 let ent = this.entrance_at(anchor_row.abs_diff(row) + anchor_col.abs_diff(col), t);
-                let f = if i == this.cursor.max(0) as usize && this.zone == Zone::Grid {
-                    1.0
-                } else {
-                    0.0
-                };
+                let f =
+                    if i == this.cursor.max(0) as usize && this.zone == Zone::Grid && !this.quiet {
+                        1.0
+                    } else {
+                        0.0
+                    };
                 let arrive = ENTER_SCALE + (1.0 - ENTER_SCALE) * ent.travel;
                 let scale = (1.0 + 0.06 * f) * arrive;
                 let cx = f64::from(slot.center_x()) + bump_x;

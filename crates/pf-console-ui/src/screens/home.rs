@@ -1,12 +1,16 @@
 //! Console home: a center-snapping carousel of host tiles plus trailing Add Host
-//! and Rescan actions.
+//! and Rescan actions, and under it the focused host's games.
 //!
 //! Every tile is a focus target in an [`el::Tree`] row; Left and Right ask the tree,
 //! and the focus plate travels behind the tile it lands on. The cursor is the index;
 //! the sprung position chases it. Focus scale, brightness, and fade read off the live
 //! sprung distance so the look matches the strip mid-motion. OK connects, wakes, or
 //! pairs; Y (OK held on a remote) opens the card's menu; X jumps to Settings; Up is
-//! the tab strip's; B at the root leaves.
+//! the tab strip's; Down lands on the games; B at the root leaves.
+//!
+//! The games are the Games tab's grid for that host ([`LibraryScreen::embedded`]). The
+//! shell fetches them once the row settles on a paired, online host; Up from their top
+//! row and B return to the row.
 //!
 //! Discovery churns the list; focus follows the tile key, not the index. A
 //! press on a side tile only retargets the cursor — Confirm starts a session.
@@ -21,6 +25,7 @@ use crate::library::{
 };
 use crate::model::{ConsoleCmd, HostRow};
 use crate::pointer::{Pointer, PointerKind};
+use crate::screens::library::LibraryScreen;
 use crate::screens::{ConnectIntent, Ctx, Outbox, Screen};
 use crate::theme::{accent, fg, fill, stroke, Fonts, PanelStroke, ONLINE_GREEN, W};
 use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuPulse};
@@ -30,6 +35,8 @@ const TILE_W: f64 = 340.0;
 const TILE_H: f64 = 224.0;
 const TILE_GAP: f64 = 30.0;
 const TILE_CORNER: f64 = 26.0;
+/// Air above the row, and between it and the games: the plate's outset and a breath.
+const ROW_AIR: f64 = 16.0;
 /// Tiles further than this many pitches from the sprung centre are off screen.
 const CULL: f64 = 2.6;
 
@@ -77,6 +84,14 @@ pub(crate) struct HomeScreen {
     /// and again once finished. [`Self::entrance_armed`] stops it re-arming.
     entrance: Option<Entrance>,
     entrance_armed: bool,
+    /// The focused host's games; the shell sets it ([`Self::wants_shelf`]).
+    shelf: Option<Box<LibraryScreen>>,
+    /// Focus is in the games, not the row.
+    below: bool,
+    /// Browse games asked for the games; focus goes down once they have titles.
+    browse: bool,
+    /// Where the games were last drawn, for the pointer.
+    shelf_rect: Rect,
 }
 
 impl HomeScreen {
@@ -89,7 +104,76 @@ impl HomeScreen {
             tree: Tree::new(),
             entrance: None,
             entrance_armed: false,
+            shelf: None,
+            below: false,
+            browse: false,
+            shelf_rect: Rect::new_empty(),
         }
+    }
+
+    /// The host whose games the row wants now: the focused one once the carousel rests
+    /// on it, when paired, saved and online, and when `library_fp` (whose list the shared
+    /// library holds) is not already its. A sleeping host is left alone: a fetch wakes it.
+    pub(crate) fn wants_shelf<'h>(
+        &self,
+        hosts: &'h [HostRow],
+        library_fp: Option<&str>,
+    ) -> Option<&'h HostRow> {
+        let h = self.focused(hosts)?;
+        let settled = (self.anim.pos - f64::from(self.cursor)).abs() < 0.05;
+        let current = self.shelf.as_ref().is_some_and(|s| s.shelf_of(h))
+            && library_fp == Some(h.fp_hex.as_str());
+        (settled && h.paired && h.saved && h.online && !current).then_some(h)
+    }
+
+    pub(crate) fn set_shelf(&mut self, shelf: LibraryScreen) {
+        self.shelf = Some(Box::new(shelf));
+        self.below = false;
+    }
+
+    /// The games the focus is in, for the launch hold and the running refresh.
+    pub(crate) fn shelf(&self) -> Option<&LibraryScreen> {
+        self.shelf.as_deref().filter(|_| self.below)
+    }
+
+    /// Browse games from the card's menu. `false` when there will be no games here to
+    /// browse: an offline or unpaired card.
+    pub(crate) fn browse(&mut self, hosts: &[HostRow]) -> bool {
+        self.browse = self.focused(hosts).is_some_and(|h| h.paired && h.online);
+        self.browse
+    }
+
+    /// The games drawn under the row: the focused card's.
+    fn shelf_live(&self, hosts: &[HostRow]) -> bool {
+        let focused = self.focused(hosts);
+        (self.shelf.as_ref()).is_some_and(|s| focused.is_some_and(|h| s.shelf_of(h)))
+    }
+
+    /// Hand focus down to the games, if they have titles.
+    fn go_below(&mut self, hosts: &[HostRow]) -> Option<MenuPulse> {
+        if !self.shelf_live(hosts) {
+            return Some(MenuPulse::Boundary);
+        }
+        let shelf = self.shelf.as_mut()?;
+        if !shelf.has_titles() {
+            return Some(MenuPulse::Boundary);
+        }
+        shelf.set_quiet(false);
+        self.below = true;
+        self.browse = false;
+        Some(MenuPulse::Move)
+    }
+
+    fn go_up(&mut self) {
+        self.below = false;
+        if let Some(shelf) = self.shelf.as_mut() {
+            shelf.set_quiet(true);
+        }
+    }
+
+    /// A finger drag on the games scrolls them.
+    pub(crate) fn pan(&mut self, p: Pointer) -> bool {
+        self.below && self.shelf.as_mut().is_some_and(|s| s.pan(p))
     }
 
     /// Focus follows the tile key, not the index.
@@ -140,6 +224,7 @@ impl HomeScreen {
     /// Left or Right through the tree. With no rects yet, or at an end, the index step
     /// moves or bumps.
     fn travel(&mut self, dir: MenuDir, len: usize) -> Option<MenuPulse> {
+        self.browse = false;
         let focused = self
             .keys
             .get(self.cursor.max(0) as usize)
@@ -161,6 +246,18 @@ impl HomeScreen {
         fx: &mut Outbox,
     ) -> Option<MenuPulse> {
         self.reconcile(ctx.hosts);
+        if self.below && !self.shelf_live(ctx.hosts) {
+            self.go_up();
+        }
+        if self.below {
+            let shelf = self.shelf.as_mut()?;
+            let up = ev == MenuEvent::Move(MenuDir::Up) && shelf.at_top();
+            if up || ev == MenuEvent::Back {
+                self.go_up();
+                return Some(MenuPulse::Move);
+            }
+            return shelf.menu(ev, ctx, fx);
+        }
         let len = Self::len(ctx.hosts);
         match ev {
             MenuEvent::Move(dir @ (MenuDir::Left | MenuDir::Right)) => self.travel(dir, len),
@@ -222,8 +319,9 @@ impl HomeScreen {
                 fx.pop(); // root pop is quit (shell rule)
                 None
             }
-            // Up is the tab strip's; nothing sits below the row yet.
-            MenuEvent::Move(MenuDir::Up | MenuDir::Down) => Some(MenuPulse::Boundary),
+            // Up is the tab strip's.
+            MenuEvent::Move(MenuDir::Up) => Some(MenuPulse::Boundary),
+            MenuEvent::Move(MenuDir::Down) => self.go_below(ctx.hosts),
         }
     }
 
@@ -231,6 +329,19 @@ impl HomeScreen {
     /// session for a host that was merely aimed at.
     pub(crate) fn pointer(&mut self, p: Pointer, ctx: &mut Ctx, fx: &mut Outbox) -> bool {
         self.reconcile(ctx.hosts);
+        if self.shelf_live(ctx.hosts) && p.hits(self.shelf_rect) {
+            let Some(shelf) = self.shelf.as_mut() else {
+                return false;
+            };
+            if !self.below && shelf.has_titles() {
+                shelf.set_quiet(false);
+                self.below = true;
+            }
+            return shelf.pointer(p, ctx, fx);
+        }
+        if self.below && matches!(p.kind, PointerKind::Move | PointerKind::Press) {
+            self.go_up();
+        }
         let len = Self::len(ctx.hosts);
         match p.kind {
             PointerKind::Scroll { up } => {
@@ -286,7 +397,11 @@ impl HomeScreen {
     }
 
     /// The focused tile as a screen reader speaks it: the name, then the line under it.
-    pub(crate) fn announcement(&self, hosts: &[HostRow]) -> Option<String> {
+    pub(crate) fn announcement(&self, ctx: &Ctx) -> Option<String> {
+        if let Some(shelf) = self.shelf() {
+            return shelf.announcement(ctx);
+        }
+        let hosts = ctx.hosts;
         let say = |(title, sub): (&str, &str)| format!("{title}, {sub}");
         Some(match self.slot(hosts) {
             Slot::Host(h) => format!("{}, {}", h.name, status(h).0),
@@ -296,6 +411,9 @@ impl HomeScreen {
     }
 
     pub(crate) fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
+        if let Some(shelf) = self.shelf() {
+            return shelf.hints(ctx);
+        }
         let mut hints = Vec::new();
         match self.slot(ctx.hosts) {
             Slot::AddHost => hints.push(Hint::new(HintKey::Confirm, "Add Host")),
@@ -355,12 +473,13 @@ impl HomeScreen {
 
         let w = f64::from(rect.width());
         let tile_w = (TILE_W * k).min(w * 0.84);
+        // The row takes the top; the focused host's games fill what is left under it.
         let tile_h = (TILE_H * k)
-            .min(f64::from(rect.height()) - 48.0 * k)
+            .min(f64::from(rect.height()) * 0.42)
             .max(118.0 * k);
         let pitch = tile_w + TILE_GAP * k;
         let cx0 = f64::from(rect.left) + w / 2.0 + self.bump.pos * k;
-        let cy = f64::from(rect.top) + f64::from(rect.height()) / 2.0;
+        let cy = f64::from(rect.top) + ROW_AIR * k + tile_h / 2.0;
 
         let len = Self::len(ctx.hosts);
         let t = ctx.t;
@@ -427,13 +546,28 @@ impl HomeScreen {
         let frame = self
             .tree
             .layout(El::column().child(row.place(viewport)), rect);
-        let focused = self
-            .keys
-            .get(self.cursor.max(0) as usize)
+        let focused = (self.keys.get(self.cursor.max(0) as usize))
+            .filter(|_| !self.below)
             .map(|k| Self::tile_id(k));
         self.tree.set_focus(focused);
         // The plate is the focus mark: it lifts the tile, so the tile draws no halo.
         self.tree.paint_focus(canvas, frame, k as f32, dt, reduced);
+
+        if self.below && !self.shelf_live(ctx.hosts) {
+            self.go_up();
+        }
+        self.shelf_rect = Rect::new_empty();
+        if self.shelf_live(ctx.hosts) {
+            let top = cy + tile_h / 2.0 + ROW_AIR * k;
+            let games = Rect::from_ltrb(rect.left, top as f32, rect.right, rect.bottom);
+            if let Some(shelf) = self.shelf.as_mut() {
+                shelf.render(canvas, games, k, dt, fonts, ctx);
+            }
+            self.shelf_rect = games;
+            if self.browse && self.shelf.as_ref().is_some_and(|s| s.has_titles()) {
+                self.go_below(ctx.hosts);
+            }
+        }
 
         if ctx.hosts.is_empty() {
             fonts.centered(
@@ -985,6 +1119,39 @@ mod tests {
         assert!(
             matches!(fx.nav, Some(crate::screens::Nav::Push(ref sc)) if matches!(**sc, Screen::CardMenu(_))),
             "the hold opens the host options menu"
+        );
+    }
+
+    /// The row asks for the games of the host it rests on, once, and again only when the
+    /// shared list became another host's. A card in flight, a sleeping host and an
+    /// unpaired one ask for nothing.
+    #[test]
+    fn the_row_asks_for_the_games_of_the_host_it_rests_on() {
+        let mut desk = host("desk", true, true, false);
+        desk.fp_hex = "d1".into();
+        let asleep = host("asleep", true, false, true);
+        let hosts = [desk.clone(), asleep];
+        let mut s = HomeScreen::new();
+        s.reconcile(&hosts);
+        assert_eq!(
+            s.wants_shelf(&hosts, None).map(|h| h.key.as_str()),
+            Some("desk")
+        );
+        s.set_shelf(LibraryScreen::embedded(&desk, 0));
+        assert!(s.wants_shelf(&hosts, Some("d1")).is_none(), "asked once");
+        assert!(
+            s.wants_shelf(&hosts, Some("other")).is_some(),
+            "the list became another host's"
+        );
+        s.cursor = 1;
+        assert!(
+            s.wants_shelf(&hosts, None).is_none(),
+            "the carousel is still moving"
+        );
+        s.anim = Spring::rest(1.0);
+        assert!(
+            s.wants_shelf(&hosts, None).is_none(),
+            "a fetch would wake it"
         );
     }
 

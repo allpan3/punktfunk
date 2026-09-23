@@ -79,7 +79,7 @@ fn chip_hosts(hosts: &[HostRow]) -> impl Iterator<Item = &HostRow> {
 impl LibraryScreen {
     /// The shelf lays out as the Games tab. A shelf drilled from Collections stays a grid.
     pub(super) fn sectioned(&self) -> bool {
-        self.view_mode == LibraryView::Grid && !self.drilled
+        self.view_mode == LibraryView::Grid && !self.drilled && !self.embedded
     }
 
     /// `h` is this shelf's host; a pinned card's shelf counts its primary row.
@@ -91,8 +91,12 @@ impl LibraryScreen {
         self.sections.iter().any(|&(x, on)| x == s && on)
     }
 
-    /// A band shows this title, so the grid does not.
+    /// A band shows this title, so the grid does not. Under the Hosts row the card above
+    /// is the desk, and launchers follow the Games tab.
     pub(super) fn banded(&self, g: &LibraryGame) -> bool {
+        if self.embedded {
+            return g.id == DESKTOP_ID || (g.launcher && self.shows(Section::Launchers));
+        }
         self.sectioned()
             && (!self.shows(Section::Games)
                 || (g.id == DESKTOP_ID && self.shows(Section::Desktops))

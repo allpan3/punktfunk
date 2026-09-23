@@ -142,7 +142,8 @@ public enum ConsoleSettings {
         .string("ui_palette", DefaultsKey.uiPalette, "violet"),
         .string("library_sort", DefaultsKey.librarySort, ""),
         .string("library_sections", DefaultsKey.librarySections, ""),
-        .string("library_view", DefaultsKey.libraryView, LibraryArrangement.shelf.stored),
+        // Unset stays unset: the console's own default is the Games tab's grid.
+        .string("library_view", DefaultsKey.libraryView, ""),
         .bool("library_collections", DefaultsKey.libraryCollections, false),
         .string("start_in", DefaultsKey.startIn, StartIn.hosts.stored),
         .bool("auto_wake", DefaultsKey.autoWake, true),

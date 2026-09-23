@@ -100,6 +100,8 @@ pub(crate) struct Outbox {
     pub copy: Option<String>,
     /// Switch to this tab (a pad shortcut).
     pub tab: Option<crate::shell::Tab>,
+    /// Browse games: focus the games under the Hosts row.
+    pub browse: bool,
 }
 
 impl Outbox {
@@ -172,6 +174,15 @@ pub(crate) enum Screen {
 }
 
 impl Screen {
+    /// The shelf a launch leaves from: the Games tab's, or the games under the Hosts row.
+    pub(crate) fn shelf(&self) -> Option<&library::LibraryScreen> {
+        match self {
+            Screen::Library(l) => Some(l),
+            Screen::Home(h) => h.shelf(),
+            _ => None,
+        }
+    }
+
     pub(crate) fn menu(
         &mut self,
         ev: MenuEvent,
@@ -212,7 +223,8 @@ impl Screen {
             Screen::ShortcutEditor(s) => s.pan_list().is_some_and(|l| l.pan(p)),
             Screen::RingEditor(s) => s.pan_list().pan(p),
             Screen::Library(s) => s.pan(p),
-            Screen::Home(_) | Screen::Collections(_) | Screen::Players(_) => false,
+            Screen::Home(s) => s.pan(p),
+            Screen::Collections(_) | Screen::Players(_) => false,
         }
     }
 
@@ -302,7 +314,7 @@ impl Screen {
     /// `None` where a screen does not answer: silence beats naming the wrong row.
     pub(crate) fn announcement(&self, ctx: &Ctx) -> Option<String> {
         match self {
-            Screen::Home(s) => s.announcement(ctx.hosts),
+            Screen::Home(s) => s.announcement(ctx),
             Screen::Library(s) => s.announcement(ctx),
             Screen::Customize(s) => s.announcement(ctx),
             Screen::Settings(s) => s.announcement(ctx),

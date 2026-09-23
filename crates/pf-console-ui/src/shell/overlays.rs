@@ -198,10 +198,9 @@ impl Shell {
         }
         if let Some(l) = &self.launching {
             // The shelf that launched it still holds its decoded poster underneath.
-            let poster = match self.stack.last() {
-                Some(crate::screens::Screen::Library(lib)) => lib.poster(&l.host.id),
-                _ => None,
-            };
+            let poster = (self.stack.last())
+                .and_then(crate::screens::Screen::shelf)
+                .and_then(|lib| lib.poster(&l.host.id));
             self.draw_launch_hold(canvas, w, h, k, t, fonts, l, poster);
         }
 

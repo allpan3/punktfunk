@@ -275,6 +275,60 @@ fn run_motion(s: &mut Shell) -> Vec<f64> {
     panic!("transition never settled");
 }
 
+/// The combined home: the games of the host the row rests on sit under it. Down lands on
+/// them without the desktop tile (the card above is the desk), OK launches from there,
+/// and Up from their top row returns to the card.
+#[test]
+fn down_from_a_card_lands_on_its_games_and_launches_there() {
+    fake_home();
+    let console = ConsoleShared::default();
+    console.set_hosts(hosts());
+    let library = LibraryShared::default();
+    let bus = ConsoleBus::default();
+    let home = vec![Screen::Home(HomeScreen::new())];
+    let mut s = Shell::new(console, library.clone(), bus.clone(), test_options(), home).unwrap();
+    let fetched = |bus: &ConsoleBus| -> Vec<String> {
+        (bus.drain().into_iter())
+            .filter_map(|c| match c {
+                ConsoleCmd::FetchLibrary { fp_hex, .. } => Some(fp_hex),
+                _ => None,
+            })
+            .collect()
+    };
+    s.sync();
+    assert_eq!(fetched(&bus), vec![hosts()[0].fp_hex.clone()]);
+    s.sync();
+    assert!(fetched(&bus).is_empty(), "asked once");
+
+    library.set_games(vec![crate::library::LibraryGame {
+        id: "steam:570".into(),
+        title: "Dota 2".into(),
+        store: "steam".into(),
+        launcher: false,
+        icon: String::new(),
+        platform: None,
+        developer: None,
+        year: None,
+        genres: Vec::new(),
+        stats: None,
+        running: false,
+    }]);
+    frame(&mut s);
+    let below = |s: &Shell| matches!(s.stack.last(), Some(Screen::Home(h)) if h.shelf().is_some());
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    assert!(below(&s), "Down lands on the games");
+    s.handle_menu(MenuEvent::Move(MenuDir::Up));
+    assert!(!below(&s), "Up from the top row returns to the card");
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    s.handle_menu(MenuEvent::Confirm);
+    match s.take_action() {
+        Some(OverlayAction::Launch { launch, .. }) => {
+            assert_eq!(launch.as_deref(), Some("steam:570"));
+        }
+        _ => panic!("OK on the games launches the title"),
+    }
+}
+
 /// Y on a pinned card must carry that preset into the library. Falling back to the
 /// host default would ignore the pin, which is why the card exists.
 #[test]
@@ -1426,6 +1480,18 @@ fn dump_console_screens() {
         })
         .collect(),
     );
+    // The combined home: the resting card's games under the row, then focus on them.
+    {
+        let console7 = ConsoleShared::default();
+        console7.set_hosts(hosts());
+        let home = vec![Screen::Home(HomeScreen::new())];
+        let bus7 = ConsoleBus::default();
+        let mut s7 = Shell::new(console7, library.clone(), bus7, test_options(), home).unwrap();
+        dump(&mut s7, 80, 8, "01g-home-games", true);
+        s7.handle_menu(MenuEvent::Move(MenuDir::Down));
+        dump(&mut s7, 40, 8, "01h-home-games-focus", true);
+    }
+
     // Fresh shell per scene: entrance and bar focus are per-shell and cannot be rewound.
     // The coverflow, which these scenes were drawn against; the Games tab has its own.
     let shelf_shell = || {
