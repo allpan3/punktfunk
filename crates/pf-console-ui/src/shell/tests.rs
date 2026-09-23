@@ -222,7 +222,7 @@ fn a_held_ok_opens_the_card_menu() {
     s.ok(true);
     s.fake_clock = Some((10.8, 0.0));
     s.tick_ok();
-    assert!(matches!(s.stack.last(), Some(Screen::HostOptions(_))));
+    assert!(matches!(s.stack.last(), Some(Screen::CardMenu(_))));
     s.ok(false);
     assert!(
         s.take_action().is_none(),
@@ -440,19 +440,18 @@ fn a_replace_carries_the_screen_it_replaced() {
     let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
     s.sync();
     s.handle_menu(MenuEvent::Secondary);
-    assert!(matches!(s.stack.last(), Some(Screen::HostOptions(_))));
+    assert!(matches!(s.stack.last(), Some(Screen::CardMenu(_))));
     finish_motion(&mut s);
 
-    // First host's menu is [Send logs, Library, Test network speed…, Copy link, Edit…, …]
-    // — four Downs. Pressed exactly so a menu reorder fails here, not on something destructive.
-    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    // The first host's menu is [Connect with…, Browse games, Copy link, Host details…] —
+    // three Downs. Pressed exactly so a reorder fails here, not on something destructive.
     s.handle_menu(MenuEvent::Move(MenuDir::Down));
     s.handle_menu(MenuEvent::Move(MenuDir::Down));
     s.handle_menu(MenuEvent::Move(MenuDir::Down));
     s.handle_menu(MenuEvent::Confirm);
     assert!(
-        matches!(s.stack.last(), Some(Screen::AddHost(_))),
-        "Edit… opens the host editor"
+        matches!(s.stack.last(), Some(Screen::CardMenu(m)) if m.title().ends_with("Details")),
+        "Host details… opens the details"
     );
     assert_eq!(s.stack.len(), 2, "the menu was swapped out, not stacked on");
     match &s.motion {
@@ -461,7 +460,7 @@ fn a_replace_carries_the_screen_it_replaced() {
             leaving: Some(carried),
             ..
         } => assert!(
-            matches!(carried.as_ref(), Screen::HostOptions(_)),
+            matches!(carried.as_ref(), Screen::CardMenu(_)),
             "the receding layer must be the MENU; carrying nothing leaves the renderer to \
              recede the menu's parent, which is the reported flash"
         ),
@@ -471,30 +470,33 @@ fn a_replace_carries_the_screen_it_replaced() {
     s.handle_menu(MenuEvent::Back);
     finish_motion(&mut s);
     assert!(
-        matches!(s.stack.last(), Some(Screen::HostOptions(_))),
+        matches!(s.stack.last(), Some(Screen::CardMenu(_))),
         "a reversed replace lands where the user actually was"
     );
 }
 
 #[test]
-fn y_opens_host_options_for_saved_tiles_only() {
+fn y_opens_a_menu_on_every_host_card_and_none_on_the_action_tiles() {
     let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
     s.sync();
     s.handle_menu(MenuEvent::Secondary);
-    assert!(
-        matches!(s.stack.last(), Some(Screen::HostOptions(_))),
-        "the first tile is a saved host"
-    );
+    assert!(matches!(s.stack.last(), Some(Screen::CardMenu(_))));
     s.motion = Motion::None;
     s.handle_menu(MenuEvent::Back);
     s.motion = Motion::None;
-    // The third fixture host is discovered-only (`saved: false`).
+    // The third fixture host is discovered-only (`saved: false`): Pair… and Add host.
     s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    s.handle_menu(MenuEvent::Secondary);
+    assert!(matches!(s.stack.last(), Some(Screen::CardMenu(_))));
+    s.motion = Motion::None;
+    s.handle_menu(MenuEvent::Back);
+    s.motion = Motion::None;
     s.handle_menu(MenuEvent::Move(MenuDir::Right));
     s.handle_menu(MenuEvent::Secondary);
     assert!(
         matches!(s.stack.last(), Some(Screen::Home(_))),
-        "an unsaved host has nothing to edit or forget"
+        "Add Host is a tile, not a host"
     );
 }
 
@@ -1303,6 +1305,11 @@ fn dump_console_screens() {
     // Y on the focused saved tile. Eyeball with 01-home: that frame carries the Options hint.
     s.handle_menu(MenuEvent::Secondary);
     dump(&mut s, 40, 8, "01b-host-options", true);
+    for _ in 0..3 {
+        s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    }
+    s.handle_menu(MenuEvent::Confirm);
+    dump(&mut s, 40, 8, "01f-host-details", true);
     s.handle_menu(MenuEvent::Back);
     dump(&mut s, 20, 8, "_settle0", true);
     // Up from the row: the plate on the Hosts pill.

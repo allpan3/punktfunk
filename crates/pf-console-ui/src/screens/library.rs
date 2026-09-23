@@ -990,9 +990,9 @@ impl LibraryScreen {
                 let g = self.focused()?;
                 // The desktop tile IS the host, so its menu is the host's.
                 if g.id == crate::library::DESKTOP_ID {
-                    fx.options(super::options::OptionsScreen::for_host(&self.host));
+                    fx.options(super::card_menu::CardMenu::for_host(&self.host));
                 } else {
-                    fx.options(super::options::OptionsScreen::for_game(&self.host, g));
+                    fx.options(super::card_menu::CardMenu::for_game(&self.host, g));
                 }
                 Some(MenuPulse::Confirm)
             }

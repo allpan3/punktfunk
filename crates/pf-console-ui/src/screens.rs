@@ -6,28 +6,17 @@
 
 pub(crate) mod add_host;
 pub(crate) mod bind_preset;
+pub(crate) mod card_menu;
 pub(crate) mod collections;
 pub(crate) mod home;
 pub(crate) mod library;
 
-pub(crate) mod options;
 pub(crate) mod pair;
 pub(crate) mod pin_hosts;
 pub(crate) mod players;
 pub(crate) mod ring_editor;
 pub(crate) mod settings;
 pub(crate) mod shortcut_editor;
-
-/// Alias home still opens by. Same type as [`options::OptionsScreen`].
-pub(crate) mod host_options {
-    pub(crate) use super::options::OptionsScreen as HostOptionsScreen;
-
-    impl HostOptionsScreen {
-        pub(crate) fn new(host: &crate::model::HostRow) -> HostOptionsScreen {
-            HostOptionsScreen::for_host(host)
-        }
-    }
-}
 
 use crate::glyphs::Hint;
 use crate::library::LibraryShared;
@@ -127,10 +116,10 @@ impl Outbox {
     }
 
     /// Raise the context menu on the focused subject. The screen names the subject
-    /// ([`options::OptionsScreen::for_host`], [`options::OptionsScreen::for_game`]);
+    /// ([`card_menu::CardMenu::for_host`], [`card_menu::CardMenu::for_game`]);
     /// the menu owns the verbs.
-    pub(crate) fn options(&mut self, menu: options::OptionsScreen) {
-        self.push(Screen::HostOptions(menu));
+    pub(crate) fn options(&mut self, menu: card_menu::CardMenu) {
+        self.push(Screen::CardMenu(menu));
     }
 }
 
@@ -177,7 +166,7 @@ pub(crate) enum Screen {
     /// In-stream ring, editing mode. Raised by the Quick actions settings row.
     RingEditor(Box<ring_editor::RingEditorScreen>),
     ShortcutEditor(shortcut_editor::ShortcutEditorScreen),
-    HostOptions(options::OptionsScreen),
+    CardMenu(card_menu::CardMenu),
 }
 
 impl Screen {
@@ -199,7 +188,7 @@ impl Screen {
             Screen::PinHosts(s) => s.menu(ev, ctx, fx),
             Screen::BindPreset(s) => s.menu(ev, ctx, fx),
             Screen::Players(s) => s.menu(ev, ctx, fx),
-            Screen::HostOptions(s) => s.menu(ev, ctx, fx),
+            Screen::CardMenu(s) => s.menu(ev, ctx, fx),
         }
     }
 
@@ -215,7 +204,7 @@ impl Screen {
             Screen::Pair(s) => s.list.pan(p),
             Screen::PinHosts(s) => s.list.pan(p),
             Screen::BindPreset(s) => s.list.pan(p),
-            Screen::HostOptions(s) => s.list.pan(p),
+            Screen::CardMenu(s) => s.list.pan(p),
             Screen::ShortcutEditor(s) => s.pan_list().is_some_and(|l| l.pan(p)),
             Screen::RingEditor(s) => s.pan_list().pan(p),
             Screen::Library(s) => s.pan(p),
@@ -239,7 +228,7 @@ impl Screen {
             Screen::PinHosts(s) => s.pointer(p, ctx, fx),
             Screen::BindPreset(s) => s.pointer(p, ctx, fx),
             Screen::Players(s) => s.pointer(p, ctx, fx),
-            Screen::HostOptions(s) => s.pointer(p, ctx, fx),
+            Screen::CardMenu(s) => s.pointer(p, ctx, fx),
         }
     }
 
@@ -299,7 +288,7 @@ impl Screen {
             Screen::PinHosts(s) => format!("Pin \u{201c}{}\u{201d}", s.preset_name()),
             Screen::BindPreset(s) => s.heading(),
             Screen::Players(_) => "Players".into(),
-            Screen::HostOptions(s) => s.title(),
+            Screen::CardMenu(s) => s.title(),
         }
     }
 
@@ -328,7 +317,7 @@ impl Screen {
             Screen::PinHosts(s) => s.hints(ctx),
             Screen::BindPreset(s) => s.hints(ctx),
             Screen::Players(s) => s.hints(ctx),
-            Screen::HostOptions(s) => s.hints(ctx),
+            Screen::CardMenu(s) => s.hints(ctx),
         }
     }
 
@@ -354,7 +343,7 @@ impl Screen {
             Screen::PinHosts(s) => s.render(canvas, rect, k, dt, fonts, ctx),
             Screen::BindPreset(s) => s.render(canvas, rect, k, dt, fonts, ctx),
             Screen::Players(s) => s.render(canvas, rect, k, dt, fonts, ctx),
-            Screen::HostOptions(s) => s.render(canvas, rect, k, dt, fonts, ctx),
+            Screen::CardMenu(s) => s.render(canvas, rect, k, dt, fonts, ctx),
         }
     }
 }

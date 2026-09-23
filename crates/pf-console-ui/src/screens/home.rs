@@ -206,13 +206,11 @@ impl HomeScreen {
             }
             // The card's menu: Y on a pad, OK held on a remote.
             MenuEvent::Secondary => match self.focused(ctx.hosts) {
-                Some(h) if super::host_options::HostOptionsScreen::available(h) => {
-                    fx.push(Screen::HostOptions(
-                        super::host_options::HostOptionsScreen::new(h),
-                    ));
+                Some(h) => {
+                    fx.options(super::card_menu::CardMenu::for_host(h));
                     Some(MenuPulse::Confirm)
                 }
-                _ => Some(MenuPulse::Boundary),
+                None => Some(MenuPulse::Boundary),
             },
             // Sector is the ring; this carousel steps on `Move`.
             MenuEvent::Sector(_) => None,
@@ -291,11 +289,7 @@ impl HomeScreen {
     pub(crate) fn announcement(&self, hosts: &[HostRow]) -> Option<String> {
         let say = |(title, sub): (&str, &str)| format!("{title}, {sub}");
         Some(match self.slot(hosts) {
-            Slot::Host(h) => match (&h.pin, &h.bound_preset) {
-                (Some(p), _) => format!("{}, {}", h.name, p.name),
-                (None, Some(b)) => format!("{}, {}:{} · {}", h.name, h.addr, h.port, b.name),
-                (None, None) => format!("{}, {}:{}", h.name, h.addr, h.port),
-            },
+            Slot::Host(h) => format!("{}, {}", h.name, status(h).0),
             Slot::AddHost => say(action_text(ActionTile::AddHost)),
             Slot::Rescan => say(action_text(ActionTile::Rescan)),
         })
@@ -317,10 +311,7 @@ impl HomeScreen {
             }
             Slot::Host(_) => hints.push(Hint::new(HintKey::Confirm, "Connect")),
         }
-        if self
-            .focused(ctx.hosts)
-            .is_some_and(super::host_options::HostOptionsScreen::available)
-        {
+        if self.focused(ctx.hosts).is_some() {
             hints.push(Hint::new(HintKey::Secondary, "Options"));
         }
         hints.push(Hint::new(HintKey::Tertiary, "Settings"));
@@ -567,65 +558,35 @@ fn draw_host_tile(canvas: &Canvas, fonts: &Fonts, h: &HostRow, rect: Rect, k: f6
         canvas.draw_circle(center, r as f32, &fill(ONLINE_GREEN));
         sx -= 2.0 * r + 9.0 * k;
     }
-    if h.paired {
+    // The lock marks what OK would pair first.
+    if !h.paired {
         draw_lock(canvas, sx - 9.0 * k, t + 4.0 * k, k);
     }
 
     let max_w = f64::from(rect.width()) - 2.0 * pad;
     let sub_base = f64::from(rect.bottom) - pad;
-    match (&h.pin, &h.bound_preset) {
-        (Some(p), _) => {
-            fonts.draw_clipped(
-                canvas,
-                &p.name,
-                l,
-                sub_base,
-                W::SemiBold,
-                13.0 * k,
-                accent_color(p.accent.as_deref()),
-                max_w,
-            );
-        }
-        (None, Some(b)) => {
-            let addr = format!("{}:{}", h.addr, h.port);
-            let addr_w = f64::from(fonts.measure(&addr, W::Regular, 13.0 * k));
-            fonts.draw_clipped(
-                canvas,
-                &addr,
-                l,
-                sub_base,
-                W::Regular,
-                13.0 * k,
-                fg(0.55),
-                max_w,
-            );
-            let x = l + addr_w + 8.0 * k;
-            if x < l + max_w {
-                fonts.draw_clipped(
-                    canvas,
-                    &format!("· {}", b.name),
-                    x,
-                    sub_base,
-                    W::SemiBold,
-                    13.0 * k,
-                    accent_color(b.accent.as_deref()),
-                    l + max_w - x,
-                );
-            }
-        }
-        (None, None) => {
-            fonts.draw_clipped(
-                canvas,
-                &format!("{}:{}", h.addr, h.port),
-                l,
-                sub_base,
-                W::Regular,
-                13.0 * k,
-                fg(0.55),
-                max_w,
-            );
-        }
+    let (line, ink) = status(h);
+    let mut x = l;
+    // Something up over there reads first, green like the online pip.
+    if !h.running.is_empty() {
+        let r = 4.0 * k;
+        canvas.draw_circle(
+            ((x + r) as f32, (sub_base - 4.6 * k) as f32),
+            r as f32,
+            &fill(ONLINE_GREEN),
+        );
+        x += 2.0 * r + 6.0 * k;
     }
+    fonts.draw_clipped(
+        canvas,
+        &line,
+        x,
+        sub_base,
+        W::SemiBold,
+        13.0 * k,
+        ink,
+        l + max_w - x,
+    );
     fonts.draw_clipped(
         canvas,
         &h.name,
@@ -636,20 +597,30 @@ fn draw_host_tile(canvas: &Canvas, fonts: &Fonts, h: &HostRow, rect: Rect, k: f6
         fg(1.0),
         max_w,
     );
-    // What the host has up, above its name — the one thing you would otherwise have to
-    // connect to find out. Green, like the shelf's RESUME pill and the online pip: on
-    // this screen that colour already means "live over there".
-    if !h.running.is_empty() {
-        fonts.draw_clipped(
-            canvas,
-            &format!("\u{25b6} {}", h.running),
-            l,
-            sub_base - 48.0 * k,
-            W::SemiBold,
-            13.0 * k,
-            ONLINE_GREEN,
-            max_w,
-        );
+}
+
+/// A card's one status line and its ink: what the host is doing, whether OK will reach
+/// it, and the preset a pinned or bound card connects with.
+fn status(h: &HostRow) -> (String, Color4f) {
+    if let Some(p) = &h.pin {
+        return (p.name.clone(), accent_color(p.accent.as_deref()));
+    }
+    let base = if !h.running.is_empty() {
+        return (format!("Playing {}", h.running), ONLINE_GREEN);
+    } else if !h.saved {
+        "Found on this network".to_string()
+    } else if !h.paired {
+        "Not paired yet".to_string()
+    } else if h.online {
+        "Online".to_string()
+    } else if h.can_wake {
+        "Offline \u{b7} wakes when you connect".to_string()
+    } else {
+        "Offline".to_string()
+    };
+    match &h.bound_preset {
+        Some(b) => (format!("{base} \u{b7} {}", b.name), fg(0.7)),
+        None => (base, fg(0.7)),
     }
 }
 
@@ -1012,7 +983,7 @@ mod tests {
         let mut fx = Outbox::default();
         s.menu(MenuEvent::Secondary, &mut ctx, &mut fx);
         assert!(
-            matches!(fx.nav, Some(crate::screens::Nav::Push(ref sc)) if matches!(**sc, Screen::HostOptions(_))),
+            matches!(fx.nav, Some(crate::screens::Nav::Push(ref sc)) if matches!(**sc, Screen::CardMenu(_))),
             "the hold opens the host options menu"
         );
     }
