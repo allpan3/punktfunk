@@ -219,15 +219,22 @@ fn home_path(p: &str, policy: &PathPolicy) -> PathBuf {
     }
 }
 
-/// Is `canonical` inside a declared manifest root or an existing grant? Declared roots are
-/// canonicalized when they resolve so both sides speak the same spelling.
-fn covers(declared: &[PathBuf], grants: &[Grant], canonical: &Path, policy: &PathPolicy) -> bool {
-    declared.iter().any(|r| {
+/// Is `canonical` inside a declared manifest root or an existing grant that allows `write`?
+/// Declared roots (`(path, writable)`) are canonicalized when they resolve so both sides speak
+/// the same spelling. A read-only root never answers a write request.
+fn covers(
+    declared: &[(PathBuf, bool)],
+    grants: &[Grant],
+    canonical: &Path,
+    write: bool,
+    policy: &PathPolicy,
+) -> bool {
+    declared.iter().any(|(r, writable)| {
         let root = r.canonicalize().unwrap_or_else(|_| r.clone());
-        within(canonical, &root)
+        (*writable || !write) && within(canonical, &root)
     }) || grants
         .iter()
-        .any(|g| within(canonical, &home_path(&g.path, policy)))
+        .any(|g| (g.write || !write) && within(canonical, &home_path(&g.path, policy)))
 }
 
 /// Windows-only refusals: `C:\Users`, the profile roots directly under it, `C:\Windows` and
@@ -498,8 +505,13 @@ impl AccessStore {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let access = self.load_access();
         let mut pending_all = self.load_pending();
-        let declared = crate::plugins::manifest::for_provider(id)
-            .map(|m| m.declared_roots())
+        let declared: Vec<(PathBuf, bool)> = crate::plugins::manifest::for_provider(id)
+            .map(|m| {
+                let reads = m.reads.iter().map(|p| (home_path(p, &self.policy), false));
+                reads
+                    .chain(m.writes.iter().map(|p| (home_path(p, &self.policy), true)))
+                    .collect()
+            })
             .unwrap_or_default();
         let entry = access.get(id).cloned().unwrap_or_default();
         let mut pending = pending_all.remove(id).unwrap_or_default();
@@ -540,7 +552,7 @@ impl AccessStore {
         raw: &str,
         write: bool,
         reason: &Option<String>,
-        declared: &[PathBuf],
+        declared: &[(PathBuf, bool)],
         entry: &PluginAccess,
         pending: &mut Vec<PendingRequest>,
         changed: &mut bool,
@@ -579,7 +591,7 @@ impl AccessStore {
         if let Some(rule) = refusal_rule(raw_path, &canonical, write, &self.policy, facts) {
             return outcome(canon, &format!("refused:{rule}"));
         }
-        if covers(declared, &entry.grants, &canonical, &self.policy) {
+        if covers(declared, &entry.grants, &canonical, write, &self.policy) {
             return outcome(canon, "granted");
         }
         if entry.denied.iter().any(|d| same_path(d, &canon)) {
@@ -1196,14 +1208,16 @@ mod tests {
             .unwrap();
         assert_eq!(m.value[0].outcome, "granted");
         assert!(!m.changed, "an already-reachable path stores no row");
-        // The pure rule knows the manifest-declared half of the same check.
-        let declared = vec![f.policy.home.join("Games")];
-        assert!(covers(
-            &declared,
-            &[],
-            &f.policy.home.join("Games/x"),
-            &f.policy
-        ));
+        // The pure rule knows the manifest-declared half of the same check, and its mode.
+        let declared = vec![(f.policy.home.join("Games"), false)];
+        let x = f.policy.home.join("Games/x");
+        assert!(covers(&declared, &[], &x, false, &f.policy));
+        assert!(!covers(&declared, &[], &x, true, &f.policy), "a read root");
+        // A write request over a read grant is a new request, not "granted".
+        let w = s
+            .request("demo", &[(sub.to_str().unwrap().to_string(), true)], None)
+            .unwrap();
+        assert_eq!(w.value[0].outcome, "pending");
         // A v1 `~/x` grant covers through the policy home even though it is stored raw.
         let mut access = BTreeMap::new();
         access.insert(
