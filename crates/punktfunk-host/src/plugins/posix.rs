@@ -226,7 +226,8 @@ pub(super) fn converge_runner_roots(
         return Ok(false);
     }
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    let tmp = dir.join(format!("{ROOTS_DROPIN}.tmp"));
+    // Per process: a CLI grant and the serving host may converge at the same moment.
+    let tmp = dir.join(format!("{ROOTS_DROPIN}.{}.tmp", std::process::id()));
     std::fs::write(&tmp, &body).with_context(|| format!("write {}", tmp.display()))?;
     std::fs::rename(&tmp, &path).with_context(|| format!("replace {}", path.display()))?;
     run_systemctl(&["daemon-reload"])?;
@@ -234,9 +235,10 @@ pub(super) fn converge_runner_roots(
     Ok(true)
 }
 
-/// One self-bind per root the unit would otherwise hide or keep read-only; a read outside the
-/// home is visible already. A `src:dst` pair fails the unit's `+` ExecStartPre. systemd drops a
-/// bind whose path holds a quote, and a control character would end the line: left out.
+/// One self-bind per root the unit would otherwise hide or keep read-only. `ProtectHome` hides
+/// `/home` and `/root` (not just this `home`); a read anywhere else is visible already. A
+/// `src:dst` pair fails the unit's `+` ExecStartPre. systemd drops a bind whose path holds a
+/// quote, and a control character would end the line: left out.
 #[cfg(any(test, target_os = "linux"))]
 fn render_roots(roots: &[access::RunnerRoot], home: &std::path::Path) -> String {
     let mut out = String::from(
@@ -257,7 +259,14 @@ fn render_roots(roots: &[access::RunnerRoot], home: &std::path::Path) -> String 
             );
             continue;
         }
-        let key = match (r.path.starts_with(home), r.write) {
+        let hidden = [
+            home,
+            std::path::Path::new("/home"),
+            std::path::Path::new("/root"),
+        ]
+        .iter()
+        .any(|h| r.path.starts_with(h));
+        let key = match (hidden, r.write) {
             (true, true) => "BindPaths",
             (true, false) => "BindReadOnlyPaths",
             (false, true) => "ReadWritePaths",
@@ -446,6 +455,7 @@ mod tests {
                 root("/h/saves", true),
                 root("/mnt/games", false),
                 root("/mnt/out", true),
+                root("/home/other/Games", false),
             ],
             Path::new("/h"),
         );
@@ -457,6 +467,8 @@ mod tests {
                 r#"BindReadOnlyPaths="-/h/My 100%% Games:x\\y""#,
                 r#"BindPaths="-/h/saves""#,
                 r#"ReadWritePaths="-/mnt/out""#,
+                // ProtectHome hides every home, not only the operator's.
+                r#"BindReadOnlyPaths="-/home/other/Games""#,
             ]
         );
         assert!(body.starts_with("# Written by punktfunk-host"));

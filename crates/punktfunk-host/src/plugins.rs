@@ -432,6 +432,9 @@ pub(crate) fn converge_runner_roots() {
     if cfg!(test) || !cfg!(target_os = "linux") || !runtime_status().installed {
         return;
     }
+    // Two quick decisions must not race: the later one reads the grants the earlier wrote.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let Some(home) = manifest::home_dir() else {
         return;
     };
