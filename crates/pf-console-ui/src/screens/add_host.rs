@@ -7,8 +7,8 @@ use crate::glyphs::{Hint, HintKey};
 use crate::model::{ConsoleCmd, HostRow};
 use crate::pointer::Pointer;
 use crate::screens::{Ctx, Outbox};
-use crate::theme::{edge, fg, Fonts, W};
-use crate::widgets::{permits, Charset, KeyMsg, Keyboard, ListMsg, MenuList, RowSpec, ROW_MAX_W};
+use crate::theme::Fonts;
+use crate::widgets::{blurb, permits, Charset, KeyMsg, Keyboard, ListMsg, MenuList, RowSpec};
 use pf_client_core::menu_nav::{MenuEvent, MenuPulse};
 use skia_safe::{Canvas, Rect};
 
@@ -297,17 +297,12 @@ impl AddHostScreen {
         fonts: &Fonts,
         ctx: &mut Ctx,
     ) {
-        // 2 px ≈ half a heading block, left-aligned to the title column.
-        // Width is ROW_MAX_W * 0.72 so the line never runs under the controller chip.
-        fonts.leading(
+        let below = blurb(
             canvas,
+            fonts,
             "Hosts on this network appear automatically — add one by address for everything else.",
-            W::Regular,
-            13.0 * k,
-            fg(0.55),
-            f64::from(rect.left) + edge(k),
-            f64::from(rect.top) + 2.0 * k,
-            ROW_MAX_W * 0.72 * k,
+            rect,
+            k,
         );
 
         let seat = self.keyboard.seat(self.editing.is_some() && !ctx.deck, dt);
@@ -318,7 +313,7 @@ impl AddHostScreen {
         };
         let list_rect = Rect::from_ltrb(
             rect.left,
-            rect.top + (34.0 * k) as f32,
+            below.top,
             rect.right,
             rect.bottom - tray_h as f32,
         );

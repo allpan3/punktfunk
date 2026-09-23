@@ -16,7 +16,7 @@ use crate::pointer::Pointer;
 use crate::screens::{Ctx, Outbox, Screen};
 use crate::theme::{edge, fg, Fonts, W};
 use crate::widgets::{
-    permits, Charset, KeyMsg, Keyboard, ListMsg, MenuList, RowSpec, TabStrip, TAB_STRIP_H,
+    column, permits, Charset, KeyMsg, Keyboard, ListMsg, MenuList, RowSpec, TabStrip, TAB_STRIP_H,
 };
 use pf_client_core::audio_format::{AUDIO_FORMATS, AUDIO_FORMAT_OPUS};
 use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuPulse};
@@ -1038,10 +1038,18 @@ impl SettingsScreen {
             // No row focus ring while the tray or the strip holds it.
             self.custom_bitrate.is_none() && !self.strip_focus,
         );
+        // Section tabs and explainer on the rows' inner column, where headers and marks sit.
+        let col = column(list_rect, k);
+        let inner = f64::from(col.left) + 16.0 * k;
         let labels: Vec<&str> = TABS.iter().map(|(name, _)| *name).collect();
         self.strip.render(
             canvas,
-            Rect::from_ltrb(rect.left, rect.top, rect.right, rect.top + strip_h as f32),
+            Rect::from_ltrb(
+                (inner - edge(k)) as f32,
+                rect.top,
+                rect.right,
+                rect.top + strip_h as f32,
+            ),
             &labels,
             self.tab,
             self.strip_focus,
@@ -1051,10 +1059,10 @@ impl SettingsScreen {
         );
         let focused = ids.get(self.list.cursor).copied();
         let detail = focused.map_or("", |id| detail(id, ctx));
-        // The explainer under the list, on the margin, led by the row's mark.
-        let x = f64::from(list_rect.left) + edge(k);
+        // The explainer under the list, led by the row's mark.
+        let x = inner;
         let top = f64::from(rect.bottom) - detail_h - tray_h + 6.0 * k;
-        let max_w = f64::from(list_rect.width()) - 2.0 * edge(k) - 22.0 * k;
+        let max_w = f64::from(col.right) - inner - 22.0 * k;
         fonts.leading(
             canvas,
             detail,

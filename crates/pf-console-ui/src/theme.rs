@@ -878,7 +878,8 @@ impl Fonts {
     }
 
     /// Left-aligned twin of [`centered`](Self::centered). Same paragraph path (CJK
-    /// fallback); chrome cannot use `draw`/`draw_clipped` instead.
+    /// fallback); chrome cannot use `draw`/`draw_clipped` instead. Returns the laid-out
+    /// height, so what follows can sit under the wrap.
     #[allow(clippy::too_many_arguments)]
     pub fn leading(
         &self,
@@ -890,9 +891,9 @@ impl Fonts {
         x: f64,
         y: f64,
         max_w: f64,
-    ) {
+    ) -> f64 {
         let at = Point::new(x as f32, y as f32);
-        self.draw_paragraph(Some(canvas), text, Para::Leading, w, size, color, max_w, at);
+        self.draw_paragraph(Some(canvas), text, Para::Leading, w, size, color, max_w, at)
     }
 
     /// Left-aligned title at `(x, y)` top edge, at most three lines then an ellipsis.

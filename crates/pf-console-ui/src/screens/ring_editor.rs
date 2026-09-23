@@ -11,7 +11,7 @@ use crate::glyphs::{Hint, HintKey};
 use crate::pointer::{Pointer, PointerKind};
 use crate::ring::{EditEvent, Ring, LABEL_H};
 use crate::screens::{Ctx, Outbox, Screen};
-use crate::theme::{card_face, edge, fg, fill, focus_halo, stroke, Fonts, W};
+use crate::theme::{card_face, edge, fg, fill, focus_halo, stroke, Fonts};
 use crate::widgets::{ListMsg, MenuList, RowSpec, ROW_MAX_W};
 use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuPulse};
 use pf_client_core::overlay_actions::{
@@ -461,16 +461,13 @@ impl RingEditorScreen {
         }
         self.ring.tick();
         let kf = k as f32;
-        fonts.leading(
+        crate::widgets::blurb(
             canvas,
+            fonts,
             "Point the stick at a button; A changes it. Y lifts a button and A drops it on \
              another to swap; with a pointer, click or drag.",
-            W::Regular,
-            13.0 * k,
-            fg(0.55),
-            f64::from(rect.left) + edge(k),
-            f64::from(rect.top) + 2.0 * k,
-            ROW_MAX_W * 0.9 * k,
+            rect,
+            k,
         );
 
         // Side-by-side when stacked fit would shrink the ring below 0.75 and width

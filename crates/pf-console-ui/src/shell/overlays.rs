@@ -508,16 +508,18 @@ impl Shell {
         match l.failed.as_deref() {
             // Where the spinner was, because the wait is what ended. Brighter than the status
             // line it replaces: this is the one thing on screen the player has to read.
-            Some(why) => fonts.leading(
-                canvas,
-                why,
-                W::Regular,
-                12.5 * k,
-                fg(0.85 * a),
-                dx,
-                y + 26.0 * k,
-                dw,
-            ),
+            Some(why) => {
+                fonts.leading(
+                    canvas,
+                    why,
+                    W::Regular,
+                    12.5 * k,
+                    fg(0.85 * a),
+                    dx,
+                    y + 26.0 * k,
+                    dw,
+                );
+            }
             None => {
                 crate::theme::spinner(canvas, dx + 8.0 * k, y + 30.0 * k, 8.0 * k, t);
                 fonts.leading(

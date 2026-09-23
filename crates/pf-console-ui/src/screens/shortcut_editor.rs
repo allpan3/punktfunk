@@ -13,7 +13,7 @@ use crate::glyphs::{Hint, HintKey};
 use crate::pointer::Pointer;
 use crate::ring::draw_keycap_disc;
 use crate::screens::{Ctx, Outbox};
-use crate::theme::{accent, edge, fg, fill, on_accent, stroke, Fonts, PanelStroke, W};
+use crate::theme::{accent, fg, fill, on_accent, stroke, Fonts, PanelStroke, W};
 use crate::widgets::{permits, Charset, KeyMsg, Keyboard, ListMsg, MenuList, RowSpec, ROW_MAX_W};
 use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuPulse};
 use pf_client_core::overlay_actions::{chord_chip, key_legend, OverlayConfig, Shortcut};
@@ -678,16 +678,12 @@ impl ShortcutEditorScreen {
         ctx: &mut Ctx,
     ) {
         let kf = k as f32;
-        let x0 = f64::from(rect.left) + edge(k);
-        fonts.leading(
+        crate::widgets::blurb(
             canvas,
+            fonts,
             "Hold the modifiers marked on, then press the key. The dial draws it as a keycap.",
-            W::Regular,
-            13.0 * k,
-            fg(0.55),
-            x0,
-            f64::from(rect.top) + 2.0 * k,
-            ROW_MAX_W * 0.9 * k,
+            rect,
+            k,
         );
 
         let top = rect.top + 40.0 * kf;

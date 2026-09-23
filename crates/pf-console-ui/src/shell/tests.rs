@@ -765,6 +765,18 @@ fn rendered_settings() -> (Shell, skia_safe::Rect) {
     (s, row)
 }
 
+/// On a wide screen the Settings rows are a centred column at their full width.
+#[test]
+fn settings_rows_sit_centred() {
+    let (_s, row) = rendered_settings();
+    assert!(
+        (row.center_x() - 640.0).abs() < 1.0,
+        "row centre {}",
+        row.center_x()
+    );
+    assert!((row.width() - crate::widgets::ROW_MAX_W as f32).abs() < 1.0);
+}
+
 /// A finger swipe across the list is a scroll and must not flip the landed-on value.
 /// The same contact lifted in place is the tap, delivered on lift at the anchor.
 #[test]

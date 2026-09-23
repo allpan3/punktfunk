@@ -15,7 +15,7 @@ use crate::pointer::Pointer;
 use crate::screens::{Ctx, Outbox, Screen};
 use crate::store::SettingsStore;
 use crate::theme::{edge, fg, Fonts, W};
-use crate::widgets::{ListMsg, MenuList, RowSpec, ROW_MAX_W};
+use crate::widgets::{blurb, ListMsg, MenuList, RowSpec};
 use pf_client_core::menu_nav::{MenuEvent, MenuPulse};
 use pf_client_core::start;
 use skia_safe::{Canvas, Image, Rect};
@@ -728,23 +728,7 @@ impl CardMenu {
         fonts: &Fonts,
         ctx: &mut Ctx,
     ) {
-        // Air under the title so the first row does not sit on it.
-        fonts.leading(
-            canvas,
-            &self.blurb(),
-            W::Regular,
-            13.0 * k,
-            fg(0.55),
-            f64::from(rect.left) + edge(k),
-            f64::from(rect.top) + 2.0 * k,
-            ROW_MAX_W * 0.72 * k,
-        );
-        let mut list_rect = Rect::from_ltrb(
-            rect.left,
-            rect.top + (34.0 * k) as f32,
-            rect.right,
-            rect.bottom,
-        );
+        let mut list_rect = blurb(canvas, fonts, &self.blurb(), rect, k);
         if let (Subject::Game { game, cover, .. }, Mode::Details) = (&self.subject, self.mode) {
             list_rect = title_card(canvas, fonts, game, cover.as_ref(), rect, k);
         }

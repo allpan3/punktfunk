@@ -200,7 +200,8 @@ const BUTTON_PITCH: f64 = 40.0;
 pub const ROW_H: f64 = 50.0;
 /// Full blur under pinned text, design units: Glur's radius on the Apple gamepad trays.
 const TRAY_SIGMA: f64 = 14.0;
-const ROW_GAP: f64 = 6.0;
+/// Clears the plate's 7 dp outset with air to spare.
+const ROW_GAP: f64 = 10.0;
 
 /// The screen edge a [`tray`] leans on.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -224,8 +225,39 @@ pub fn tray(canvas: &Canvas, rect: Rect, toward: Toward, k: f64) {
     let sigma = (TRAY_SIGMA * k) as f32;
     crate::blur::backdrop(canvas, rect, crate::blur::Band { edge, clear, sigma });
 }
-const HEADER_H: f64 = 34.0;
+/// A section header's band above its row, and its baseline's rise over the row: the text
+/// stays clear of the plate, stretched in flight, on the row below.
+const HEADER_H: f64 = 44.0;
+const HEADER_RISE: f64 = 18.0;
 pub const ROW_MAX_W: f64 = 620.0;
+/// Air between a form's blurb and its first row: the plate's outset and then some.
+const BLURB_GAP: f64 = 20.0;
+
+/// The form column in `rect`: at most [`ROW_MAX_W`] wide, centred, never nearer the
+/// screen's edge than the shared margin.
+pub fn column(rect: Rect, k: f64) -> Rect {
+    let w = (ROW_MAX_W * k).min(f64::from(rect.width()) - 2.0 * edge(k)) as f32;
+    Rect::from_xywh(rect.center_x() - w / 2.0, rect.top, w, rect.height())
+}
+
+/// A form's blurb at the top of `rect`, on the column. Returns what is left below it for
+/// the rows, however many lines it took.
+pub fn blurb(canvas: &Canvas, fonts: &Fonts, text: &str, rect: Rect, k: f64) -> Rect {
+    let col = column(rect, k);
+    let (x, y, w) = (
+        f64::from(col.left),
+        f64::from(rect.top) + 2.0 * k,
+        f64::from(col.width()),
+    );
+    let h = fonts.leading(canvas, text, W::Regular, 13.0 * k, fg(0.55), x, y, w);
+    let top = y + h + BLURB_GAP * k;
+    Rect::from_ltrb(
+        rect.left,
+        top as f32,
+        rect.right,
+        rect.bottom.max(top as f32),
+    )
+}
 
 /// The list's scroll node, and row `i`'s cell in it.
 const LIST: &str = "menu-list";
@@ -686,7 +718,8 @@ impl MenuList {
         // Rows are cells in a scroll column, `ROW_GAP` apart, a header band above a
         // sectioned row. Each cell's painter draws the row as it always has.
         let list = Id::new(LIST, 0);
-        let row_w = (ROW_MAX_W * k).min(f64::from(rect.width()) - 2.0 * edge(k));
+        let col = column(rect, k);
+        let row_w = f64::from(col.width());
         let dot_gutter = if rows.iter().any(|r| r.dot) {
             16.0 * k
         } else {
@@ -709,7 +742,7 @@ impl MenuList {
             .gap((ROW_GAP * k) as f32)
             .style(|s| {
                 s.align_items = Some(taffy::AlignItems::START);
-                s.padding.left = taffy::LengthPercentage::length(air + edge(k) as f32);
+                s.padding.left = taffy::LengthPercentage::length(air + col.left - rect.left);
                 s.padding.top = taffy::LengthPercentage::length(pad_top);
                 s.padding.bottom = taffy::LengthPercentage::length(pad_bottom);
             })
@@ -834,7 +867,7 @@ impl MenuList {
                 canvas,
                 &header.to_uppercase(),
                 x0 + 16.0 * k,
-                top - 12.0 * k,
+                top - HEADER_RISE * k,
                 W::SemiBold,
                 12.0 * k,
                 1.4 * k,
