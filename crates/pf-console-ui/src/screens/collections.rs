@@ -279,6 +279,25 @@ impl CollectionsScreen {
         }
     }
 
+    /// OK went down: the plate under the focused pill or tile dips.
+    pub(crate) fn press(&mut self) {
+        self.tree.press();
+    }
+
+    /// What a screen reader says for the focused pill or tile.
+    pub(crate) fn announcement(&self) -> Option<String> {
+        if let Some(i) = self.pill {
+            let applied = if SortKey::ALL[i] == self.sort {
+                ", applied"
+            } else {
+                ""
+            };
+            return Some(format!("Sort by {}{applied}", SortKey::ALL[i].label()));
+        }
+        let g = self.groups.get(self.cursor.max(0) as usize)?;
+        Some(format!("{}, {} titles", g.label, g.count))
+    }
+
     /// The applied sort's pill.
     fn sort_pill(&self) -> usize {
         SortKey::ALL

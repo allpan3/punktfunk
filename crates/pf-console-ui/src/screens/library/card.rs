@@ -328,9 +328,9 @@ pub(super) struct TitleBand<'a> {
 }
 
 impl TitleBand<'_> {
-    /// Over the field's foot in `r`, the backdrop reaching `reach` across: what scrolls under
-    /// it blurs more toward the bottom, under a scrim that deepens with it. The one place
-    /// the band's backdrop is drawn; `cheap` keeps the scrim and drops the blur.
+    /// Over the field's foot in `r`, the backdrop reaching `reach` across: the shared tray
+    /// blurs what scrolls under toward the bottom, under a scrim that deepens with it, as
+    /// posters are too bright for white text on blur alone. `cheap` keeps only the scrim.
     pub(super) fn paint(
         &self,
         canvas: &Canvas,
@@ -342,12 +342,7 @@ impl TitleBand<'_> {
     ) {
         let back = Rect::from_ltrb(reach.0, r.top, reach.1, r.bottom);
         if !cheap {
-            let band = crate::blur::Band {
-                edge: r.bottom,
-                clear: r.top,
-                sigma: (20.0 * k) as f32,
-            };
-            crate::blur::backdrop(canvas, back, band);
+            crate::widgets::tray(canvas, back, crate::widgets::Toward::Bottom, k);
         }
         let deep = (r.top + (TITLE_BAND * 0.45 * k) as f32).min(r.bottom);
         let colors = [crate::theme::shade(0.0), crate::theme::shade(0.42)];

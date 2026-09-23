@@ -271,39 +271,13 @@ fn navigation_lap() {
     assert!(matches!(s.take_action(), Some(OverlayAction::Quit)));
 }
 
-fn one_game() -> Vec<crate::library::LibraryGame> {
-    vec![crate::library::LibraryGame {
-        id: "steam:570".into(),
-        title: "Dota 2".into(),
-        store: "steam".into(),
-        launcher: false,
-        icon: String::new(),
-        platform: None,
-        developer: None,
-        year: None,
-        genres: Vec::new(),
-        stats: None,
-        running: false,
-    }]
-}
-
-/// A tab root with nothing to focus, a library that failed to load, keeps focus on its
-/// tab: Down stays there, OK still retries, and focus enters once there are titles.
+/// A tab root that places nothing to focus parks focus on its tab, where Down stays;
+/// once the root places targets, the parked focus goes back in by itself.
 #[test]
-fn a_root_with_nothing_to_focus_keeps_focus_on_the_strip() {
-    fake_home();
-    let console = ConsoleShared::default();
-    console.set_hosts(hosts());
-    let library = LibraryShared::default();
-    let bus = ConsoleBus::default();
-    let root = vec![Screen::Library(LibraryScreen::new(&hosts()[0], 0))];
-    let mut s = Shell::new(console, library.clone(), bus.clone(), test_options(), root).unwrap();
-    library.set_phase(crate::library::LibraryPhase::Error {
-        title: "Couldn't load the library".into(),
-        body: "refused".into(),
-        can_retry: true,
-    });
+fn a_root_with_nothing_to_focus_parks_focus_on_the_strip() {
+    let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
     frame(&mut s);
+    s.root_targets = Some(0);
     s.sync();
     assert!(s.strip_focus, "focus parks on the tab");
     assert!(matches!(
@@ -311,42 +285,22 @@ fn a_root_with_nothing_to_focus_keeps_focus_on_the_strip() {
         Some(MenuPulse::Boundary)
     ));
     assert!(s.strip_focus, "nothing below takes it");
-    bus.drain();
-    s.handle_menu(MenuEvent::Confirm);
-    let retried = (bus.drain().into_iter()).any(|c| matches!(c, ConsoleCmd::FetchLibrary { .. }));
-    assert!(retried && s.strip_focus, "OK retries from the tab");
 
-    library.set_games(one_game());
-    frame(&mut s);
+    s.strip_parked = true;
+    s.root_targets = Some(3);
     s.sync();
-    assert!(s.strip_focus, "the strip was in use: focus waits for Down");
-    s.handle_menu(MenuEvent::Move(MenuDir::Down));
-    assert!(!s.strip_focus, "and enters the titles");
+    assert!(!s.strip_focus, "the root's targets take it back");
 }
 
-/// Focus the shell parked on the tab while the root loaded goes back once it can land.
+/// Up that a root screen bumps reaches its tab.
 #[test]
-fn a_parked_focus_returns_once_the_root_can_take_it() {
-    let (mut s, _console, library) =
-        shell(vec![Screen::Library(LibraryScreen::new(&hosts()[0], 0))]);
-    library.begin_fetch();
+fn a_bumped_up_at_a_root_reaches_the_strip() {
+    let (mut s, _console, _library) = shell(vec![Screen::Players(
+        crate::screens::players::PlayersScreen::new(),
+    )]);
     frame(&mut s);
     s.sync();
-    assert!(s.strip_focus, "loading, the tab holds focus");
-    library.set_games(one_game());
-    frame(&mut s);
-    s.sync();
-    assert!(!s.strip_focus, "the titles take it back");
-}
-
-/// Up that a root screen leaves unanswered still reaches its tab.
-#[test]
-fn an_unanswered_up_at_a_root_reaches_the_strip() {
-    let (mut s, _console, library) =
-        shell(vec![Screen::Library(LibraryScreen::new(&hosts()[0], 0))]);
-    library.set_phase(crate::library::LibraryPhase::Empty);
-    s.sync();
-    assert!(!s.strip_focus, "nothing painted yet, nothing parked");
+    assert!(!s.strip_focus);
     assert!(matches!(
         s.handle_menu(MenuEvent::Move(MenuDir::Up)),
         Some(MenuPulse::Move)

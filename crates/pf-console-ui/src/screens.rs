@@ -211,6 +211,7 @@ impl Screen {
         match self {
             Screen::Home(s) => s.press(),
             Screen::Library(s) => s.press(),
+            Screen::Collections(s) => s.press(),
             Screen::Settings(s) => s.press(),
             Screen::AddHost(s) => s.list.dip(),
             Screen::Pair(s) => s.list.dip(),
@@ -332,6 +333,7 @@ impl Screen {
         match self {
             Screen::Home(s) => s.announcement(ctx),
             Screen::Library(s) => s.announcement(ctx),
+            Screen::Collections(s) => s.announcement(),
             Screen::Customize(s) => s.announcement(ctx),
             Screen::Settings(s) => s.announcement(ctx),
             Screen::Players(s) => s.announcement(ctx),
