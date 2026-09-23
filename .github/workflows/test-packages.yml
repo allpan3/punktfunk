@@ -1,5 +1,12 @@
 name: Test packages
 
+# Package version = the upstream version in Cargo.toml + "." + HOTFIX, release = this
+# workflow's run number: 0.39.0.1-17. Bump HOTFIX by hand when the fix set changes; the run
+# number makes every build an upgrade regardless. pacman and dpkg rank 0.39.0.1 above the
+# official 0.39.0-1 and its rebuilds, and below the next upstream 0.40.0. Digits only: an
+# alphabetic suffix such as ".test17" sorts BELOW 0.39.0 in pacman. Reset HOTFIX to 1 at a
+# new upstream version. Every file name carries version and release.
+
 on:
   workflow_dispatch:
   push:
@@ -7,6 +14,9 @@ on:
 
 permissions:
   contents: read
+
+env:
+  HOTFIX: 1
 
 concurrency:
   group: test-packages-${{ github.ref }}
@@ -31,6 +41,9 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="$(awk -F'"' '/^version = / { print $2; exit }' Cargo.toml)"
+          VERSION="${VERSION}.${HOTFIX}"
+          PKG_VERSION="${VERSION}-${GITHUB_RUN_NUMBER}"
+          echo "PKG_VERSION=$PKG_VERSION" >> "$GITHUB_ENV"
           ARCHIVE="$RUNNER_TEMP/Punktfunk-macos.xcarchive"
           DERIVED="$RUNNER_TEMP/DerivedData"
 
@@ -58,15 +71,15 @@ jobs:
           mkdir -p "$STAGE"
           ditto "$APP" "$STAGE/Punktfunk.app"
           ln -s /Applications "$STAGE/Applications"
-          DMG="$RUNNER_TEMP/Punktfunk-macOS-test-${GITHUB_SHA::7}.dmg"
-          hdiutil create -volname 'Punktfunk Test' -srcfolder "$STAGE" \
+          DMG="$RUNNER_TEMP/Punktfunk-${PKG_VERSION}-macos.dmg"
+          hdiutil create -volname "Punktfunk ${PKG_VERSION}" -srcfolder "$STAGE" \
             -ov -format UDZO "$DMG"
           mkdir -p artifacts
           cp "$DMG" artifacts/
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: punktfunk-macos-${{ github.sha }}
+          name: punktfunk-${{ env.PKG_VERSION }}-macos
           path: artifacts/*.dmg
           if-no-files-found: error
 
@@ -92,6 +105,9 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
           VERSION="$(awk -F'"' '/^version = / { print $2; exit }' Cargo.toml)"
+          VERSION="${VERSION}.${HOTFIX}"
+          PKG_VERSION="${VERSION}-${GITHUB_RUN_NUMBER}"
+          echo "PKG_VERSION=$PKG_VERSION" >> "$GITHUB_ENV"
           useradd -m builder
           mkdir -p dist
           chown -R builder: "$GITHUB_WORKSPACE"
@@ -99,14 +115,14 @@ jobs:
           cd packaging/arch
           sudo -u builder env \
             PF_SRCDIR="$GITHUB_WORKSPACE" \
-            PF_PKGVER="${VERSION}.test${GITHUB_RUN_NUMBER}" \
-            PF_PKGREL=1 \
+            PF_PKGVER="$VERSION" \
+            PF_PKGREL="$GITHUB_RUN_NUMBER" \
             PKGDEST="$GITHUB_WORKSPACE/dist" \
             makepkg -f -d --holdver
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: punktfunk-omarchy-${{ github.sha }}
+          name: punktfunk-${{ env.PKG_VERSION }}-omarchy
           path: |
             dist/punktfunk-host-*.pkg.tar.zst
             dist/punktfunk-icons-*.pkg.tar.zst
