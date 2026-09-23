@@ -244,6 +244,14 @@ impl Tree {
             if let Some(c) = c {
                 canvas.clip_rect(c, None, true);
             }
+            // A press dips the focused element with its plate.
+            let dip = self.plate.press_scale();
+            if n.id == self.focus && n.focus.is_some() && dip < 1.0 {
+                let (cx, cy) = (rect.center_x(), rect.center_y());
+                canvas.translate((cx, cy));
+                canvas.scale((dip, dip));
+                canvas.translate((-cx, -cy));
+            }
             p(canvas, rect);
             canvas.restore();
         }

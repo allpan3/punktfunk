@@ -53,7 +53,7 @@ const NAV_REVEAL_ALPHA: f64 = 0.4;
 /// the question is whether the screen under the cursor is the one being aimed at.
 const NAV_INPUT_OPENS: f64 = 0.85;
 /// Chrome bands, design units: pinned title above, hints below.
-const TOP_BAND: f64 = 64.0;
+const TOP_BAND: f64 = 88.0;
 const BOTTOM_BAND: f64 = 86.0;
 /// A tab switch slides the new root this share of the width.
 pub(crate) const TAB_SLIDE: f64 = 0.25;

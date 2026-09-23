@@ -36,7 +36,6 @@ mod games;
 pub(crate) use games::CustomizeScreen;
 use games::Zone;
 
-const GRID_MARGIN: f64 = 48.0;
 /// The grid's scroll node, and title `i`'s cell in it.
 const GRID: &str = "library-grid";
 fn grid_cell(i: usize) -> Id {
@@ -45,6 +44,10 @@ fn grid_cell(i: usize) -> Id {
 /// Row air only; the title lives in the shared detail band.
 const GRID_LABEL: f64 = 10.0;
 const GRID_HEADING: f64 = 30.0;
+/// Row 0's air under the Hosts row: the plate's outset and a breath.
+const EMBED_AIR: f64 = 14.0;
+/// Room for the plate's outset past the grid's first column.
+const PLATE_AIR: f64 = 32.0;
 /// Title line only; the store lives on the cover badge.
 const DETAIL_BAND: f64 = 64.0;
 const BAR_CORNER: f64 = 14.0;
@@ -575,6 +578,11 @@ impl LibraryScreen {
     }
 
     /// The row has focus (`true`) or has handed it down.
+    /// OK went down: the plate dips under the focused poster.
+    pub(crate) fn press(&mut self) {
+        self.grid.get_mut().press();
+    }
+
     pub(crate) fn set_quiet(&mut self, quiet: bool) {
         self.quiet = quiet;
     }
@@ -659,7 +667,7 @@ impl LibraryScreen {
 
     /// Columns that fit `rect` at `k`. Per-frame: a stale count puts cursor and layout on different grids.
     fn grid_cols(&self, rect: Rect, k: f64) -> usize {
-        let avail = f64::from(rect.width()) - 2.0 * GRID_MARGIN * k;
+        let avail = f64::from(rect.width()) - 2.0 * edge(k);
         let pitch = (GRID_W + GRID_GAP) * k;
         // Last column has no trailing gap.
         (((avail + GRID_GAP * k) / pitch).floor() as i64).clamp(2, 8) as usize
@@ -1450,7 +1458,7 @@ impl LibraryScreen {
                     self.draw_bar(canvas, bar, k, fonts, dt);
                     canvas.restore();
                 }
-                if !self.quiet {
+                if !self.quiet && !self.embedded {
                     let title = self.zone_title(ctx);
                     self.draw_detail_band(canvas, rect, k, fonts, title);
                 }
@@ -1617,14 +1625,19 @@ impl LibraryScreen {
         }
         let shape = GridShape::new(self.len(), cols, self.lead_count());
         // Two-column clamp can overflow a narrow rect; shrink cells only, never headings.
-        let fit = ((f64::from(rect.width()) - 2.0 * GRID_MARGIN * k)
+        let fit = ((f64::from(rect.width()) - 2.0 * edge(k))
             / ((cols as f64 * (GRID_W + GRID_GAP) - GRID_GAP) * k))
             .clamp(0.25, 1.0);
         let (cw, ch) = (GRID_W * k * fit, GRID_H * k * fit);
         let pitch_x = cw + GRID_GAP * k * fit;
         let pitch_y = ch + GRID_GAP * k + GRID_LABEL * k;
         let split_row = (shape.split > 0).then(|| shape.split_row());
-        let heading_h = GRID_HEADING * k;
+        // Under the Hosts row the grid needs only the plate's air above row 0.
+        let heading_h = if self.embedded {
+            EMBED_AIR
+        } else {
+            GRID_HEADING
+        } * k;
         // Top inset is always on: it is also the air row 0 needs. GAMES heading stays conditional.
         let row_top = |row: usize| -> f64 {
             let section_gap = match split_row {
@@ -1634,7 +1647,7 @@ impl LibraryScreen {
             row as f64 * pitch_y + heading_h + section_gap
         };
 
-        let view_h = f64::from(rect.height()) - DETAIL_BAND * k;
+        let view_h = f64::from(rect.height()) - if self.embedded { 0.0 } else { DETAIL_BAND * k };
         let grid_w = cols as f64 * pitch_x - GRID_GAP * k * fit;
         let gap_y = pitch_y - ch;
         // On the Games tab the grid is one line among chips and bands ([`games`]).
@@ -1697,7 +1710,14 @@ impl LibraryScreen {
         } else {
             (bump, 0.0)
         };
-        let viewport = Rect::from_xywh(rect.left, rect.top, rect.width(), (view_h.max(0.0)) as f32);
+        // Room left of the first column for the plate's outset; the padding gives it back.
+        let air = PLATE_AIR * k;
+        let viewport = Rect::from_xywh(
+            rect.left - air as f32,
+            rect.top,
+            rect.width() + air as f32,
+            (view_h.max(0.0)) as f32,
+        );
         let (anchor_row, anchor_col) =
             shape.cell_of(self.entrance_anchor.min(self.len().saturating_sub(1)));
         let painted = RefCell::new(Vec::new());
@@ -1730,7 +1750,7 @@ impl LibraryScreen {
                         0.0
                     };
                 let arrive = ENTER_SCALE + (1.0 - ENTER_SCALE) * ent.travel;
-                let scale = (1.0 + 0.06 * f) * arrive;
+                let scale = (1.0 + 0.04 * f) * arrive;
                 let cx = f64::from(slot.center_x()) + bump_x;
                 let cy = f64::from(slot.center_y()) + bump_y + (1.0 - ent.travel) * ENTER_RISE * k;
                 let cell = Rect::from_xywh(
@@ -1743,18 +1763,14 @@ impl LibraryScreen {
                 let id = game.id.clone();
                 let running = game.running;
 
-                crate::theme::focus_halo(canvas, cell, 12.0, k as f32, f as f32);
                 let art = this.art.get(&id);
-                // Layer only for multi-piece fades (placeholder, focus ring). Paint alpha otherwise.
-                let layered = ent.fade < 1.0 && (art.is_none() || f > 0.0);
+                // Layer only for multi-piece fades (the placeholder). Paint alpha otherwise.
+                let layered = ent.fade < 1.0 && art.is_none();
                 if layered {
                     canvas.save_layer_alpha_f(cell, ent.fade as f32);
                 }
                 let alpha = if layered { 1.0 } else { ent.fade as f32 };
                 paint_cover(canvas, fonts, game, art, cell, k, alpha);
-                if f > 0.0 {
-                    crate::theme::focus_ring(canvas, cell, 12.0, k as f32);
-                }
                 if running {
                     draw_running_badge(canvas, fonts, cell, k);
                 }
@@ -1763,6 +1779,7 @@ impl LibraryScreen {
                 }
             })
             .id(grid_cell(i))
+            .focusable((12.0 * k) as f32)
             .size(cw as f32, ch as f32)
         };
         // Rows `from..to` of the grid, built only while in view.
@@ -1786,8 +1803,10 @@ impl LibraryScreen {
         let hits = &hits;
         let band =
             |b: usize| this.band_el(&bands[b], b, fonts, grid_w, (cw, ch), viewport, k, hits);
-        let mut root = El::scroll(grid, Axis::Vertical)
-            .style(|s| s.align_items = Some(taffy::AlignItems::CENTER));
+        let mut root = El::scroll(grid, Axis::Vertical).style(|s| {
+            s.align_items = Some(taffy::AlignItems::START);
+            s.padding.left = taffy::LengthPercentage::length((edge(k) + air) as f32);
+        });
         if sectioned {
             root = root.child(this.chips_el(ctx.hosts, fonts, grid_w, k, hits));
             root = root.children((0..before).map(band));
@@ -1818,7 +1837,11 @@ impl LibraryScreen {
         root = root.child(El::column().size(grid_w as f32, heading_h as f32));
         let mut tree = this.grid.borrow_mut();
         let frame = tree.layout(root, viewport);
-        tree.paint(canvas, frame);
+        let focus = (this.zone == Zone::Grid && !this.quiet)
+            .then(|| grid_cell(this.cursor.max(0) as usize));
+        tree.set_focus(focus);
+        let cheap = super::settings::reduce_ui_res(ctx.settings, ctx.platform, ctx.fallback_ui);
+        tree.paint_focus(canvas, frame, k as f32, dt, cheap);
         drop(tree);
 
         // Hit rects are the cells as laid out; covers drawn this frame stay warm.

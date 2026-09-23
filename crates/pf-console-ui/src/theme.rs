@@ -118,6 +118,16 @@ pub fn art_sampling() -> skia_safe::SamplingOptions {
 pub const ERROR: Color4f = Color4f::new(1.0, 0.576, 0.541, 1.0);
 pub const ONLINE_GREEN: Color4f = Color4f::new(0.20, 0.84, 0.29, 1.0);
 
+/// Green text for what is live (online, playing) on glass: pastel under white ink, deep
+/// under dark ink.
+pub fn live() -> Color4f {
+    if ink().scrim.r > 0.5 {
+        Color4f::new(0.06, 0.50, 0.18, 1.0)
+    } else {
+        Color4f::new(0.64, 0.95, 0.60, 1.0)
+    }
+}
+
 /// Palette-derived fg, accent, glass, and scrim. Pale fields need dark text;
 /// a brand-violet wash on a copper field clashes.
 #[derive(Clone, Copy)]

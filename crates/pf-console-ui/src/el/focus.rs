@@ -183,6 +183,11 @@ impl Plate {
         }
     }
 
+    /// The pressed element's scale this frame: 1 at rest.
+    pub(crate) fn press_scale(&self) -> f32 {
+        self.press.map_or(1.0, |p| p.pos as f32)
+    }
+
     /// The plate on screen this frame, before its outset.
     pub(crate) fn rect(&self) -> Option<(Rect, f32)> {
         let e = self.edges.as_ref()?;

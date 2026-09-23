@@ -210,6 +210,7 @@ impl Screen {
     pub(crate) fn press(&mut self) {
         match self {
             Screen::Home(s) => s.press(),
+            Screen::Library(s) => s.press(),
             Screen::Settings(s) => s.press(),
             Screen::AddHost(s) => s.list.dip(),
             Screen::Pair(s) => s.list.dip(),

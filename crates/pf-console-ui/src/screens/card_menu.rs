@@ -97,6 +97,16 @@ impl CardMenu {
         CardMenu::on(Subject::Host(host.clone()), Mode::Menu)
     }
 
+    /// The presets, for one connect to `host`.
+    pub(crate) fn connect_with(host: &HostRow) -> CardMenu {
+        CardMenu::on(Subject::Host(host.clone()), Mode::ConnectWith)
+    }
+
+    /// `host`'s details, in sections.
+    pub(crate) fn host_details(host: &HostRow) -> CardMenu {
+        CardMenu::on(Subject::Host(host.clone()), Mode::Details)
+    }
+
     pub(crate) fn for_game(host: &HostRow, game: &LibraryGame, cover: Option<Image>) -> CardMenu {
         CardMenu::on(
             Subject::Game {

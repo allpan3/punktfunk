@@ -294,9 +294,9 @@ fn run_motion(s: &mut Shell) -> Vec<f64> {
     panic!("transition never settled");
 }
 
-/// The combined home: the games of the host the row rests on sit under it. Down lands on
-/// them without the desktop tile (the card above is the desk), OK launches from there,
-/// and Up from their top row returns to the card.
+/// The combined home: the games of the host the row rests on sit under it. Down past the
+/// card's verbs lands on them without the desktop tile (the card above is the desk), OK
+/// launches from there, and Up from their top row returns to the verbs.
 #[test]
 fn down_from_a_card_lands_on_its_games_and_launches_there() {
     fake_home();
@@ -335,9 +335,11 @@ fn down_from_a_card_lands_on_its_games_and_launches_there() {
     frame(&mut s);
     let below = |s: &Shell| matches!(s.stack.last(), Some(Screen::Home(h)) if h.shelf().is_some());
     s.handle_menu(MenuEvent::Move(MenuDir::Down));
-    assert!(below(&s), "Down lands on the games");
+    assert!(!below(&s), "the first Down lands on the card's verbs");
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    assert!(below(&s), "the second lands on the games");
     s.handle_menu(MenuEvent::Move(MenuDir::Up));
-    assert!(!below(&s), "Up from the top row returns to the card");
+    assert!(!below(&s), "Up from the top row returns to the verbs");
     s.handle_menu(MenuEvent::Move(MenuDir::Down));
     s.handle_menu(MenuEvent::Confirm);
     match s.take_action() {
@@ -3033,6 +3035,7 @@ fn dump_phone_home() {
     };
     let (mut s, _console, library) = shell(vec![Screen::Home(HomeScreen::new())]);
     s.fake_clock = Some((0.0, 1.0 / 60.0));
+    s.platform = crate::platform::Platform::Apple;
     let dump = |s: &mut Shell, frames: usize, name: &str| {
         let mut surface = skia_safe::surfaces::raster_n32_premul((w, h)).unwrap();
         for _ in 0..frames {
@@ -3080,4 +3083,7 @@ fn dump_phone_home() {
     s.handle_menu(MenuEvent::Move(MenuDir::Up));
     s.handle_menu(MenuEvent::Move(MenuDir::Up));
     dump(&mut s, 60, "p5-home-strip");
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    dump(&mut s, 60, "p6-home-offline");
 }

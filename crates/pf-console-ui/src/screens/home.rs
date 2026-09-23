@@ -1,21 +1,20 @@
-//! Console home: a center-snapping carousel of host tiles plus trailing Add Host
-//! and Rescan actions, and under it the focused host's games.
+//! Console home: a row of host cards plus trailing Add Host and Rescan actions, the
+//! focused card's verbs under it, and under those the focused host's games.
 //!
-//! Every tile is a focus target in an [`el::Tree`] row; Left and Right ask the tree,
-//! and the focus plate travels behind the tile it lands on. The cursor is the index;
-//! the sprung position chases it. Focus scale, brightness, and fade read off the live
-//! sprung distance so the look matches the strip mid-motion. OK connects, wakes, or
-//! pairs; Y (OK held on a remote) opens the card's menu; X jumps to Settings; Up is
-//! the tab strip's; Down lands on the games; B at the root leaves.
+//! Every card and verb is a focus target in one [`el::Tree`], so the plate travels from
+//! card to verb. The row keeps the focused card on the shared margin until its end reaches
+//! the screen's. OK connects, wakes, or pairs; Down reaches the verbs (Games, Connect
+//! with…, Wake, Details…, More…), then the games; Y (OK held on a remote) opens the
+//! card's menu; X jumps to Settings; Up from the row is the tab strip's; B at the root
+//! leaves.
 //!
 //! The games are the Games tab's grid for that host ([`LibraryScreen::embedded`]). The
-//! shell fetches them once the row settles on a paired, online host; Up from their top
-//! row and B return to the row.
+//! shell fetches them once the row settles on a paired, online host. With focus in them
+//! the row and verbs slide up out of the way; Up from their top row returns to the verbs.
 //!
-//! Discovery churns the list; focus follows the tile key, not the index. A
-//! press on a side tile only retargets the cursor — Confirm starts a session.
-//! Pin with the tests in this module: key-follow, confirm routing, padless
-//! Settings/Options, pinned-card preset, trailing Add Host.
+//! Discovery churns the list; focus follows the tile key, not the index. A press on
+//! another card only focuses it; a second press connects. Pin with the tests in this
+//! module: key-follow, confirm routing, verbs, pinned-card preset, trailing Add Host.
 
 use crate::anim::{entrances, Entrance, EntranceAt, Spring};
 use crate::el::{Axis, El, Group, Id, Tree};
@@ -25,35 +24,35 @@ use crate::library::{
 };
 use crate::model::{ConsoleCmd, HostRow};
 use crate::pointer::{Pointer, PointerKind};
+use crate::screens::card_menu::CardMenu;
 use crate::screens::library::LibraryScreen;
 use crate::screens::{ConnectIntent, Ctx, Outbox, Screen};
-use crate::theme::{accent, fg, fill, stroke, Fonts, PanelStroke, ONLINE_GREEN, W};
+use crate::theme::{accent, edge, fg, fill, stroke, Fonts, PanelStroke, W};
 use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuPulse};
-use skia_safe::{Canvas, Color4f, MaskFilter, PathBuilder, Point, RRect, Rect};
+use skia_safe::{Canvas, Color4f, MaskFilter, PathBuilder, RRect, Rect};
 
 const TILE_W: f64 = 340.0;
-const TILE_H: f64 = 224.0;
-const TILE_GAP: f64 = 30.0;
-const TILE_CORNER: f64 = 26.0;
-/// Air above the row, and between it and the games: the plate's outset and a breath.
+const TILE_H: f64 = 92.0;
+const TILE_GAP: f64 = 24.0;
+const TILE_CORNER: f64 = 20.0;
+const BADGE: f64 = 52.0;
+/// How much the focused card grows over its neighbours.
+const FOCUS_LIFT: f64 = 0.04;
+/// Air above the row: the plate's outset and a breath.
 const ROW_AIR: f64 = 16.0;
-/// Tiles further than this many pitches from the sprung centre are off screen.
-const CULL: f64 = 2.6;
+/// A verb's height, label size and side padding; the air above the verbs, the gap between.
+const VERB_H: f64 = 38.0;
+const VERB_TEXT: f64 = 15.0;
+const VERB_PAD: f64 = 18.0;
+const VERB_AIR: f64 = 16.0;
+const VERB_GAP: f64 = 12.0;
+/// Air between the verbs and the games.
+const GAMES_AIR: f64 = 12.0;
 
 /// Sentinel. Host keys are fingerprints or `addr:port`; neither starts with `\0`.
 const ADD_KEY: &str = "\0add";
 /// Sentinel for the trailing Rescan tile; same `\0` prefix as [`ADD_KEY`].
 const SCAN_KEY: &str = "\0scan";
-
-/// The offscreen a tile needs: reduced rendering keeps only the entrance fade. Once mounted,
-/// its veil and scale carry depth without rerasterizing the card through a colour-filter layer.
-fn tile_layer(reduced: bool, entrance: f64, alpha: f64, recede: f64) -> Option<(f32, bool)> {
-    if reduced {
-        (entrance < 0.999).then_some((entrance as f32, false))
-    } else {
-        (alpha < 0.999 || recede > 0.001).then_some((alpha as f32, recede > 0.001))
-    }
-}
 
 /// Do not use `hosts.get(i)`: `None` is both trailing actions.
 enum Slot<'h> {
@@ -68,6 +67,72 @@ fn slot_at(i: usize, hosts: &[HostRow]) -> Slot<'_> {
         Some(h) => Slot::Host(h),
         None if i == hosts.len() => Slot::AddHost,
         None => Slot::Rescan,
+    }
+}
+
+/// What a card offers besides OK, each one press away under it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Verb {
+    Pair,
+    Games,
+    ConnectWith,
+    Wake,
+    Details,
+    /// The card's whole menu, the hold's.
+    More,
+}
+
+impl Verb {
+    fn label(self) -> &'static str {
+        match self {
+            Verb::Pair => "Pair\u{2026}",
+            Verb::Games => "Games",
+            Verb::ConnectWith => "Connect with\u{2026}",
+            Verb::Wake => "Wake",
+            Verb::Details => "Details\u{2026}",
+            Verb::More => "More\u{2026}",
+        }
+    }
+}
+
+/// The verbs under a card. The action tiles have none: OK is all they do.
+fn verbs(slot: &Slot<'_>) -> Vec<Verb> {
+    let Slot::Host(h) = slot else {
+        return Vec::new();
+    };
+    let mut v = Vec::new();
+    if !h.paired {
+        v.push(Verb::Pair);
+    } else if h.online {
+        v.extend([Verb::Games, Verb::ConnectWith]);
+    } else if h.can_wake {
+        v.push(Verb::Wake);
+    }
+    v.extend([Verb::Details, Verb::More]);
+    v
+}
+
+fn verb_id(i: usize) -> Id {
+    Id::new("verb", i)
+}
+
+fn run_verb(verb: Verb, h: &HostRow, ctx: &mut Ctx, fx: &mut Outbox) {
+    match verb {
+        Verb::Pair => fx.push(Screen::Pair(super::pair::PairScreen::new(
+            h,
+            ctx.device_name,
+        ))),
+        Verb::Games => fx.tab = Some(crate::shell::Tab::Games),
+        Verb::ConnectWith => fx.push(Screen::CardMenu(CardMenu::connect_with(h))),
+        Verb::Wake => {
+            fx.cmds.push(ConsoleCmd::Wake {
+                key: h.key.clone(),
+                then_connect: false,
+            });
+            fx.toast = Some(format!("Waking {}\u{2026}", h.name));
+        }
+        Verb::Details => fx.push(Screen::CardMenu(CardMenu::host_details(h))),
+        Verb::More => fx.options(CardMenu::for_host(h)),
     }
 }
 
@@ -92,6 +157,10 @@ pub(crate) struct HomeScreen {
     browse: bool,
     /// Where the games were last drawn, for the pointer.
     shelf_rect: Rect,
+    /// Focus is on the focused card's verb `i`, not the card.
+    verb: Option<usize>,
+    /// How far the row and verbs have slid up for the games, px.
+    page: Spring,
 }
 
 impl HomeScreen {
@@ -108,6 +177,8 @@ impl HomeScreen {
             below: false,
             browse: false,
             shelf_rect: Rect::new_empty(),
+            verb: None,
+            page: Spring::rest(0.0),
         }
     }
 
@@ -161,20 +232,24 @@ impl HomeScreen {
         shelf.set_quiet(false);
         self.below = true;
         self.browse = false;
+        self.verb = None;
         Some(MenuPulse::Move)
     }
 
-    fn go_up(&mut self) {
+    /// Out of the games: to the first verb, where Down came from, or to the card.
+    fn go_up(&mut self, to_verbs: bool) {
         self.below = false;
+        self.verb = to_verbs.then_some(0);
         if let Some(shelf) = self.shelf.as_mut() {
             shelf.set_quiet(true);
         }
     }
 
-    /// OK went down: the focused card's plate dips, or the games' focused row.
+    /// OK went down: the plate dips under the focused card, verb, or poster.
     pub(crate) fn press(&mut self) {
-        if !self.below {
-            self.tree.press();
+        match self.shelf.as_mut().filter(|_| self.below) {
+            Some(shelf) => shelf.press(),
+            None => self.tree.press(),
         }
     }
 
@@ -232,6 +307,7 @@ impl HomeScreen {
     /// moves or bumps.
     fn travel(&mut self, dir: MenuDir, len: usize) -> Option<MenuPulse> {
         self.browse = false;
+        self.verb = None;
         let focused = self
             .keys
             .get(self.cursor.max(0) as usize)
@@ -254,18 +330,48 @@ impl HomeScreen {
     ) -> Option<MenuPulse> {
         self.reconcile(ctx.hosts);
         if self.below && !self.shelf_live(ctx.hosts) {
-            self.go_up();
+            self.go_up(false);
         }
         if self.below {
             let shelf = self.shelf.as_mut()?;
             let up = ev == MenuEvent::Move(MenuDir::Up) && shelf.at_top();
             if up || ev == MenuEvent::Back {
-                self.go_up();
+                self.go_up(up);
                 return Some(MenuPulse::Move);
             }
             return shelf.menu(ev, ctx, fx);
         }
         let len = Self::len(ctx.hosts);
+        let slot = self.slot(ctx.hosts);
+        let on = verbs(&slot);
+        if let Some(i) = self.verb {
+            match ev {
+                MenuEvent::Move(MenuDir::Left) if i > 0 => {
+                    self.verb = Some(i - 1);
+                    return Some(MenuPulse::Move);
+                }
+                MenuEvent::Move(MenuDir::Right) if i + 1 < on.len() => {
+                    self.verb = Some(i + 1);
+                    return Some(MenuPulse::Move);
+                }
+                MenuEvent::Move(MenuDir::Left | MenuDir::Right) => {
+                    return Some(MenuPulse::Boundary)
+                }
+                MenuEvent::Move(MenuDir::Up) | MenuEvent::Back => {
+                    self.verb = None;
+                    return Some(MenuPulse::Move);
+                }
+                MenuEvent::Move(MenuDir::Down) => return self.go_below(ctx.hosts),
+                MenuEvent::Confirm => {
+                    if let (Some(&v), Slot::Host(h)) = (on.get(i), slot) {
+                        run_verb(v, h, ctx, fx);
+                    }
+                    return Some(MenuPulse::Confirm);
+                }
+                // The pad shortcuts act on the card, as they do from it.
+                _ => {}
+            }
+        }
         match ev {
             MenuEvent::Move(dir @ (MenuDir::Left | MenuDir::Right)) => self.travel(dir, len),
             MenuEvent::JumpBack => self.step(-5, len, true),
@@ -328,12 +434,16 @@ impl HomeScreen {
             }
             // Up is the tab strip's.
             MenuEvent::Move(MenuDir::Up) => Some(MenuPulse::Boundary),
-            MenuEvent::Move(MenuDir::Down) => self.go_below(ctx.hosts),
+            MenuEvent::Move(MenuDir::Down) if on.is_empty() => self.go_below(ctx.hosts),
+            MenuEvent::Move(MenuDir::Down) => {
+                self.verb = Some(0);
+                Some(MenuPulse::Move)
+            }
         }
     }
 
-    /// Only the centre tile activates. A press that also connected would start a
-    /// session for a host that was merely aimed at.
+    /// Only the focused card activates. A press that also connected would start a session
+    /// for a host that was merely aimed at. A verb acts on the first press.
     pub(crate) fn pointer(&mut self, p: Pointer, ctx: &mut Ctx, fx: &mut Outbox) -> bool {
         self.reconcile(ctx.hosts);
         if self.shelf_live(ctx.hosts) && p.hits(self.shelf_rect) {
@@ -347,7 +457,21 @@ impl HomeScreen {
             return shelf.pointer(p, ctx, fx);
         }
         if self.below && matches!(p.kind, PointerKind::Move | PointerKind::Press) {
-            self.go_up();
+            self.go_up(false);
+        }
+        let hit = self.tree.hit(p.x as f32, p.y as f32);
+        let verb = (0..verbs(&self.slot(ctx.hosts)).len()).find(|&i| hit == Some(verb_id(i)));
+        if let Some(i) = verb {
+            let moved = self.verb != Some(i);
+            self.verb = Some(i);
+            return match p.kind {
+                PointerKind::Press => {
+                    self.menu(MenuEvent::Confirm, ctx, fx);
+                    true
+                }
+                PointerKind::Move => moved,
+                _ => false,
+            };
         }
         let len = Self::len(ctx.hosts);
         match p.kind {
@@ -359,19 +483,22 @@ impl HomeScreen {
             // than the one that reaches it. The move-then-press fallback below stays for a
             // pointer that cannot hover: a touchscreen sends Press with no Move before it.
             PointerKind::Move => match self.pick(p, len) {
-                Some(i) if i != self.cursor as usize => {
+                Some(i) if i != self.cursor as usize || self.verb.is_some() => {
                     self.cursor = i as i32;
+                    self.verb = None;
                     true
                 }
                 _ => false,
             },
             PointerKind::Press => match self.pick(p, len) {
                 Some(i) if i == self.cursor as usize => {
+                    self.verb = None;
                     self.menu(MenuEvent::Confirm, ctx, fx);
                     true
                 }
                 Some(i) => {
                     self.cursor = i as i32;
+                    self.verb = None;
                     true
                 }
                 None => false,
@@ -380,14 +507,15 @@ impl HomeScreen {
         }
     }
 
-    /// The painted tile under `p`, by key: discovery can reorder the strip between draw
-    /// and press.
+    /// The painted card under `p`, by key: discovery can reorder the row between draw and
+    /// press.
     fn pick(&self, p: Pointer, len: usize) -> Option<usize> {
         let i = self.index_of(self.tree.hit(p.x as f32, p.y as f32)?)?;
-        (i < len && (i as f64 - self.anim.pos).abs() <= CULL).then_some(i)
+        (i < len).then_some(i)
     }
 
     fn step(&mut self, delta: i32, len: usize, clamp: bool) -> Option<MenuPulse> {
+        self.verb = None;
         match step_cursor(self.cursor, len, delta, clamp) {
             StepResult::Moved(to) => {
                 self.cursor = to;
@@ -409,6 +537,12 @@ impl HomeScreen {
             return shelf.announcement(ctx);
         }
         let hosts = ctx.hosts;
+        if let Some(v) = self
+            .verb
+            .and_then(|i| verbs(&self.slot(hosts)).get(i).copied())
+        {
+            return Some(v.label().trim_end_matches('\u{2026}').to_string());
+        }
         let say = |(title, sub): (&str, &str)| format!("{title}, {sub}");
         Some(match self.slot(hosts) {
             Slot::Host(h) => format!("{}, {}", h.name, status(h).0),
@@ -461,7 +595,7 @@ impl HomeScreen {
         self.bump.step(0.0, BUMP_K, BUMP_C, dt);
         self.bump.settle(0.0, 0.3, 4.0);
         // Reduced motion drops bump travel, not the chase. Freezing the cursor
-        // spring would jump the strip; the refusal is already a Boundary haptic.
+        // spring would jump the row; the refusal is already a Boundary haptic.
         if crate::theme::reduce_motion() {
             self.bump = Spring::rest(0.0);
         }
@@ -477,24 +611,52 @@ impl HomeScreen {
         if self.entrance.is_some_and(|e| e.done(ctx.t)) {
             self.entrance = None;
         }
+        if self.below && !self.shelf_live(ctx.hosts) {
+            self.go_up(false);
+        }
 
         let w = f64::from(rect.width());
-        let tile_w = (TILE_W * k).min(w * 0.84);
-        // The row takes the top; the focused host's games fill what is left under it.
-        let tile_h = (TILE_H * k)
-            .min(f64::from(rect.height()) * 0.42)
-            .max(118.0 * k);
+        let margin = edge(k);
+        let tile_w = (TILE_W * k).min((w - 2.0 * margin) * 0.8);
+        let tile_h = TILE_H * k;
         let pitch = tile_w + TILE_GAP * k;
-        let cx0 = f64::from(rect.left) + w / 2.0 + self.bump.pos * k;
-        let cy = f64::from(rect.top) + ROW_AIR * k + tile_h / 2.0;
-
         let len = Self::len(ctx.hosts);
-        let t = ctx.t;
-        // A scroll the carousel spring drives, so the plate rides the strip and springs only
-        // between tiles. Two pitches of slack each end hold the overshoot and the bump. The
-        // viewport spans three widths: a scaled screen in a push must not show its clip.
+        let slot = self.slot(ctx.hosts);
+        let verbs = verbs(&slot);
+        if self.verb.is_some_and(|i| i >= verbs.len()) {
+            self.verb = None;
+        }
+
+        // With focus in the games, the row and its verbs slide up out of their way.
+        let verbs_h = if verbs.is_empty() {
+            0.0
+        } else {
+            (VERB_AIR + VERB_H) * k
+        };
+        let block = ROW_AIR * k + tile_h + verbs_h;
+        let page_to = if self.below { block } else { 0.0 };
+        if crate::theme::reduce_motion() {
+            self.page = Spring::rest(page_to);
+        } else {
+            self.page
+                .step_spec(page_to, crate::anim::springs::FOCUS, dt);
+            self.page.settle(page_to, 0.25, 4.0);
+        }
+        let top = f64::from(rect.top) - self.page.pos;
+        let row_y = top + ROW_AIR * k;
+
+        // The focused card rests on the margin until the row's end reaches the screen's.
+        let span = (len as f64 - 1.0) * pitch + tile_w;
+        let most = ((span - (w - 2.0 * margin)) / pitch).max(0.0);
+        let s = self.anim.pos.clamp(0.0, most);
+        let bump = self.bump.pos * k;
+        let x_of = |i: f64| f64::from(rect.left) + margin + (i - s) * pitch + bump;
+
+        // A scroll the row's spring drives, so the plate rides the row and springs only
+        // between cards. The viewport spans three widths: a scaled screen in a push must
+        // not show its clip.
         let slack = 2.0 * pitch;
-        let offset = (slack + self.anim.pos * pitch - self.bump.pos * k) as f32;
+        let offset = (slack + s * pitch - bump) as f32;
         let strip = Id::new("hosts", 0);
         self.tree.set_offset(strip, offset);
         let content_w = 2.0 * slack + 3.0 * w + len.saturating_sub(1) as f64 * pitch;
@@ -504,45 +666,42 @@ impl HomeScreen {
             .group(Group::Row)
             .child(El::column().place(Rect::from_xywh(0.0, 0.0, content_w as f32, 1.0)));
         for i in 0..len {
-            let d = i as f64 - self.anim.pos;
-            let f = 1.0 - d.abs().min(1.0); // 1 at focus → 0 one slot out
+            let f = 1.0 - (i as f64 - self.anim.pos).abs().min(1.0);
             let ent = self
                 .entrance
                 .map_or(EntranceAt::SETTLED, |e| e.at(i, ctx.t));
             let arrive = ENTER_SCALE + (1.0 - ENTER_SCALE) * ent.travel;
-            let scale = (0.88 + 0.12 * f) * arrive;
-            let alpha = (0.78 + 0.22 * f) * ent.fade;
-            let cx = cx0 + d * pitch;
-            let cy = cy + (1.0 - ent.travel) * ENTER_RISE * k;
+            let scale = (1.0 + FOCUS_LIFT * f) * arrive;
+            let x = x_of(i as f64);
+            let cx = x + tile_w / 2.0;
+            let cy = row_y + tile_h / 2.0 + (1.0 - ent.travel) * ENTER_RISE * k;
             let tile = Rect::from_xywh(
-                (cx - tile_w / 2.0) as f32,
+                x as f32,
                 (cy - tile_h / 2.0) as f32,
                 tile_w as f32,
                 tile_h as f32,
             );
-            // The node is the drawn tile, entrance included: it is still offset by
-            // ENTER_RISE while arriving.
+            // The node is the drawn card, entrance and lift included.
             let drawn = Rect::from_xywh(
                 (cx - tile_w * scale / 2.0) as f32,
                 (cy - tile_h * scale / 2.0) as f32,
                 (tile_w * scale) as f32,
                 (tile_h * scale) as f32,
             );
-            let node = if d.abs() > CULL {
+            let off =
+                x + tile_w < f64::from(rect.left) - pitch || x > f64::from(rect.right) + pitch;
+            let node = if off {
                 El::column()
             } else {
                 let look = TileLook {
                     tile,
                     center: (cx, cy),
                     scale,
-                    alpha,
                     fade: ent.fade,
-                    f,
-                    reduced,
                     k,
                 };
                 let slot = slot_at(i, ctx.hosts);
-                El::paint(move |canvas, _| look.paint(canvas, fonts, &slot, t))
+                El::paint(move |canvas, _| look.paint(canvas, fonts, &slot))
             };
             row = row.child(
                 node.id(Self::tile_id(&self.keys[i]))
@@ -550,23 +709,56 @@ impl HomeScreen {
                     .place(drawn.with_offset((-origin.0, -origin.1))),
             );
         }
-        let frame = self
-            .tree
-            .layout(El::column().child(row.place(viewport)), rect);
-        let focused = (self.keys.get(self.cursor.max(0) as usize))
-            .filter(|_| !self.below)
-            .map(|k| Self::tile_id(k));
+
+        // The verbs sit under the focused card and follow it along the row. A scroll with
+        // no travel clips them at the band as they slide up.
+        let fade = (1.0 - self.page.pos / block.max(1.0)).clamp(0.0, 1.0) as f32;
+        let mut vx = x_of(f64::from(self.cursor));
+        let vy = row_y + tile_h + VERB_AIR * k;
+        let mut under = El::scroll(Id::new("verbs", 0), Axis::Vertical)
+            .group(Group::Row)
+            .place(Rect::from_xywh(0.0, 0.0, rect.width(), rect.height()));
+        for (i, v) in verbs.iter().enumerate() {
+            let label = v.label();
+            let bw =
+                f64::from(fonts.measure(label, W::SemiBold, VERB_TEXT * k)) + 2.0 * VERB_PAD * k;
+            let r = Rect::from_xywh(
+                (vx - f64::from(rect.left)) as f32,
+                (vy - f64::from(rect.top)) as f32,
+                bw as f32,
+                (VERB_H * k) as f32,
+            );
+            under = under.child(
+                El::paint(move |canvas, r| {
+                    canvas.save_layer_alpha_f(r.with_outset((8.0, 8.0)), fade);
+                    draw_verb(canvas, fonts, label, r, k);
+                    canvas.restore();
+                })
+                .id(verb_id(i))
+                .focusable((VERB_H * k / 2.0) as f32)
+                .place(r),
+            );
+            vx += bw + VERB_GAP * k;
+        }
+        let root = El::column().child(row.place(viewport)).child(under);
+        let frame = self.tree.layout(root, rect);
+        let focused = match self.verb {
+            _ if self.below => None,
+            Some(i) => Some(verb_id(i)),
+            None => (self.keys.get(self.cursor.max(0) as usize)).map(|k| Self::tile_id(k)),
+        };
         self.tree.set_focus(focused);
-        // The plate is the focus mark: it lifts the tile, so the tile draws no halo.
+        // The plate is the focus mark: it lifts the card, so the card draws no halo.
         self.tree.paint_focus(canvas, frame, k as f32, dt, reduced);
 
-        if self.below && !self.shelf_live(ctx.hosts) {
-            self.go_up();
-        }
         self.shelf_rect = Rect::new_empty();
+        let games_top = top + block + GAMES_AIR * k;
         if self.shelf_live(ctx.hosts) {
-            let top = cy + tile_h / 2.0 + ROW_AIR * k;
-            let games = Rect::from_ltrb(rect.left, top as f32, rect.right, rect.bottom);
+            // The games run on to the screen's foot rather than stopping short of it.
+            let foot = canvas
+                .local_clip_bounds()
+                .map_or(rect.bottom, |c| c.bottom.max(rect.bottom));
+            let games = Rect::from_ltrb(rect.left, games_top as f32, rect.right, foot);
             if let Some(shelf) = self.shelf.as_mut() {
                 shelf.render(canvas, games, k, dt, fonts, ctx);
             }
@@ -574,148 +766,106 @@ impl HomeScreen {
             if self.browse && self.shelf.as_ref().is_some_and(|s| s.has_titles()) {
                 self.go_below(ctx.hosts);
             }
-        }
-
-        if ctx.hosts.is_empty() {
-            fonts.centered(
-                canvas,
-                "Hosts on this network appear automatically — add one by address for everything else.",
-                W::Regular,
-                13.0 * k,
-                fg(0.55),
-                f64::from(rect.left) + w / 2.0,
-                cy + tile_h / 2.0 + 24.0 * k,
-                w * 0.7,
-            );
+        } else {
+            let line = if ctx.hosts.is_empty() {
+                Some("Hosts on this network appear automatically. Add one by address for everything else.".to_string())
+            } else {
+                no_games(&slot)
+            };
+            if let Some(line) = line {
+                fonts.draw_clipped(
+                    canvas,
+                    &line,
+                    f64::from(rect.left) + margin,
+                    games_top + 30.0 * k,
+                    W::Medium,
+                    15.0 * k,
+                    fg(0.62),
+                    w - 2.0 * margin,
+                );
+            }
         }
     }
 }
 
-/// One tile as the carousel draws it this frame.
+/// One card as the row draws it this frame.
 #[derive(Clone, Copy)]
 struct TileLook {
     tile: Rect,
     center: (f64, f64),
     scale: f64,
-    alpha: f64,
     /// Entrance fade.
     fade: f64,
-    /// 1 at focus, 0 one slot out.
-    f: f64,
-    reduced: bool,
     k: f64,
 }
 
 impl TileLook {
-    fn paint(&self, canvas: &Canvas, fonts: &Fonts, slot: &Slot<'_>, t: f64) {
+    fn paint(&self, canvas: &Canvas, fonts: &Fonts, slot: &Slot<'_>) {
         let TileLook {
             tile,
             center: (cx, cy),
             scale,
-            alpha,
             fade,
-            f,
-            reduced,
             k,
         } = *self;
         canvas.save();
         canvas.translate((cx as f32, cy as f32));
         canvas.scale((scale as f32, scale as f32));
         canvas.translate((-cx as f32, -cy as f32));
-        // Rich tiles isolate alpha/recede and blur focus marks. The reduced path keeps the
-        // entrance layer only; live card motion remains direct geometry on the main target.
-        let recede = 1.0 - f;
-        let layer = tile_layer(reduced, fade, alpha, recede);
-        if let Some((layer_alpha, filter_recede)) = layer {
-            let mut lp = crate::theme::layer();
-            lp.set_alpha_f(layer_alpha);
-            if filter_recede {
-                lp.set_color_filter(skia_safe::color_filters::matrix_row_major(
-                    &crate::theme::recede_matrix(recede),
-                    None,
-                ));
-            }
-            let bounds = tile.with_outset(((36.0 * k) as f32, (36.0 * k) as f32));
-            canvas.save_layer(
-                &skia_safe::canvas::SaveLayerRec::default()
-                    .bounds(&bounds)
-                    .paint(&lp),
-            );
+        // Only the entrance fades a card; a settled one draws straight onto the field.
+        let layered = fade < 0.999;
+        if layered {
+            let bounds = tile.with_outset(((24.0 * k) as f32, (24.0 * k) as f32));
+            canvas.save_layer_alpha_f(bounds, fade as f32);
         }
         match slot {
-            Slot::Host(h) => draw_host_tile(canvas, fonts, h, tile, k, t),
+            Slot::Host(h) => draw_host_tile(canvas, fonts, h, tile, k),
             Slot::AddHost => draw_action_tile(canvas, fonts, tile, k, ActionTile::AddHost),
             Slot::Rescan => draw_action_tile(canvas, fonts, tile, k, ActionTile::Rescan),
         }
-        // The cheap path leans harder on the veil because it omits the recede matrix.
-        if f < 1.0 {
-            let veil = (1.0 - f) as f32 * if reduced { 0.16 } else { 0.07 };
-            canvas.draw_rrect(
-                RRect::new_rect_xy(tile, (TILE_CORNER * k) as f32, (TILE_CORNER * k) as f32),
-                &fill(crate::theme::shade(veil)),
-            );
-        }
-        if layer.is_some() {
+        if layered {
             canvas.restore();
         }
         canvas.restore();
     }
 }
 
-fn draw_host_tile(canvas: &Canvas, fonts: &Fonts, h: &HostRow, rect: Rect, k: f64, _t: f64) {
-    crate::theme::panel(
-        canvas,
-        rect,
-        TILE_CORNER as f32,
-        h.saved.then(|| accent(0.20)),
-        if h.saved {
-            PanelStroke::Gradient
-        } else {
-            PanelStroke::GradientDashed
-        },
-        k as f32,
-    );
-    crate::theme::panel_highlight(canvas, rect, TILE_CORNER as f32, k as f32);
+/// A card: the badge, then what the host is doing over its name, and a lock while OK would
+/// pair first.
+fn draw_host_tile(canvas: &Canvas, fonts: &Fonts, h: &HostRow, rect: Rect, k: f64) {
+    let stroke = if h.saved {
+        PanelStroke::Plain(0.08)
+    } else {
+        PanelStroke::GradientDashed
+    };
+    crate::theme::panel(canvas, rect, TILE_CORNER as f32, None, stroke, k as f32);
     let pad = 20.0 * k;
-    let (l, t) = (f64::from(rect.left) + pad, f64::from(rect.top) + pad);
-    draw_badge(canvas, fonts, &h.name, &h.os, h.saved, l, t, k);
-
-    let mut sx = f64::from(rect.right) - pad;
-    if h.online {
-        let r = 4.5 * k;
-        let center = Point::new((sx - r) as f32, (t + 9.0 * k) as f32);
-        let mut glow = fill(Color4f::new(
-            ONLINE_GREEN.r,
-            ONLINE_GREEN.g,
-            ONLINE_GREEN.b,
-            0.7,
-        ));
-        glow.set_mask_filter(MaskFilter::blur(
-            skia_safe::BlurStyle::Normal,
-            (5.0 * k) as f32,
-            None,
-        ));
-        canvas.draw_circle(center, r as f32, &glow);
-        canvas.draw_circle(center, r as f32, &fill(ONLINE_GREEN));
-        sx -= 2.0 * r + 9.0 * k;
-    }
-    // The lock marks what OK would pair first.
+    let cy = f64::from(rect.center_y());
+    let l = f64::from(rect.left) + pad;
+    draw_badge(
+        canvas,
+        fonts,
+        &h.name,
+        &h.os,
+        h.saved,
+        l,
+        cy - BADGE * k / 2.0,
+        k,
+    );
+    let tx = l + (BADGE + 16.0) * k;
+    let mut right = f64::from(rect.right) - pad;
     if !h.paired {
-        draw_lock(canvas, sx - 9.0 * k, t + 4.0 * k, k);
+        draw_lock(canvas, right - 11.0 * k, cy - 9.0 * k, k);
+        right -= 23.0 * k;
     }
-
-    let max_w = f64::from(rect.width()) - 2.0 * pad;
-    let sub_base = f64::from(rect.bottom) - pad;
+    let max_w = right - tx;
     let (line, ink) = status(h);
-    let mut x = l;
-    // Something up over there reads first, green like the online pip.
-    if !h.running.is_empty() {
-        let r = 4.0 * k;
-        canvas.draw_circle(
-            ((x + r) as f32, (sub_base - 4.6 * k) as f32),
-            r as f32,
-            &fill(ONLINE_GREEN),
-        );
+    let sub_base = cy - 7.0 * k;
+    let mut x = tx;
+    if h.online || !h.running.is_empty() {
+        let r = 3.5 * k;
+        let dot = ((x + r) as f32, (sub_base - 4.6 * k) as f32);
+        canvas.draw_circle(dot, r as f32, &fill(crate::theme::live()));
         x += 2.0 * r + 6.0 * k;
     }
     fonts.draw_clipped(
@@ -724,20 +874,48 @@ fn draw_host_tile(canvas: &Canvas, fonts: &Fonts, h: &HostRow, rect: Rect, k: f6
         x,
         sub_base,
         W::SemiBold,
-        13.0 * k,
+        14.0 * k,
         ink,
-        l + max_w - x,
+        tx + max_w - x,
     );
     fonts.draw_clipped(
         canvas,
         &h.name,
-        l,
-        sub_base - 22.0 * k,
+        tx,
+        cy + 18.0 * k,
         W::Bold,
-        23.0 * k,
+        21.0 * k,
         fg(1.0),
         max_w,
     );
+}
+
+/// A verb under the focused card: a glass pill with its label.
+fn draw_verb(canvas: &Canvas, fonts: &Fonts, label: &str, r: Rect, k: f64) {
+    let stroke = PanelStroke::Plain(0.08);
+    crate::theme::panel(canvas, r, (VERB_H / 2.0) as f32, None, stroke, k as f32);
+    let size = VERB_TEXT * k;
+    let tw = f64::from(fonts.measure(label, W::SemiBold, size));
+    let (x, y) = (
+        f64::from(r.center_x()) - tw / 2.0,
+        f64::from(r.center_y()) + size * 0.36,
+    );
+    fonts.draw(canvas, label, x, y, W::SemiBold, size, fg(0.95));
+}
+
+/// What stands where the games would when the focused card has none to show.
+fn no_games(slot: &Slot<'_>) -> Option<String> {
+    Some(match slot {
+        Slot::Host(h) if !h.paired => format!("Pair with {} to see its games here.", h.name),
+        Slot::Host(h) if !h.online && h.can_wake => {
+            format!("{} is asleep. Wake it to see its games.", h.name)
+        }
+        Slot::Host(h) if !h.online => format!(
+            "{} is offline. Its games show here once it is back.",
+            h.name
+        ),
+        _ => return None,
+    })
 }
 
 /// A card's one status line and its ink: what the host is doing, whether OK will reach
@@ -746,35 +924,35 @@ fn status(h: &HostRow) -> (String, Color4f) {
     if let Some(p) = &h.pin {
         return (p.name.clone(), accent_color(p.accent.as_deref()));
     }
-    let base = if !h.running.is_empty() {
-        return (format!("Playing {}", h.running), ONLINE_GREEN);
+    let (base, ink) = if !h.running.is_empty() {
+        return (format!("Playing {}", h.running), crate::theme::live());
     } else if !h.saved {
-        "Found on this network".to_string()
+        ("Found on this network".to_string(), fg(0.7))
     } else if !h.paired {
-        "Not paired yet".to_string()
+        ("Not paired yet".to_string(), fg(0.7))
     } else if h.online {
-        "Online".to_string()
+        ("Online".to_string(), crate::theme::live())
     } else if h.can_wake {
-        "Offline \u{b7} wakes when you connect".to_string()
+        ("Offline \u{b7} wakes when you connect".to_string(), fg(0.7))
     } else {
-        "Offline".to_string()
+        ("Offline".to_string(), fg(0.7))
     };
     match &h.bound_preset {
-        Some(b) => (format!("{base} \u{b7} {}", b.name), fg(0.7)),
-        None => (base, fg(0.7)),
+        Some(b) => (format!("{base} \u{b7} {}", b.name), ink),
+        None => (base, ink),
     }
 }
 
-/// `#RRGGBB` accent, or the palette accent. A malformed value falls back.
+/// `#RRGGBB` accent, or the card's ink. A malformed value falls back.
 fn accent_color(hex: Option<&str>) -> skia_safe::Color4f {
     let Some(hex) = hex
         .and_then(|a| a.strip_prefix('#'))
         .filter(|h| h.len() == 6)
     else {
-        return accent(1.0);
+        return fg(0.85);
     };
     let Ok(v) = u32::from_str_radix(hex, 16) else {
-        return accent(1.0);
+        return fg(0.85);
     };
     skia_safe::Color4f::new(
         ((v >> 16) & 0xff) as f32 / 255.0,
@@ -790,7 +968,7 @@ enum ActionTile {
     Rescan,
 }
 
-/// The tile's title and the line under it. Drawn and spoken from the same pair.
+/// The tile's title and the line over it. Drawn and spoken from the same pair.
 fn action_text(kind: ActionTile) -> (&'static str, &'static str) {
     match kind {
         ActionTile::AddHost => ("Add Host", "Register a host by address"),
@@ -807,20 +985,17 @@ fn draw_action_tile(canvas: &Canvas, fonts: &Fonts, rect: Rect, k: f64, kind: Ac
         PanelStroke::GradientDashed,
         k as f32,
     );
-    crate::theme::panel_highlight(canvas, rect, TILE_CORNER as f32, k as f32);
     let pad = 20.0 * k;
-    let (l, t) = (f64::from(rect.left) + pad, f64::from(rect.top) + pad);
-    let badge = Rect::from_xywh(l as f32, t as f32, (52.0 * k) as f32, (52.0 * k) as f32);
-    canvas.draw_rrect(
-        RRect::new_rect_xy(badge, (15.0 * k) as f32, (15.0 * k) as f32),
-        &fill(accent(0.16)),
-    );
-    canvas.draw_rrect(
-        RRect::new_rect_xy(badge, (15.0 * k) as f32, (15.0 * k) as f32),
-        &stroke(accent(0.5), 1.0),
-    );
-    let (bcx, bcy) = (l + 26.0 * k, t + 26.0 * k);
-    let mut p = stroke(accent(1.0), (3.0 * k) as f32);
+    let cy = f64::from(rect.center_y());
+    let l = f64::from(rect.left) + pad;
+    let side = BADGE * k;
+    let badge = Rect::from_xywh(l as f32, (cy - side / 2.0) as f32, side as f32, side as f32);
+    let rr = RRect::new_rect_xy(badge, (14.0 * k) as f32, (14.0 * k) as f32);
+    canvas.draw_rrect(rr, &fill(fg(0.14)));
+    canvas.draw_rrect(rr, &stroke(fg(0.35), 1.0));
+    let (bcx, bcy) = (l + side / 2.0, cy);
+    let ink = fg(0.9);
+    let mut p = stroke(ink, (3.0 * k) as f32);
     p.set_stroke_cap(skia_safe::PaintCap::Round);
     let r = 9.0 * k;
     match kind {
@@ -857,38 +1032,37 @@ fn draw_action_tile(canvas: &Canvas, fonts: &Fonts, rect: Rect, k: f64, kind: Ac
             tip.line_to(((hx + head * 0.5) as f32, (hy - head * 1.1) as f32));
             tip.line_to(((hx + head * 0.2) as f32, (hy + head * 0.7) as f32));
             tip.close();
-            canvas.draw_path(&tip.detach(), &fill(accent(1.0)));
+            canvas.draw_path(&tip.detach(), &fill(ink));
         }
     }
 
     let (title, sub) = action_text(kind);
-    let max_w = f64::from(rect.width()) - 2.0 * pad;
-    let sub_base = f64::from(rect.bottom) - pad;
+    let tx = l + side + 16.0 * k;
+    let max_w = f64::from(rect.right) - pad - tx;
     fonts.draw_clipped(
         canvas,
         sub,
-        l,
-        sub_base,
-        W::Regular,
-        13.0 * k,
-        fg(0.55),
+        tx,
+        cy - 7.0 * k,
+        W::SemiBold,
+        14.0 * k,
+        fg(0.6),
         max_w,
     );
     fonts.draw_clipped(
         canvas,
         title,
-        l,
-        sub_base - 22.0 * k,
+        tx,
+        cy + 18.0 * k,
         W::Bold,
-        23.0 * k,
+        21.0 * k,
         fg(1.0),
         max_w,
     );
 }
 
-/// OS mark when the advertised chain resolves; otherwise the host initial.
-/// Substitution, not addition: unknown or empty `os` keeps the monogram. The
-/// mark is decorative — the name beside it already states the host.
+/// The host's badge: a white tile with its OS mark, else its initial, in the accent. A host
+/// not saved yet gets a quiet outline instead. Decorative: the name beside it states the host.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_badge(
     canvas: &Canvas,
@@ -900,40 +1074,33 @@ pub(crate) fn draw_badge(
     y: f64,
     k: f64,
 ) {
-    let badge = Rect::from_xywh(x as f32, y as f32, (52.0 * k) as f32, (52.0 * k) as f32);
-    let rr = RRect::new_rect_xy(badge, (15.0 * k) as f32, (15.0 * k) as f32);
-    if filled {
-        let mut p = crate::theme::shaded();
-        let colors = [accent(1.0), accent(0.68)];
-        p.set_shader(skia_safe::gradient::shaders::linear_gradient(
-            (
-                Point::new(badge.left, badge.top),
-                Point::new(badge.left, badge.bottom),
-            ),
-            &skia_safe::gradient::Gradient::new(
-                skia_safe::gradient::Colors::new_evenly_spaced(
-                    &colors,
-                    skia_safe::TileMode::Clamp,
-                    None,
-                ),
-                skia_safe::gradient::Interpolation::default(),
-            ),
+    let side = BADGE * k;
+    let badge = Rect::from_xywh(x as f32, y as f32, side as f32, side as f32);
+    let rr = RRect::new_rect_xy(badge, (14.0 * k) as f32, (14.0 * k) as f32);
+    let ink = if filled {
+        let mut glow = fill(Color4f::new(1.0, 1.0, 1.0, 0.35));
+        glow.set_mask_filter(MaskFilter::blur(
+            skia_safe::BlurStyle::Normal,
+            (6.0 * k) as f32,
             None,
         ));
-        canvas.draw_rrect(rr, &p);
+        canvas.draw_rrect(rr, &glow);
+        canvas.draw_rrect(rr, &fill(Color4f::new(1.0, 1.0, 1.0, 1.0)));
+        accent(1.0)
     } else {
-        canvas.draw_rrect(rr, &fill(accent(0.16)));
-        canvas.draw_rrect(rr, &stroke(accent(0.5), 1.0));
-    }
-    let ink = if filled { fg(1.0) } else { accent(1.0) };
+        canvas.draw_rrect(rr, &fill(fg(0.14)));
+        canvas.draw_rrect(rr, &stroke(fg(0.35), 1.0));
+        fg(0.9)
+    };
     // ~54% of the badge so the mark sits on it, not cropped to it. `os_mark`
     // letterboxes a non-square master.
-    let side = 28.0 * k;
+    let mark = 28.0 * k;
+    let (cx, cy) = (x + side / 2.0, y + side / 2.0);
     let inner = Rect::from_xywh(
-        (x + 26.0 * k - side / 2.0) as f32,
-        (y + 26.0 * k - side / 2.0) as f32,
-        side as f32,
-        side as f32,
+        (cx - mark / 2.0) as f32,
+        (cy - mark / 2.0) as f32,
+        mark as f32,
+        mark as f32,
     );
     if let Some(path) = crate::os_marks::os_mark(os, inner) {
         canvas.draw_path(&path, &fill(ink));
@@ -950,8 +1117,8 @@ pub(crate) fn draw_badge(
     fonts.draw(
         canvas,
         &letter,
-        x + 26.0 * k - tw / 2.0,
-        y + 26.0 * k + size * 0.36,
+        cx - tw / 2.0,
+        cy + size * 0.36,
         W::Bold,
         size,
         ink,
@@ -992,14 +1159,6 @@ fn draw_lock(canvas: &Canvas, x: f64, y: f64, k: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn reduced_tiles_layer_only_for_the_entrance() {
-        assert_eq!(tile_layer(true, 1.0, 0.78, 1.0), None);
-        assert_eq!(tile_layer(true, 0.5, 0.39, 1.0), Some((0.5, false)));
-        assert_eq!(tile_layer(false, 1.0, 0.78, 1.0), Some((0.78, true)));
-        assert_eq!(tile_layer(false, 1.0, 1.0, 0.0), None);
-    }
 
     fn host(key: &str, paired: bool, online: bool, can_wake: bool) -> HostRow {
         HostRow {
@@ -1092,10 +1251,11 @@ mod tests {
         ));
     }
 
-    /// Up and Down are the shell's: Up lands on the tab strip, and nothing sits below the
-    /// row. The host menu is the hold (Secondary), which a remote reaches by holding OK.
+    /// Up from the row is the tab strip's. Down reaches the card's verbs, which run on OK;
+    /// the last is the card's whole menu, also the hold (Secondary) a remote reaches by
+    /// holding OK.
     #[test]
-    fn up_and_down_leave_the_row_and_the_hold_opens_the_menu() {
+    fn down_reaches_the_verbs_and_every_verb_is_one_press_away() {
         let mut settings = ctx_settings();
         let hosts = [host("paired", true, true, false)];
         let pads: Vec<pf_client_core::menu_nav::PadInfo> = Vec::new();
@@ -1116,13 +1276,37 @@ mod tests {
             t: 0.0,
         };
         let mut s = HomeScreen::new();
-        for dir in [MenuDir::Up, MenuDir::Down] {
+        let mut go = |s: &mut HomeScreen, ev: MenuEvent| {
             let mut fx = Outbox::default();
-            let pulse = s.menu(MenuEvent::Move(dir), &mut ctx, &mut fx);
-            assert!(matches!(pulse, Some(MenuPulse::Boundary)) && fx.nav.is_none());
+            (s.menu(ev, &mut ctx, &mut fx), fx)
+        };
+        let (pulse, fx) = go(&mut s, MenuEvent::Move(MenuDir::Up));
+        assert!(matches!(pulse, Some(MenuPulse::Boundary)) && fx.nav.is_none());
+        let (pulse, _) = go(&mut s, MenuEvent::Move(MenuDir::Down));
+        assert!(matches!(pulse, Some(MenuPulse::Move)) && s.verb == Some(0));
+        let (_, fx) = go(&mut s, MenuEvent::Confirm);
+        assert_eq!(
+            fx.tab,
+            Some(crate::shell::Tab::Games),
+            "Games opens its tab"
+        );
+        // Games, Connect with…, Details…, More…, and no further.
+        for _ in 0..3 {
+            go(&mut s, MenuEvent::Move(MenuDir::Right));
         }
-        let mut fx = Outbox::default();
-        s.menu(MenuEvent::Secondary, &mut ctx, &mut fx);
+        let (pulse, _) = go(&mut s, MenuEvent::Move(MenuDir::Right));
+        assert!(matches!(pulse, Some(MenuPulse::Boundary)));
+        let (_, fx) = go(&mut s, MenuEvent::Confirm);
+        assert!(
+            matches!(fx.nav, Some(crate::screens::Nav::Push(ref sc)) if matches!(**sc, Screen::CardMenu(_))),
+            "More… is the card's menu"
+        );
+        // No games here yet: Down past the verbs refuses, Up returns to the card.
+        let (pulse, _) = go(&mut s, MenuEvent::Move(MenuDir::Down));
+        assert!(matches!(pulse, Some(MenuPulse::Boundary)));
+        go(&mut s, MenuEvent::Move(MenuDir::Up));
+        assert_eq!(s.verb, None);
+        let (_, fx) = go(&mut s, MenuEvent::Secondary);
         assert!(
             matches!(fx.nav, Some(crate::screens::Nav::Push(ref sc)) if matches!(**sc, Screen::CardMenu(_))),
             "the hold opens the host options menu"
