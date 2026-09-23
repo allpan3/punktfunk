@@ -1094,9 +1094,165 @@ pub fn initials(title: &str) -> String {
         .collect()
 }
 
+/// One band of the Games tab, by the id `Settings::library_sections` stores.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Section {
+    Desktops,
+    Recent,
+    Favorites,
+    Launchers,
+    Games,
+}
+
+impl Section {
+    pub const ALL: [Section; 5] = [
+        Section::Desktops,
+        Section::Recent,
+        Section::Favorites,
+        Section::Launchers,
+        Section::Games,
+    ];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Section::Desktops => "desktops",
+            Section::Recent => "recent",
+            Section::Favorites => "favorites",
+            Section::Launchers => "launchers",
+            Section::Games => "games",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Section::Desktops => "Desktops",
+            Section::Recent => "Recently played",
+            Section::Favorites => "Favorites",
+            Section::Launchers => "Launchers",
+            Section::Games => "Games",
+        }
+    }
+}
+
+/// `library_sections` as the Apple app parses it: ids in order, `-` before one switched
+/// off, an unknown id dropped, a repeat keeping its first place, a known section the value
+/// lacks appended switched on.
+pub fn sections(stored: &str) -> Vec<(Section, bool)> {
+    let mut out: Vec<(Section, bool)> = Vec::new();
+    for token in stored.split(',').map(str::trim) {
+        let (on, id) = match token.strip_prefix('-') {
+            Some(id) => (false, id),
+            None => (true, token),
+        };
+        let Some(s) = Section::ALL.into_iter().find(|s| s.id() == id) else {
+            continue;
+        };
+        if !out.iter().any(|(seen, _)| *seen == s) {
+            out.push((s, on));
+        }
+    }
+    for s in Section::ALL {
+        if !out.iter().any(|(seen, _)| *seen == s) {
+            out.push((s, true));
+        }
+    }
+    out
+}
+
+/// The stored form of `sections`.
+pub fn stored_sections(sections: &[(Section, bool)]) -> String {
+    sections
+        .iter()
+        .map(|(s, on)| format!("{}{}", if *on { "" } else { "-" }, s.id()))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Where a host's favorites live in the settings document's `extra` map.
+fn favorites_key(fp_hex: &str) -> String {
+    format!("favorites.{fp_hex}")
+}
+
+/// The titles marked favorite on host `fp_hex` from this device, in marking order.
+pub fn favorites(settings: &pf_client_core::trust::Settings, fp_hex: &str) -> Vec<String> {
+    settings
+        .extra
+        .get(&favorites_key(fp_hex))
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Mark or unmark `id` on host `fp_hex`; `true` when it is now a favorite.
+pub fn toggle_favorite(
+    settings: &mut pf_client_core::trust::Settings,
+    fp_hex: &str,
+    id: &str,
+) -> bool {
+    let mut list = favorites(settings, fp_hex);
+    let on = match list.iter().position(|f| f == id) {
+        Some(i) => {
+            list.remove(i);
+            false
+        }
+        None => {
+            list.push(id.to_string());
+            true
+        }
+    };
+    let key = favorites_key(fp_hex);
+    if list.is_empty() {
+        settings.extra.remove(&key);
+    } else {
+        settings.extra.insert(key, list.into());
+    }
+    on
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sections_parse_as_the_apple_app_does() {
+        use Section::*;
+        assert_eq!(
+            sections(""),
+            Section::ALL.map(|s| (s, true)).to_vec(),
+            "empty is every section, on"
+        );
+        assert_eq!(
+            sections("games,-recent,bogus,games,desktops"),
+            vec![
+                (Games, true),
+                (Recent, false),
+                (Desktops, true),
+                (Favorites, true),
+                (Launchers, true),
+            ]
+        );
+        let s = sections("desktops,recent,-favorites,launchers,games");
+        assert_eq!(
+            stored_sections(&s),
+            "desktops,recent,-favorites,launchers,games"
+        );
+    }
+
+    #[test]
+    fn favorites_toggle_per_host_and_drop_an_empty_list() {
+        let mut settings = pf_client_core::trust::Settings::default();
+        assert!(toggle_favorite(&mut settings, "aa", "steam:1"));
+        assert!(toggle_favorite(&mut settings, "aa", "steam:2"));
+        assert!(favorites(&settings, "bb").is_empty(), "per host");
+        assert_eq!(favorites(&settings, "aa"), ["steam:1", "steam:2"]);
+        assert!(!toggle_favorite(&mut settings, "aa", "steam:1"));
+        assert!(!toggle_favorite(&mut settings, "aa", "steam:2"));
+        assert!(settings.extra.is_empty(), "no empty list left behind");
+    }
 
     /// Parity with `clients/shared/console-vectors.json` (`include_str!`: missing file fails compile).
     ///

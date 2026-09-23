@@ -59,7 +59,8 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
           waker: HostWaker, actions: Actions) {
         guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue(),
             let bridge = ConsoleBridge(
-                options: Self.options(entry: entry, pin: pin, presets: presets.presets),
+                options: Self.options(
+                    entry: entry, pin: pin, presets: presets.presets, hosts: store.hosts),
                 device: device, queue: queue)
         else { return nil }
         self.device = device
@@ -83,7 +84,7 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
         pushHosts()
         pushPresets()
         pushKnownHosts()
-        bridge.push(.settings, ConsoleSettings.json())
+        bridge.push(.settings, ConsoleJSON.string(Self.settings(store.hosts)))
         discovery.start()
         pads.start()
         for object in [store.objectWillChange, presets.objectWillChange, power.objectWillChange,
@@ -142,9 +143,32 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
 
     // MARK: - what the app pushes
 
-    private static func options(entry: StoredHost?, pin: StreamPreset?, presets: [StreamPreset])
-        -> String
-    {
+    /// The settings document with each saved host's favorites under `favorites.<fp>`, where
+    /// the console reads them; `LibraryFavorites` keeps them by host record.
+    private static func settings(_ hosts: [StoredHost]) -> [String: Any] {
+        var doc = ConsoleSettings.document()
+        for host in hosts {
+            guard let fp = host.pinnedSHA256?.map({ String(format: "%02x", $0) }).joined()
+            else { continue }
+            let ids = LibraryFavorites.shared.ids(for: host.id.uuidString)
+            doc["favorites.\(fp)"] = ids.isEmpty ? nil : ids
+        }
+        return doc
+    }
+
+    /// The console saved favorites: back into `LibraryFavorites`, by record.
+    private func applyFavorites(_ doc: [String: Any]) {
+        for host in store.hosts {
+            guard let fp = host.pinnedSHA256?.map({ String(format: "%02x", $0) }).joined()
+            else { continue }
+            let ids = doc["favorites.\(fp)"] as? [String] ?? []
+            LibraryFavorites.shared.set(ids, host: host.id.uuidString)
+        }
+    }
+
+    private static func options(
+        entry: StoredHost?, pin: StreamPreset?, presets: [StreamPreset], hosts: [StoredHost]
+    ) -> String {
         var options: [String: Any] = [
             "device_name": deviceName,
             "gpu_cache_bytes": gpuCacheBytes,
@@ -153,7 +177,7 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
             "fallback_ui": true,
             "av1_ok": AV1.hardwareDecodeSupported,
             "pyrowave_ok": MetalWaveletDecoder.supported,
-            "settings": ConsoleSettings.document(),
+            "settings": settings(hosts),
             "presets": presets.map { ["id": $0.id, "name": $0.name, "overrides": [:] as [String: Any]] },
         ]
         if let screen = screenSize {
@@ -272,6 +296,7 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
         else { return }
         if let settings = event["settings"] as? [String: Any] {
             ConsoleSettings.apply(settings)
+            applyFavorites(settings)
         } else if let text = event["announce"] as? String {
             announce(text)
         } else if let action = event["action"] {

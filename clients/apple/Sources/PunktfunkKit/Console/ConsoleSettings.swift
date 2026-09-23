@@ -141,6 +141,7 @@ public enum ConsoleSettings {
         .bool("allow_vrr", DefaultsKey.allowVRR, true),
         .string("ui_palette", DefaultsKey.uiPalette, "violet"),
         .string("library_sort", DefaultsKey.librarySort, ""),
+        .string("library_sections", DefaultsKey.librarySections, ""),
         .string("library_view", DefaultsKey.libraryView, LibraryArrangement.shelf.stored),
         .bool("library_collections", DefaultsKey.libraryCollections, false),
         .string("start_in", DefaultsKey.startIn, StartIn.hosts.stored),

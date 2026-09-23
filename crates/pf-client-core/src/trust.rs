@@ -1361,6 +1361,11 @@ pub struct Settings {
     /// Default off so an existing install's deep-link landing screen does not move.
     #[serde(default)]
     pub library_collections: bool,
+    /// The Games tab's sections, in order: ids comma-separated, a leading `-` on a section
+    /// switched off (`desktops,recent,-favorites,launchers,games`). `""` = every section, on,
+    /// in that order. The Apple app's `librarySections` spelling.
+    #[serde(default)]
+    pub library_sections: String,
     /// Where a bare launch opens: `"hosts"` (default), `"library"`, or `"stream"`.
     /// `""`/unknown = hosts, the `library_view` convention. Resolve through
     /// [`crate::start::start_screen`] — no default host degrades every value to the list.
@@ -1559,6 +1564,7 @@ impl Default for Settings {
             library_sort: String::new(),
             library_view: String::new(),
             library_collections: false,
+            library_sections: String::new(),
             start_in: String::new(),
             default_host: None,
             auto_wake: true,
