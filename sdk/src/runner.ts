@@ -482,20 +482,29 @@ export const adoptNestedState = (stateDir: string, id: string, log: LogSink): vo
 	log(`[runner] ${id}: moved its state up from ${nested}`);
 };
 
-/** Write this plugin's own token under its state dir for the sandbox's read-only bind. */
-const writePluginToken = (config: string, stateDir: string, id: string): string | undefined => {
-	const file = path.join(stateDir, ".plugin-token");
+/**
+ * Write this plugin's own token under its state dir for the sandbox's read-only bind. A missing
+ * token and an unwritable state dir are different faults and say so.
+ */
+const writePluginToken = (config: string, stateDir: string, id: string): string | Error => {
+	let token: string | undefined;
 	try {
 		const tokens = JSON.parse(
 			fs.readFileSync(path.join(config, "plugin-run", "plugin-tokens.json"), "utf8"),
 		) as Record<string, string>;
-		const token = tokens[id];
-		if (token === undefined) return undefined;
+		token = tokens[id];
+	} catch {}
+	if (token === undefined)
+		return new Error(
+			`No API credential exists for ${id} yet. Restart the host if this persists.`,
+		);
+	const file = path.join(stateDir, ".plugin-token");
+	try {
 		fs.mkdirSync(stateDir, { recursive: true });
 		fs.writeFileSync(file, `PUNKTFUNK_PLUGIN_TOKEN=${token}\n`, { mode: 0o600 });
 		return file;
-	} catch {
-		return undefined;
+	} catch (e) {
+		return new Error(`Couldn't write the credential for ${id} into ${stateDir} — ${e}`);
 	}
 };
 
@@ -519,14 +528,8 @@ const runSandboxed = (
 		const stateDir = path.join(config, "plugin-state", id);
 		adoptNestedState(stateDir, id, log);
 		const tokenFile = writePluginToken(config, stateDir, id);
-		if (!tokenFile) {
-			resume(
-				Effect.fail(
-					new Error(
-						`No API credential exists for ${id} yet. Restart the host if this persists.`,
-					),
-				),
-			);
+		if (tokenFile instanceof Error) {
+			resume(Effect.fail(tokenFile));
 			return;
 		}
 		const filter = netlinkFilter();
