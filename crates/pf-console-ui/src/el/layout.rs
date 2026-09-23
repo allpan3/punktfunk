@@ -28,6 +28,9 @@ pub struct Tree {
     /// Focus containers as last painted; [`Placed::group`] indexes here.
     groups: Vec<GroupBox>,
     focus: Option<Id>,
+    /// [`Tree::set_focus`] named `focus` since the last paint: the caller holds it, so a
+    /// paint that lacks it fades the plate instead of reseating.
+    held: bool,
     /// Per group id, the child that last had focus.
     memory: HashMap<Id, Id>,
     plate: Plate,
@@ -122,6 +125,7 @@ impl Tree {
             placed: Vec::new(),
             groups: Vec::new(),
             focus: None,
+            held: false,
             memory: HashMap::new(),
             plate: Plate::default(),
         }
@@ -160,13 +164,18 @@ impl Tree {
     }
 
     /// [`Self::paint`], with the focus plate advanced `dt` seconds toward this frame's
-    /// rect of the focused node and drawn behind its whole focus group. `k` scales the
-    /// plate's outset; `cheap` drops its blurred shadow.
+    /// rect of the focused node and drawn behind its whole focus group; with no focused
+    /// node it glides on and fades. `k` scales the plate's outset; `cheap` drops its
+    /// blurred shadow.
     pub fn paint_focus(&mut self, canvas: &Canvas, frame: Frame<'_>, k: f32, dt: f64, cheap: bool) {
         self.paint_inner(canvas, frame, Some((k, dt, cheap)));
     }
 
+    /// A focus the caller did not hold and this frame lacks reseats on the target nearest
+    /// where it stood. Every paint reports its targets to the running [`super::census`].
     fn paint_inner(&mut self, canvas: &Canvas, frame: Frame<'_>, plate: Option<(f32, f64, bool)>) {
+        let last = self.focus.and_then(|f| self.rect(f));
+        let anchor = last.or_else(|| self.plate.rect().map(|p| p.0));
         self.placed.clear();
         self.groups = frame.groups;
         // Per scroll: the summed offset of it and its ancestors, and its on-screen clip.
@@ -187,9 +196,12 @@ impl Tree {
             });
             clip.push(view);
         }
+        if !std::mem::take(&mut self.held) {
+            self.reseat(&frame.nodes, &shift, anchor);
+        }
         // The plate goes under the first node of the focused node's group, so it never
         // covers a neighbour.
-        let plate = plate.and_then(|look| {
+        let at = plate.and_then(|look| {
             let f = frame
                 .nodes
                 .iter()
@@ -202,18 +214,28 @@ impl Tree {
             let space = n.scroll.map(|i| frame.scrolls[i].id);
             Some((at, look, n.id?, n.rect, n.focus?, space, d, c))
         });
+        // Nothing focused to rest on: the plate fades under everything, in its scroll.
+        if let (None, Some((k, dt, cheap))) = (at, plate) {
+            let space = self.plate.space();
+            let i = frame.scrolls.iter().position(|s| Some(s.id) == space);
+            canvas.save();
+            if let Some(i) = i {
+                canvas.clip_rect(clip[i], None, true);
+            }
+            self.plate.lose(dt, i.map(|i| shift[i]));
+            self.plate.draw(canvas, k, cheap);
+            canvas.restore();
+        }
         for (i, n) in frame.nodes.into_iter().enumerate() {
             if let Some((_, (k, dt, cheap), id, target, corner, space, d, c)) =
-                plate.filter(|p| p.0 == i)
+                at.filter(|p| p.0 == i)
             {
                 canvas.save();
                 if let Some(c) = c {
                     canvas.clip_rect(c, None, true);
                 }
                 self.plate.step(id, target, corner, dt, space, d);
-                if !super::dormant() {
-                    self.plate.draw(canvas, k, cheap);
-                }
+                self.plate.draw(canvas, k, cheap);
                 canvas.restore();
             }
             let (d, c) = n
@@ -257,7 +279,29 @@ impl Tree {
             p(canvas, rect);
             canvas.restore();
         }
+        super::claim(self.placed.iter().filter(|p| p.focus.is_some()).count());
         self.remember();
+    }
+
+    /// Move a focus this frame's `nodes` lack to the target nearest `anchor`, on screen.
+    /// With no target in the frame it stays, to reseat once one is back.
+    fn reseat(&mut self, nodes: &[Node<'_>], shift: &[(f32, f32)], anchor: Option<Rect>) {
+        let (Some(f), Some(a)) = (self.focus, anchor) else {
+            return;
+        };
+        let targets = nodes.iter().filter(|n| n.focus.is_some());
+        if targets.clone().any(|n| n.id == Some(f)) {
+            return;
+        }
+        let far = |n: &Node<'_>| {
+            let r = n
+                .scroll
+                .map_or(n.rect, |i| n.rect.with_offset((-shift[i].0, -shift[i].1)));
+            (r.center_x() - a.center_x()).hypot(r.center_y() - a.center_y())
+        };
+        if let Some(n) = targets.min_by(|x, y| far(x).total_cmp(&far(y))) {
+            self.focus = n.id;
+        }
     }
 
     pub fn focus(&self) -> Option<Id> {
@@ -269,8 +313,11 @@ impl Tree {
         self.plate.press();
     }
 
+    /// The caller's focus, held through the next paint even when that paint lacks it.
+    /// `None` is no focus here: the plate fades out.
     pub fn set_focus(&mut self, id: Option<Id>) {
         self.focus = id;
+        self.held = true;
         self.remember();
     }
 
@@ -279,9 +326,10 @@ impl Tree {
         self.plate.busy()
     }
 
-    /// Where the plate is this frame, before its outset, and its corner radius.
+    /// Where the plate is this frame, before its outset, and its corner radius. `None`
+    /// once it has faded out.
     pub fn plate_rect(&self) -> Option<(Rect, f32)> {
-        self.plate.rect()
+        self.plate.rect().filter(|_| self.plate.visible())
     }
 
     /// Move focus from the focused target one step `dir`, by last frame's rects. `None`

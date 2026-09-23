@@ -193,6 +193,7 @@ impl Shell {
                 && self.launching.is_none()
                 && self.wake.is_none(),
             cheap: false,
+            root_targets: None,
         };
         self.hint_rects.clear();
         // Reduced motion keeps the crossfade (an instant swap loses the only spatial
@@ -283,6 +284,7 @@ impl Shell {
         if settled {
             self.hint_rects = rects;
         }
+        self.root_targets = env.root_targets;
 
         if let Some(chip) = &self.chip {
             let size = 12.0 * k;
@@ -419,6 +421,8 @@ struct LayerEnv<'a> {
     show_hints: bool,
     /// Reduced UI resolution, as the last painted screen's settings say.
     cheap: bool,
+    /// Focus targets the tab root placed, once its layer paints.
+    root_targets: Option<usize>,
 }
 
 /// Opens a draw at `alpha`: a layer when faded, a plain save when whole. False, and
@@ -438,7 +442,8 @@ fn open_at(canvas: &Canvas, alpha: f64) -> bool {
 impl LayerEnv<'_> {
     /// One screen's content as a unit: fade, slide, scale about centre. The band and
     /// legend stay out of the layer; the returned [`Chrome`] draws them in place, so a
-    /// tab switch or a push never moves the strip.
+    /// tab switch or a push never moves the strip. A tab root records the focus targets
+    /// it placed.
     #[allow(clippy::too_many_arguments)]
     fn paint(
         &mut self,
@@ -481,10 +486,16 @@ impl LayerEnv<'_> {
             device_name: self.device_name,
             t: self.t,
         };
-        // With focus on the tabs, a root keeps its plate to itself.
+        // With focus on the tabs, a root's plate fades out. A root's target count says if
+        // focus can enter.
         crate::el::set_dormant(self.strip_focus && band == Band::Strip);
-        screen.render(canvas, self.content, self.k, self.dt, self.fonts, &mut ctx);
+        let targets = crate::el::census(|| {
+            screen.render(canvas, self.content, self.k, self.dt, self.fonts, &mut ctx);
+        });
         crate::el::set_dormant(false);
+        if band == Band::Strip {
+            self.root_targets = Some(targets);
+        }
         self.cheap =
             crate::screens::settings::reduce_ui_res(ctx.settings, ctx.platform, ctx.fallback_ui);
         let title = (band == Band::Title).then(|| screen.title(&ctx));

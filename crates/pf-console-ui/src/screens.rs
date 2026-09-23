@@ -369,7 +369,11 @@ impl Screen {
     ) {
         match self {
             Screen::Home(s) => s.render(canvas, rect, k, dt, fonts, ctx),
-            Screen::Library(s) => s.render(canvas, rect, k, dt, fonts, ctx),
+            // The shelf view draws its focus outside el: titles to walk are its targets.
+            Screen::Library(s) => {
+                s.render(canvas, rect, k, dt, fonts, ctx);
+                crate::el::claim(usize::from(s.has_titles()));
+            }
             Screen::Collections(s) => s.render(canvas, rect, k, dt, fonts, ctx),
             Screen::Settings(s) => s.render(canvas, rect, k, dt, fonts, ctx),
             Screen::AddHost(s) => s.render(canvas, rect, k, dt, fonts, ctx),

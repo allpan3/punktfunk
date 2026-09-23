@@ -6,8 +6,8 @@
 //! a group with an id hands focus back to the child it last had.
 //!
 //! [`Plate`] is one sprung rounded rect that morphs from target to target behind the
-//! focused node, then sweeps a light across its rim once on arrival. Under Reduce Motion
-//! it jumps and fades. Pinned by `el::tests`.
+//! focused node, then sweeps a light across its rim once on arrival. With no target it
+//! fades out. Under Reduce Motion it jumps and fades. Pinned by `el::tests`.
 
 use crate::anim::{Spring, SpringSpec};
 use crate::theme::{accent, fg, fill, stroke};
@@ -75,14 +75,19 @@ pub const TRAVEL: SpringSpec = crate::anim::springs::FOCUS;
 const SWEEP_S: f64 = 0.6;
 /// Plate growth past its target, design units.
 const OUTSET: f32 = 7.0;
+/// Fade time constant, seconds: out with no target or while dormant, in on the way back.
+const FADE_TAU: f64 = 0.06;
 
 /// Sprung rect behind the focused node. It springs in its scroll's content space, so it
-/// rides a scrolling list rigidly and only its own travel lags.
+/// rides a scrolling list rigidly and only its own travel lags. With nothing to rest on
+/// it glides on and fades out, and never freezes on a stale rect.
 #[derive(Default)]
 pub struct Plate {
     /// left, top, right, bottom, corner, in `space`'s content px; `None` until the first
     /// target.
     edges: Option<[Spring; 5]>,
+    /// Where the edges are springing to: the last target's rect and corner.
+    goal: [f64; 5],
     /// Target the plate is travelling to or resting on.
     to: Option<super::Id>,
     /// Scroll whose content the plate lives in, and that scroll's shift this frame.
@@ -93,15 +98,17 @@ pub struct Plate {
     /// When the sweep started; armed by a focus change, fired on arrival.
     sweep: Option<f64>,
     armed: bool,
-    /// Reduce Motion fade, 0..1.
+    /// Opacity 0..1, easing toward `fade_to`.
     shown: f64,
+    fade_to: f64,
     /// OK went down: the plate's scale, springing back to 1.
     press: Option<Spring>,
 }
 
 impl Plate {
     /// Chase `target`, `id`'s content rect in the scroll `space` shifted by `shift` this
-    /// frame, by `dt` seconds.
+    /// frame, by `dt` seconds. Dormant, it fades out on the way; a plate that had faded
+    /// out starts over on its target instead of gliding in from where it vanished.
     pub(crate) fn step(
         &mut self,
         id: super::Id,
@@ -123,17 +130,16 @@ impl Plate {
         }
         self.space = space;
         self.shift = shift;
-        let goal = [
+        self.goal = [
             f64::from(target.left),
             f64::from(target.top),
             f64::from(target.right),
             f64::from(target.bottom),
             f64::from(corner),
         ];
-        self.t += dt;
         let reduced = crate::theme::reduce_motion();
-        let moved = self.to != Some(id);
-        if moved {
+        let live = !super::dormant();
+        if self.to != Some(id) {
             self.armed = true;
             self.sweep = None;
             if reduced {
@@ -141,16 +147,44 @@ impl Plate {
             }
         }
         self.to = Some(id);
-        let edges = self.edges.get_or_insert(goal.map(Spring::rest));
-        if reduced {
-            *edges = goal.map(Spring::rest);
-            self.shown = crate::anim::approach(self.shown, 1.0, dt, 0.06);
-        } else {
-            self.shown = 1.0;
-            for (s, g) in edges.iter_mut().zip(goal) {
-                s.step_spec(g, TRAVEL, dt);
-                s.settle(g, 0.25, 4.0);
-            }
+        if self.edges.is_none() {
+            self.shown = if live && !reduced { 1.0 } else { 0.0 };
+        }
+        if reduced || self.edges.is_none() || self.shown == 0.0 {
+            self.edges = Some(self.goal.map(Spring::rest));
+        }
+        self.travel(dt, live);
+    }
+
+    /// No target this frame: the plate glides on to its last goal and fades out, riding
+    /// its scroll at `shift` while that scroll is drawn.
+    pub(crate) fn lose(&mut self, dt: f64, shift: Option<(f32, f32)>) {
+        if let Some(s) = shift {
+            self.shift = s;
+        }
+        self.travel(dt, false);
+    }
+
+    /// The scroll the plate lives in.
+    pub(crate) fn space(&self) -> Option<super::Id> {
+        self.space
+    }
+
+    /// Spring the edges `dt` toward the goal and fade toward `live`. Landing fires the
+    /// sweep, unless the plate is on its way out.
+    fn travel(&mut self, dt: f64, live: bool) {
+        self.t += dt;
+        let Some(edges) = self.edges.as_mut() else {
+            return;
+        };
+        for (s, g) in edges.iter_mut().zip(self.goal) {
+            s.step_spec(g, TRAVEL, dt);
+            s.settle(g, 0.25, 4.0);
+        }
+        self.fade_to = if live { 1.0 } else { 0.0 };
+        self.shown = crate::anim::approach(self.shown, self.fade_to, dt, FADE_TAU);
+        if (self.shown - self.fade_to).abs() < 0.01 {
+            self.shown = self.fade_to;
         }
         if let Some(p) = self.press.as_mut() {
             p.step_spec(1.0, crate::anim::springs::PRESS, dt);
@@ -159,20 +193,25 @@ impl Plate {
         self.press = self.press.filter(|p| p.pos != 1.0 || p.vel != 0.0);
         let landed = edges
             .iter()
-            .zip(goal)
+            .zip(self.goal)
             .all(|(s, g)| s.pos == g && s.vel == 0.0);
         if self.armed && landed {
             self.armed = false;
-            self.sweep = Some(self.t);
+            self.sweep = live.then_some(self.t);
         }
     }
 
     /// Still travelling, fading, pressed or sweeping: the frame loop must keep drawing.
     pub fn busy(&self) -> bool {
         self.armed
-            || self.shown < 1.0
+            || self.shown != self.fade_to
             || self.press.is_some()
             || self.sweep.is_some_and(|s| self.t - s < SWEEP_S)
+    }
+
+    /// Any of the plate is on screen.
+    pub(crate) fn visible(&self) -> bool {
+        self.shown > 0.0
     }
 
     /// OK went down on the focused node: the plate dips and springs back. Reduce Motion
@@ -209,7 +248,7 @@ impl Plate {
     /// A lifted glass plate with a brighter rim, then the sweep. `k` scales the outset;
     /// `cheap` skips the blurred shadow.
     pub(crate) fn draw(&self, canvas: &Canvas, k: f32, cheap: bool) {
-        let Some((r, corner)) = self.rect() else {
+        let Some((r, corner)) = self.rect().filter(|_| self.visible()) else {
             return;
         };
         let alpha = self.shown as f32;

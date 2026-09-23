@@ -307,3 +307,103 @@ fn the_plate_travels_lands_and_sweeps() {
     );
     assert!(tree.plate_busy(), "and fades in");
 }
+
+/// Paint the cards in `shown` of a row of three, the plate stepping a 60 Hz frame.
+fn cards(tree: &mut Tree, shown: &[usize]) {
+    let root = El::column().children(shown.iter().map(|&i| target("card", i, card(i))));
+    let frame = tree.layout(root, Rect::from_xywh(0.0, 0.0, 600.0, 600.0));
+    tree.paint_focus(canvas().canvas(), frame, 1.0, 1.0 / 60.0, false);
+}
+
+#[test]
+fn a_vanished_target_hands_focus_to_the_nearest_and_the_plate_glides() {
+    let mut tree = Tree::new();
+    tree.set_focus(Some(Id::new("card", 2)));
+    cards(&mut tree, &[0, 1, 2]);
+    assert_eq!(tree.plate_rect().map(|p| p.0.left), Some(240.0));
+
+    // Card 2 goes and nobody names it again: the tree reseats on its nearest neighbour.
+    cards(&mut tree, &[0, 1]);
+    assert_eq!(tree.focus(), Some(Id::new("card", 1)));
+    let left = tree.plate_rect().unwrap().0.left;
+    assert!(
+        left > 120.0 && left < 240.0,
+        "glides from where it was: {left}"
+    );
+    for _ in 0..120 {
+        cards(&mut tree, &[0, 1]);
+    }
+    assert_eq!(tree.plate_rect().map(|p| p.0.left), Some(120.0));
+    assert!(!tree.plate_busy());
+}
+
+#[test]
+fn a_held_focus_the_frame_lacks_fades_the_plate_out() {
+    let mut tree = Tree::new();
+    tree.set_focus(Some(Id::new("card", 2)));
+    cards(&mut tree, &[0, 1, 2]);
+    for _ in 0..60 {
+        // The caller insists on card 2: the tree keeps it and the plate fades.
+        tree.set_focus(Some(Id::new("card", 2)));
+        cards(&mut tree, &[0, 1]);
+    }
+    assert_eq!(tree.focus(), Some(Id::new("card", 2)));
+    assert!(tree.plate_rect().is_none(), "faded out");
+    assert!(!tree.plate_busy(), "and the frames stop");
+
+    tree.set_focus(Some(Id::new("card", 2)));
+    cards(&mut tree, &[0, 1, 2]);
+    assert_eq!(
+        tree.plate_rect().map(|p| p.0.left),
+        Some(240.0),
+        "back on its target, not gliding in from where it vanished"
+    );
+    assert!(tree.plate_busy(), "fading in");
+}
+
+#[test]
+fn a_tree_with_no_targets_counts_none_and_focus_waits() {
+    let mut tree = Tree::new();
+    tree.set_focus(Some(Id::new("card", 2)));
+    assert_eq!(census(|| cards(&mut tree, &[0, 1, 2])), 3);
+
+    // Nothing focusable: the census says so, focus waits and the plate fades.
+    let empty = |tree: &mut Tree| {
+        let frame = tree.layout(El::column(), Rect::from_xywh(0.0, 0.0, 600.0, 600.0));
+        tree.paint_focus(canvas().canvas(), frame, 1.0, 1.0 / 60.0, false);
+    };
+    assert_eq!(census(|| empty(&mut tree)), 0);
+    for _ in 0..60 {
+        empty(&mut tree);
+    }
+    assert!(tree.plate_rect().is_none() && !tree.plate_busy());
+    assert_eq!(tree.focus(), Some(Id::new("card", 2)));
+
+    // Targets back: focus lands on the one nearest where it stood.
+    cards(&mut tree, &[0, 1]);
+    assert_eq!(tree.focus(), Some(Id::new("card", 1)));
+
+    // Nested counts add up; a claim outside a census goes nowhere.
+    assert_eq!(census(|| claim(2)), 2);
+    let outer = census(|| {
+        census(|| cards(&mut tree, &[0, 1]));
+        claim(1);
+    });
+    assert_eq!(outer, 3);
+    claim(5);
+}
+
+/// Up from the top row answers nothing and leaves focus put: a screen reads that as its
+/// boundary, and the shell hands Up past a root's boundary to the tab strip.
+#[test]
+fn up_from_the_top_row_leaves_focus_put() {
+    use pf_client_core::menu_nav::MenuDir::*;
+    let mut surface = canvas();
+    let mut tree = Tree::new();
+    shelf(&mut tree, &mut surface);
+    tree.set_focus(Some(Id::new("card", 1)));
+    assert_eq!(tree.move_focus(Up), None);
+    assert_eq!(tree.focus(), Some(Id::new("card", 1)));
+    shelf(&mut tree, &mut surface);
+    assert_eq!(tree.move_focus(Up), None, "still, after a paint");
+}

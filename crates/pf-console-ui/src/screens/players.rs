@@ -189,11 +189,8 @@ impl PlayersScreen {
         ctx: &mut Ctx,
     ) {
         let all = targets(ctx);
-        if self
-            .tree
-            .focus()
-            .is_none_or(|id| !all.iter().any(|t| target_id(*t, ctx.pads) == id))
-        {
+        // The first target takes focus once; a card that goes reseats it in the tree.
+        if self.tree.focus().is_none() {
             self.tree.set_focus(Some(target_id(all[0], ctx.pads)));
         }
         let (platform, pads) = (ctx.platform, ctx.pads);

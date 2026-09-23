@@ -369,6 +369,11 @@ pub(crate) struct Shell {
     library_fp: Option<String>,
     /// Focus is on the tab strip, not the screen.
     strip_focus: bool,
+    /// The shell moved focus to the strip because the root had nothing to focus. It goes
+    /// back once the root has something, unless the strip is used meanwhile.
+    strip_parked: bool,
+    /// Focus targets the root placed when last painted; `None` until it paints.
+    root_targets: Option<usize>,
     /// The strip's pills and focus plate.
     strip: crate::el::Tree,
     /// OK down on a remote: when, and whether the hold already fired.
@@ -501,6 +506,8 @@ impl Shell {
             games_key: None,
             library_fp: None,
             strip_focus: false,
+            strip_parked: false,
+            root_targets: None,
             strip: crate::el::Tree::new(),
             ok_down: None,
             motion: Motion::None,
@@ -578,6 +585,7 @@ impl Shell {
         self.parked[tab.index()] = None;
         self.tab = tab;
         self.strip_focus = false;
+        self.root_targets = None;
         self.stack = stack;
         self.motion = Motion::None;
         self.bg_mix = match self.stack.last().expect("non-empty").background() {
@@ -1027,6 +1035,22 @@ impl Shell {
         self.collections_handover();
         self.home_shelf();
         self.tick_launch();
+        self.settle_focus();
+    }
+
+    /// A root with nothing to focus parks focus on the tab strip; once it has something
+    /// again, a parked focus goes back.
+    fn settle_focus(&mut self) {
+        if self.stack.len() > 1 {
+            return;
+        }
+        match self.root_targets {
+            Some(0) if !self.strip_focus => (self.strip_focus, self.strip_parked) = (true, true),
+            Some(n) if n > 0 && self.strip_parked => {
+                (self.strip_focus, self.strip_parked) = (false, false);
+            }
+            _ => {}
+        }
     }
 
     /// Fetch the games under the Hosts row once it rests on a host. Lives here, like
@@ -1140,7 +1164,8 @@ impl Shell {
     }
 
     /// The strip's share of a menu event: L1/R1 from anywhere but a text field, every
-    /// direction while the strip has focus. `None` leaves the event to the screen.
+    /// direction while the strip has focus. `None` leaves the event to the screen. Over a
+    /// root with nothing to focus, Down stays on the strip and OK is the screen's.
     fn tab_menu(&mut self, ev: MenuEvent) -> Option<Option<MenuPulse>> {
         let editing = self.stack.last().is_some_and(Screen::editing);
         match ev {
@@ -1149,9 +1174,13 @@ impl Shell {
             _ if !self.strip_focus || self.stack.len() > 1 => return None,
             _ => {}
         }
+        self.strip_parked = false;
+        let empty = self.root_targets == Some(0);
         match ev {
             MenuEvent::Move(MenuDir::Left) => Some(self.step_tab(-1)),
             MenuEvent::Move(MenuDir::Right) => Some(self.step_tab(1)),
+            MenuEvent::Move(MenuDir::Down) if empty => Some(Some(MenuPulse::Boundary)),
+            MenuEvent::Confirm if empty => None,
             MenuEvent::Move(MenuDir::Down) | MenuEvent::Confirm => {
                 self.strip_focus = false;
                 Some(Some(MenuPulse::Move))
@@ -1192,10 +1221,12 @@ impl Shell {
     }
 
     /// `root` becomes the stack; the current root parks and a pushed screen is dropped.
+    /// What it can focus is unknown until it paints.
     fn mount(&mut self, to: Tab, root: Screen) {
         self.stack.truncate(1);
         self.parked[self.tab.index()] = self.stack.pop();
         self.stack.push(root);
+        self.root_targets = None;
         let from = std::mem::replace(&mut self.tab, to);
         self.motion = Motion::Tab {
             spring: Spring::rest(0.0),
@@ -1421,11 +1452,12 @@ impl Shell {
                 .expect("non-empty stack")
                 .menu(ev, &mut ctx, &mut fx)
         };
-        // Up past a root screen's first row lands on its tab.
+        // Up that a root screen bumps or leaves unanswered lands on its tab.
         let to_strip = self.stack.len() == 1
             && ev == MenuEvent::Move(MenuDir::Up)
-            && matches!(pulse, Some(MenuPulse::Boundary))
-            && fx.nav.is_none();
+            && matches!(pulse, Some(MenuPulse::Boundary) | None)
+            && fx.nav.is_none()
+            && !self.stack[0].editing();
         self.apply(fx);
         if to_strip {
             self.strip_focus = true;
