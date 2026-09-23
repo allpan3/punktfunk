@@ -1276,17 +1276,24 @@ impl Shell {
         if down {
             // A fresh press restarts the hold, so a lost release cannot strand it.
             self.ok_down = Some((t, false));
-            let modal = self.connecting.is_some() || self.launching.is_some();
-            if !self.strip_focus && !modal {
-                if let Some(s) = self.stack.last_mut() {
-                    s.press();
-                }
-            }
+            self.dip();
             return None;
         }
         match self.ok_down.take() {
-            Some((_, false)) => self.handle_menu(MenuEvent::Confirm),
+            Some((_, false)) => self.menu_event(MenuEvent::Confirm),
             _ => None,
+        }
+    }
+
+    /// OK went down on what has focus: its plate and the element dip.
+    fn dip(&mut self) {
+        if self.connecting.is_some() || self.launching.is_some() {
+            return;
+        }
+        if self.strip_focus {
+            self.strip.press();
+        } else if let Some(s) = self.stack.last_mut() {
+            s.press();
         }
     }
 
@@ -1300,7 +1307,17 @@ impl Shell {
         }
     }
 
+    /// A menu event from a pad, the keys, or a clicked hint.
     pub(crate) fn handle_menu(&mut self, ev: MenuEvent) -> Option<MenuPulse> {
+        // A pad's A dips what it acts on; a remote's OK dipped on its way down.
+        if ev == MenuEvent::Confirm {
+            self.dip();
+        }
+        self.menu_event(ev)
+    }
+
+    /// [`Self::handle_menu`] without the Confirm dip.
+    fn menu_event(&mut self, ev: MenuEvent) -> Option<MenuPulse> {
         self.last_input = Instant::now();
         self.sync();
         // The launch hold owns the buttons while it is up: before the dial lands B
@@ -1500,10 +1517,17 @@ impl Shell {
             }
             return true;
         }
-        if p.press() {
-            self.strip_focus = false;
+        if !p.press() {
+            return self.screen_pointer(p);
         }
-        self.screen_pointer(p)
+        self.strip_focus = false;
+        let depth = self.stack.len();
+        let used = self.screen_pointer(p);
+        // A tap dips what it landed on, unless it opened a screen over it.
+        if self.stack.len() == depth && matches!(self.motion, Motion::None) {
+            self.dip();
+        }
+        used
     }
 
     /// The strip pill under `p`, when the strip is up.
