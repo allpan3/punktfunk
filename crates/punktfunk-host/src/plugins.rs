@@ -40,7 +40,21 @@ pub fn main(args: &[String]) -> Result<()> {
             if !listing {
                 plat::require_elevation("installing or removing plugins")?;
             }
+            // A removed plugin's titles leave with it; its id is gone once its files are.
+            let removing: Vec<String> = match args.first().map(String::as_str) {
+                Some("remove") | Some("rm") | Some("uninstall") => args[1..]
+                    .iter()
+                    .filter(|a| !a.starts_with('-'))
+                    .filter_map(|pkg| manifest::id_of_package(pkg))
+                    .collect(),
+                _ => Vec::new(),
+            };
             forward_to_runner(args)?;
+            for provider in removing {
+                if let Err(e) = crate::library::delete_provider(&provider) {
+                    println!("Couldn't remove the library titles of {provider}: {e:#}");
+                }
+            }
             if !listing {
                 // The runner hands each plugin its token from this file; a running host picks
                 // the new set up on the plugin's first request.

@@ -418,6 +418,8 @@ fn run_install(id: &str, plan: Plan, plugin_tokens: &crate::mgmt::PluginTokens) 
 
 fn run_uninstall(id: &str, pkg: &str, plugin_tokens: &crate::mgmt::PluginTokens) -> Result<()> {
     let dir = super::plugins_dir();
+    // Its titles leave with it: nothing would launch an exec tile of a removed plugin.
+    let provider = crate::plugins::manifest::id_of_package(pkg);
     set_phase(id, "removing");
     run_runner(
         id,
@@ -430,6 +432,16 @@ fn run_uninstall(id: &str, pkg: &str, plugin_tokens: &crate::mgmt::PluginTokens)
     )?;
     set_phase(id, "recording");
     manifest::forget(&dir, pkg).context("update install provenance")?;
+    if let Some(provider) = provider {
+        match crate::library::delete_provider(&provider) {
+            Ok(n) if n > 0 => log_line(id, format!("removed {n} library titles of {provider}")),
+            Ok(_) => {}
+            Err(e) => log_line(
+                id,
+                format!("remove the library titles of {provider}: {e:#}"),
+            ),
+        }
+    }
     refresh_plugin_tokens(id, plugin_tokens)?;
     restart_runner(id);
     Ok(())

@@ -254,6 +254,15 @@ pub fn for_provider(id: &str) -> Option<PluginManifest> {
     installed().remove(id)
 }
 
+/// The provider id package `pkg` declares, read before an uninstall takes its files away.
+pub fn id_of_package(pkg: &str) -> Option<String> {
+    let dir = pf_paths::config_dir()
+        .join("plugins")
+        .join("node_modules")
+        .join(pkg);
+    read_package(&dir).map(|m| m.id).filter(|id| valid_id(id))
+}
+
 /// `node_modules/<name>` plus `node_modules/@scope/<name>`.
 fn package_dirs(root: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(root) else {
