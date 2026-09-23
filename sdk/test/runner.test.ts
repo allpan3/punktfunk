@@ -6,6 +6,7 @@ import { Effect, Fiber } from "effect";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
+	adoptNestedState,
 	discoverUnits,
 	runner,
 	spawnAgainIfKilled,
@@ -184,6 +185,35 @@ describe("discovery", () => {
 			JSON.stringify({ name: "plugins", dependencies: {} }),
 		);
 		expect(discoverUnits(d)).toEqual([]);
+	});
+});
+
+describe("adoptNestedState (0.39 wrote sandboxed state one level down)", () => {
+	const write = (p: string, s: string) => {
+		fs.mkdirSync(path.dirname(p), { recursive: true });
+		fs.writeFileSync(p, s);
+	};
+	const quiet = () => {};
+
+	test("moves nested files up; the nested copy wins a clash and the old one is kept", () => {
+		const state = path.join(ROOT, "adopt", "rom-manager");
+		write(path.join(state, "config.json"), "old");
+		write(path.join(state, "libretro-db", "a.dat"), "db");
+		write(path.join(state, "rom-manager", "config.json"), "new");
+		write(path.join(state, "rom-manager", "cache.json"), "cache");
+		adoptNestedState(state, "rom-manager", quiet);
+		expect(fs.readFileSync(path.join(state, "config.json"), "utf8")).toBe("new");
+		expect(fs.readFileSync(path.join(state, "config.json.pre-sandbox"), "utf8")).toBe("old");
+		expect(fs.readFileSync(path.join(state, "cache.json"), "utf8")).toBe("cache");
+		expect(fs.existsSync(path.join(state, "libretro-db", "a.dat"))).toBe(true);
+		expect(fs.existsSync(path.join(state, "rom-manager"))).toBe(false);
+	});
+
+	test("leaves a state dir with nothing nested alone", () => {
+		const state = path.join(ROOT, "adopt", "steam");
+		write(path.join(state, "config.json"), "cfg");
+		adoptNestedState(state, "steam", quiet);
+		expect(fs.readdirSync(state)).toEqual(["config.json"]);
 	});
 });
 

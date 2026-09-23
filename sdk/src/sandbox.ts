@@ -136,7 +136,12 @@ export const bwrapArgv = (
 	argv.push("--ro-bind", paths.pluginsDir, paths.pluginsDir);
 	argv.push("--ro-bind", paths.bun, paths.bun);
 	argv.push("--ro-bind", paths.runner, paths.runner);
-	argv.push("--bind", paths.stateDir, "/run/punktfunk/plugin-state");
+	// Where `pluginStateDir(<id>)` resolves inside: `PUNKTFUNK_CONFIG_DIR/plugin-state/<id>`.
+	argv.push(
+		"--bind",
+		paths.stateDir,
+		path.join("/run/punktfunk/plugin-state", path.basename(paths.stateDir)),
+	);
 	argv.push("--ro-bind", paths.tokenFile, "/run/punktfunk/plugin-token");
 	argv.push("--bind", paths.socket, "/run/punktfunk/host.sock");
 	// What it said it needs. `-try` so an uninstalled launcher's dir is simply absent rather

@@ -67,9 +67,10 @@ describe("bwrapArgv", () => {
 
 	test("binds the plugin's own things, and the home only through what it declared", () => {
 		const argv = bwrapArgv(manifest(), paths);
+		// The kit's `pluginStateDir("demo")` inside the sandbox, not one level above it.
 		expect(binds(argv, "--bind")).toContainEqual([
 			paths.stateDir,
-			"/run/punktfunk/plugin-state",
+			"/run/punktfunk/plugin-state/demo",
 		]);
 		expect(binds(argv, "--ro-bind")).toContainEqual([
 			paths.tokenFile,

@@ -452,6 +452,36 @@ export const discoverUnits = (
 export const sandboxMode = (): "on" | "off" =>
 	/^(0|off|false)$/i.test(process.env.PUNKTFUNK_PLUGIN_SANDBOX ?? "") ? "off" : "on";
 
+/**
+ * Move `<state>/<id>/` up into `<state>/`: 0.39 bound the state dir one level too high, so a
+ * sandboxed plugin wrote there. On a clash the nested file is the newer one; the older is kept
+ * beside it as `<name>.pre-sandbox`.
+ */
+export const adoptNestedState = (stateDir: string, id: string, log: LogSink): void => {
+	const nested = path.join(stateDir, id);
+	let names: string[];
+	try {
+		if (!fs.lstatSync(nested).isDirectory()) return;
+		names = fs.readdirSync(nested);
+	} catch {
+		return;
+	}
+	for (const name of names) {
+		const to = path.join(stateDir, name);
+		try {
+			if (fs.existsSync(to)) fs.renameSync(to, `${to}.pre-sandbox`);
+			fs.renameSync(path.join(nested, name), to);
+		} catch (e) {
+			log(`[runner] ${id}: state ${name} stayed in ${nested}: ${e}`, "warn");
+			return;
+		}
+	}
+	try {
+		fs.rmdirSync(nested);
+	} catch {}
+	log(`[runner] ${id}: moved its state up from ${nested}`);
+};
+
 /** Write this plugin's own token under its state dir for the sandbox's read-only bind. */
 const writePluginToken = (config: string, stateDir: string, id: string): string | undefined => {
 	const file = path.join(stateDir, ".plugin-token");
@@ -487,6 +517,7 @@ const runSandboxed = (
 		const id = manifest.id ?? unit.name;
 		const config = options.configDir ?? configDir();
 		const stateDir = path.join(config, "plugin-state", id);
+		adoptNestedState(stateDir, id, log);
 		const tokenFile = writePluginToken(config, stateDir, id);
 		if (!tokenFile) {
 			resume(
