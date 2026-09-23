@@ -363,6 +363,12 @@ pub(crate) fn revoke_acl(dir: &std::path::Path) -> std::io::Result<()> {
     plat::revoke(dir).map_err(|e| std::io::Error::other(e.to_string()))
 }
 
+/// Windows: the runner grants `plugins enable` applies, which a fresh install never ran.
+/// `serve` calls this; it acts once per install. POSIX needs none.
+pub(crate) fn converge_runner_acls(status: &RuntimeStatus) {
+    plat::converge_runner_acls(status);
+}
+
 /// Keep a rewritten runner credential readable by the enabled Windows service. POSIX runners
 /// inherit access from the operator and need no ACL adjustment.
 pub(crate) fn converge_runner_credential(path: &std::path::Path) -> Result<()> {

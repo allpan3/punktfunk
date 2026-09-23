@@ -114,6 +114,8 @@ pub(super) fn revoke(_dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn converge_runner_acls(_status: &RuntimeStatus) {}
+
 /// Lifts a mask left by [`disable`] first; a no-op when there is none.
 #[cfg(target_os = "linux")]
 pub(super) fn enable() -> Result<()> {
