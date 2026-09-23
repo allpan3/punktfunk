@@ -100,6 +100,13 @@ pub struct Spring {
     pub vel: f64,
 }
 
+impl Default for Spring {
+    /// At rest on zero.
+    fn default() -> Spring {
+        Spring::rest(0.0)
+    }
+}
+
 impl Spring {
     pub fn rest(pos: f64) -> Spring {
         Spring { pos, vel: 0.0 }

@@ -264,7 +264,7 @@ fn a_group_hands_focus_back_to_the_child_it_left() {
 }
 
 #[test]
-fn the_plate_travels_lands_and_sweeps() {
+fn the_plate_travels_lands_and_settles() {
     use pf_client_core::menu_nav::MenuDir::*;
     let mut surface = canvas();
     let mut tree = Tree::new();
@@ -294,7 +294,7 @@ fn the_plate_travels_lands_and_sweeps() {
     }
     assert!(peak > 120.0, "overshoots a little: {peak}");
     assert_eq!(tree.plate_rect().unwrap().0.left, 120.0);
-    assert!(!tree.plate_busy(), "the sweep has run out");
+    assert!(!tree.plate_busy(), "the landing wobble has settled");
 
     crate::theme::set_reduce_motion(true);
     tree.move_focus(Right);

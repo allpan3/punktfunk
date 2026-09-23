@@ -6,8 +6,8 @@
 //! a group with an id hands focus back to the child it last had.
 //!
 //! [`Plate`] is one sprung rounded rect that morphs from target to target behind the
-//! focused node, stretching toward where it is going, then sweeps a light across its rim
-//! once on arrival. With no target it fades out. Under Reduce Motion it jumps and fades.
+//! focused node, stretching toward where it is going, then wobbling like jelly as it
+//! lands. With no target it fades out. Under Reduce Motion it jumps and fades.
 //! Pinned by `el::tests`.
 
 use crate::anim::{Spring, SpringSpec};
@@ -72,8 +72,6 @@ pub(crate) fn score(from: Rect, to: Rect, dir: MenuDir) -> Option<(u8, f32, f32)
 
 /// The plate's travel: the focus spring.
 pub const TRAVEL: SpringSpec = crate::anim::springs::FOCUS;
-/// Seconds the arrival sweep takes to cross the rim.
-const SWEEP_S: f64 = 0.6;
 /// Plate growth past its target, design units.
 const OUTSET: f32 = 7.0;
 /// The leading edge runs this many seconds of travel ahead: 22 px at 1000 px/s.
@@ -82,8 +80,18 @@ const STRETCH_S: f64 = 0.022;
 const STRETCH_MAX: f64 = 0.3;
 /// Of a stretch, the share the cross axis gives up.
 const SQUASH: f64 = 0.15;
-/// Travel speed, design units/s, that lands with the sweep at full strength.
-const SWEEP_FULL: f64 = 2500.0;
+/// The landing: a jelly settle after a hop, kicked by arrival speed.
+const LAND: SpringSpec = SpringSpec {
+    response: 0.32,
+    damping: 0.3,
+};
+/// Of the arrival speed, the share the landing kick takes; capped by [`LAND_VMAX`].
+const LAND_GAIN: f64 = 0.25;
+const LAND_VMAX: f64 = 2400.0;
+/// Most a landing compresses, as a fraction of the plate's length along the travel.
+const LAND_MAX: f64 = 0.09;
+/// Of a landing squash, the share the cross axis takes up.
+const LAND_CROSS: f64 = 0.6;
 /// Fade time constant, seconds: out with no target or while dormant, in on the way back.
 const FADE_TAU: f64 = 0.06;
 
@@ -105,13 +113,15 @@ pub struct Plate {
     shift: (f32, f32),
     /// Seconds on the plate's own clock.
     t: f64,
-    /// When the sweep started; armed by a focus change, fired on arrival.
-    sweep: Option<f64>,
+    /// The landing wobble, px of compression along the travel; kicked on arrival.
+    land: Spring,
+    /// Unit direction of the last hop, the axis the landing compresses along.
+    axis: (f64, f64),
     armed: bool,
     /// Opacity 0..1, easing toward `fade_to`.
     shown: f64,
     fade_to: f64,
-    /// Fastest the plate moved since its target changed, px/s: the sweep's strength.
+    /// Fastest the plate moved since its target changed, px/s: the landing's strength.
     peak: f64,
     /// OK went down: the plate's scale, springing back to 1.
     press: Option<Spring>,
@@ -142,6 +152,7 @@ impl Plate {
         }
         self.space = space;
         self.shift = shift;
+        let from = self.goal;
         self.goal = [
             f64::from(target.left),
             f64::from(target.top),
@@ -153,8 +164,15 @@ impl Plate {
         let live = !super::dormant();
         if self.to != Some(id) {
             self.armed = true;
-            self.sweep = None;
             self.peak = 0.0;
+            self.land = Spring::rest(0.0);
+            let (dx, dy) = (
+                self.goal[0] + self.goal[2] - from[0] - from[2],
+                self.goal[1] + self.goal[3] - from[1] - from[3],
+            );
+            if dx.hypot(dy) > 1.0 {
+                self.axis = (dx / dx.hypot(dy), dy / dx.hypot(dy));
+            }
             if reduced {
                 self.shown = 0.0;
             }
@@ -183,8 +201,8 @@ impl Plate {
         self.space
     }
 
-    /// Spring the edges `dt` toward the goal and fade toward `live`. Landing fires the
-    /// sweep, unless the plate is on its way out.
+    /// Spring the edges `dt` toward the goal and fade toward `live`. Landing kicks the
+    /// wobble by the hop's top speed, unless the plate is on its way out.
     fn travel(&mut self, dt: f64, live: bool) {
         self.t += dt;
         let Some(edges) = self.edges.as_mut() else {
@@ -206,22 +224,27 @@ impl Plate {
             p.settle(1.0, 0.0005, 0.01);
         }
         self.press = self.press.filter(|p| p.pos != 1.0 || p.vel != 0.0);
+        self.land.step_spec(0.0, LAND, dt);
+        self.land.settle(0.0, 0.15, 2.0);
         let landed = edges
             .iter()
             .zip(self.goal)
             .all(|(s, g)| s.pos == g && s.vel == 0.0);
         if self.armed && landed {
             self.armed = false;
-            self.sweep = live.then_some(self.t);
+            if live && !crate::theme::reduce_motion() {
+                self.land.vel -= self.peak.min(LAND_VMAX) * LAND_GAIN;
+            }
         }
     }
 
-    /// Still travelling, fading, pressed or sweeping: the frame loop must keep drawing.
+    /// Still travelling, fading, pressed or wobbling: the frame loop must keep drawing.
     pub fn busy(&self) -> bool {
         self.armed
             || self.shown != self.fade_to
             || self.press.is_some()
-            || self.sweep.is_some_and(|s| self.t - s < SWEEP_S)
+            || self.land.pos != 0.0
+            || self.land.vel != 0.0
     }
 
     /// Any of the plate is on screen.
@@ -243,17 +266,27 @@ impl Plate {
     }
 
     /// The plate on screen this frame, before its outset: stretched along its travel,
-    /// squashed a little across it, dipped by a press.
+    /// squashed a little across it, compressed by its landing, dipped by a press.
     pub(crate) fn rect(&self) -> Option<(Rect, f32)> {
         let e = self.edges.as_ref()?;
         let (l, r, sx) = stretch(e[0], e[2]);
         let (t, b, sy) = stretch(e[1], e[3]);
         let (qx, qy) = (sy * SQUASH / 2.0, sx * SQUASH / 2.0);
+        // The landing: shorter along the hop's axis, wider across it, both wobbling.
+        let (ax, ay) = (self.axis.0.abs(), self.axis.1.abs());
+        let along = self.land.pos.clamp(
+            -LAND_MAX * (r - l).abs().max((b - t).abs()),
+            LAND_MAX * (r - l).abs().max((b - t).abs()),
+        );
+        let (lx, ly) = (
+            (along * ax - along * LAND_CROSS * ay) / 2.0,
+            (along * ay - along * LAND_CROSS * ax) / 2.0,
+        );
         let r = Rect::from_ltrb(
-            (l + qx) as f32,
-            (t + qy) as f32,
-            (r - qx) as f32,
-            (b - qy) as f32,
+            (l + qx + lx) as f32,
+            (t + qy + ly) as f32,
+            (r - qx - lx) as f32,
+            (b - qy - ly) as f32,
         );
         let s = self.press.map_or(1.0, |p| p.pos) as f32;
         let (dx, dy) = (r.width() * (1.0 - s) / 2.0, r.height() * (1.0 - s) / 2.0);
@@ -264,8 +297,8 @@ impl Plate {
         ))
     }
 
-    /// A lifted glass plate with a brighter rim, then the sweep, brighter the faster the
-    /// plate came in. `k` scales the outset; `cheap` skips the blurred shadow.
+    /// A lifted glass plate with a brighter rim; the rim glows with the landing wobble.
+    /// `k` scales the outset; `cheap` skips the blurred shadow.
     pub(crate) fn draw(&self, canvas: &Canvas, k: f32, cheap: bool) {
         let Some((r, corner)) = self.rect().filter(|_| self.visible()) else {
             return;
@@ -285,20 +318,11 @@ impl Plate {
         }
         canvas.draw_rrect(rr, &fill(fg(0.12 * alpha)));
         canvas.draw_rrect(rr, &fill(accent(0.10 * alpha)));
-        let rim = [fg(0.62 * alpha), fg(0.14 * alpha)];
+        let pulse = (self.land.pos.abs() / (10.0 * f64::from(k))).min(0.35) as f32;
+        let rim = [fg((0.62 + pulse) * alpha), fg((0.14 + pulse / 2.0) * alpha)];
         let mut p = stroke(fg(1.0), 1.5 * k);
         p.set_shader(linear(rr.rect(), &rim, None));
         canvas.draw_rrect(rr, &p);
-        if let Some(s) = self.sweep {
-            let p = ((self.t - s) / SWEEP_S) as f32;
-            let gain = match crate::theme::reduce_motion() {
-                true => 1.0,
-                false => (0.45 + 0.55 * self.peak / (SWEEP_FULL * f64::from(k))).min(1.0),
-            };
-            if (0.0..1.0).contains(&p) {
-                sweep(canvas, rr, k, p, alpha * gain as f32, cheap);
-            }
-        }
     }
 }
 
@@ -308,36 +332,6 @@ fn stretch(lo: Spring, hi: Spring) -> (f64, f64, f64) {
     let cap = STRETCH_MAX * (hi.pos - lo.pos).abs();
     let s = ((lo.vel + hi.vel) / 2.0 * STRETCH_S).clamp(-cap, cap);
     (lo.pos + s.min(0.0), hi.pos + s.max(0.0), s.abs())
-}
-
-/// One light crossing the rim top-left to bottom-right at `p` of the way, an accent glow
-/// under it; a rim glow fading in and out under Reduce Motion.
-fn sweep(canvas: &Canvas, rr: RRect, k: f32, p: f32, alpha: f32, cheap: bool) {
-    let glow = (std::f32::consts::PI * p).sin() * alpha;
-    let band = |c: Color4f| -> Option<skia_safe::Shader> {
-        let at = -0.15 + 1.3 * p;
-        let clear = Color4f::new(c.r, c.g, c.b, 0.0);
-        let stops = [
-            (at - 0.14).clamp(0.0, 1.0),
-            at.clamp(0.0, 1.0),
-            (at + 0.14).clamp(0.0, 1.0),
-        ];
-        linear(rr.rect(), &[clear, c, clear], Some(&stops))
-    };
-    let reduced = crate::theme::reduce_motion();
-    if !cheap {
-        let mut halo = stroke(accent(0.9 * glow), 6.0 * k);
-        halo.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, 4.0 * k, None));
-        if !reduced {
-            halo.set_shader(band(accent(0.9 * glow)));
-        }
-        canvas.draw_rrect(rr, &halo);
-    }
-    let mut core = stroke(fg(glow), 2.0 * k);
-    if !reduced {
-        core.set_shader(band(fg(glow)));
-    }
-    canvas.draw_rrect(rr, &core);
 }
 
 /// Top-left to bottom-right across `r`.
