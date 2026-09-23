@@ -28,6 +28,7 @@ use crate::screens::card_menu::CardMenu;
 use crate::screens::library::LibraryScreen;
 use crate::screens::{ConnectIntent, Ctx, Outbox, Screen};
 use crate::theme::{accent, edge, fg, fill, stroke, Fonts, PanelStroke, W};
+use crate::widgets::{button, button_w, BUTTON_H};
 use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuPulse};
 use skia_safe::{Canvas, Color4f, MaskFilter, PathBuilder, RRect, Rect};
 
@@ -40,10 +41,7 @@ const BADGE: f64 = 52.0;
 const FOCUS_LIFT: f64 = 0.04;
 /// Air above the row: the plate's outset and a breath.
 const ROW_AIR: f64 = 16.0;
-/// A verb's height, label size and side padding; the air above the verbs, the gap between.
-const VERB_H: f64 = 38.0;
-const VERB_TEXT: f64 = 15.0;
-const VERB_PAD: f64 = 18.0;
+/// The air above the verbs, and the gap between two.
 const VERB_AIR: f64 = 16.0;
 const VERB_GAP: f64 = 12.0;
 /// Air between the verbs and the games.
@@ -631,7 +629,7 @@ impl HomeScreen {
         let verbs_h = if verbs.is_empty() {
             0.0
         } else {
-            (VERB_AIR + VERB_H) * k
+            (VERB_AIR + BUTTON_H) * k
         };
         let block = ROW_AIR * k + tile_h + verbs_h;
         let page_to = if self.below { block } else { 0.0 };
@@ -720,22 +718,21 @@ impl HomeScreen {
             .place(Rect::from_xywh(0.0, 0.0, rect.width(), rect.height()));
         for (i, v) in verbs.iter().enumerate() {
             let label = v.label();
-            let bw =
-                f64::from(fonts.measure(label, W::SemiBold, VERB_TEXT * k)) + 2.0 * VERB_PAD * k;
+            let bw = button_w(fonts, label, k);
             let r = Rect::from_xywh(
                 (vx - f64::from(rect.left)) as f32,
                 (vy - f64::from(rect.top)) as f32,
                 bw as f32,
-                (VERB_H * k) as f32,
+                (BUTTON_H * k) as f32,
             );
             under = under.child(
                 El::paint(move |canvas, r| {
                     canvas.save_layer_alpha_f(r.with_outset((8.0, 8.0)), fade);
-                    draw_verb(canvas, fonts, label, r, k);
+                    button(canvas, fonts, label, r, k);
                     canvas.restore();
                 })
                 .id(verb_id(i))
-                .focusable((VERB_H * k / 2.0) as f32)
+                .focusable((BUTTON_H * k / 2.0) as f32)
                 .place(r),
             );
             vx += bw + VERB_GAP * k;
@@ -888,19 +885,6 @@ fn draw_host_tile(canvas: &Canvas, fonts: &Fonts, h: &HostRow, rect: Rect, k: f6
         fg(1.0),
         max_w,
     );
-}
-
-/// A verb under the focused card: a glass pill with its label.
-fn draw_verb(canvas: &Canvas, fonts: &Fonts, label: &str, r: Rect, k: f64) {
-    let stroke = PanelStroke::Plain(0.08);
-    crate::theme::panel(canvas, r, (VERB_H / 2.0) as f32, None, stroke, k as f32);
-    let size = VERB_TEXT * k;
-    let tw = f64::from(fonts.measure(label, W::SemiBold, size));
-    let (x, y) = (
-        f64::from(r.center_x()) - tw / 2.0,
-        f64::from(r.center_y()) + size * 0.36,
-    );
-    fonts.draw(canvas, label, x, y, W::SemiBold, size, fg(0.95));
 }
 
 /// What stands where the games would when the focused card has none to show.

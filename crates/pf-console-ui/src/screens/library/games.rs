@@ -6,17 +6,17 @@
 //! grid keeps its own cursor and hands off at its top and bottom rows.
 
 use super::{desk_intent, draw_running_badge, paint_cover, LibraryScreen};
-use crate::el::El;
+use crate::el::{El, Id};
 use crate::glyphs::{Hint, HintKey};
 use crate::library::{LibraryGame, LibraryView, Section, DESKTOP_ID, GRID_GAP};
 use crate::model::{ConsoleCmd, HostRow};
 use crate::pointer::Pointer;
 use crate::screens::card_menu::CardMenu;
 use crate::screens::{Ctx, Outbox, Screen};
-use crate::theme::{accent, fg, fill, Fonts, PanelStroke, W};
-use crate::widgets::{ListMsg, MenuList, RowSpec};
+use crate::theme::{fg, fill, Fonts, PanelStroke, W};
+use crate::widgets::{button, button_w, text_tab, ListMsg, MenuList, RowSpec};
 use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuPulse};
-use skia_safe::{Canvas, RRect, Rect};
+use skia_safe::{Canvas, Rect};
 use std::cell::RefCell;
 
 /// Recently played shows at most this many.
@@ -25,7 +25,10 @@ const RECENT_MAX: usize = 12;
 const HEADING_H: f64 = 30.0;
 const BAND_AIR: f64 = 18.0;
 const CAPTION_H: f64 = 24.0;
-const CHIP_H: f64 = 40.0;
+const CHIP_H: f64 = 38.0;
+/// A host chip's label size and side padding, as a section tab's.
+const TAB_TEXT: f64 = 16.0;
+const TAB_PAD: f64 = 10.0;
 const TOP_AIR: f64 = 12.0;
 const DESKTOP_W: f64 = 300.0;
 const DESKTOP_H: f64 = 96.0;
@@ -40,6 +43,23 @@ pub(super) enum Zone {
         band: usize,
         item: usize,
     },
+}
+
+pub(super) fn chip_id(i: usize) -> Id {
+    Id::new("games-chip", i)
+}
+
+pub(super) fn band_item_id(band: usize, item: usize) -> Id {
+    Id::new("games-band", band * 10_000 + item)
+}
+
+/// The focus target for `zone`, with the grid's cursor at `cell`.
+pub(super) fn zone_id(zone: Zone, cell: Id) -> Id {
+    match zone {
+        Zone::Grid => cell,
+        Zone::Chip(i) => chip_id(i),
+        Zone::Band { band, item } => band_item_id(band, item),
+    }
 }
 
 pub(super) enum Item {
@@ -479,30 +499,36 @@ impl LibraryScreen {
         k: f64,
         hits: &'a RefCell<Vec<(Zone, Rect)>>,
     ) -> El<'a> {
-        El::paint(move |canvas, r| {
-            let mut x = f64::from(r.left);
-            let top = f64::from(r.top) + TOP_AIR * k;
-            let names = chip_hosts(hosts).map(|h| (h.name.as_str(), h.os.as_str(), self.own(h)));
-            // One line, no scroll: past about six hosts the last chips run off the edge.
-            for (i, (label, os, mine)) in names.chain([("Customize", "", false)]).enumerate() {
-                let mark = if os.is_empty() { 0.0 } else { 22.0 * k };
-                let w = f64::from(fonts.measure(label, W::SemiBold, 15.0 * k)) + mark + 36.0 * k;
-                let chip = Rect::from_xywh(x as f32, top as f32, w as f32, (CHIP_H * k) as f32);
-                hits.borrow_mut().push((Zone::Chip(i), chip));
-                draw_chip(
-                    canvas,
-                    fonts,
-                    label,
-                    os,
-                    chip,
-                    k,
-                    mine,
-                    self.zone == Zone::Chip(i),
-                );
-                x += w + 10.0 * k;
-            }
-        })
-        .size(width as f32, Self::chips_h(k) as f32)
+        let names = chip_hosts(hosts).map(|h| (h.name.as_str(), Some(self.own(h))));
+        let (mut x, top, h) = (0.0, TOP_AIR * k, CHIP_H * k);
+        let mut row = El::column().size(width as f32, Self::chips_h(k) as f32);
+        // One line, no scroll: past about six hosts the last chips run off the edge.
+        for (i, (label, mine)) in names.chain([("Customize", None)]).enumerate() {
+            let w = match mine {
+                Some(_) => {
+                    f64::from(fonts.measure(label, W::Bold, TAB_TEXT * k)) + 2.0 * TAB_PAD * k
+                }
+                None => button_w(fonts, label, k),
+            };
+            let chip = Rect::from_xywh(x as f32, top as f32, w as f32, h as f32);
+            row = row.child(
+                El::paint(move |canvas, r| {
+                    hits.borrow_mut().push((Zone::Chip(i), r));
+                    match mine {
+                        Some(mine) => {
+                            let ink = fg(if mine { 1.0 } else { 0.6 });
+                            text_tab(canvas, fonts, label, r, TAB_TEXT * k, ink);
+                        }
+                        None => button(canvas, fonts, label, r, k),
+                    }
+                })
+                .id(chip_id(i))
+                .focusable((h / 2.0) as f32)
+                .place(chip),
+            );
+            x += w + 10.0 * k;
+        }
+        row
     }
 
     /// Band `b`, as a child of the grid's scroll: its heading, then its row at its own
@@ -520,7 +546,7 @@ impl LibraryScreen {
         hits: &'a RefCell<Vec<(Zone, Rect)>>,
     ) -> El<'a> {
         let label = band.section.label().to_uppercase();
-        El::paint(move |canvas, r| {
+        let heading = El::paint(move |canvas, r| {
             fonts.draw_tracked(
                 canvas,
                 &label,
@@ -531,28 +557,57 @@ impl LibraryScreen {
                 1.4 * k,
                 fg(0.45),
             );
-            let (iw, pitch) = item_pitch(band, cw, k);
-            let top = f64::from(r.top) + HEADING_H * k;
-            let off = self.band_x.get(b).map_or(0.0, |s| s.pos);
-            for (i, it) in band.items.iter().enumerate() {
-                let x = f64::from(r.left) + i as f64 * pitch - off;
-                if x + iw < f64::from(view.left) || x > f64::from(view.right) {
-                    continue;
-                }
-                let slot =
-                    Rect::from_xywh(x as f32, top as f32, iw as f32, row_h(band, ch, k) as f32);
-                let z = Zone::Band { band: b, item: i };
-                hits.borrow_mut().push((z, slot));
-                let on = self.zone == z;
-                match it {
-                    Item::Desktop(h) => desktop_tile(canvas, fonts, h, slot, k, on),
-                    Item::Game(g) => {
-                        self.band_poster(canvas, fonts, band.section, *g, slot, ch, k, on)
-                    }
-                }
-            }
         })
-        .size(width as f32, Self::band_h(band, ch, k) as f32)
+        .place(Rect::from_xywh(
+            0.0,
+            0.0,
+            width as f32,
+            (HEADING_H * k) as f32,
+        ));
+        let (iw, pitch) = item_pitch(band, cw, k);
+        let off = self.band_x.get(b).map_or(0.0, |s| s.pos);
+        let corner = if band.section == Section::Desktops {
+            18.0
+        } else {
+            12.0
+        };
+        let mut el = El::column()
+            .size(width as f32, Self::band_h(band, ch, k) as f32)
+            .child(heading);
+        for (i, it) in band.items.iter().enumerate() {
+            let x = i as f64 * pitch - off;
+            let slot = Rect::from_xywh(
+                x as f32,
+                (HEADING_H * k) as f32,
+                iw as f32,
+                row_h(band, ch, k) as f32,
+            );
+            let z = Zone::Band { band: b, item: i };
+            el = el.child(
+                El::paint(move |canvas, slot| {
+                    // Past the viewport's sides the band draws nothing and takes no press.
+                    if slot.right < view.left || slot.left > view.right {
+                        return;
+                    }
+                    hits.borrow_mut().push((z, slot));
+                    let on = self.zone == z;
+                    match it {
+                        Item::Desktop(h) => desktop_tile(canvas, fonts, h, slot, k),
+                        Item::Game(g) => {
+                            self.band_poster(canvas, fonts, band.section, *g, slot, ch, k, on)
+                        }
+                    }
+                })
+                .id(band_item_id(b, i))
+                .focusable((corner * k) as f32)
+                .size(iw as f32, ch.min(f64::from(slot.height())) as f32)
+                .place(match it {
+                    Item::Desktop(_) => slot,
+                    Item::Game(_) => Rect::from_xywh(slot.left, slot.top, slot.width(), ch as f32),
+                }),
+            );
+        }
+        el
     }
 
     /// A poster in a band: the grid's cover, with a caption under it — when it was
@@ -570,20 +625,8 @@ impl LibraryScreen {
         on: bool,
     ) {
         let g = &self.games[i];
-        let scale = if on { 1.06 } else { 1.0 };
-        let (w, h) = (f64::from(slot.width()) * scale, ch * scale);
-        let cy = f64::from(slot.top) + ch / 2.0;
-        let cell = Rect::from_xywh(
-            (f64::from(slot.center_x()) - w / 2.0) as f32,
-            (cy - h / 2.0) as f32,
-            w as f32,
-            h as f32,
-        );
-        crate::theme::focus_halo(canvas, cell, 12.0, k as f32, if on { 1.0 } else { 0.0 });
+        let cell = Rect::from_xywh(slot.left, slot.top, slot.width(), ch as f32);
         paint_cover(canvas, fonts, g, self.art.get(&g.id), cell, k, 1.0);
-        if on {
-            crate::theme::focus_ring(canvas, cell, 12.0, k as f32);
-        }
         if g.running {
             draw_running_badge(canvas, fonts, cell, k);
         }
@@ -628,71 +671,9 @@ fn item_pitch(band: &Band, cw: f64, k: f64) -> (f64, f64) {
     (w, w + GRID_GAP * k)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_chip(
-    canvas: &Canvas,
-    fonts: &Fonts,
-    label: &str,
-    os: &str,
-    r: Rect,
-    k: f64,
-    mine: bool,
-    on: bool,
-) {
-    let rr = RRect::new_rect_xy(r, r.height() / 2.0, r.height() / 2.0);
-    canvas.draw_rrect(rr, &fill(if mine { accent(0.30) } else { fg(0.08) }));
-    if on {
-        let corner = (f64::from(r.height()) / 2.0 / k) as f32;
-        crate::theme::focus_halo(canvas, r, corner, k as f32, 1.0);
-        crate::theme::focus_ring(canvas, r, corner, k as f32);
-    }
-    let ink = if mine || on { fg(1.0) } else { fg(0.7) };
-    let mut x = f64::from(r.left) + 18.0 * k;
-    let side = 16.0 * k;
-    let mark = Rect::from_xywh(
-        x as f32,
-        (f64::from(r.center_y()) - side / 2.0) as f32,
-        side as f32,
-        side as f32,
-    );
-    if let Some(path) = (!os.is_empty())
-        .then(|| crate::os_marks::os_mark(os, mark))
-        .flatten()
-    {
-        canvas.draw_path(&path, &fill(ink));
-    }
-    if !os.is_empty() {
-        x += 22.0 * k;
-    }
-    let size = 15.0 * k;
-    fonts.draw(
-        canvas,
-        label,
-        x,
-        f64::from(r.center_y()) + size * 0.36,
-        W::SemiBold,
-        size,
-        ink,
-    );
-}
-
 /// A host's desk in the Desktops band: its badge, its name, what OK does, presence.
-fn desktop_tile(canvas: &Canvas, fonts: &Fonts, h: &HostRow, r: Rect, k: f64, on: bool) {
-    if on {
-        crate::theme::focus_halo(canvas, r, 18.0, k as f32, 1.0);
-    }
-    crate::theme::panel(
-        canvas,
-        r,
-        18.0,
-        Some(accent(if on { 0.28 } else { 0.16 })),
-        if on {
-            PanelStroke::Brand(0.9)
-        } else {
-            PanelStroke::Gradient
-        },
-        k as f32,
-    );
+fn desktop_tile(canvas: &Canvas, fonts: &Fonts, h: &HostRow, r: Rect, k: f64) {
+    crate::theme::panel(canvas, r, 18.0, None, PanelStroke::Plain(0.08), k as f32);
     let pad = 22.0 * k;
     let badge_y = f64::from(r.center_y()) - 26.0 * k;
     crate::screens::home::draw_badge(
@@ -721,25 +702,26 @@ fn desktop_tile(canvas: &Canvas, fonts: &Fonts, h: &HostRow, r: Rect, k: f64, on
     let (line, ink) = if h.running.is_empty() {
         ("Desktop".to_string(), fg(0.6))
     } else {
-        (format!("Resume {}", h.running), crate::theme::ONLINE_GREEN)
+        (format!("Resume {}", h.running), crate::theme::live())
     };
+    // Online reads as the home card's green dot before the line.
+    let mut lx = x;
+    if h.online {
+        let r = 3.5 * k;
+        let dot = ((lx + r) as f32, (cy + 13.4 * k) as f32);
+        canvas.draw_circle(dot, r as f32, &fill(crate::theme::live()));
+        lx += 2.0 * r + 6.0 * k;
+    }
     fonts.draw_clipped(
         canvas,
         &line,
-        x,
+        lx,
         cy + 18.0 * k,
         W::SemiBold,
         13.0 * k,
         ink,
-        w,
+        w - (lx - x),
     );
-    if h.online {
-        let dot = (
-            (f64::from(r.right) - 14.0 * k) as f32,
-            (f64::from(r.top) + 14.0 * k) as f32,
-        );
-        canvas.draw_circle(dot, (4.0 * k) as f32, &fill(crate::theme::ONLINE_GREEN));
-    }
 }
 
 /// Customize: the sections' order and switches, stored as `library_sections`. OK picks a

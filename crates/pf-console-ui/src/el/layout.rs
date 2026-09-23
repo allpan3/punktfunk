@@ -211,7 +211,9 @@ impl Tree {
                     canvas.clip_rect(c, None, true);
                 }
                 self.plate.step(id, target, corner, dt, space, d);
-                self.plate.draw(canvas, k, cheap);
+                if !super::dormant() {
+                    self.plate.draw(canvas, k, cheap);
+                }
                 canvas.restore();
             }
             let (d, c) = n

@@ -18,6 +18,20 @@ mod layout;
 
 pub use focus::{Group, Plate};
 pub use layout::{Frame, Tree};
+
+thread_local! {
+    /// Focus is on the shell's tab strip, not in the layer painting now: its trees step
+    /// their plates without drawing them, so one plate shows. Set by the shell per layer.
+    static DORMANT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub fn set_dormant(on: bool) {
+    DORMANT.with(|d| d.set(on));
+}
+
+fn dormant() -> bool {
+    DORMANT.with(std::cell::Cell::get)
+}
 use skia_safe::{Canvas, Rect};
 pub use taffy::Style;
 use taffy::{Dimension, FlexDirection, LengthPercentage, Overflow, Point, Size};

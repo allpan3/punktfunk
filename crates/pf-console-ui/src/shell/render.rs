@@ -6,6 +6,7 @@ use crate::library::LibraryShared;
 use crate::model::HostRow;
 use crate::screens::{Bg, Ctx, Screen};
 use crate::theme::{edge, fg, Fonts, PanelStroke, EDGE_INSET, W};
+use crate::widgets::text_tab;
 use pf_client_core::menu_nav::PadInfo;
 use pf_client_core::trust;
 use skia_safe::{Canvas, Rect};
@@ -450,8 +451,11 @@ impl LayerEnv<'_> {
             device_name: self.device_name,
             t: self.t,
         };
-        // Content first: a list scrolls up under the band drawn over it.
+        // Content first: a list scrolls up under the band drawn over it. With focus on the
+        // tabs, the screen keeps its plate to itself.
+        crate::el::set_dormant(self.strip_focus && band == Band::Strip);
         screen.render(canvas, self.content, self.k, self.dt, self.fonts, &mut ctx);
+        crate::el::set_dormant(false);
         let cheap =
             crate::screens::settings::reduce_ui_res(ctx.settings, ctx.platform, ctx.fallback_ui);
         let title = (band == Band::Title).then(|| screen.title(&ctx));
@@ -500,13 +504,14 @@ impl LayerEnv<'_> {
         for tab in TABS {
             let w = f64::from(self.fonts.measure(tab.name(), W::Bold, size)) + 2.0 * pad;
             let r = Rect::from_xywh(x as f32, top as f32, w as f32, h as f32);
-            let look = TextTab {
-                selected: tab == self.tab,
-                enabled: tab != Tab::Games || self.games_ok,
+            let ink = match (tab != Tab::Games || self.games_ok, tab == self.tab) {
+                (false, _) => fg(0.28),
+                (true, true) => fg(1.0),
+                (true, false) => fg(0.6),
             };
             let fonts = self.fonts;
             row = row.child(
-                El::paint(move |canvas, r| look.paint(canvas, fonts, tab.name(), r, size))
+                El::paint(move |canvas, r| text_tab(canvas, fonts, tab.name(), r, size, ink))
                     .id(pill_id(tab))
                     .focusable((10.0 * k) as f32)
                     .place(r),
@@ -523,27 +528,6 @@ impl LayerEnv<'_> {
         } else {
             self.strip.paint(canvas, frame);
         }
-    }
-}
-
-/// One tab: bold text, full ink when current. The plate behind it is focus.
-#[derive(Clone, Copy)]
-struct TextTab {
-    selected: bool,
-    enabled: bool,
-}
-
-impl TextTab {
-    fn paint(self, canvas: &Canvas, fonts: &Fonts, label: &str, r: Rect, size: f64) {
-        let ink = match (self.enabled, self.selected) {
-            (false, _) => fg(0.28),
-            (true, true) => fg(1.0),
-            (true, false) => fg(0.6),
-        };
-        let tw = f64::from(fonts.measure(label, W::Bold, size));
-        let x = f64::from(r.center_x()) - tw / 2.0;
-        let y = f64::from(r.center_y()) + size * 0.36;
-        fonts.draw(canvas, label, x, y, W::Bold, size, ink);
     }
 }
 

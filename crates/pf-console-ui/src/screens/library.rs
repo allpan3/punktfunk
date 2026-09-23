@@ -478,8 +478,8 @@ pub(crate) struct LibraryScreen {
     /// Seat scroll next frame; the two arrangements do not share a position.
     snap_scroll: bool,
     /// The grid's layout, scroll and hit rects. A cell: the card painters borrow the
-    /// screen while the tree lays them out.
-    grid: RefCell<Tree>,
+    /// screen while the tree lays them out. Boxed, as `bar` is.
+    grid: RefCell<Box<Tree>>,
     /// The grid scroll keeps the focus row in view. A finger pan lets go until focus moves.
     follow: bool,
     /// Columns the last grid frame drew. `None` until then — do not invent a count.
@@ -542,7 +542,7 @@ impl LibraryScreen {
             bar: Box::new(LibraryBar::new()),
             scroll: Spring::rest(0.0),
             snap_scroll: true,
-            grid: RefCell::new(Tree::new()),
+            grid: RefCell::new(Box::new(Tree::new())),
             follow: true,
             grid_cols_last: None,
             grid_col: 0,
@@ -1837,8 +1837,8 @@ impl LibraryScreen {
         root = root.child(El::column().size(grid_w as f32, heading_h as f32));
         let mut tree = this.grid.borrow_mut();
         let frame = tree.layout(root, viewport);
-        let focus = (this.zone == Zone::Grid && !this.quiet)
-            .then(|| grid_cell(this.cursor.max(0) as usize));
+        let cell = grid_cell(this.cursor.max(0) as usize);
+        let focus = (!this.quiet).then(|| games::zone_id(this.zone, cell));
         tree.set_focus(focus);
         let cheap = super::settings::reduce_ui_res(ctx.settings, ctx.platform, ctx.fallback_ui);
         tree.paint_focus(canvas, frame, k as f32, dt, cheap);
@@ -2060,17 +2060,15 @@ impl LibraryScreen {
             (None, Some(g)) => g.title.clone(),
             (None, None) => return,
         };
-        let w = f64::from(rect.width());
-        let cx = f64::from(rect.left) + w / 2.0;
-        fonts.centered(
+        fonts.leading(
             canvas,
             &title,
             W::Bold,
             27.0 * k,
             fg(1.0),
-            cx,
+            f64::from(rect.left) + edge(k),
             f64::from(rect.bottom) - TITLE_TOP * k,
-            w * 0.8,
+            f64::from(rect.width()) - 2.0 * edge(k),
         );
     }
 }

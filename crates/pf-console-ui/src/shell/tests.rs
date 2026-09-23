@@ -580,15 +580,8 @@ fn next_section(s: &mut Shell) {
     while !matches!(s.stack.last(), Some(Screen::Settings(st)) if st.strip_focus_for_test()) {
         s.handle_menu(MenuEvent::Move(MenuDir::Up));
     }
-    // A rail walks down and returns right; a strip walks right and returns down.
-    let rail = matches!(s.stack.last(), Some(Screen::Settings(st)) if st.rail_for_test());
-    let (walk, back) = if rail {
-        (MenuDir::Down, MenuDir::Right)
-    } else {
-        (MenuDir::Right, MenuDir::Down)
-    };
-    s.handle_menu(MenuEvent::Move(walk));
-    s.handle_menu(MenuEvent::Move(back));
+    s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
 }
 
 #[test]
@@ -3033,7 +3026,7 @@ fn dump_phone_home() {
         },
         scale: Some(2.25),
     };
-    let (mut s, _console, library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    let (mut s, console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
     s.fake_clock = Some((0.0, 1.0 / 60.0));
     s.platform = crate::platform::Platform::Apple;
     let dump = |s: &mut Shell, frames: usize, name: &str| {
@@ -3047,6 +3040,11 @@ fn dump_phone_home() {
             .unwrap();
         std::fs::write(format!("{dir}/{name}.png"), png.as_bytes()).unwrap();
     };
+    console.set_hosts(Vec::new());
+    dump(&mut s, 60, "p0-no-hosts");
+    let (mut s, _console, library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    s.fake_clock = Some((0.0, 1.0 / 60.0));
+    s.platform = crate::platform::Platform::Apple;
     dump(&mut s, 60, "p1-home-empty");
     let games = (0..8)
         .map(|i| crate::library::LibraryGame {
@@ -3086,4 +3084,29 @@ fn dump_phone_home() {
     s.handle_menu(MenuEvent::Move(MenuDir::Down));
     s.handle_menu(MenuEvent::Move(MenuDir::Right));
     dump(&mut s, 60, "p6-home-offline");
+    // The card's menu and details, from the first card's verbs.
+    s.handle_menu(MenuEvent::Move(MenuDir::Left));
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    for _ in 0..3 {
+        s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    }
+    s.handle_menu(MenuEvent::Confirm);
+    dump(&mut s, 60, "p7-card-menu");
+    s.handle_menu(MenuEvent::Back);
+    s.handle_menu(MenuEvent::Move(MenuDir::Left));
+    s.handle_menu(MenuEvent::Confirm);
+    dump(&mut s, 60, "p8-host-details");
+    s.handle_menu(MenuEvent::Back);
+    dump(&mut s, 30, "_back");
+    for (tab, name) in [
+        (Tab::Games, "p9-games"),
+        (Tab::Players, "pa-players"),
+        (Tab::Settings, "pb-settings"),
+    ] {
+        s.switch_tab(tab);
+        dump(&mut s, 60, name);
+    }
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    dump(&mut s, 60, "pc-settings-rows");
 }

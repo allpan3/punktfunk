@@ -1947,16 +1947,16 @@
   ],
   "$shell_tabs": "Version 3: the console's top-level tabs, in strip order. The Skia shell draws them on every platform, so its Rust twin pins them; Apple and Android hold no copy.",
   "settings_sections": [
-    { "name": "Stream", "icon": "tv" },
-    { "name": "Picture", "icon": "film" },
-    { "name": "Sound", "icon": "volume-2" },
-    { "name": "Controllers", "icon": "gamepad-2" },
-    { "name": "Input", "icon": "mouse" },
-    { "name": "Interface", "icon": "palette" },
-    { "name": "Presets", "icon": "settings" },
-    { "name": "About", "icon": "info" }
+    { "name": "Stream" },
+    { "name": "Picture" },
+    { "name": "Sound" },
+    { "name": "Controllers" },
+    { "name": "Input" },
+    { "name": "Interface" },
+    { "name": "Presets" },
+    { "name": "About" }
   ],
-  "$settings_sections": "Version 3: the Settings tab's sections and their Lucide marks, in rail order. The Skia shell draws them on every platform, so its Rust twin pins them.",
+  "$settings_sections": "Version 3: the Settings tab's sections, in tab order. The Skia shell draws them on every platform, so its Rust twin pins them.",
   "backdrop_pairs": [
     { "id": "violet", "pair": [[0.78, 0.63, 0.98], [0.45, 0.44, 0.95]] },
     { "id": "oled", "pair": [[0.12, 0.024, 0.13], [0.01, 0.02, 0.1]] },

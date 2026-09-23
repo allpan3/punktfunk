@@ -16,7 +16,7 @@ use crate::model::ConsoleCmd;
 use crate::platform::Platform;
 use crate::pointer::{Pointer, PointerKind};
 use crate::screens::{Ctx, Outbox};
-use crate::theme::{accent, fg, Fonts, PanelStroke, W};
+use crate::theme::{accent, edge, fg, Fonts, PanelStroke, W};
 use pf_client_core::menu_nav::{MenuEvent, MenuPulse, PadInfo};
 use skia_safe::{Canvas, Rect};
 
@@ -203,8 +203,10 @@ impl PlayersScreen {
             .collect();
         let row_w = cards.len() as f64 * (cw + gap) - gap;
         let w = f64::from(rect.width());
-        // Centred while it fits; past that the row scrolls to keep focus in view.
-        let x0 = ((w - row_w) / 2.0).max(24.0 * k);
+        // The viewport reaches past the cards so the plate's lift is not clipped.
+        let air = 28.0 * k;
+        // On the margin; past the screen's width the row scrolls to keep focus in view.
+        let x0 = air + edge(k);
         let strip = Id::new("cards", 0);
         let focus_x = cards
             .iter()
@@ -214,8 +216,6 @@ impl PlayersScreen {
         let offset = focus_x.map_or(0.0, |x| (x - w / 2.0).clamp(0.0, max));
         self.tree.set_offset(strip, offset as f32);
         let top = 24.0 * k;
-        // The viewport reaches past the cards so the plate's lift is not clipped.
-        let air = 28.0 * k;
         let row = El::scroll(strip, Axis::Horizontal)
             .group(Group::Row)
             .id(strip)
@@ -234,13 +234,13 @@ impl PlayersScreen {
                     .place(r)
             }))
             .place(Rect::from_xywh(
-                0.0,
+                -air as f32,
                 (top - air) as f32,
-                w as f32,
+                (w + air) as f32,
                 (ch + 2.0 * air) as f32,
             ));
         let grants_top = top + ch + 36.0 * k;
-        let (rw, rh) = ((ROW_W * k).min(w - 48.0 * k), ROW_H * k);
+        let (rw, rh) = ((ROW_W * k).min(w - 2.0 * edge(k)), ROW_H * k);
         let grants = El::column()
             .id(Id::new("grants", 0))
             .group(Group::Column)
@@ -252,7 +252,7 @@ impl PlayersScreen {
                     })
                     .map(|i| {
                         let r = Rect::from_xywh(
-                            ((w - rw) / 2.0) as f32,
+                            edge(k) as f32,
                             (grants_top + 28.0 * k + i as f64 * (rh + ROW_GAP * k)) as f32,
                             rw as f32,
                             rh as f32,
@@ -272,7 +272,7 @@ impl PlayersScreen {
             fonts.draw_tracked(
                 canvas,
                 "PASSTHROUGH",
-                f64::from(rect.left) + (w - rw) / 2.0 + 16.0 * k,
+                f64::from(rect.left) + edge(k) + 16.0 * k,
                 f64::from(rect.top) + grants_top + 16.0 * k,
                 W::SemiBold,
                 12.0 * k,
@@ -281,15 +281,15 @@ impl PlayersScreen {
             );
         }
         let detail = detail(self.focused(ctx), ctx);
-        fonts.centered(
+        fonts.leading(
             canvas,
             &detail,
             W::Regular,
             13.0 * k,
             fg(0.55),
-            f64::from(rect.left) + w / 2.0,
+            f64::from(rect.left) + edge(k),
             f64::from(rect.bottom) - 28.0 * k,
-            w * 0.8,
+            w - 2.0 * edge(k),
         );
     }
 }

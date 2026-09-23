@@ -254,9 +254,11 @@ const SLIP_DP: f64 = 14.0;
 /// Cap so a held repeat is one travel, not a value thrown off the row.
 const SLIP_MAX: f64 = 22.0;
 /// Confirm-dip floor (visual sibling of the haptic).
-const PRESS_DIP: f64 = crate::anim::PRESS_SCALE;
 /// Mount rise, design units. A twelfth of the carousel travel — same language, smaller.
 const ROW_RISE: f64 = 12.0;
+
+/// Room above a list's first row and left of its column for the plate's outset, design units.
+const PLATE_AIR: f64 = 12.0;
 
 struct SlipPrev {
     /// Index and label both: the screen rebuilds rows every frame, so an index
@@ -281,13 +283,9 @@ pub struct MenuList {
     tree: RefCell<Tree>,
     /// The scroll centres the focused row. A finger pan lets go until focus moves.
     follow: bool,
-    /// Colour channel of focus (tint, alpha, chevrons), eased. Not sprung:
-    /// overshoot would leave the palette.
+    /// Colour channel of focus (alpha, chevrons), eased. Not sprung: overshoot would
+    /// leave the palette. The plate behind the row is the focus mark itself.
     focus: Vec<f64>,
-    /// Scale channel, sprung — the overshoot is the "picked up" pop.
-    focus_pop: Vec<Spring>,
-    /// Confirm dip, rest 1.0. One spring: only the focused row can be dipping.
-    press: Spring,
     /// Stepped-value displacement, chasing 0 from ±[`SLIP_DP`]. Not reset on a
     /// new step: velocity is what lets held repeats accumulate into one travel.
     slip: Spring,
@@ -336,8 +334,6 @@ impl MenuList {
             tree: RefCell::new(Tree::new()),
             follow: true,
             focus: Vec::new(),
-            focus_pop: Vec::new(),
-            press: Spring::rest(1.0),
             slip: Spring::rest(0.0),
             slip_prev: None,
             step_dir: 0,
@@ -403,7 +399,7 @@ impl MenuList {
     /// Confirm dip; also OK going down on a remote. Separate from [`Self::armed`]: an
     /// action row still presses.
     pub fn dip(&mut self) {
-        self.press.pos = PRESS_DIP;
+        self.tree.get_mut().press();
     }
 
     /// The trailing button under the pointer, as `(row, button)`. The screen decides what
@@ -526,14 +522,12 @@ impl MenuList {
             // Replaced rows share no history: snap focus, drop slip. A value that
             // "changed" because the row set swapped is not a step.
             self.focus.clear();
-            self.focus_pop.clear();
             self.shown.clear();
             self.slip = Spring::rest(0.0);
             self.slip_prev = None;
             self.step_dir = 0;
         }
         self.focus.resize(rows.len(), 0.0);
-        self.focus_pop.resize(rows.len(), Spring::rest(0.0));
         if self.snap || self.knobs.len() != rows.len() {
             self.knobs.clear();
             self.knobs.extend(rows.iter().map(|r| match r.control {
@@ -566,24 +560,11 @@ impl MenuList {
                 *f = target;
             }
         }
-        for (i, s) in self.focus_pop.iter_mut().enumerate() {
-            let target = if active && i == self.cursor { 1.0 } else { 0.0 };
-            if self.snap || reduce {
-                *s = Spring::rest(target);
-            } else {
-                s.step_spec(target, springs::FOCUS, dt);
-                s.settle(target, 0.0005, 0.005);
-            }
-        }
         self.bump.step(0.0, BUMP_K, BUMP_C, dt);
         self.bump.settle(0.0, 0.3, 4.0);
         if reduce {
             // Reduced motion: keep the Boundary haptic, drop the recoil travel.
             self.bump = Spring::rest(0.0);
-            self.press = Spring::rest(1.0);
-        } else {
-            self.press.step_spec(1.0, springs::PRESS, dt);
-            self.press.settle(1.0, 0.0005, 0.005);
         }
 
         // Arm slip only if `step_dir` is set AND this row is `adjustable` AND the
@@ -631,7 +612,7 @@ impl MenuList {
         // Rows are cells in a scroll column, `ROW_GAP` apart, a header band above a
         // sectioned row. Each cell's painter draws the row as it always has.
         let list = Id::new(LIST, 0);
-        let row_w = (ROW_MAX_W * k).min(f64::from(rect.width()) - 48.0 * k);
+        let row_w = (ROW_MAX_W * k).min(f64::from(rect.width()) - 2.0 * edge(k));
         let dot_gutter = if rows.iter().any(|r| r.dot) {
             16.0 * k
         } else {
@@ -639,24 +620,27 @@ impl MenuList {
         };
         let snap = std::mem::take(&mut self.snap);
         self.tree.get_mut().tick(dt as f32);
-        // Bleeding, the viewport reaches the layer's edges and pads back to `rect`.
+        // Bleeding, the viewport reaches the layer's edges and pads back to `rect`. Either way
+        // it holds the plate's outset above the first row and left of the column.
+        let air = (PLATE_AIR * k) as f32;
         let view = if self.bleed {
             let clip = canvas.local_clip_bounds().unwrap_or(rect);
             Rect::from_ltrb(
-                rect.left,
-                clip.top.min(rect.top),
+                rect.left - air,
+                clip.top.min(rect.top - air),
                 rect.right,
                 clip.bottom.max(rect.bottom),
             )
         } else {
-            rect
+            Rect::from_ltrb(rect.left - air, rect.top - air, rect.right, rect.bottom)
         };
         let (pad_top, pad_bottom) = (rect.top - view.top, view.bottom - rect.bottom);
         let this = &*self;
         let root = El::scroll(list, Axis::Vertical)
             .gap((ROW_GAP * k) as f32)
             .style(|s| {
-                s.align_items = Some(taffy::AlignItems::CENTER);
+                s.align_items = Some(taffy::AlignItems::START);
+                s.padding.left = taffy::LengthPercentage::length(air + edge(k) as f32);
                 s.padding.top = taffy::LengthPercentage::length(pad_top);
                 s.padding.bottom = taffy::LengthPercentage::length(pad_bottom);
             })
@@ -665,6 +649,7 @@ impl MenuList {
                     this.paint_row(canvas, fonts, i, row, cell, k, dot_gutter);
                 })
                 .id(row_id(i))
+                .focusable((14.0 * k) as f32)
                 .size(row_w as f32, (ROW_H * k) as f32);
                 match row.header {
                     Some(_) => cell.style(|s| {
@@ -697,7 +682,8 @@ impl MenuList {
         }
         let scroll_settled = !tree.moving(list) && (!following || tree.offset(list) == target);
         let offset = tree.offset(list);
-        tree.paint(canvas, frame);
+        tree.set_focus(active.then(|| row_id(this.cursor)));
+        tree.paint_focus(canvas, frame, k as f32, dt, false);
         drop(tree);
         // Rows past `rect` blur more the further they go, from nothing at its edge.
         if self.bleed {
@@ -758,15 +744,9 @@ impl MenuList {
                 .iter()
                 .enumerate()
                 .all(|(i, f)| *f == focus_target(i))
-            && self
-                .focus_pop
-                .iter()
-                .enumerate()
-                .all(|(i, s)| s.vel == 0.0 && s.pos == focus_target(i))
+            && !self.tree.get_mut().plate_busy()
             && self.bump.pos == 0.0
             && self.bump.vel == 0.0
-            && self.press.pos == 1.0
-            && self.press.vel == 0.0
             && self.slip.pos == 0.0
             && scroll_settled
             && self
@@ -807,22 +787,8 @@ impl MenuList {
                 fg(0.45),
             );
         }
-        // Scale 0.98 → 1.0 about the centre, times the confirm dip. Two
-        // channels: pop = this is the row, dip = you just pressed it.
-        let pop = self.focus_pop.get(i).map_or(f, |s| s.pos);
-        // A switch is its own feedback: squashing the row around it reads as the list
-        // lurching on what is one control moving.
-        let dip = if i == self.cursor && !matches!(row.control, Control::Toggle(_)) {
-            self.press.pos
-        } else {
-            1.0
-        };
-        let scale = (0.98 + 0.02 * pop) * dip;
         let (cx, cy) = (x0 + row_w / 2.0, top + ROW_H * k / 2.0);
         canvas.save();
-        canvas.translate((cx as f32, cy as f32));
-        canvas.scale((scale as f32, scale as f32));
-        canvas.translate((-cx as f32, -cy as f32));
         // Per-row layer only while arriving (panel + two text runs). Bounds
         // are the row rect so this is never a full-screen pass.
         let fading = ent.fade < 1.0;
@@ -831,27 +797,13 @@ impl MenuList {
             canvas.save_layer_alpha_f(bounds, ent.fade as f32);
         }
         let r = Rect::from_xywh(x0 as f32, top as f32, row_w as f32, (ROW_H * k) as f32);
-        let stroke = if row.caret {
-            PanelStroke::Brand(0.7)
+        // The field being typed into keeps its accent; focus is the plate behind the row.
+        let (stroke, tint) = if row.caret {
+            (PanelStroke::Brand(0.7), Some(accent(0.30)))
         } else {
-            PanelStroke::Plain(0.06 + 0.22 * f as f32)
+            (PanelStroke::Plain(0.08), None)
         };
-        let tint = if row.caret {
-            Some(accent(0.30))
-        } else if f > 0.01 {
-            Some(accent(0.30 * f as f32))
-        } else {
-            None
-        };
-        // The shadow deepens with focus; an idle row casts none.
-        if f > 0.01 {
-            crate::theme::drop_shadow(canvas, r, 14.0, k as f32, 0.30 * f as f32);
-        }
         crate::theme::panel(canvas, r, 14.0, tint, stroke, k as f32);
-        // Specular only on the focused row; a settings screen paints dozens of idle rows.
-        if f > 0.5 {
-            crate::theme::panel_highlight(canvas, r, 14.0, k as f32);
-        }
 
         // A note under the label lifts the label; the two share the row's height. The value
         // stays on the row's centre line with the switch and the chevrons — lifted with the
@@ -1147,20 +1099,58 @@ pub const TAB_STRIP_H: f64 = 46.0;
 pub const TAB_PILL_TOP: f64 = 2.0;
 pub const TAB_PILL_H: f64 = 30.0;
 
-/// Horizontal section switcher. Presentational: the screen owns selection and
-/// the shoulders; this draws the pills and slides one highlight between them.
+/// Horizontal section switcher, drawn as the console's tabs: bold text, the current one
+/// in full ink, the plate behind it while the strip has focus. Presentational: the screen
+/// owns selection and the shoulders.
 pub struct TabStrip {
-    /// Highlight `(x, width)` in device px, sprung so velocity carries across
-    /// rapid L1/R1. `None` until first render so a new screen does not fly in
-    /// from x = 0.
-    indicator: Option<(Spring, Spring)>,
-    /// Last-drawn pill rects, device px — the pointer hit-tests what was drawn.
+    /// The tabs as focus targets, so the plate travels between them. Boxed: a strip sits
+    /// inside screens that are variants of one enum.
+    tree: Box<Tree>,
+    /// Last-drawn tab rects, device px — the pointer hit-tests what was drawn.
     pills: Vec<Rect>,
 }
 
-const PILL_TEXT: f64 = 13.0;
-const PILL_PAD_X: f64 = 13.0;
-const PILL_GAP: f64 = 7.0;
+const PILL_TEXT: f64 = 16.0;
+const PILL_PAD_X: f64 = 10.0;
+const PILL_GAP: f64 = 4.0;
+
+/// A button's label size, its side padding, and its height, design units.
+pub(crate) const BUTTON_TEXT: f64 = 15.0;
+pub(crate) const BUTTON_PAD: f64 = 18.0;
+pub(crate) const BUTTON_H: f64 = 38.0;
+
+/// The console's button: a glass pill with its label. The plate behind it is focus.
+pub(crate) fn button(canvas: &Canvas, fonts: &Fonts, label: &str, r: Rect, k: f64) {
+    let corner = (f64::from(r.height()) / 2.0 / k) as f32;
+    crate::theme::panel(canvas, r, corner, None, PanelStroke::Plain(0.08), k as f32);
+    let size = BUTTON_TEXT * k;
+    let tw = f64::from(fonts.measure(label, W::SemiBold, size));
+    let (x, y) = (
+        f64::from(r.center_x()) - tw / 2.0,
+        f64::from(r.center_y()) + size * 0.36,
+    );
+    fonts.draw(canvas, label, x, y, W::SemiBold, size, fg(0.95));
+}
+
+/// A button's width for `label`, device px.
+pub(crate) fn button_w(fonts: &Fonts, label: &str, k: f64) -> f64 {
+    f64::from(fonts.measure(label, W::SemiBold, BUTTON_TEXT * k)) + 2.0 * BUTTON_PAD * k
+}
+
+/// A tab's label, bold and centred in `r`. Every row of tabs in the console draws with it.
+pub(crate) fn text_tab(
+    canvas: &Canvas,
+    fonts: &Fonts,
+    label: &str,
+    r: Rect,
+    size: f64,
+    ink: skia_safe::Color4f,
+) {
+    let tw = f64::from(fonts.measure(label, W::Bold, size));
+    let x = f64::from(r.center_x()) - tw / 2.0;
+    let y = f64::from(r.center_y()) + size * 0.36;
+    fonts.draw(canvas, label, x, y, W::Bold, size, ink);
+}
 
 /// Each pill's width and the run's total, device px. Shared with
 /// [`TabStrip::width`]: a trailing-aligned caller needs the width before draw,
@@ -1169,10 +1159,14 @@ fn pill_widths(labels: &[&str], fonts: &Fonts, k: f64) -> (Vec<f64>, f64) {
     let size = PILL_TEXT * k;
     let widths: Vec<f64> = labels
         .iter()
-        .map(|l| f64::from(fonts.measure(l, W::SemiBold, size)) + 2.0 * PILL_PAD_X * k)
+        .map(|l| f64::from(fonts.measure(l, W::Bold, size)) + 2.0 * PILL_PAD_X * k)
         .collect();
     let total = widths.iter().sum::<f64>() + PILL_GAP * k * (labels.len().saturating_sub(1)) as f64;
     (widths, total)
+}
+
+fn tab_id(i: usize) -> Id {
+    Id::new("tab-strip", i)
 }
 
 impl Default for TabStrip {
@@ -1189,7 +1183,7 @@ impl TabStrip {
 
     pub fn new() -> TabStrip {
         TabStrip {
-            indicator: None,
+            tree: Box::new(Tree::new()),
             pills: Vec::new(),
         }
     }
@@ -1200,15 +1194,19 @@ impl TabStrip {
         self.pills.get(i).copied()
     }
 
+    /// OK went down on the focused tab: its plate dips.
+    pub fn press(&mut self) {
+        self.tree.press();
+    }
+
     /// Tab a press landed on. Hit box is the full strip height: pills are too
     /// small for a tap that misses the text.
     pub fn pointer(&self, p: Pointer) -> Option<usize> {
         p.press().then(|| p.pick(&self.pills)).flatten()
     }
 
-    /// Draw pills on the leading edge of `rect`'s top band, at [`edge`].
-    /// `focused` is D-pad focus (no-shoulder remote): highlight brightens and
-    /// grows ‹ ›, the same left/right affordance as a focused value row.
+    /// Draw the tabs on the leading edge of `rect`'s top band, the text on [`edge`].
+    /// `focused` is D-pad focus (no-shoulder remote): the plate stands behind the current tab.
     #[allow(clippy::too_many_arguments)] // same render signature as MenuList
     pub fn render(
         &mut self,
@@ -1224,81 +1222,40 @@ impl TabStrip {
         if labels.is_empty() {
             return;
         }
-        let pill_h = TAB_PILL_H * k;
-        let size = PILL_TEXT * k;
+        let (pill_h, size, pad) = (TAB_PILL_H * k, PILL_TEXT * k, PILL_PAD_X * k);
         let (widths, total) = pill_widths(labels, fonts, k);
-        let gap = PILL_GAP * k;
-        // Leading, under the heading: a centred strip under a left-aligned
-        // title reads as two pieces of chrome. Clamp, not a branch: full inset,
-        // then centred, then flush-left (overflow spends on the unread right).
-        let inset = edge(k);
+        // Text on the heading's column: a centred strip under a left-aligned title reads as
+        // two pieces of chrome. Clamp, not a branch: full inset, then centred, then
+        // flush-left (overflow spends on the unread right).
         let slack = f64::from(rect.width()) - total;
-        let mut x = f64::from(rect.left) + inset.min((slack / 2.0).max(0.0));
+        let mut x = f64::from(rect.left) + (edge(k) - pad).min((slack / 2.0).max(0.0));
         let top = f64::from(rect.top) + TAB_PILL_TOP * k;
-
         let sel = selected.min(labels.len() - 1);
-        let target = (
-            x + widths[..sel].iter().sum::<f64>() + gap * sel as f64,
-            widths[sel],
-        );
-        if self.indicator.is_none() {
-            self.indicator = Some((Spring::rest(target.0), Spring::rest(target.1)));
-        }
-        let (ix, iw) = {
-            let (sx, sw) = self.indicator.as_mut().expect("seeded just above");
-            if crate::theme::reduce_motion() {
-                *sx = Spring::rest(target.0);
-                *sw = Spring::rest(target.1);
-            } else {
-                sx.step_spec(target.0, springs::INDICATOR, dt);
-                sw.step_spec(target.1, springs::INDICATOR, dt);
-                // Settle in device px (already × `k`) so the pill stops sub-pixel jittering.
-                sx.settle(target.0, 0.05, 0.5);
-                sw.settle(target.1, 0.05, 0.5);
-            }
-            (sx.pos, sw.pos)
-        };
-        crate::theme::panel(
-            canvas,
-            Rect::from_xywh(ix as f32, top as f32, iw as f32, pill_h as f32),
-            (pill_h / 2.0 / k) as f32,
-            Some(accent(if focused { 1.0 } else { 0.85 })),
-            PanelStroke::Plain(if focused { 0.5 } else { 0.22 }),
-            k as f32,
-        );
-        if focused {
-            // Same ‹ › as a focused value row: left/right travel here.
-            let cy = top + pill_h / 2.0;
-            chevron(canvas, ix - 9.0 * k, cy, 4.0 * k, true, 0.9);
-            chevron(canvas, ix + iw + 9.0 * k, cy, 4.0 * k, false, 0.9);
-        }
-
-        let baseline = top + pill_h / 2.0 + size * 0.36;
         self.pills.clear();
-        for (i, label) in labels.iter().enumerate() {
-            // Fade toward white by highlight overlap so both labels light as it slides.
-            let pill_x = x;
-            // Full-height hit box; width is this pill only, so neighbours cannot both claim a press.
-            self.pills.push(Rect::from_xywh(
-                pill_x as f32,
-                rect.top,
+        let mut row = El::column();
+        for (i, label) in labels.iter().copied().enumerate() {
+            // Full-height hit box; width is this tab only, so neighbours cannot both claim a press.
+            let hit = rect.height().max((pill_h + 4.0 * k) as f32);
+            self.pills
+                .push(Rect::from_xywh(x as f32, rect.top, widths[i] as f32, hit));
+            let ink = fg(if i == sel { 1.0 } else { 0.6 });
+            let r = Rect::from_xywh(
+                x as f32 - rect.left,
+                top as f32 - rect.top,
                 widths[i] as f32,
-                rect.height().max((pill_h + 4.0 * k) as f32),
-            ));
-            let overlap = (pill_x + widths[i]).min(ix + iw) - pill_x.max(ix);
-            let covered = (overlap / widths[i]).clamp(0.0, 1.0) as f32;
-            let tw = f64::from(fonts.measure(label, W::SemiBold, size));
-            fonts.draw(
-                canvas,
-                label,
-                pill_x + (widths[i] - tw) / 2.0,
-                baseline,
-                W::SemiBold,
-                size,
-                fg(0.5 + 0.5 * covered),
+                pill_h as f32,
             );
-            x += widths[i] + gap;
+            row = row.child(
+                El::paint(move |canvas, r| text_tab(canvas, fonts, label, r, size, ink))
+                    .id(tab_id(i))
+                    .focusable((10.0 * k) as f32)
+                    .place(r),
+            );
+            x += widths[i] + PILL_GAP * k;
         }
+        let frame = self.tree.layout(row, rect);
+        self.tree.set_focus(focused.then(|| tab_id(sel)));
+        self.tree.paint_focus(canvas, frame, k as f32, dt, false);
     }
 }
 
@@ -1754,46 +1711,25 @@ mod tests {
         "Presets",
     ];
 
-    /// A velocity-carrying spring can overshoot: pin that a burst never leaves
-    /// the strip, and that it still lands on the selected pill.
+    /// Focused, a burst of section changes leaves the plate on the selected tab.
     #[test]
-    fn tab_indicator_rides_a_burst_without_leaving_the_strip() {
+    fn the_plate_lands_on_the_selected_tab() {
         let fonts = crate::theme::build_fonts().unwrap();
         let mut surface = skia_safe::surfaces::raster_n32_premul((900, 120)).unwrap();
         let rect = Rect::from_xywh(0.0, 0.0, 900.0, TAB_STRIP_H as f32);
         let mut strip = TabStrip::new();
         let dt = 1.0 / 60.0;
-        // Seat, then a 5-step burst at one press per frame — faster than the spring can settle.
-        strip.render(surface.canvas(), rect, &TABS, 0, false, &fonts, 1.0, dt);
-        let mut worst_left = f64::MAX;
-        let mut worst_right = f64::MIN;
-        for sel in 1..=5 {
-            strip.render(surface.canvas(), rect, &TABS, sel, false, &fonts, 1.0, dt);
-            let (ix, iw) = strip.indicator.map(|(x, w)| (x.pos, w.pos)).unwrap();
-            worst_left = worst_left.min(ix);
-            worst_right = worst_right.max(ix + iw);
+        for sel in (0..=5).chain([5; 240]) {
+            strip.render(surface.canvas(), rect, &TABS, sel, true, &fonts, 1.0, dt);
         }
-        for _ in 0..240 {
-            strip.render(surface.canvas(), rect, &TABS, 5, false, &fonts, 1.0, dt);
-            let (ix, iw) = strip.indicator.map(|(x, w)| (x.pos, w.pos)).unwrap();
-            worst_left = worst_left.min(ix);
-            worst_right = worst_right.max(ix + iw);
-        }
+        let pill = strip.pill(5).expect("the selected tab was drawn");
+        let (plate, _) = strip
+            .tree
+            .plate_rect()
+            .expect("a focused strip has a plate");
         assert!(
-            worst_left >= f64::from(rect.left) - 0.5,
-            "pill ran off the left: {worst_left}"
-        );
-        assert!(
-            worst_right <= f64::from(rect.right) + 0.5,
-            "pill ran off the right: {worst_right}"
-        );
-        let pill = strip.pill(5).expect("the selected pill was drawn");
-        let (ix, iw) = strip.indicator.map(|(x, w)| (x.pos, w.pos)).unwrap();
-        assert!(
-            (ix - f64::from(pill.left)).abs() < 0.5 && (iw - f64::from(pill.width())).abs() < 0.5,
-            "settled at ({ix}, {iw}), pill is at ({}, {})",
-            pill.left,
-            pill.width()
+            (plate.left - pill.left).abs() < 0.5 && (plate.width() - pill.width()).abs() < 0.5,
+            "the plate rests at {plate:?}, the tab is at {pill:?}"
         );
     }
 
@@ -1811,15 +1747,16 @@ mod tests {
             let mut strip = TabStrip::new();
             strip.render(surface.canvas(), rect, &TABS, 0, false, &fonts, k, dt);
             let first = strip.pill(0).expect("the first section was drawn");
+            let text = f64::from(first.left) + PILL_PAD_X * k;
             let last = strip
                 .pill(TABS.len() - 1)
                 .expect("the last section was drawn");
-            (rect, f64::from(first.left), f64::from(last.right))
+            (rect, f64::from(first.left), f64::from(last.right), text)
         };
 
-        // Both insets fit: starts on the heading column at every scale, still inside the band.
+        // Both insets fit: the text starts on the heading column at every scale.
         for k in [0.75, 1.0, 2.0] {
-            let (rect, left, right) = run(1400.0, k);
+            let (rect, _, right, left) = run(1400.0, k);
             assert!(
                 (left - (f64::from(rect.left) + edge(k))).abs() < 0.5,
                 "k={k}: strip starts at {left}, not on the {} column",
@@ -1831,11 +1768,11 @@ mod tests {
             );
         }
 
-        let (_, wide_left, wide_right) = run(1400.0, 1.0);
+        let (_, wide_left, wide_right, _) = run(1400.0, 1.0);
         let total = wide_right - wide_left;
 
         // Narrower than both insets, wider than the run: centre so the shortfall is not all on one edge.
-        let (rect, left, right) = run((total + crate::theme::EDGE_INSET) as f32, 1.0);
+        let (rect, left, right, _) = run((total + crate::theme::EDGE_INSET) as f32, 1.0);
         assert!(
             (left - f64::from(rect.left) - (f64::from(rect.right) - right)).abs() < 0.5,
             "a squeezed strip should sit even: {left} in from the left, {} from the right",
@@ -1843,7 +1780,7 @@ mod tests {
         );
 
         // Wider than the band: flush left, overflow right only.
-        let (rect, left, right) = run((total - 40.0) as f32, 1.0);
+        let (rect, left, right, _) = run((total - 40.0) as f32, 1.0);
         assert!(
             (left - f64::from(rect.left)).abs() < 0.5,
             "an overflowing strip should go flush left, not to {left}"
@@ -2305,7 +2242,7 @@ mod tests {
         );
         assert_eq!(list.bump.pos, 0.0, "recoil travel suppressed");
         // Focus still arrives: reduced motion is not unfocused.
-        assert_eq!(list.focus_pop[0].pos, 1.0);
+        assert_eq!(list.focus[0], 1.0);
         crate::theme::set_reduce_motion(false);
     }
 

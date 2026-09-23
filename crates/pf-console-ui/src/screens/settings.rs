@@ -1,20 +1,20 @@
 //! Console settings: the couch-facing subset of the shared Settings store.
 //!
-//! One row per setting, in the sections of [`TABS`]: a rail beside the list on a wide
-//! screen, a strip over it on a narrow one. Up from the first row reaches the sections;
-//! there Up/Down (rail) or Left/Right (strip) switch them. Left/right steps the focused
+//! One row per setting, in the sections of [`TABS`], named in a strip of tabs over the
+//! list. Up from the first row reaches the sections; Left/Right there switch them, Down
+//! returns. Left/right steps the focused
 //! value (clamped); A cycles wrapping; L1/R1 change section; B closes. Every change
 //! writes the store immediately so desktop shells round-trip the same file.
 //! Each section remembers its cursor. Presets is built from the catalog at render
 //! time — the console never creates or edits presets.
 //!
-//! Section names and marks match `settings_sections` in `clients/shared/console-vectors.json`.
+//! Section names match `settings_sections` in `clients/shared/console-vectors.json`.
 //! Platform split: [`row_on`]. Availability this frame: [`row_applies`].
 
 use crate::glyphs::{Hint, HintKey};
 use crate::pointer::Pointer;
 use crate::screens::{Ctx, Outbox, Screen};
-use crate::theme::{accent, edge, fg, fill, Fonts, W};
+use crate::theme::{edge, fg, Fonts, W};
 use crate::widgets::{
     permits, Charset, KeyMsg, Keyboard, ListMsg, MenuList, RowSpec, TabStrip, TAB_STRIP_H,
 };
@@ -320,26 +320,8 @@ const TABS: [(&str, &[RowId]); 8] = [
     ("About", &[RowId::Version, RowId::Licenses]),
 ];
 
-/// Each section's Lucide mark, for the rail and the detail band.
-const TAB_ICONS: [&str; TABS.len()] = [
-    "tv",
-    "film",
-    "volume-2",
-    "gamepad-2",
-    "mouse",
-    "palette",
-    "settings",
-    "info",
-];
-
 /// The Presets section — catalog-built, not [`TABS`] rows.
 const PRESETS_TAB: usize = 6;
-
-/// Wider than this in design units, the sections sit in a rail beside the list.
-const RAIL_MIN_W: f64 = 1100.0;
-/// The rail's width and its rows, design units.
-const RAIL_W: f64 = 240.0;
-const RAIL_ROW_H: f64 = 48.0;
 
 /// Strip length for the shell's raster walk. `cfg(test)`: a shipping build
 /// would warn it dead, and this crate treats warnings as errors.
@@ -513,13 +495,8 @@ pub(crate) struct SettingsScreen {
     /// Each preset's overrides by id, loaded with `presets`: the rows say when a
     /// host's bound preset outranks the global value they show.
     overrides: std::collections::HashMap<String, SettingsOverlay>,
-    /// D-pad focus on the sections (rail or strip). TV remotes have no shoulders and no
-    /// Tab key.
+    /// D-pad focus on the section strip. TV remotes have no shoulders and no Tab key.
     strip_focus: bool,
-    /// The last frame was wide enough for the rail; the D-pad reads the same layout.
-    rail: bool,
-    /// The rail's sections as last drawn, for the pointer.
-    rail_rects: Vec<Rect>,
     /// Typed Mbps while Y has the bitrate field open. Y, not A, so A still cycles.
     custom_bitrate: Option<String>,
     /// Tray keyboard. Unused on Deck: Steam's keyboard types (same as add-host).
@@ -546,8 +523,6 @@ impl SettingsScreen {
             presets,
             overrides: Default::default(),
             strip_focus: false,
-            rail: false,
-            rail_rects: Vec::new(),
             custom_bitrate: None,
             keyboard: Keyboard::new(),
         }
@@ -683,14 +658,11 @@ impl SettingsScreen {
 
     /// OK went down on the focused row: it dips before the release acts.
     pub(crate) fn press(&mut self) {
-        if !self.strip_focus && self.custom_bitrate.is_none() {
+        if self.strip_focus {
+            self.strip.press();
+        } else if self.custom_bitrate.is_none() {
             self.list.dip();
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn rail_for_test(&self) -> bool {
-        self.rail
     }
 
     #[cfg(test)]
@@ -746,8 +718,7 @@ impl SettingsScreen {
             }
             return true;
         }
-        let rail = (self.rail_rects.iter()).position(|r| self.rail && p.hits(*r));
-        if let Some(tab) = rail.or_else(|| self.strip.pointer(p).filter(|_| !self.rail)) {
+        if let Some(tab) = self.strip.pointer(p) {
             if p.press() {
                 self.show_tab(tab, ctx);
             }
@@ -795,12 +766,6 @@ impl SettingsScreen {
         }
         let ids = self.row_ids(ctx);
         self.clamp_cursor(ids.len());
-        // Beside the rail, Left on a row with nothing to step goes to the rail.
-        let steps = ids.get(self.list.cursor).is_some_and(|id| steps(*id));
-        if self.rail && ev == MenuEvent::Move(MenuDir::Left) && !steps {
-            self.strip_focus = true;
-            return Some(MenuPulse::Move);
-        }
         // Y opens the typed bitrate. Skip under PyroWave: the row is inert (`row_spec`).
         if ev == MenuEvent::Secondary {
             return if ids.get(self.list.cursor) == Some(&RowId::Bitrate)
@@ -816,14 +781,9 @@ impl SettingsScreen {
         self.apply_row(msg, pulse, &ids, ctx, fx)
     }
 
-    /// The D-pad on the sections. A rail walks them with Up/Down and stops at its ends, so
-    /// Up past the first reaches the tab strip; a strip walks them with Left/Right, wrapping.
+    /// The D-pad on the section strip: Left/Right walk it, wrapping; Down returns to the
+    /// rows; Up is the shell's tab strip.
     fn sections_menu(&mut self, ev: MenuEvent, ctx: &Ctx, fx: &mut Outbox) -> Option<MenuPulse> {
-        let into = if self.rail {
-            MenuDir::Right
-        } else {
-            MenuDir::Down
-        };
         match ev {
             MenuEvent::Back => {
                 fx.pop();
@@ -835,52 +795,14 @@ impl SettingsScreen {
                 self.strip_focus = false;
                 Some(MenuPulse::Move)
             }
-            MenuEvent::Move(d) if d == into => {
+            MenuEvent::Move(MenuDir::Down) => {
                 self.strip_focus = false;
                 Some(MenuPulse::Move)
             }
-            MenuEvent::Move(MenuDir::Up) if self.rail && self.tab > 0 => {
-                self.show_tab(self.tab - 1, ctx)
-            }
-            MenuEvent::Move(MenuDir::Down) if self.rail && self.tab + 1 < TABS.len() => {
-                self.show_tab(self.tab + 1, ctx)
-            }
-            MenuEvent::Move(MenuDir::Left) if !self.rail => self.switch_tab(-1, ctx),
-            MenuEvent::Move(MenuDir::Right) if !self.rail => self.switch_tab(1, ctx),
+            MenuEvent::Move(MenuDir::Left) => self.switch_tab(-1, ctx),
+            MenuEvent::Move(MenuDir::Right) => self.switch_tab(1, ctx),
             MenuEvent::Move(_) => Some(MenuPulse::Boundary),
             _ => None,
-        }
-    }
-
-    /// The sections as a column beside the list: each its mark and name, the shown one
-    /// lit, and the focus ring on it while the D-pad is here.
-    fn draw_rail(&mut self, canvas: &Canvas, rect: Rect, fonts: &Fonts, k: f64) {
-        self.rail_rects.clear();
-        let x = f64::from(rect.left) + edge(k);
-        let w = RAIL_W * k - edge(k) - 16.0 * k;
-        let h = (RAIL_ROW_H - 6.0) * k;
-        for (i, (name, _)) in TABS.iter().enumerate() {
-            let y = f64::from(rect.top) + (8.0 + i as f64 * RAIL_ROW_H) * k;
-            let r = Rect::from_xywh(x as f32, y as f32, w as f32, h as f32);
-            self.rail_rects.push(r);
-            let shown = i == self.tab;
-            let corner = 12.0;
-            if shown {
-                let rr = skia_safe::RRect::new_rect_xy(r, (corner * k) as f32, (corner * k) as f32);
-                canvas.draw_rrect(rr, &fill(accent(0.22)));
-            }
-            if shown && self.strip_focus {
-                crate::theme::focus_halo(canvas, r, corner as f32, k as f32, 1.0);
-                crate::theme::focus_ring(canvas, r, corner as f32, k as f32);
-            }
-            let ink = if shown { fg(1.0) } else { fg(0.65) };
-            if let Some(icon) = crate::icons::by_name(TAB_ICONS[i]) {
-                let cx = (x + 24.0 * k) as f32;
-                crate::icons::draw_icon(canvas, icon, cx, r.center_y(), (20.0 * k) as f32, ink);
-            }
-            let size = 16.0 * k;
-            let baseline = f64::from(r.center_y()) + size * 0.36;
-            fonts.draw(canvas, name, x + 48.0 * k, baseline, W::SemiBold, size, ink);
         }
     }
 
@@ -1076,9 +998,7 @@ impl SettingsScreen {
         // Strip on top, explainer under the list; rows get the band between and scroll on
         // under both, so the list draws first.
         let detail_h = 34.0 * k;
-        self.rail = f64::from(rect.width()) / k > RAIL_MIN_W;
-        let strip_h = if self.rail { 0.0 } else { TAB_STRIP_H * k };
-        let rail_w = if self.rail { RAIL_W * k } else { 0.0 };
+        let strip_h = TAB_STRIP_H * k;
         let seat = self
             .keyboard
             .seat(self.custom_bitrate.is_some() && !ctx.deck, dt);
@@ -1088,7 +1008,7 @@ impl SettingsScreen {
             0.0
         };
         let list_rect = Rect::from_ltrb(
-            rect.left + rail_w as f32,
+            rect.left,
             rect.top + strip_h as f32,
             rect.right,
             rect.bottom - detail_h as f32 - tray_h as f32,
@@ -1122,45 +1042,37 @@ impl SettingsScreen {
             // No row focus ring while the tray or the strip holds it.
             self.custom_bitrate.is_none() && !self.strip_focus,
         );
-        if self.rail {
-            let column = Rect::from_ltrb(rect.left, rect.top, list_rect.left, list_rect.bottom);
-            self.draw_rail(canvas, column, fonts, k);
-        } else {
-            self.rail_rects.clear();
-            let labels: Vec<&str> = TABS.iter().map(|(name, _)| *name).collect();
-            self.strip.render(
-                canvas,
-                Rect::from_ltrb(rect.left, rect.top, rect.right, rect.top + strip_h as f32),
-                &labels,
-                self.tab,
-                self.strip_focus,
-                fonts,
-                k,
-                dt,
-            );
-        }
+        let labels: Vec<&str> = TABS.iter().map(|(name, _)| *name).collect();
+        self.strip.render(
+            canvas,
+            Rect::from_ltrb(rect.left, rect.top, rect.right, rect.top + strip_h as f32),
+            &labels,
+            self.tab,
+            self.strip_focus,
+            fonts,
+            k,
+            dt,
+        );
         let focused = ids.get(self.list.cursor).copied();
         let detail = focused.map_or("", |id| detail(id, ctx));
-        // The explainer under the list, led by the row's mark.
-        let cx = f64::from(list_rect.center_x());
-        let max_w = f64::from(list_rect.width()) * 0.8;
+        // The explainer under the list, on the margin, led by the row's mark.
+        let x = f64::from(list_rect.left) + edge(k);
         let top = f64::from(rect.bottom) - detail_h - tray_h + 6.0 * k;
-        fonts.centered(
+        let max_w = f64::from(list_rect.width()) - 2.0 * edge(k) - 22.0 * k;
+        fonts.leading(
             canvas,
             detail,
             W::Regular,
             13.0 * k,
             fg(0.55),
-            cx,
+            x + 22.0 * k,
             top,
             max_w,
         );
         if let Some(icon) = focused.filter(|_| !detail.is_empty()).map(row_icon) {
-            let tw = f64::from(fonts.measure(detail, W::Regular, 13.0 * k)).min(max_w);
-            let x = (cx - tw / 2.0 - 14.0 * k) as f32;
-            let y = (top + 8.0 * k) as f32;
             if let Some(mark) = crate::icons::by_name(icon) {
-                crate::icons::draw_icon(canvas, mark, x, y, (14.0 * k) as f32, fg(0.55));
+                let (cx, cy) = ((x + 7.0 * k) as f32, (top + 8.0 * k) as f32);
+                crate::icons::draw_icon(canvas, mark, cx, cy, (14.0 * k) as f32, fg(0.55));
             }
         }
         if seat > 0.0 {
@@ -1305,20 +1217,6 @@ pub fn row_spec(
         ));
     }
     spec
-}
-
-/// Left and Right step this row's value. The rest open something or show a fact.
-fn steps(id: RowId) -> bool {
-    !matches!(
-        id,
-        RowId::Preset(_)
-            | RowId::NoPresets
-            | RowId::Controllers
-            | RowId::Licenses
-            | RowId::QuickActions
-            | RowId::LibrarySections
-            | RowId::Version
-    )
 }
 
 /// The row's Lucide mark.
@@ -2493,25 +2391,20 @@ pub(crate) mod tests {
         );
     }
 
-    /// Section names and marks vs `settings_sections` in `console-vectors.json`.
+    /// Section names vs `settings_sections` in `console-vectors.json`.
     #[test]
     fn sections_match_the_shared_vectors() {
         let raw = include_str!("../../../../clients/shared/console-vectors.json");
         let file: serde_json::Value =
             serde_json::from_str(raw).expect("console-vectors.json must parse");
-        let want: Vec<(&str, &str)> = file["settings_sections"]
+        let want: Vec<&str> = file["settings_sections"]
             .as_array()
             .expect("settings_sections")
             .iter()
-            .map(|t| (t["name"].as_str().unwrap(), t["icon"].as_str().unwrap()))
+            .map(|t| t["name"].as_str().unwrap())
             .collect();
-        let got: Vec<(&str, &str)> = (TABS.iter().zip(TAB_ICONS))
-            .map(|((name, _), icon)| (*name, icon))
-            .collect();
-        assert_eq!(got, want, "the sections' names, marks and order");
-        for icon in TAB_ICONS {
-            assert!(crate::icons::by_name(icon).is_some(), "{icon} ships");
-        }
+        let got: Vec<&str> = TABS.iter().map(|(name, _)| *name).collect();
+        assert_eq!(got, want, "the sections' names and order");
     }
 
     /// Every row's mark is one this build ships.
@@ -2574,7 +2467,7 @@ pub(crate) mod tests {
         rendered_w(screen, 1000)
     }
 
-    /// Draw once at `w` × 800; wider than 1100 draws the rail.
+    /// Draw once at `w` × 800.
     fn rendered_w(screen: &mut SettingsScreen, w: i32) -> f64 {
         let fonts = crate::theme::build_fonts().unwrap();
         let h = 800i32;
@@ -2711,40 +2604,6 @@ pub(crate) mod tests {
             // Selecting a tab re-lays the strip; re-render so the next pick is current.
             rendered(&mut s);
         }
-    }
-
-    /// Wide, the sections stand in a rail: Up from the first row enters it, Up and Down
-    /// walk it, Right returns, a press picks a section, and Left on a row with nothing to
-    /// step also reaches it. Up past the first section is the tab strip's.
-    #[test]
-    fn a_wide_screen_walks_the_sections_in_a_rail() {
-        let mut s = SettingsScreen::with_presets(Vec::new());
-        rendered_w(&mut s, 1600);
-        assert!(s.rail && s.rail_rects.len() == TABS.len());
-        with_ctx(|ctx| {
-            let mut fx = Outbox::default();
-            let mut go = |s: &mut SettingsScreen, d| s.menu(MenuEvent::Move(d), ctx, &mut fx);
-            go(&mut s, MenuDir::Up);
-            assert!(s.strip_focus, "Up from the first row enters the rail");
-            let pulse = go(&mut s, MenuDir::Up);
-            assert!(
-                matches!(pulse, Some(MenuPulse::Boundary)),
-                "the tab strip's"
-            );
-            go(&mut s, MenuDir::Down);
-            assert_eq!(s.tab, 1, "Down walks the rail");
-            go(&mut s, MenuDir::Right);
-            assert!(!s.strip_focus, "Right returns to the list");
-            (s.tab, s.list.cursor) = (TABS.len() - 1, 0);
-            go(&mut s, MenuDir::Left);
-            assert!(s.strip_focus, "Left on the version row reaches the rail");
-        });
-        let rail = s.rail_rects[5];
-        with_ctx(|ctx| {
-            let mut fx = Outbox::default();
-            assert!(s.pointer(press(rail), ctx, &mut fx));
-        });
-        assert_eq!(s.tab, 5, "a press picks the section");
     }
 
     #[test]
