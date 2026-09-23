@@ -12,7 +12,7 @@ use crate::anim::{approach, entrances, springs, Entrance, EntranceAt, Spring, TR
 use crate::el::{Axis, El, Id, Tree};
 use crate::library::{BUMP_C, BUMP_K};
 use crate::pointer::{Pointer, PointerKind};
-use crate::theme::{accent, fg, fill, stroke, Fonts, PanelStroke, EDGE_INSET, W};
+use crate::theme::{accent, edge, fg, fill, stroke, Fonts, PanelStroke, W};
 use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuPulse};
 use skia_safe::{Canvas, Paint, PathBuilder, RRect, Rect};
 use std::cell::RefCell;
@@ -1206,7 +1206,7 @@ impl TabStrip {
         p.press().then(|| p.pick(&self.pills)).flatten()
     }
 
-    /// Draw pills on the leading edge of `rect`'s top band, at [`EDGE_INSET`].
+    /// Draw pills on the leading edge of `rect`'s top band, at [`edge`].
     /// `focused` is D-pad focus (no-shoulder remote): highlight brightens and
     /// grows ‹ ›, the same left/right affordance as a focused value row.
     #[allow(clippy::too_many_arguments)] // same render signature as MenuList
@@ -1231,7 +1231,7 @@ impl TabStrip {
         // Leading, under the heading: a centred strip under a left-aligned
         // title reads as two pieces of chrome. Clamp, not a branch: full inset,
         // then centred, then flush-left (overflow spends on the unread right).
-        let inset = EDGE_INSET * k;
+        let inset = edge(k);
         let slack = f64::from(rect.width()) - total;
         let mut x = f64::from(rect.left) + inset.min((slack / 2.0).max(0.0));
         let top = f64::from(rect.top) + TAB_PILL_TOP * k;
@@ -1797,7 +1797,7 @@ mod tests {
         );
     }
 
-    /// Same column as the heading ([`EDGE_INSET`]); a shrinking window gives it
+    /// Same column as the heading ([`edge`]); a shrinking window gives it
     /// up as inset, then centred, then flush. Ordering, not three pixel x's,
     /// so a renamed tab does not break the pin.
     #[test]
@@ -1821,9 +1821,9 @@ mod tests {
         for k in [0.75, 1.0, 2.0] {
             let (rect, left, right) = run(1400.0, k);
             assert!(
-                (left - (f64::from(rect.left) + EDGE_INSET * k)).abs() < 0.5,
+                (left - (f64::from(rect.left) + edge(k))).abs() < 0.5,
                 "k={k}: strip starts at {left}, not on the {} column",
-                EDGE_INSET * k
+                edge(k)
             );
             assert!(
                 right <= f64::from(rect.right),
@@ -1835,7 +1835,7 @@ mod tests {
         let total = wide_right - wide_left;
 
         // Narrower than both insets, wider than the run: centre so the shortfall is not all on one edge.
-        let (rect, left, right) = run((total + EDGE_INSET) as f32, 1.0);
+        let (rect, left, right) = run((total + crate::theme::EDGE_INSET) as f32, 1.0);
         assert!(
             (left - f64::from(rect.left) - (f64::from(rect.right) - right)).abs() < 0.5,
             "a squeezed strip should sit even: {left} in from the left, {} from the right",

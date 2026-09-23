@@ -24,7 +24,7 @@ use crate::library::{
 use crate::model::HostRow;
 use crate::pointer::{Pointer, PointerKind};
 use crate::screens::{Ctx, Outbox, Screen};
-use crate::theme::{accent, art_sampling, fg, fill, stroke, Fonts, PanelStroke, EDGE_INSET, W};
+use crate::theme::{accent, art_sampling, edge, fg, fill, stroke, Fonts, PanelStroke, W};
 use crate::widgets::{TabStrip, TAB_STRIP_H};
 use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuPulse};
 use skia_safe::{Canvas, Color4f, Image, Matrix, Point, RRect, Rect, TileMode};
@@ -348,7 +348,7 @@ impl CollectionsScreen {
         let strip = Rect::from_xywh(rect.left, rect.top, rect.width(), (TAB_STRIP_H * k) as f32);
         // Same caption as the library bar: four unlabeled pills are not a sort, and
         // this screen and the shelf behind share the key.
-        let cap_x = f64::from(strip.left) + EDGE_INSET * k;
+        let cap_x = f64::from(strip.left) + edge(k);
         let pills = cap_x + super::library::strip_caption(canvas, fonts, "SORT", strip, cap_x, k);
         self.sort_tabs.render(
             canvas,
@@ -632,13 +632,8 @@ fn fan_matrix(front: Rect, n: usize, k: f64) -> Matrix {
 
 /// Contact shadow under one card. Drawn, not sampled from the cover.
 fn plate(canvas: &Canvas, rr: RRect, k: f64) {
-    // Black is weight on a dark field and dirt on a pale one. `theme::drop_shadow`
-    // scales back at the pale pole; ignoring that smears every pair of covers.
-    let alpha = if crate::theme::ink().scrim.r > 0.5 {
-        PLATE_ALPHA * 0.40
-    } else {
-        PLATE_ALPHA
-    };
+    // Black is weight on a dark field and dirt on a pale one.
+    let alpha = crate::theme::shadow(PLATE_ALPHA);
     canvas.draw_rrect(
         rr.with_outset(((PLATE_OUTSET * k) as f32, (PLATE_OUTSET * k) as f32))
             .with_offset(((PLATE_DX * k) as f32, (PLATE_DY * k) as f32)),

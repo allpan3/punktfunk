@@ -25,7 +25,7 @@ use crate::library::{
 use crate::model::{ConsoleCmd, HostRow};
 use crate::pointer::{Pointer, PointerKind};
 use crate::screens::{ConnectIntent, Ctx, Outbox, Screen};
-use crate::theme::{accent, art_sampling, fg, fill, Fonts, EDGE_INSET, W};
+use crate::theme::{accent, art_sampling, edge, fg, fill, Fonts, W};
 use crate::widgets::{TabStrip, TAB_PILL_H, TAB_PILL_TOP, TAB_STRIP_H};
 use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuPulse};
 use skia_safe::{Canvas, Color4f, Data, Image, Matrix, Point, RRect, Rect, TileMode, M44};
@@ -1551,9 +1551,9 @@ impl LibraryScreen {
         let sort_pills = crate::widgets::TabStrip::width(&sorts, fonts, k);
         let view_pills = crate::widgets::TabStrip::width(&views, fonts, k);
 
-        let sort_x = f64::from(bar.left) + EDGE_INSET * k;
+        let sort_x = f64::from(bar.left) + edge(k);
         // Scale follows height; a tall-narrow window must crowd, not slide off the leading edge.
-        let view_x = (f64::from(bar.right) - EDGE_INSET * k - view_cap - gap - view_pills)
+        let view_x = (f64::from(bar.right) - edge(k) - view_cap - gap - view_pills)
             .max(sort_x + sort_cap + gap + sort_pills + gap);
 
         strip_caption(canvas, fonts, "SORT", bar, sort_x, k);
@@ -2021,7 +2021,7 @@ impl LibraryScreen {
             fonts.draw(
                 canvas,
                 note,
-                f64::from(rect.left) + EDGE_INSET * k,
+                f64::from(rect.left) + edge(k),
                 f64::from(rect.bottom) - NOTE_BASE * k,
                 W::Regular,
                 12.0 * k,

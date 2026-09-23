@@ -14,7 +14,7 @@ use crate::model::{ConsoleCmd, HostRow};
 use crate::pointer::Pointer;
 use crate::screens::{Ctx, Outbox, Screen};
 use crate::store::SettingsStore;
-use crate::theme::{fg, Fonts, EDGE_INSET, W};
+use crate::theme::{edge, fg, Fonts, W};
 use crate::widgets::{ListMsg, MenuList, RowSpec, ROW_MAX_W};
 use pf_client_core::menu_nav::{MenuEvent, MenuPulse};
 use pf_client_core::start;
@@ -725,7 +725,7 @@ impl CardMenu {
             W::Regular,
             13.0 * k,
             fg(0.55),
-            f64::from(rect.left) + EDGE_INSET * k,
+            f64::from(rect.left) + edge(k),
             f64::from(rect.top) + 2.0 * k,
             ROW_MAX_W * 0.72 * k,
         );
@@ -766,7 +766,7 @@ fn title_card(
     rect: Rect,
     k: f64,
 ) -> Rect {
-    let pad = EDGE_INSET * k;
+    let pad = edge(k);
     let ch = (f64::from(rect.height()) - 24.0 * k).min(420.0 * k);
     let cw = ch * 2.0 / 3.0;
     let art = Rect::from_xywh(

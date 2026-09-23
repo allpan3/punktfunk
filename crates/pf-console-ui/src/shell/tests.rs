@@ -3011,3 +3011,73 @@ fn the_takeover_field_reaches_past_a_side_cutout() {
          safe rect again"
     );
 }
+
+/// Ignored phone dump at an iPhone Pro Max's landscape geometry, for the mockup check.
+/// `PF_CONSOLE_DUMP=<dir> cargo test -p pf-console-ui --release -- --ignored phone`.
+#[test]
+#[ignore]
+fn dump_phone_home() {
+    let dir = std::env::var("PF_CONSOLE_DUMP").expect("set PF_CONSOLE_DUMP to an output dir");
+    let fonts = crate::theme::build_fonts().unwrap();
+    let (w, h) = (2868_i32, 1320_i32);
+    let viewport = crate::console::Viewport {
+        width: w as u32,
+        height: h as u32,
+        insets: crate::console::Insets {
+            left: 186.0,
+            top: 0.0,
+            right: 186.0,
+            bottom: 63.0,
+        },
+        scale: Some(2.25),
+    };
+    let (mut s, _console, library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    s.fake_clock = Some((0.0, 1.0 / 60.0));
+    let dump = |s: &mut Shell, frames: usize, name: &str| {
+        let mut surface = skia_safe::surfaces::raster_n32_premul((w, h)).unwrap();
+        for _ in 0..frames {
+            s.render_in(surface.canvas(), &viewport, &fonts, None, None, &[]);
+        }
+        let png = surface
+            .image_snapshot()
+            .encode(None, skia_safe::EncodedImageFormat::PNG, 100)
+            .unwrap();
+        std::fs::write(format!("{dir}/{name}.png"), png.as_bytes()).unwrap();
+    };
+    dump(&mut s, 60, "p1-home-empty");
+    let games = (0..8)
+        .map(|i| crate::library::LibraryGame {
+            id: format!("steam:{i}"),
+            title: [
+                "Doom",
+                "Hades",
+                "Celeste",
+                "Portal 2",
+                "Tunic",
+                "Inside",
+                "Limbo",
+                "Hollow Knight",
+            ][i]
+                .into(),
+            store: "steam".into(),
+            launcher: false,
+            icon: String::new(),
+            platform: None,
+            developer: None,
+            year: None,
+            genres: Vec::new(),
+            stats: None,
+            running: false,
+        })
+        .collect();
+    library.set_games(games);
+    dump(&mut s, 60, "p2-home-games");
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    dump(&mut s, 60, "p3-home-down");
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    dump(&mut s, 60, "p4-home-down2");
+    s.handle_menu(MenuEvent::Move(MenuDir::Up));
+    s.handle_menu(MenuEvent::Move(MenuDir::Up));
+    s.handle_menu(MenuEvent::Move(MenuDir::Up));
+    dump(&mut s, 60, "p5-home-strip");
+}

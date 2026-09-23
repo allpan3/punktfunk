@@ -71,7 +71,7 @@ public struct GamepadPalette: Identifiable, Equatable, Sendable {
         // --- dark fields (white ink) ---
         GamepadPalette(
             id: "violet", name: "Violet", stops: [],
-            ground: SIMD3(0.075, 0.060, 0.160), accent: SIMD3(0.525, 0.471, 0.961), light: false),
+            ground: SIMD3(0.510, 0.470, 0.960), accent: SIMD3(0.525, 0.471, 0.961), light: false),
         GamepadPalette(
             // For OLED and AMOLED panels, where a black pixel is a pixel switched off — no glow,
             // no power. The first two stops are literally (0,0,0), so the shaded half of the

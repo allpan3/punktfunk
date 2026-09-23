@@ -7,7 +7,7 @@ use crate::glyphs::{Hint, HintKey};
 use crate::model::{ConsoleCmd, HostRow};
 use crate::pointer::Pointer;
 use crate::screens::{Ctx, Outbox};
-use crate::theme::{fg, Fonts, EDGE_INSET, W};
+use crate::theme::{edge, fg, Fonts, W};
 use crate::widgets::{permits, Charset, KeyMsg, Keyboard, ListMsg, MenuList, RowSpec, ROW_MAX_W};
 use pf_client_core::menu_nav::{MenuEvent, MenuPulse};
 use skia_safe::{Canvas, Rect};
@@ -305,7 +305,7 @@ impl AddHostScreen {
             W::Regular,
             13.0 * k,
             fg(0.55),
-            f64::from(rect.left) + EDGE_INSET * k,
+            f64::from(rect.left) + edge(k),
             f64::from(rect.top) + 2.0 * k,
             ROW_MAX_W * 0.72 * k,
         );

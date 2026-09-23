@@ -5,7 +5,7 @@ use crate::glyphs::{hint_bar, GlyphStyle};
 use crate::library::LibraryShared;
 use crate::model::HostRow;
 use crate::screens::{Bg, Ctx, Screen};
-use crate::theme::{fg, Fonts, PanelStroke, EDGE_INSET, W};
+use crate::theme::{edge, fg, Fonts, PanelStroke, EDGE_INSET, W};
 use pf_client_core::menu_nav::PadInfo;
 use pf_client_core::trust;
 use skia_safe::{Canvas, Rect};
@@ -81,15 +81,10 @@ impl Shell {
         crate::theme::set_reduce_motion(reduce);
         self.pads = pads.to_vec();
         self.glyphs = glyph_style(self.input_source, pad_pref, self.platform);
-        // Rebuild the chip string only when it changes. `pads` is left alone — a
-        // handful of small structs; `PadInfo` has no `PartialEq` in its crate.
-        let chip = pad.unwrap_or(if self.glyphs == GlyphStyle::Remote {
-            "TV remote — a controller works too"
-        } else {
-            "No controller — keyboard works too"
-        });
-        if self.chip.as_deref() != Some(chip) {
-            self.chip = Some(chip.to_owned());
+        // The chip names the connected pad, rebuilt only when it changes; with none there
+        // is nothing to say. `PadInfo` has no `PartialEq` in its crate.
+        if self.chip.as_deref() != pad {
+            self.chip = pad.map(str::to_owned);
         }
 
         let (full_w, full_h) = (f64::from(viewport.width), f64::from(viewport.height));
@@ -106,6 +101,7 @@ impl Shell {
             full_h - f64::from(ins.top) - f64::from(ins.bottom),
         );
         self.last_insets = (ins.left, ins.top);
+        crate::theme::set_side_inset(f64::from(ins.left));
         self.last_full = (full_w as f32, full_h as f32);
         self.last_k = k;
         let t = self.t();
@@ -133,11 +129,17 @@ impl Shell {
             canvas.translate((ins.left, ins.top));
         }
 
+        // The hint bar's band only where a hint bar can show.
+        let bottom = if self.glyphs == GlyphStyle::Remote {
+            EDGE_INSET
+        } else {
+            BOTTOM_BAND
+        };
         let content = Rect::from_ltrb(
             0.0,
             (TOP_BAND * k) as f32,
             w as f32,
-            (h - BOTTOM_BAND * k) as f32,
+            (h - bottom * k) as f32,
         );
         // Heading budget left of the controller chip. 12 dp is the gap between them;
         // the 0.35 w floor stops a long chip from squeezing the title to nothing.
@@ -150,7 +152,7 @@ impl Shell {
                     k,
                 )
             });
-            (w - 2.0 * EDGE_INSET * k - chip_w - 12.0 * k).max(w * 0.35)
+            (w - 2.0 * edge(k) - chip_w - 12.0 * k).max(w * 0.35)
         };
         let games_ok = self.games_host().is_some();
         let (tab, strip_focus) = (self.tab, self.strip_focus);
@@ -284,7 +286,7 @@ impl Shell {
             let mark_w = 15.0 * k;
             let battery = self.pads.first().and_then(|p| p.battery);
             let bw = chip_width(fonts, chip, battery.is_some(), k);
-            let bx = w - EDGE_INSET * k - bw;
+            let bx = w - edge(k) - bw;
             let top = 18.0 * k;
             let rect = Rect::from_xywh(bx as f32, top as f32, bw as f32, bh as f32);
             crate::theme::panel(
@@ -463,7 +465,7 @@ impl LayerEnv<'_> {
                 W::Bold,
                 30.0 * self.k,
                 fg(1.0),
-                EDGE_INSET * self.k,
+                edge(self.k),
                 18.0 * self.k,
                 self.title_max_w,
             );
@@ -488,26 +490,25 @@ impl LayerEnv<'_> {
         rects
     }
 
-    /// The tab pills where a root's title would be, text aligned with the title. The plate
+    /// The text tabs where a root's title would be, text on the title's margin. The plate
     /// sits behind the current tab while the strip has focus.
     fn draw_strip(&mut self, canvas: &Canvas, cheap: bool) {
         let k = self.k;
-        let (size, pad, gap, h, top) = (18.0 * k, 16.0 * k, 4.0 * k, 40.0 * k, 16.0 * k);
-        let mut x = EDGE_INSET * k - pad;
+        let (size, pad, gap, h, top) = (20.0 * k, 10.0 * k, 4.0 * k, 36.0 * k, 32.0 * k);
+        let mut x = edge(k) - pad;
         let mut row = El::column();
         for tab in TABS {
-            let w = f64::from(self.fonts.measure(tab.name(), W::SemiBold, size)) + 2.0 * pad;
+            let w = f64::from(self.fonts.measure(tab.name(), W::Bold, size)) + 2.0 * pad;
             let r = Rect::from_xywh(x as f32, top as f32, w as f32, h as f32);
-            let look = Pill {
+            let look = TextTab {
                 selected: tab == self.tab,
-                focused: self.strip_focus,
                 enabled: tab != Tab::Games || self.games_ok,
             };
             let fonts = self.fonts;
             row = row.child(
                 El::paint(move |canvas, r| look.paint(canvas, fonts, tab.name(), r, size))
                     .id(pill_id(tab))
-                    .focusable((h / 2.0) as f32)
+                    .focusable((10.0 * k) as f32)
                     .place(r),
             );
             x += w + gap;
@@ -525,29 +526,24 @@ impl LayerEnv<'_> {
     }
 }
 
+/// One tab: bold text, full ink when current. The plate behind it is focus.
 #[derive(Clone, Copy)]
-struct Pill {
+struct TextTab {
     selected: bool,
-    focused: bool,
     enabled: bool,
 }
 
-impl Pill {
+impl TextTab {
     fn paint(self, canvas: &Canvas, fonts: &Fonts, label: &str, r: Rect, size: f64) {
-        // Resting on content, the current tab keeps a quiet chip; focused, the plate is it.
-        if self.selected && !self.focused {
-            let rr = skia_safe::RRect::new_rect_xy(r, r.height() / 2.0, r.height() / 2.0);
-            canvas.draw_rrect(rr, &crate::theme::fill(fg(0.10)));
-        }
         let ink = match (self.enabled, self.selected) {
             (false, _) => fg(0.28),
             (true, true) => fg(1.0),
             (true, false) => fg(0.6),
         };
-        let tw = f64::from(fonts.measure(label, W::SemiBold, size));
+        let tw = f64::from(fonts.measure(label, W::Bold, size));
         let x = f64::from(r.center_x()) - tw / 2.0;
         let y = f64::from(r.center_y()) + size * 0.36;
-        fonts.draw(canvas, label, x, y, W::SemiBold, size, ink);
+        fonts.draw(canvas, label, x, y, W::Bold, size, ink);
     }
 }
 

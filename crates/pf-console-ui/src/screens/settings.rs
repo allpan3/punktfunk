@@ -14,7 +14,7 @@
 use crate::glyphs::{Hint, HintKey};
 use crate::pointer::Pointer;
 use crate::screens::{Ctx, Outbox, Screen};
-use crate::theme::{accent, fg, fill, Fonts, EDGE_INSET, W};
+use crate::theme::{accent, edge, fg, fill, Fonts, W};
 use crate::widgets::{
     permits, Charset, KeyMsg, Keyboard, ListMsg, MenuList, RowSpec, TabStrip, TAB_STRIP_H,
 };
@@ -856,8 +856,8 @@ impl SettingsScreen {
     /// lit, and the focus ring on it while the D-pad is here.
     fn draw_rail(&mut self, canvas: &Canvas, rect: Rect, fonts: &Fonts, k: f64) {
         self.rail_rects.clear();
-        let x = f64::from(rect.left) + EDGE_INSET * k;
-        let w = RAIL_W * k - EDGE_INSET * k - 16.0 * k;
+        let x = f64::from(rect.left) + edge(k);
+        let w = RAIL_W * k - edge(k) - 16.0 * k;
         let h = (RAIL_ROW_H - 6.0) * k;
         for (i, (name, _)) in TABS.iter().enumerate() {
             let y = f64::from(rect.top) + (8.0 + i as f64 * RAIL_ROW_H) * k;

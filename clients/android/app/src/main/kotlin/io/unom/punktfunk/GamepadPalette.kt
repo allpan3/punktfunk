@@ -135,7 +135,7 @@ class GamepadPalette(
             // --- dark fields (white ink) ---
             GamepadPalette(
                 "violet", "Violet", emptyList(),
-                ground = Triple(0.075, 0.060, 0.160),
+                ground = Triple(0.510, 0.470, 0.960),
                 accent = Triple(0.525, 0.471, 0.961), light = false,
             ),
             GamepadPalette(

@@ -10,7 +10,7 @@
 //! it jumps and fades. Pinned by `el::tests`.
 
 use crate::anim::{Spring, SpringSpec};
-use crate::theme::{accent, fg, fill, ink, stroke};
+use crate::theme::{accent, fg, fill, stroke};
 use pf_client_core::menu_nav::MenuDir;
 use skia_safe::{gradient, BlurStyle, Canvas, Color4f, MaskFilter, Point, RRect, Rect, TileMode};
 
@@ -211,12 +211,11 @@ impl Plate {
         let out = OUTSET * k;
         let rr = RRect::new_rect_xy(r.with_outset((out, out)), corner + out, corner + out);
         if !cheap {
-            let pale = ink().scrim.r > 0.5;
             let mut shadow = fill(Color4f::new(
                 0.0,
                 0.0,
                 0.0,
-                alpha * if pale { 0.16 } else { 0.4 },
+                alpha * crate::theme::shadow(0.4),
             ));
             shadow.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, 12.0 * k, None));
             canvas.draw_rrect(rr.with_offset((0.0, 10.0 * k)), &shadow);

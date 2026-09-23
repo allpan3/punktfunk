@@ -124,28 +124,80 @@ pub const ONLINE_GREEN: Color4f = Color4f::new(0.20, 0.84, 0.29, 1.0);
 pub struct Ink {
     fg: Color4f,
     accent: Color4f,
+    /// Glass at a panel's top and at its foot.
     glass: Color4f,
+    glass_low: Color4f,
+    /// A coverless card's face at tint 0 and at tint 1 ([`card_face`]).
+    face: [Color4f; 2],
+    /// Drop shadow strength against a dark field's.
+    shadow: f32,
     /// Ground the vignette leans toward (black on dark, white on pale) and how
     /// hard (`a`). Mixing toward white at dark-field strength bleaches chroma.
     pub scrim: Color4f,
 }
 
-/// Shipped dark look, and the fallback before any palette is applied.
+const BLACK: Color4f = Color4f::new(0.0, 0.0, 0.0, 1.0);
+const WHITE: Color4f = Color4f::new(1.0, 1.0, 1.0, 1.0);
+
+/// Dark look, and the fallback before any palette is applied.
 const DARK_INK: Ink = Ink {
-    fg: Color4f::new(1.0, 1.0, 1.0, 1.0),
+    fg: WHITE,
     // Brand violet, dark-appearance `#8678F5`.
     accent: Color4f::new(0.525, 0.471, 0.961, 1.0),
     glass: Color4f::new(0.086, 0.086, 0.125, 0.62),
-    scrim: Color4f::new(0.0, 0.0, 0.0, 1.0),
+    glass_low: Color4f::new(0.086, 0.086, 0.125, 0.62),
+    face: [BLACK, Color4f::new(0.525, 0.471, 0.961, 1.0)],
+    shadow: 1.0,
+    scrim: BLACK,
 };
+
+/// A mid-bright field (the brand default): white ink, violet glass clearing toward white at
+/// its foot, violet faces deep enough for white titles, an indigo accent (white would hide
+/// a switch's knob), and a whisper of vignette.
+const VIVID_INK: Ink = Ink {
+    fg: WHITE,
+    accent: Color4f::new(0.28, 0.20, 0.70, 1.0),
+    glass: Color4f::new(0.32, 0.24, 0.42, 0.30),
+    glass_low: Color4f::new(1.0, 1.0, 1.0, 0.16),
+    face: [
+        Color4f::new(0.56, 0.42, 0.93, 1.0),
+        Color4f::new(0.40, 0.26, 0.82, 1.0),
+    ],
+    shadow: 0.55,
+    scrim: Color4f::new(0.0, 0.0, 0.0, 0.12),
+};
+
+/// A pale field: white frost (0.66 vs dark's 0.62, a bright gradient has less to separate
+/// it), a softer shadow, and scrims that lean white. `fg` and `accent` are the palette's.
+const PALE_INK: Ink = Ink {
+    fg: BLACK,
+    accent: BLACK,
+    glass: Color4f::new(1.0, 1.0, 1.0, 0.66),
+    glass_low: Color4f::new(1.0, 1.0, 1.0, 0.66),
+    face: [WHITE, BLACK],
+    shadow: 0.40,
+    scrim: Color4f::new(1.0, 1.0, 1.0, 0.45),
+};
+
+/// Relative luminance of an sRGB colour, for picking ink against a ground.
+pub(crate) fn luma((r, g, b): (f64, f64, f64)) -> f64 {
+    0.2126 * r + 0.7152 * g + 0.0722 * b
+}
 
 impl Ink {
     /// Palette ink. Pale fields get near-black fg tinted toward the ground (a
     /// foreign grey reads as a second palette) and white-frost glass.
     pub fn of(p: &crate::library::Palette) -> Ink {
         let accent = Color4f::new(p.accent.0 as f32, p.accent.1 as f32, p.accent.2 as f32, 1.0);
+        if !p.light && luma(p.ground) > 0.3 {
+            return VIVID_INK;
+        }
         if !p.light {
-            return Ink { accent, ..DARK_INK };
+            return Ink {
+                accent,
+                face: [BLACK, accent],
+                ..DARK_INK
+            };
         }
         let g = p.ground;
         Ink {
@@ -156,9 +208,8 @@ impl Ink {
                 1.0,
             ),
             accent,
-            // 0.66 vs dark's 0.62: white frost over a bright gradient has less to separate it.
-            glass: Color4f::new(1.0, 1.0, 1.0, 0.66),
-            scrim: Color4f::new(1.0, 1.0, 1.0, 0.45),
+            face: [WHITE, accent],
+            ..PALE_INK
         }
     }
 
@@ -168,19 +219,22 @@ impl Ink {
         let c = |(r, g, b): (f64, f64, f64), a: f32| Color4f::new(r as f32, g as f32, b as f32, a);
         let accent = c(crate::os_theme::readable_accent(t), 1.0);
         if !t.light {
+            // Theme field, not brand violet-grey: a panel sits a shade above the ground it covers.
+            let glass = c(crate::os_theme::mix(t.background, t.foreground, 0.10), 0.62);
             return Ink {
                 fg: c(t.foreground, 1.0),
                 accent,
-                // Theme field, not brand violet-grey: a panel sits a shade above the ground it covers.
-                glass: c(crate::os_theme::mix(t.background, t.foreground, 0.10), 0.62),
-                scrim: Color4f::new(0.0, 0.0, 0.0, 1.0),
+                glass,
+                glass_low: glass,
+                face: [BLACK, accent],
+                ..DARK_INK
             };
         }
         Ink {
             fg: c(t.foreground, 1.0),
             accent,
-            glass: Color4f::new(1.0, 1.0, 1.0, 0.66),
-            scrim: Color4f::new(1.0, 1.0, 1.0, 0.45),
+            face: [WHITE, accent],
+            ..PALE_INK
         }
     }
 }
@@ -230,14 +284,18 @@ pub fn shade(alpha: f32) -> Color4f {
     Color4f::new(s.r, s.g, s.b, alpha * s.a)
 }
 
-/// Opaque coverless-card face, `tint` of the way from the field's ground toward accent.
-/// Coverflow sides overlap, so glass would show the neighbour. Face and [`fg`] move
-/// opposite ways with the palette; a fixed near-black face under pale `fg` fails contrast.
+/// Opaque coverless-card face, `tint` of the way along the ink's face ramp. Coverflow
+/// sides overlap, so glass would show the neighbour. Face and [`fg`] move opposite ways
+/// with the palette; a fixed near-black face under pale `fg` fails contrast.
 pub fn card_face(tint: f32) -> Color4f {
-    let a = ink().accent;
-    let base = if ink().scrim.r > 0.5 { 1.0 } else { 0.0 };
-    let mix = |c: f32| c * tint + base * (1.0 - tint);
-    Color4f::new(mix(a.r), mix(a.g), mix(a.b), 1.0)
+    let [a, b] = ink().face;
+    let mix = |x: f32, y: f32| x + (y - x) * tint;
+    Color4f::new(mix(a.r, b.r), mix(a.g, b.g), mix(a.b, b.b), 1.0)
+}
+
+/// A drop shadow's alpha: `alpha` is dark-field strength, softened on brighter fields.
+pub fn shadow(alpha: f32) -> f32 {
+    alpha * ink().shadow
 }
 
 /// Black or white on the accent, by luminance not `light`: an accent is picked
@@ -263,8 +321,9 @@ pub enum PanelStroke {
     Brand(f32),
 }
 
-/// Glass panel with its gloss: a sheen from the top left, gone by the middle. `corner` and
-/// the dash pattern are design units; the caller's `k` scales them.
+/// Glass panel with its gloss: glass deepest at the top and clearing toward its foot, and a
+/// sheen from the top left, gone by the middle. `corner` and the dash pattern are design
+/// units; the caller's `k` scales them.
 pub fn panel(
     canvas: &Canvas,
     rect: Rect,
@@ -274,7 +333,23 @@ pub fn panel(
     k: f32,
 ) {
     let rr = RRect::new_rect_xy(rect, corner * k, corner * k);
-    canvas.draw_rrect(rr, &fill(ink().glass));
+    let mut glass = shaded();
+    glass.set_shader(gradient::shaders::linear_gradient(
+        (
+            Point::new(rect.left, rect.top),
+            Point::new(rect.left, rect.bottom),
+        ),
+        &gradient::Gradient::new(
+            gradient::Colors::new_evenly_spaced(
+                &[ink().glass, ink().glass_low],
+                TileMode::Clamp,
+                None,
+            ),
+            gradient::Interpolation::default(),
+        ),
+        None,
+    ));
+    canvas.draw_rrect(rr, &glass);
     if let Some(tint) = tint {
         canvas.draw_rrect(rr, &fill(tint));
     }
@@ -450,13 +525,7 @@ const SHEEN: f32 = 0.07;
 
 /// A soft shadow falling below `rect`, drawn only outside it: glass shows what lies under.
 pub fn drop_shadow(canvas: &Canvas, rect: Rect, corner: f32, k: f32, alpha: f32) {
-    // Scale 0.40 at the pale pole so the caller's alpha stays dark-field strength.
-    let alpha = if ink().scrim.r > 0.5 {
-        alpha * 0.40
-    } else {
-        alpha
-    };
-    let mut p = fill(Color4f::new(0.0, 0.0, 0.0, alpha));
+    let mut p = fill(Color4f::new(0.0, 0.0, 0.0, shadow(alpha)));
     p.set_mask_filter(MaskFilter::blur(
         skia_safe::BlurStyle::Normal,
         10.0 * k,
@@ -490,9 +559,23 @@ pub fn spinner(canvas: &Canvas, cx: f64, cy: f64, r: f64, t: f64) {
 }
 
 /// Chrome inset from the screen edge, design units. 24 matches Apple `.horizontal, 24`
-/// and Android `ConsoleEdgeInset`. Not the legend's 18 (a pill edge). Screen inset,
-/// not content margin: rows and coverflow are centred columns.
+/// and Android `ConsoleEdgeInset`. Not the legend's 18 (a pill edge).
 pub const EDGE_INSET: f64 = 24.0;
+
+thread_local! {
+    /// The safe area's left inset this frame, px. Set by [`crate::shell::Shell::render`].
+    static SIDE_INSET: Cell<f64> = const { Cell::new(0.0) };
+}
+
+pub fn set_side_inset(px: f64) {
+    SIDE_INSET.with(|s| s.set(px));
+}
+
+/// The margin every screen shares, px from the layout's edge: [`EDGE_INSET`] from the
+/// screen's edge, of which a safe-area inset already gives its share.
+pub fn edge(k: f64) -> f64 {
+    (EDGE_INSET * k - SIDE_INSET.with(Cell::get)).max(0.0)
+}
 
 /// Geist weights, matching the Apple client's `.geist(size, weight)`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]

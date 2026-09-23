@@ -417,9 +417,10 @@ const CELL_RAMP: [f64; 16] = [
 pub const PALETTES: [Palette; 13] = [
     // --- dark fields (white ink) ---
     Palette {
+        // The brand default: a bright periwinkle field with lavender pools, still white ink.
         id: "violet", name: "Violet", stops: None,
-        pair: [(0.490, 0.390, 0.950), (0.200, 0.300, 0.850)],
-        ground: (0.075, 0.060, 0.160), accent: (0.525, 0.471, 0.961), light: false,
+        pair: [(0.780, 0.630, 0.980), (0.450, 0.440, 0.950)],
+        ground: (0.510, 0.470, 0.960), accent: (0.525, 0.471, 0.961), light: false,
     },
     Palette {
         // First two stops are (0,0,0): OLED pixels off, not dark grey. Ground is black so calm lifts to nothing.
@@ -2205,6 +2206,17 @@ mod tests {
     #[test]
     fn palettes_are_in_gamut_and_honest_about_lightness() {
         let luma = |c: (f64, f64, f64)| 0.2126 * c.0 + 0.7152 * c.1 + 0.0722 * c.2;
+        // WCAG contrast of white on `c`; 3:1 is the floor for bold and large type.
+        let contrast = |c: (f64, f64, f64)| {
+            let lin = |v: f64| {
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            1.05 / (luma((lin(c.0), lin(c.1), lin(c.2))) + 0.05)
+        };
         for p in &PALETTES {
             for c in p.mesh_colors().iter().chain(p.blob_colors().iter()) {
                 for v in [c.0, c.1, c.2] {
@@ -2217,7 +2229,11 @@ mod tests {
                 assert!(luma(p.ground) > 0.6, "{}'s ground is dark", p.id);
             } else {
                 assert!(mean < 0.45, "{} is flagged dark but means {mean:.2}", p.id);
-                assert!(luma(p.ground) < 0.2, "{}'s ground is light", p.id);
+                assert!(
+                    contrast(p.ground) >= 3.0,
+                    "white ink fades on {}'s ground",
+                    p.id
+                );
             }
             // Accent tints glass of the opposite polarity: dark on white frost, bright on dark glass.
             let a = luma(p.accent);

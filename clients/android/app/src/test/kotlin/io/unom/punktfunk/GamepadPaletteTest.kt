@@ -99,7 +99,7 @@ class GamepadPaletteTest {
                 assertTrue("${p.id}'s ground is dark", luma(p.ground) > 0.6)
                 assertTrue("${p.id}'s accent is too pale", luma(p.accent) < 0.45)
             } else {
-                assertTrue("${p.id}'s ground is light", luma(p.ground) < 0.2)
+                assertTrue("white ink fades on ${p.id}'s ground", luma(p.ground) < 0.55)
                 assertTrue("${p.id}'s accent is too dark", luma(p.accent) > 0.25)
             }
         }

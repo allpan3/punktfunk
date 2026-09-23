@@ -106,7 +106,7 @@ final class GamepadPaletteTests: XCTestCase {
                 XCTAssertLessThan(luma(p.accent), 0.45, "\(p.id)'s accent is too pale")
             } else {
                 XCTAssertLessThan(mean, 0.45, "\(p.id) is flagged dark")
-                XCTAssertLessThan(luma(p.ground), 0.2, "\(p.id)'s ground is light")
+                XCTAssertLessThan(luma(p.ground), 0.55, "white ink fades on \(p.id)'s ground")
                 XCTAssertGreaterThan(luma(p.accent), 0.25, "\(p.id)'s accent is too dark")
             }
         }

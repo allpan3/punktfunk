@@ -11,7 +11,7 @@ use crate::glyphs::{Hint, HintKey};
 use crate::pointer::{Pointer, PointerKind};
 use crate::ring::{EditEvent, Ring, LABEL_H};
 use crate::screens::{Ctx, Outbox, Screen};
-use crate::theme::{card_face, fg, fill, focus_halo, stroke, Fonts, EDGE_INSET, W};
+use crate::theme::{card_face, edge, fg, fill, focus_halo, stroke, Fonts, W};
 use crate::widgets::{ListMsg, MenuList, RowSpec, ROW_MAX_W};
 use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuPulse};
 use pf_client_core::overlay_actions::{
@@ -468,7 +468,7 @@ impl RingEditorScreen {
             W::Regular,
             13.0 * k,
             fg(0.55),
-            f64::from(rect.left) + EDGE_INSET * k,
+            f64::from(rect.left) + edge(k),
             f64::from(rect.top) + 2.0 * k,
             ROW_MAX_W * 0.9 * k,
         );
@@ -488,7 +488,7 @@ impl RingEditorScreen {
         };
         let rk = kf * fit;
         let stage_x = if side {
-            rect.left + (EDGE_INSET * k) as f32
+            rect.left + (edge(k)) as f32
         } else {
             rect.center_x() - stage_w / 2.0
         };
