@@ -81,7 +81,7 @@ impl PluginManifest {
         self.reads
             .iter()
             .chain(self.writes.iter())
-            .filter_map(|p| expand_home(p))
+            .flat_map(|p| expand_home(p))
             .collect()
     }
 
@@ -113,12 +113,41 @@ impl PluginManifest {
     }
 }
 
-fn expand_home(p: &str) -> Option<PathBuf> {
-    let rest = match p.strip_prefix("~/") {
-        Some(rest) => rest,
-        None => return Some(PathBuf::from(p)),
-    };
-    Some(home_dir()?.join(rest))
+/// `~/x` under every home it may mean ([`plugin_homes`]); any other path as written.
+fn expand_home(p: &str) -> Vec<PathBuf> {
+    match p.strip_prefix("~/") {
+        Some(rest) => plugin_homes().into_iter().map(|h| h.join(rest)).collect(),
+        None => vec![PathBuf::from(p)],
+    }
+}
+
+/// The homes a manifest's `~` names. The Windows host is a service whose own profile is
+/// `systemprofile`, where no launcher is ever installed, so there it is every real user profile.
+fn plugin_homes() -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        // `C:` joined with `Users` is drive-relative, so the separator is spelled out.
+        let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+        let base = PathBuf::from(format!("{drive}\\Users"));
+        let people = std::fs::read_dir(&base)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+                !matches!(
+                    name.as_str(),
+                    "public" | "default" | "default user" | "all users"
+                )
+            })
+            .map(|e| e.path());
+        let mut homes: Vec<PathBuf> = people.chain(home_dir()).collect();
+        homes.dedup();
+        homes
+    }
+    #[cfg(not(windows))]
+    home_dir().into_iter().collect()
 }
 
 pub(crate) fn home_dir() -> Option<PathBuf> {
@@ -164,7 +193,7 @@ pub(crate) fn granted_roots_in(id: &str, config_dir: PathBuf) -> Vec<PathBuf> {
     crate::plugins::access::AccessStore::open(config_dir)
         .grants_for(id)
         .into_iter()
-        .filter_map(|g| expand_home(&g.path))
+        .flat_map(|g| expand_home(&g.path))
         .collect()
 }
 
@@ -392,8 +421,8 @@ mod manifest_tests {
     #[test]
     fn expand_home_roots_only_a_tilde_prefix() {
         if let Some(home) = home_dir() {
-            assert_eq!(expand_home("~/legacy"), Some(home.join("legacy")));
-            assert_eq!(expand_home("/abs/path"), Some(PathBuf::from("/abs/path")));
+            assert!(expand_home("~/legacy").contains(&home.join("legacy")));
+            assert_eq!(expand_home("/abs/path"), vec![PathBuf::from("/abs/path")]);
         }
     }
 
