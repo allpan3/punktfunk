@@ -9,6 +9,7 @@ import {
 	adoptNestedState,
 	describeFailure,
 	discoverUnits,
+	inProcessConnect,
 	runner,
 	spawnAgainIfKilled,
 	superviseUnit,
@@ -225,6 +226,28 @@ describe("adoptNestedState (0.39 wrote sandboxed state one level down)", () => {
 		write(path.join(state, "config.json"), "cfg");
 		adoptNestedState(state, "steam", quiet);
 		expect(fs.readdirSync(state)).toEqual(["config.json"]);
+	});
+});
+
+describe("inProcessConnect (Windows, or the sandbox off)", () => {
+	const config = path.join(ROOT, "tokens");
+	fs.mkdirSync(path.join(config, "plugin-run"), { recursive: true });
+	fs.writeFileSync(
+		path.join(config, "plugin-run", "plugin-tokens.json"),
+		JSON.stringify({ "rom-manager": "own-token" }),
+	);
+	const shared = { url: "https://127.0.0.1:1", token: TOKEN };
+	const options = { configDir: config, connect: shared };
+
+	test("a plugin with a manifest speaks with its own token", () => {
+		const unit = { name: "r", file: "/x", manifest: { id: "rom-manager" } };
+		expect(inProcessConnect(unit, options)).toEqual({ ...shared, token: "own-token" });
+	});
+
+	test("a loose script, or a plugin with no minted token, keeps the runner's", () => {
+		expect(inProcessConnect({ name: "s", file: "/x" }, options)).toBe(shared);
+		const unknown = { name: "n", file: "/x", manifest: { id: "nope" } };
+		expect(inProcessConnect(unknown, options)).toBe(shared);
 	});
 });
 

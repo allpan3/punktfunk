@@ -486,18 +486,38 @@ export const adoptNestedState = (stateDir: string, id: string, log: LogSink): vo
 	log(`[runner] ${id}: moved its state up from ${nested}`);
 };
 
+/** This plugin's own API token, from the map the host mints for every installed manifest. */
+const pluginToken = (config: string, id: string): string | undefined => {
+	try {
+		const tokens = JSON.parse(
+			fs.readFileSync(path.join(config, "plugin-run", "plugin-tokens.json"), "utf8"),
+		) as Record<string, string>;
+		return tokens[id];
+	} catch {
+		return undefined;
+	}
+};
+
+/**
+ * The connection an in-process plugin gets: its own token when its manifest has one, so it is
+ * scoped to its own provider and its folder requests reach the host. Anything else keeps the
+ * runner's.
+ */
+export const inProcessConnect = (
+	unit: Unit,
+	options: RunnerOptions,
+): ConnectOptions | undefined => {
+	const id = unit.manifest?.id;
+	const token = id ? pluginToken(options.configDir ?? configDir(), id) : undefined;
+	return token ? { ...options.connect, token } : options.connect;
+};
+
 /**
  * Write this plugin's own token under its state dir for the sandbox's read-only bind. A missing
  * token and an unwritable state dir are different faults and say so.
  */
 const writePluginToken = (config: string, stateDir: string, id: string): string | Error => {
-	let token: string | undefined;
-	try {
-		const tokens = JSON.parse(
-			fs.readFileSync(path.join(config, "plugin-run", "plugin-tokens.json"), "utf8"),
-		) as Record<string, string>;
-		token = tokens[id];
-	} catch {}
+	const token = pluginToken(config, id);
 	if (token === undefined)
 		return new Error(
 			`No API credential exists for ${id} yet. Restart the host if this persists.`,
@@ -684,11 +704,12 @@ const attemptUnit = (
 			return "script" as const; // the import WAS the run (top-level await)
 		}
 		const def = mod.default;
+		const own = inProcessConnect(unit, options);
 		if (Effect.isEffect(def.main)) {
 			// The well-behaved shape: interruption reaches it structurally, its scoped
 			// finalizers run on shutdown.
 			yield* (def.main as Effect.Effect<unknown, unknown, PunktfunkHost>).pipe(
-				Effect.provide(hostLayer(options.connect)),
+				Effect.provide(hostLayer(own)),
 			);
 		} else {
 			// The simple shape: a facade client whose close is guaranteed by the scope —
@@ -697,7 +718,7 @@ const attemptUnit = (
 			yield* Effect.scoped(
 				Effect.gen(function* () {
 					const pf = yield* Effect.acquireRelease(
-						Effect.tryPromise(() => connect(options.connect)),
+						Effect.tryPromise(() => connect(own)),
 						(client) => Effect.sync(() => client.close()),
 					);
 					yield* Effect.tryPromise(async () => await main(pf));
