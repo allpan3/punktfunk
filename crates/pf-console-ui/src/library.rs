@@ -32,8 +32,9 @@ pub const ROTATE_DEG: f64 = 38.0;
 pub const SHELF_EYE: f64 = 0.55;
 /// Perspective depth for the launch hold's tilt, px (CSS `perspective()` semantics).
 pub const PERSPECTIVE: f64 = 800.0;
-/// Refused-move recoil, px against the push.
-pub const BUMP_PX: f64 = 16.0;
+/// Refused-move recoil: the kick against the push, design units/s. A velocity, not a
+/// displacement, so the list eases out and springs back rather than jumping.
+pub const BUMP_V: f64 = 380.0;
 /// Mount entrance ([`crate::anim::Entrance`]): arrival scale, rise (design units), yaw. Shared with the home carousel.
 pub const ENTER_SCALE: f64 = 0.96;
 pub const ENTER_RISE: f64 = 12.0;
@@ -44,9 +45,10 @@ pub const JUMP: i32 = 5;
 /// Cursor chase: ζ ≈ 0.85 — settles in ~0.3 s with a whisker of overshoot.
 pub const SPRING_K: f64 = 200.0;
 pub const SPRING_C: f64 = 24.0;
-/// Boundary recoil: stiffer and more underdamped (ζ ≈ 0.55) — one visible wobble.
-pub const BUMP_K: f64 = 600.0;
-pub const BUMP_C: f64 = 27.0;
+/// Boundary recoil: soft and underdamped (ζ ≈ 0.4) — a rubbery bounce, two visible
+/// wobbles, ~0.5 s to rest.
+pub const BUMP_K: f64 = 260.0;
+pub const BUMP_C: f64 = 13.0;
 
 fn spring_step(pos: f64, vel: f64, target: f64, k: f64, c: f64, dt: f64) -> (f64, f64) {
     let vel = vel + (k * (target - pos) - c * vel) * dt;

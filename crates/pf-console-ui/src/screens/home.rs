@@ -20,7 +20,7 @@ use crate::anim::{entrances, Entrance, EntranceAt, Spring};
 use crate::el::{Axis, El, Group, Id, Tree};
 use crate::glyphs::{Hint, HintKey};
 use crate::library::{
-    step_cursor, StepResult, BUMP_C, BUMP_K, BUMP_PX, ENTER_RISE, ENTER_SCALE, SPRING_C, SPRING_K,
+    step_cursor, StepResult, BUMP_C, BUMP_K, BUMP_V, ENTER_RISE, ENTER_SCALE, SPRING_C, SPRING_K,
 };
 use crate::model::{ConsoleCmd, HostRow};
 use crate::pointer::{Pointer, PointerKind};
@@ -521,8 +521,8 @@ impl HomeScreen {
             }
             StepResult::Boundary => {
                 self.bump = Spring {
-                    pos: -BUMP_PX * f64::from(delta.signum()),
-                    vel: 0.0,
+                    pos: self.bump.pos,
+                    vel: -BUMP_V * f64::from(delta.signum()),
                 };
                 Some(MenuPulse::Boundary)
             }

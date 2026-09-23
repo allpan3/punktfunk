@@ -10,7 +10,7 @@
 
 use crate::anim::{approach, entrances, springs, Entrance, EntranceAt, Spring, TRAY_C, TRAY_K};
 use crate::el::{Axis, El, Id, Tree};
-use crate::library::{BUMP_C, BUMP_K};
+use crate::library::{BUMP_C, BUMP_K, BUMP_V};
 use crate::pointer::{Pointer, PointerKind};
 use crate::theme::{accent, edge, fg, fill, stroke, Fonts, PanelStroke, W};
 use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuPulse};
@@ -629,10 +629,10 @@ impl MenuList {
         self.follow = true;
         let target = self.cursor as i32 + delta;
         if len == 0 || target < 0 || target >= len as i32 {
-            // End of the list: Boundary pulse plus 14 dp vertical recoil.
+            // End of the list: Boundary pulse plus a rubbery vertical recoil.
             self.bump = Spring {
-                pos: -14.0 * f64::from(delta.signum()),
-                vel: 0.0,
+                pos: self.bump.pos,
+                vel: -BUMP_V * f64::from(delta.signum()),
             };
             return Some(MenuPulse::Boundary);
         }
@@ -906,7 +906,11 @@ impl MenuList {
         let ent = self
             .entrance
             .map_or(EntranceAt::SETTLED, |e| e.at(i, self.age));
-        let top = f64::from(cell.top) + self.bump.pos * k + (1.0 - ent.travel) * ROW_RISE * k;
+        // The recoil whips: rows nearer the cursor move most, the far end least, so the
+        // list compresses like a spring rather than shifting as a block.
+        let whip = 1.0 / (1.0 + 0.12 * (i as f64 - self.cursor as f64).abs());
+        let top =
+            f64::from(cell.top) + self.bump.pos * k * whip + (1.0 - ent.travel) * ROW_RISE * k;
         if let Some(header) = row.header {
             fonts.draw_tracked(
                 canvas,
@@ -1823,7 +1827,7 @@ mod tests {
             l.menu(MenuEvent::Move(MenuDir::Up), 3).1,
             Some(MenuPulse::Boundary)
         ));
-        assert!(l.bump.pos.abs() > 1.0, "recoil engaged");
+        assert!(l.bump.vel.abs() > 1.0, "recoil engaged");
         assert_eq!(
             l.menu(MenuEvent::Move(MenuDir::Right), 3).0,
             ListMsg::Adjust(1)

@@ -16,7 +16,7 @@ use crate::glyphs::{Hint, HintKey};
 use crate::library::{
     grid_col_hint, grid_step, initials, project, shelf_matrix, step_cursor, store_label, GridDir,
     GridShape, LibraryGame, LibraryPhase, LibraryShared, LibraryView, Stale, StepResult, BUMP_C,
-    BUMP_K, BUMP_PX, ENTER_RISE, ENTER_SCALE, ENTER_TURN_DEG, GRID_GAP, GRID_H, GRID_W, JUMP,
+    BUMP_K, BUMP_V, ENTER_RISE, ENTER_SCALE, ENTER_TURN_DEG, GRID_GAP, GRID_H, GRID_W, JUMP,
     POSTER_H, RECEDE_FADE, RECEDE_SCALE, ROTATE_DEG, SHELF_CORNER, SHELF_COVER_MIN, SHELF_EYE,
     SHELF_SPACING, SPRING_C, SPRING_K,
 };
@@ -860,8 +860,8 @@ impl LibraryScreen {
                 // Against the push, on its axis. Zero recoil reads as a dropped input.
                 let forward = matches!(dir, GridDir::Right | GridDir::Down | GridDir::PageForward);
                 self.bump = Spring {
-                    pos: -BUMP_PX * if forward { 1.0 } else { -1.0 },
-                    vel: 0.0,
+                    pos: self.bump.pos,
+                    vel: -BUMP_V * if forward { 1.0 } else { -1.0 },
                 };
                 self.bump_vertical = !matches!(dir, GridDir::Left | GridDir::Right);
                 Some(MenuPulse::Boundary)
@@ -1048,8 +1048,8 @@ impl LibraryScreen {
             }
             StepResult::Boundary => {
                 self.bump = Spring {
-                    pos: -BUMP_PX * f64::from(delta.signum()),
-                    vel: 0.0,
+                    pos: self.bump.pos,
+                    vel: -BUMP_V * f64::from(delta.signum()),
                 };
                 self.bump_vertical = false; // shelf is a line; recoil is horizontal
                 Some(MenuPulse::Boundary)
