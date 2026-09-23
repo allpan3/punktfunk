@@ -338,7 +338,7 @@ pub enum ConsoleCmd {
     OpenPlatformScreen {
         id: String,
     },
-    /// Platform-only pad work. `action` is [`crate::screens::controllers::PadAction::id`];
+    /// Platform-only pad work. `action` is [`crate::screens::players::PadAction::id`];
     /// `pad_key` indexes [`crate::screens::Ctx::pads`] and is empty when the pad list
     /// cannot name the device. One command, not one per button: the host's answer is
     /// always "do it, report as a notice", and a command per grant would span three crates.

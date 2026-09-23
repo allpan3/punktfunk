@@ -112,7 +112,7 @@ pub enum RowId {
     /// Long-press the remote's OK to send a right click. webOS only — it exists because a
     /// Magic Remote has no second button.
     CursorGestures,
-    /// Action row: opens the in-process controllers screen.
+    /// Action row: jumps to the Players tab.
     Controllers,
     /// Action row: asks the host to open the platform licences screen.
     Licenses,
@@ -824,13 +824,10 @@ impl SettingsScreen {
                     ListMsg::None => pulse,
                 };
             }
-            // In-process Skia screen; grant dialogs still go to the host.
             RowId::Controllers => {
                 return match msg {
                     ListMsg::Activate => {
-                        fx.push(Screen::Controllers(
-                            super::controllers::ControllersScreen::new(),
-                        ));
+                        fx.tab = Some(crate::shell::Tab::Players);
                         pulse
                     }
                     ListMsg::Adjust(_) => Some(MenuPulse::Boundary),
@@ -1260,7 +1257,7 @@ fn row_spec_base(id: RowId, ctx: &Ctx, presets: &[(String, String)]) -> RowSpec 
         RowId::NoPresets => {
             return RowSpec::action("No presets yet", false);
         }
-        RowId::Controllers => return RowSpec::action("Connected controllers", true),
+        RowId::Controllers => return RowSpec::action("Players", true),
         RowId::Licenses => return RowSpec::action("Open-source licences", true),
         RowId::QuickActions => {
             let mut r = RowSpec::action("Quick actions", true);
@@ -1831,7 +1828,7 @@ pub fn detail(id: RowId, ctx: &Ctx) -> &'static str {
                  The switch above turns it off altogether."
             }
         },
-        RowId::Controllers => "Connected controllers, their grants and a rumble/haptics test.",
+        RowId::Controllers => "The controllers connected here, their grants and a rumble test.",
         RowId::Licenses => "The open-source licences this app ships under.",
         RowId::Preset(_) => {
             "Pin this preset to a host and it appears as its own card — one press \

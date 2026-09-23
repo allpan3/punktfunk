@@ -63,10 +63,11 @@ const HOLD_S: f64 = 0.5;
 pub(crate) enum Tab {
     Hosts,
     Games,
+    Players,
     Settings,
 }
 
-pub(crate) const TABS: [Tab; 3] = [Tab::Hosts, Tab::Games, Tab::Settings];
+pub(crate) const TABS: [Tab; 4] = [Tab::Hosts, Tab::Games, Tab::Players, Tab::Settings];
 
 impl Tab {
     /// The id `console-vectors.json` pins; also the pill's element id.
@@ -74,6 +75,7 @@ impl Tab {
         match self {
             Tab::Hosts => "hosts",
             Tab::Games => "games",
+            Tab::Players => "players",
             Tab::Settings => "settings",
         }
     }
@@ -82,6 +84,7 @@ impl Tab {
         match self {
             Tab::Hosts => "Hosts",
             Tab::Games => "Games",
+            Tab::Players => "Players",
             Tab::Settings => "Settings",
         }
     }
@@ -94,6 +97,7 @@ impl Tab {
     fn of(root: &Screen) -> Tab {
         match root {
             Screen::Library(_) | Screen::Collections(_) => Tab::Games,
+            Screen::Players(_) => Tab::Players,
             Screen::Settings(_) => Tab::Settings,
             _ => Tab::Hosts,
         }
@@ -489,7 +493,7 @@ impl Shell {
         Ok(Shell {
             tab: Tab::of(&stack[0]),
             stack,
-            parked: [None, None, None],
+            parked: [None, None, None, None],
             games_key: None,
             strip_focus: false,
             strip: crate::el::Tree::new(),
@@ -1177,6 +1181,11 @@ impl Shell {
         let parked = self.parked[tab.index()].take();
         match tab {
             Tab::Hosts => Some(parked.unwrap_or_else(|| Screen::Home(HomeScreen::new()))),
+            Tab::Players => {
+                Some(parked.unwrap_or_else(|| {
+                    Screen::Players(crate::screens::players::PlayersScreen::new())
+                }))
+            }
             Tab::Settings => Some(parked.unwrap_or_else(|| {
                 Screen::Settings(crate::screens::settings::SettingsScreen::new(&*self.store))
             })),

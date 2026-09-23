@@ -184,6 +184,9 @@ fn navigation_lap() {
     assert!(matches!(s.stack.as_slice(), [Screen::Library(_)]));
     finish_motion(&mut s);
     s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    assert_eq!(s.tab, Tab::Players);
+    finish_motion(&mut s);
+    s.handle_menu(MenuEvent::Move(MenuDir::Right));
     assert_eq!(s.tab, Tab::Settings);
     finish_motion(&mut s);
     assert!(matches!(
@@ -192,10 +195,10 @@ fn navigation_lap() {
     ));
     s.handle_menu(MenuEvent::Move(MenuDir::Down));
     assert!(!s.strip_focus, "down returns to the screen");
-    s.handle_menu(MenuEvent::JumpBack);
-    finish_motion(&mut s);
-    s.handle_menu(MenuEvent::JumpBack);
-    finish_motion(&mut s);
+    for _ in 0..3 {
+        s.handle_menu(MenuEvent::JumpBack);
+        finish_motion(&mut s);
+    }
     assert!(matches!(s.stack.as_slice(), [Screen::Home(_)]));
     s.handle_menu(MenuEvent::Back);
     assert!(matches!(s.take_action(), Some(OverlayAction::Quit)));
@@ -396,7 +399,7 @@ fn tab_and_shift_tab_change_tabs() {
     assert_eq!(s.tab, Tab::Games, "Tab goes forward");
     s.motion = Motion::None;
     s.key(Scancode::Tab, false, false);
-    assert_eq!(s.tab, Tab::Settings);
+    assert_eq!(s.tab, Tab::Players);
     s.motion = Motion::None;
     assert!(s.key(Scancode::Tab, true, false));
     assert_eq!(s.tab, Tab::Games, "Shift+Tab goes back");
@@ -1714,7 +1717,7 @@ fn store_shots() {
     let mut s = store_shell(
         vec![
             Screen::Home(HomeScreen::new()),
-            Screen::Controllers(crate::screens::controllers::ControllersScreen::new()),
+            Screen::Players(crate::screens::players::PlayersScreen::new()),
         ],
         LibraryShared::default(),
     );

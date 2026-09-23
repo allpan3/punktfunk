@@ -1937,11 +1937,15 @@
       "name": "Games"
     },
     {
+      "id": "players",
+      "name": "Players"
+    },
+    {
       "id": "settings",
       "name": "Settings"
     }
   ],
-  "$shell_tabs": "Version 3: the console's top-level tabs, in strip order. The Skia shell draws them on every platform, so its Rust twin pins them; Apple and Android hold no copy. Players joins between Games and Settings when the controllers screen becomes it.",
+  "$shell_tabs": "Version 3: the console's top-level tabs, in strip order. The Skia shell draws them on every platform, so its Rust twin pins them; Apple and Android hold no copy.",
   "tabs": [
     {
       "name": "Stream"

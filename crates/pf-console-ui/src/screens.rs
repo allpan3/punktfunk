@@ -7,13 +7,13 @@
 pub(crate) mod add_host;
 pub(crate) mod bind_preset;
 pub(crate) mod collections;
-pub(crate) mod controllers;
 pub(crate) mod home;
 pub(crate) mod library;
 
 pub(crate) mod options;
 pub(crate) mod pair;
 pub(crate) mod pin_hosts;
+pub(crate) mod players;
 pub(crate) mod ring_editor;
 pub(crate) mod settings;
 pub(crate) mod shortcut_editor;
@@ -172,8 +172,8 @@ pub(crate) enum Screen {
     PinHosts(pin_hosts::PinHostsScreen),
     /// Which preset the host's primary tile connects with.
     BindPreset(bind_preset::BindPresetScreen),
-    /// Attached pads. Android-only — the settings row that opens it is not on desktop.
-    Controllers(controllers::ControllersScreen),
+    /// The Players tab: attached pads, and the platform's grants and tests.
+    Players(players::PlayersScreen),
     /// In-stream ring, editing mode. Raised by the Quick actions settings row.
     RingEditor(Box<ring_editor::RingEditorScreen>),
     ShortcutEditor(shortcut_editor::ShortcutEditorScreen),
@@ -198,7 +198,7 @@ impl Screen {
             Screen::Pair(s) => s.menu(ev, ctx, fx),
             Screen::PinHosts(s) => s.menu(ev, ctx, fx),
             Screen::BindPreset(s) => s.menu(ev, ctx, fx),
-            Screen::Controllers(s) => s.menu(ev, ctx, fx),
+            Screen::Players(s) => s.menu(ev, ctx, fx),
             Screen::HostOptions(s) => s.menu(ev, ctx, fx),
         }
     }
@@ -215,12 +215,11 @@ impl Screen {
             Screen::Pair(s) => s.list.pan(p),
             Screen::PinHosts(s) => s.list.pan(p),
             Screen::BindPreset(s) => s.list.pan(p),
-            Screen::Controllers(s) => s.list.pan(p),
             Screen::HostOptions(s) => s.list.pan(p),
             Screen::ShortcutEditor(s) => s.pan_list().is_some_and(|l| l.pan(p)),
             Screen::RingEditor(s) => s.pan_list().pan(p),
             Screen::Library(s) => s.pan(p),
-            Screen::Home(_) | Screen::Collections(_) => false,
+            Screen::Home(_) | Screen::Collections(_) | Screen::Players(_) => false,
         }
     }
 
@@ -239,7 +238,7 @@ impl Screen {
             Screen::Pair(s) => s.pointer(p, ctx, fx),
             Screen::PinHosts(s) => s.pointer(p, ctx, fx),
             Screen::BindPreset(s) => s.pointer(p, ctx, fx),
-            Screen::Controllers(s) => s.pointer(p, ctx, fx),
+            Screen::Players(s) => s.pointer(p, ctx, fx),
             Screen::HostOptions(s) => s.pointer(p, ctx, fx),
         }
     }
@@ -280,7 +279,9 @@ impl Screen {
 
     pub(crate) fn background(&self) -> Bg {
         match self {
-            Screen::Home(_) | Screen::Library(_) | Screen::Collections(_) => Bg::Aurora,
+            Screen::Home(_) | Screen::Library(_) | Screen::Collections(_) | Screen::Players(_) => {
+                Bg::Aurora
+            }
             _ => Bg::Form,
         }
     }
@@ -297,7 +298,7 @@ impl Screen {
             Screen::Pair(s) => format!("Pair with {}", s.host_name()),
             Screen::PinHosts(s) => format!("Pin \u{201c}{}\u{201d}", s.preset_name()),
             Screen::BindPreset(s) => s.heading(),
-            Screen::Controllers(_) => "Connected controllers".into(),
+            Screen::Players(_) => "Players".into(),
             Screen::HostOptions(s) => s.title(),
         }
     }
@@ -309,6 +310,7 @@ impl Screen {
             Screen::Home(s) => s.announcement(ctx.hosts),
             Screen::Library(s) => s.announcement(),
             Screen::Settings(s) => s.announcement(ctx),
+            Screen::Players(s) => s.announcement(ctx),
             _ => None,
         }
     }
@@ -325,7 +327,7 @@ impl Screen {
             Screen::Pair(s) => s.hints(ctx),
             Screen::PinHosts(s) => s.hints(ctx),
             Screen::BindPreset(s) => s.hints(ctx),
-            Screen::Controllers(s) => s.hints(ctx),
+            Screen::Players(s) => s.hints(ctx),
             Screen::HostOptions(s) => s.hints(ctx),
         }
     }
@@ -351,7 +353,7 @@ impl Screen {
             Screen::Pair(s) => s.render(canvas, rect, k, dt, fonts, ctx),
             Screen::PinHosts(s) => s.render(canvas, rect, k, dt, fonts, ctx),
             Screen::BindPreset(s) => s.render(canvas, rect, k, dt, fonts, ctx),
-            Screen::Controllers(s) => s.render(canvas, rect, k, dt, fonts, ctx),
+            Screen::Players(s) => s.render(canvas, rect, k, dt, fonts, ctx),
             Screen::HostOptions(s) => s.render(canvas, rect, k, dt, fonts, ctx),
         }
     }
