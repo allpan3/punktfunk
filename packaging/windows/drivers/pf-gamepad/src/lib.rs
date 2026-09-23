@@ -20,7 +20,9 @@
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
-use pf_driver_proto::gamepad::PadShm;
+use pf_driver_proto::gamepad::{
+    DEVTYPE_DUALSHOCK4, DEVTYPE_STEAMDECK, PadShm, pad_serial, ps_mac_low,
+};
 use pf_umdf_util::channel::{ChannelClient, ChannelConfig};
 use pf_umdf_util::hid::{
     IOCTL_HID_GET_DEVICE_ATTRIBUTES, IOCTL_HID_GET_DEVICE_DESCRIPTOR,
@@ -1368,16 +1370,13 @@ fn on_set_feature(request: &Request) -> NTSTATUS {
 /// truth this mirrors). Anything else echoes the latched command.
 fn deck_feature_reply() -> [u8; 64] {
     let last = LAST_SET_FEATURE.lock().map(|g| *g).unwrap_or([0u8; 64]);
-    // Per-pad unit id "PF" + [`pad_index`] — matches steam_proto::deck_unit_id / deck_serial,
-    // so two virtual Decks never collide in Steam's eyes.
-    let unit_id: u32 = 0x5046_0000 | pad_index() as u32;
     // Steam validates the unit serial's PREFIX before accepting it: a "PF"-leading serial is
     // REJECTED ("Invalid or missing unit serial number …") and Steam then substitutes a hash and
     // MANGLES the displayed name ("Steam Deck Controllerggg"). An 'F'-leading serial passes, so we
     // keep our PunktFunk marker one slot in ("FVPF") — still distinct enough for the Linux side's
     // physical-Deck self-detection while satisfying Steam's format check. (This, not the build-time
     // attributes below, is what un-mangles the name — verified by A/B on .173.)
-    let unit_serial = format!("FVPF{unit_id:08X}");
+    let unit_serial = pad_serial(DEVTYPE_STEAMDECK, pad_index());
     let unit_serial = unit_serial.as_bytes();
     let mut r = [0u8; 64];
     // The CHANNEL PROOF, Deck flavour: the Deck's ONE feature report is unnumbered and Steam drives
@@ -1522,17 +1521,13 @@ fn on_get_feature(request: &Request) -> NTSTATUS {
     // DualSense + Edge use feature ids 0x05/0x09/0x20 (same blobs — SDL forces enhanced-rumble
     // for the Edge PID regardless of the firmware version at 0x20[44..46]); DualShock 4 uses
     // 0x02/0x12/0xa3.
-    // The pairing replies are per-pad: the MAC (bytes 1..7, LSB first) low octet carries the pad
-    // index (see `pad_index` — SDL/Steam dedup controllers by this serial), agreeing with the
-    // GET_STRING serial in `on_get_string`. The Edge lands on its GET_STRING base (0x75 = DS
-    // base + 1) so its feature MAC and USB serial string agree too.
+    // The pairing MAC (bytes 1..7, LSB first) is per pad: its low octet is `ps_mac_low`, the
+    // same octet that ends the GET_STRING serial in `on_get_string`.
     let devtype = device_type();
     let mut ds_pairing = DS_FEATURE_PAIRING;
-    ds_pairing[1] = ds_pairing[1]
-        .wrapping_add(u8::from(devtype == 2))
-        .wrapping_add(pad_index());
+    ds_pairing[1] = ps_mac_low(devtype, pad_index());
     let mut ds4_pairing = DS4_FEATURE_PAIRING;
-    ds4_pairing[1] = ds4_pairing[1].wrapping_add(pad_index());
+    ds4_pairing[1] = ps_mac_low(DEVTYPE_DUALSHOCK4, pad_index());
     let blob: &[u8] = match (devtype, report_id) {
         (0 | 2, 0x05) => &DS_FEATURE_CALIBRATION,
         (0 | 2, 0x09) => &ds_pairing,
@@ -1568,34 +1563,10 @@ fn on_get_string(request: &Request) -> NTSTATUS {
             4..=6 => "Microsoft".into(),
             _ => "Sony Interactive Entertainment".into(),
         },
-        // Per-pad serials (see `pad_index`): SDL reads this via HidD_GetSerialNumberString and
-        // Steam dedups controllers by it. The PS strings are the pairing MAC MSB-first, so the
-        // low octet — the LAST two hex chars — carries the pad index, agreeing with the patched
-        // feature 0x09/0x12 replies in `on_get_feature`. The Deck serial must agree with
-        // deck_feature_reply's 0xAE answer (Steam reads both).
-        2 | 0x0010 => match devtype {
-            1 => format!("DEADBEEF00{:02X}", 0x01u8.wrapping_add(pad_index())),
-            2 => format!("35533AD6E7{:02X}", 0x75u8.wrapping_add(pad_index())),
-            3 => format!("FVPF{:08X}", 0x5046_0000u32 | pad_index() as u32),
-            // Xbox pads report a Bluetooth MAC-shaped serial; the low octet carries the pad index
-            // so Steam dedups multiple forwarded pads, exactly like the PS identities above. Each
-            // Xbox identity gets its OWN base octet (0x10 / 0x30 / 0x50) rather than sharing one:
-            // a mixed session can present a Wireless pad and an Elite at once, and two identities
-            // whose serials differ only by pad index are one off-by-one away from colliding — the
-            // failure being Steam silently treating two live pads as one device.
-            4 => format!("F4B0FC2A6C{:02X}", 0x10u8.wrapping_add(pad_index())),
-            5 => format!("F4B0FC2A6C{:02X}", 0x30u8.wrapping_add(pad_index())),
-            6 => format!("F4B0FC2A6C{:02X}", 0x50u8.wrapping_add(pad_index())),
-            // The Triton serial comes from the shared proto helper (13 ASCII bytes,
-            // "FVPF1302<idx>D03") so it always agrees with the query dance's 0xAE / firmware
-            // replies in `triton::feature_reply` — Steam reads both.
-            7 => {
-                let mut s = [0u8; 13];
-                pf_driver_proto::triton::serial(pad_index(), &mut s);
-                String::from_utf8_lossy(&s).into_owned()
-            }
-            _ => format!("35533AD6E7{:02X}", 0x74u8.wrapping_add(pad_index())),
-        },
+        // Per-pad serials: SDL reads this via HidD_GetSerialNumberString and Steam dedups pads
+        // by it. The PS serials end in the pairing MAC's low octet (`on_get_feature`); the Deck
+        // and Triton serials match their 0xAE answers. Steam reads both.
+        2 | 0x0010 => pad_serial(devtype, pad_index()),
         _ => match devtype {
             1 => "Wireless Controller".into(),
             2 => "DualSense Edge Wireless Controller".into(),

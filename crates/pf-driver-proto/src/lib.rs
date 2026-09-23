@@ -2341,6 +2341,39 @@ pub mod gamepad {
             _ => false,
         }
     }
+
+    /// Low octet of a PlayStation pad's MAC: byte 1 of its pairing reply (feature 0x09 / 0x12)
+    /// and the last two hex digits of its USB serial. Each identity has its own base, so no
+    /// index of one identity lands on another's octet.
+    pub const fn ps_mac_low(device_type: u8, index: u8) -> u8 {
+        let base: u8 = match device_type {
+            DEVTYPE_DUALSHOCK4 => 0x01,
+            DEVTYPE_DUALSENSE_EDGE => 0x94,
+            _ => 0x74,
+        };
+        base.wrapping_add(index)
+    }
+
+    /// USB serial string of pad `index` presented as `device_type`. SDL and Steam dedup pads by
+    /// it, so no two (identity, index) pairs may share one. A PlayStation serial is the pairing
+    /// MAC, most significant octet first; each Xbox model has its own base octet.
+    pub fn pad_serial(device_type: u8, index: u8) -> String {
+        let low = ps_mac_low(device_type, index);
+        let xbox = |base: u8| alloc::format!("F4B0FC2A6C{:02X}", base.wrapping_add(index));
+        match device_type {
+            DEVTYPE_DUALSHOCK4 => alloc::format!("DEADBEEF00{low:02X}"),
+            DEVTYPE_STEAMDECK => alloc::format!("FVPF{:08X}", 0x5046_0000u32 | index as u32),
+            DEVTYPE_XBOX => xbox(0x10),
+            DEVTYPE_XBOX_ONE_S => xbox(0x30),
+            DEVTYPE_XBOX_ELITE => xbox(0x50),
+            DEVTYPE_TRITON => {
+                let mut s = [0u8; 13];
+                crate::triton::serial(index, &mut s);
+                String::from_utf8_lossy(&s).into_owned()
+            }
+            _ => alloc::format!("35533AD6E7{low:02X}"),
+        }
+    }
 }
 
 /// Steam Controller 2 (Triton) wire tables: UMDF driver (answers Steam synchronously) and
@@ -2848,6 +2881,37 @@ mod tests {
         let mut xbox = [0x11u8; 64];
         assert!(!stamp_sony_clock(DEVTYPE_XBOX, &mut xbox, 1, 4_000));
         assert_eq!(xbox, [0x11u8; 64]);
+    }
+
+    /// SDL and Steam merge two pads that report one serial. Every identity at every host pad
+    /// index (`MAX_PADS` = 16) must be distinct; a DualSense in slot n+1 once matched an Edge in
+    /// slot n.
+    #[test]
+    fn no_two_pads_share_a_serial() {
+        use gamepad::*;
+        let mut seen = std::collections::HashMap::new();
+        for devtype in DEVTYPE_DUALSENSE..=DEVTYPE_TRITON {
+            for index in 0..16u8 {
+                let serial = pad_serial(devtype, index);
+                if let Some(prev) = seen.insert(serial.clone(), (devtype, index)) {
+                    panic!("{serial} is both {prev:?} and {:?}", (devtype, index));
+                }
+            }
+        }
+        // The pairing MAC's low octet is the serial's last two hex digits.
+        for devtype in [
+            DEVTYPE_DUALSENSE,
+            DEVTYPE_DUALSHOCK4,
+            DEVTYPE_DUALSENSE_EDGE,
+        ] {
+            let serial = pad_serial(devtype, 3);
+            let low = alloc::format!("{:02X}", ps_mac_low(devtype, 3));
+            assert!(serial.ends_with(&low), "{serial} vs {low}");
+        }
+        assert_eq!(pad_serial(DEVTYPE_DUALSENSE, 0), "35533AD6E774");
+        assert_eq!(pad_serial(DEVTYPE_DUALSHOCK4, 0), "DEADBEEF0001");
+        assert_eq!(pad_serial(DEVTYPE_STEAMDECK, 2), "FVPF50460002");
+        assert_eq!(pad_serial(DEVTYPE_TRITON, 12), "FVPF130212D03");
     }
 
     /// Serves land one period apart on a fine timer, and a coarse timer restarts the schedule
