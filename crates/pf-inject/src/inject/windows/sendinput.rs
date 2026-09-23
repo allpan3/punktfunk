@@ -430,6 +430,8 @@ impl InputInjector for SendInputInjector {
             | InputKind::GamepadState
             | InputKind::GamepadRemove
             | InputKind::GamepadArrival => Ok(()),
+            // Held-key snapshot: the host turns one into key ups before the injector.
+            InputKind::KeysHeld => Ok(()),
             // Wire touch → PT_TOUCH (design/pen-tablet-input.md). Lazy: a session that
             // never touches never creates one; a pre-1809 create failure latches the no-op.
             InputKind::TouchDown | InputKind::TouchMove | InputKind::TouchUp => {

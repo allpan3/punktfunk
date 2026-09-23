@@ -386,6 +386,15 @@
 // Serialized [`InputEvent`] size (tag + fields). The C struct is larger (`_pad`).
 #define PUNKTFUNK_INPUT_WIRE_LEN (((((1 + 1) + 4) + 4) + 4) + 4)
 
+// VK slots in one [`InputKind::KeysHeld`] event: `code`/`x`/`y`, one key per byte.
+#define PUNKTFUNK_KEYS_HELD_MAX 12
+
+// Snapshot cadence, including the empty state after keyboard use
+#define PUNKTFUNK_KEY_STATE_INTERVAL_MS 100
+
+// A key edge's `x` carries its sequence in the same space as [`InputKind::KeysHeld`]
+#define PUNKTFUNK_KEY_FLAG_SEQUENCE 1
+
 // [`InputKind::MouseScroll`] `flags` bit: the delta was MEASURED off a precise surface (a
 // trackpad, a Magic Mouse, a touchscreen pan), not counted off a notched wheel. `x` stays in
 // 120-per-detent units; the bit says that number is a distance expressed in detents, not a
@@ -783,6 +792,14 @@
 // message. A host that leaves the bit clear therefore learns nothing about a session's air
 // after its first window, and its groups are left alone.
 #define PUNKTFUNK_HOST_CAP2_DELIVERY 32
+
+// [`Welcome::host_caps2`](crate::quic::Welcome::host_caps2): the host reconciles held
+// keys against [`InputKind::KeysHeld`](crate::input::InputKind::KeysHeld) snapshots, so
+// a client sends them after keyboard use. Without the bit key state is edge-only and a
+// lost [`KeyUp`](crate::input::InputKind::KeyUp) holds the key until the session ends.
+// Keyboard edges and snapshots share a sequence to reject stale datagrams.
+// Bit 0x40 is reserved for unsequenced snapshots and is not interchangeable
+#define PUNKTFUNK_HOST_CAP2_KEY_STATE 128
 
 // [`Hello::video_codecs`]: H.264 / AVC. The software encode path emits H.264, so a client
 // that wants to stream from a GPU-less host must advertise this.
@@ -1356,6 +1373,14 @@ enum PunktfunkInputKind
     // host advertised `HOST_CAP2_SCROLL`; the client's outbound seam converts
     // to [`MouseScroll`](Self::MouseScroll) for older hosts.
     PUNKTFUNK_INPUT_KIND_SCROLL = 16,
+    // Every key the client holds right now, one VK per byte ([`keys_held_codes`]).
+    // Key edges are one lossy datagram each, so a dropped [`KeyUp`](Self::KeyUp) leaves
+    // the host pressing a key the user let go of, and the focused app repeats it until
+    // the next edge. The host releases what it holds that a newer snapshot omits. Sent only
+    // when the host advertised
+    // [`HOST_CAP2_KEY_STATE`](crate::quic::HOST_CAP2_KEY_STATE); older hosts ignore the
+    // tag and keep edge-only key state. `flags` carries the shared keyboard sequence.
+    PUNKTFUNK_INPUT_KIND_KEYS_HELD = 17,
 };
 #ifndef __cplusplus
 #if __STDC_VERSION__ >= 202311L
