@@ -48,7 +48,7 @@ pub struct RowSpec {
     /// Header above this row; only the first row of a group carries it.
     pub header: Option<&'static str>,
     pub label: String,
-    /// `None` = action row (centred label, brand tint).
+    /// `None` = action row: the label alone, where every row's label starts.
     pub value: Option<String>,
     /// Dim the value as a placeholder when the field is empty.
     pub value_dim: bool,
@@ -787,7 +787,7 @@ impl MenuList {
                 fg(0.45),
             );
         }
-        let (cx, cy) = (x0 + row_w / 2.0, top + ROW_H * k / 2.0);
+        let cy = top + ROW_H * k / 2.0;
         canvas.save();
         // Per-row layer only while arriving (panel + two text runs). Bounds
         // are the row rect so this is never a full-screen pass.
@@ -909,16 +909,14 @@ impl MenuList {
             );
         }
         if row.value.is_none() {
-            let color = tone(accent(1.0), fg(0.35));
-            let tw = fonts.measure(&row.label, W::SemiBold, 16.0 * k) as f64;
             fonts.draw(
                 canvas,
                 &row.label,
-                cx - tw / 2.0,
+                label_x,
                 baseline,
                 W::SemiBold,
                 16.0 * k,
-                color,
+                tone(fg(1.0), fg(0.35)),
             );
         } else if let Control::Toggle(_) = row.control {
             fonts.draw(

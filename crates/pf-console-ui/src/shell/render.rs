@@ -19,6 +19,10 @@ use super::{
 use crate::el::{El, Id, Tree};
 use crate::glyphs::{Hint, HintKey};
 
+/// The tab strip's top and height, design units.
+const STRIP_TOP: f64 = 32.0;
+const STRIP_H: f64 = 36.0;
+
 impl Shell {
     #[allow(clippy::too_many_arguments)]
     /// Test helper: no insets, default scale. Hosts call [`Self::render_in`].
@@ -288,7 +292,8 @@ impl Shell {
             let battery = self.pads.first().and_then(|p| p.battery);
             let bw = chip_width(fonts, chip, battery.is_some(), k);
             let bx = w - edge(k) - bw;
-            let top = 18.0 * k;
+            // Centred on the tabs' line.
+            let top = (STRIP_TOP + STRIP_H / 2.0) * k - bh / 2.0;
             let rect = Rect::from_xywh(bx as f32, top as f32, bw as f32, bh as f32);
             crate::theme::panel(
                 canvas,
@@ -498,7 +503,8 @@ impl LayerEnv<'_> {
     /// sits behind the current tab while the strip has focus.
     fn draw_strip(&mut self, canvas: &Canvas, cheap: bool) {
         let k = self.k;
-        let (size, pad, gap, h, top) = (20.0 * k, 10.0 * k, 4.0 * k, 36.0 * k, 32.0 * k);
+        let (size, pad, gap) = (20.0 * k, 10.0 * k, 4.0 * k);
+        let (h, top) = (STRIP_H * k, STRIP_TOP * k);
         let mut x = edge(k) - pad;
         let mut row = El::column();
         for tab in TABS {
