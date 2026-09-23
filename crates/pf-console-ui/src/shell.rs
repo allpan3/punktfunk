@@ -2097,39 +2097,14 @@ struct FieldCache {
     mesh: (String, Option<u64>),
 }
 
-/// The reduced backdrop's offscreen: a GPU render target on `canvas`'s own context
-/// where one exists, a raster surface where none does (tests, a software host) — the
-/// cheap pass still applies there.
-#[cfg(any(feature = "gl", feature = "vulkan-overlay"))]
+/// The reduced backdrop's offscreen, on `canvas`'s own backend: a GPU target under a GPU
+/// canvas (GL, Vulkan or Metal alike), raster only under a raster one. A raster offscreen
+/// under a GPU canvas runs the field's SkSL on the CPU, several frames' worth on a TV.
 fn field_surface(canvas: &Canvas, size: (i32, i32)) -> Option<Surface> {
-    use skia_safe::gpu;
     let info = skia_safe::ImageInfo::new_n32_premul(size, None);
     canvas
-        .recording_context()
-        .and_then(|mut rc| {
-            gpu::surfaces::render_target(
-                &mut rc,
-                gpu::Budgeted::Yes,
-                &info,
-                None,
-                gpu::SurfaceOrigin::TopLeft,
-                None,
-                false,
-                None,
-            )
-        })
+        .new_surface(&info, None)
         .or_else(|| skia_safe::surfaces::raster(&info, None, None))
-}
-
-/// The reduced backdrop's offscreen where the build has no GPU backend: a raster
-/// surface — same pass, just CPU-painted.
-#[cfg(not(any(feature = "gl", feature = "vulkan-overlay")))]
-fn field_surface(_canvas: &Canvas, size: (i32, i32)) -> Option<Surface> {
-    skia_safe::surfaces::raster(
-        &skia_safe::ImageInfo::new_n32_premul(size, None),
-        None,
-        None,
-    )
 }
 
 /// Compile the mesh for a palette and the lift, scrim, and ink it decides.
