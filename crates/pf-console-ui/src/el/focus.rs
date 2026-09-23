@@ -6,8 +6,9 @@
 //! a group with an id hands focus back to the child it last had.
 //!
 //! [`Plate`] is one sprung rounded rect that morphs from target to target behind the
-//! focused node, then sweeps a light across its rim once on arrival. With no target it
-//! fades out. Under Reduce Motion it jumps and fades. Pinned by `el::tests`.
+//! focused node, stretching toward where it is going, then sweeps a light across its rim
+//! once on arrival. With no target it fades out. Under Reduce Motion it jumps and fades.
+//! Pinned by `el::tests`.
 
 use crate::anim::{Spring, SpringSpec};
 use crate::theme::{accent, fg, fill, stroke};
@@ -75,12 +76,21 @@ pub const TRAVEL: SpringSpec = crate::anim::springs::FOCUS;
 const SWEEP_S: f64 = 0.6;
 /// Plate growth past its target, design units.
 const OUTSET: f32 = 7.0;
+/// The leading edge runs this many seconds of travel ahead: 22 px at 1000 px/s.
+const STRETCH_S: f64 = 0.022;
+/// Most a stretch adds, as a fraction of the plate's length along it.
+const STRETCH_MAX: f64 = 0.3;
+/// Of a stretch, the share the cross axis gives up.
+const SQUASH: f64 = 0.15;
+/// Travel speed, design units/s, that lands with the sweep at full strength.
+const SWEEP_FULL: f64 = 2500.0;
 /// Fade time constant, seconds: out with no target or while dormant, in on the way back.
 const FADE_TAU: f64 = 0.06;
 
 /// Sprung rect behind the focused node. It springs in its scroll's content space, so it
-/// rides a scrolling list rigidly and only its own travel lags. With nothing to rest on
-/// it glides on and fades out, and never freezes on a stale rect.
+/// rides a scrolling list rigidly and only its own travel lags. In flight it stretches
+/// toward where it is going by its own speed; with nothing to rest on it glides on and
+/// fades out, and never freezes on a stale rect.
 #[derive(Default)]
 pub struct Plate {
     /// left, top, right, bottom, corner, in `space`'s content px; `None` until the first
@@ -101,6 +111,8 @@ pub struct Plate {
     /// Opacity 0..1, easing toward `fade_to`.
     shown: f64,
     fade_to: f64,
+    /// Fastest the plate moved since its target changed, px/s: the sweep's strength.
+    peak: f64,
     /// OK went down: the plate's scale, springing back to 1.
     press: Option<Spring>,
 }
@@ -142,6 +154,7 @@ impl Plate {
         if self.to != Some(id) {
             self.armed = true;
             self.sweep = None;
+            self.peak = 0.0;
             if reduced {
                 self.shown = 0.0;
             }
@@ -181,6 +194,8 @@ impl Plate {
             s.step_spec(g, TRAVEL, dt);
             s.settle(g, 0.25, 4.0);
         }
+        let v = |a: usize, b: usize| (edges[a].vel + edges[b].vel) / 2.0;
+        self.peak = self.peak.max(v(0, 2).hypot(v(1, 3)));
         self.fade_to = if live { 1.0 } else { 0.0 };
         self.shown = crate::anim::approach(self.shown, self.fade_to, dt, FADE_TAU);
         if (self.shown - self.fade_to).abs() < 0.01 {
@@ -227,14 +242,18 @@ impl Plate {
         self.press.map_or(1.0, |p| p.pos as f32)
     }
 
-    /// The plate on screen this frame, before its outset.
+    /// The plate on screen this frame, before its outset: stretched along its travel,
+    /// squashed a little across it, dipped by a press.
     pub(crate) fn rect(&self) -> Option<(Rect, f32)> {
         let e = self.edges.as_ref()?;
+        let (l, r, sx) = stretch(e[0], e[2]);
+        let (t, b, sy) = stretch(e[1], e[3]);
+        let (qx, qy) = (sy * SQUASH / 2.0, sx * SQUASH / 2.0);
         let r = Rect::from_ltrb(
-            e[0].pos as f32,
-            e[1].pos as f32,
-            e[2].pos as f32,
-            e[3].pos as f32,
+            (l + qx) as f32,
+            (t + qy) as f32,
+            (r - qx) as f32,
+            (b - qy) as f32,
         );
         let s = self.press.map_or(1.0, |p| p.pos) as f32;
         let (dx, dy) = (r.width() * (1.0 - s) / 2.0, r.height() * (1.0 - s) / 2.0);
@@ -245,8 +264,8 @@ impl Plate {
         ))
     }
 
-    /// A lifted glass plate with a brighter rim, then the sweep. `k` scales the outset;
-    /// `cheap` skips the blurred shadow.
+    /// A lifted glass plate with a brighter rim, then the sweep, brighter the faster the
+    /// plate came in. `k` scales the outset; `cheap` skips the blurred shadow.
     pub(crate) fn draw(&self, canvas: &Canvas, k: f32, cheap: bool) {
         let Some((r, corner)) = self.rect().filter(|_| self.visible()) else {
             return;
@@ -272,11 +291,23 @@ impl Plate {
         canvas.draw_rrect(rr, &p);
         if let Some(s) = self.sweep {
             let p = ((self.t - s) / SWEEP_S) as f32;
+            let gain = match crate::theme::reduce_motion() {
+                true => 1.0,
+                false => (0.45 + 0.55 * self.peak / (SWEEP_FULL * f64::from(k))).min(1.0),
+            };
             if (0.0..1.0).contains(&p) {
-                sweep(canvas, rr, k, p, alpha, cheap);
+                sweep(canvas, rr, k, p, alpha * gain as f32, cheap);
             }
         }
     }
+}
+
+/// One axis, `lo` and `hi` its edges: the leading edge runs ahead by the axis speed times
+/// [`STRETCH_S`], at most [`STRETCH_MAX`] of the length. The edges, then the stretch.
+fn stretch(lo: Spring, hi: Spring) -> (f64, f64, f64) {
+    let cap = STRETCH_MAX * (hi.pos - lo.pos).abs();
+    let s = ((lo.vel + hi.vel) / 2.0 * STRETCH_S).clamp(-cap, cap);
+    (lo.pos + s.min(0.0), hi.pos + s.max(0.0), s.abs())
 }
 
 /// One light crossing the rim top-left to bottom-right at `p` of the way, an accent glow
@@ -344,5 +375,34 @@ mod tests {
         }
         assert_eq!(p.rect().unwrap().0, r);
         assert!(p.press.is_none());
+    }
+
+    /// Travelling right, the plate reaches ahead: its right edge lands before its left
+    /// does, it stretches on the way, and it rests on its target's rect exactly. A long
+    /// throw stretches no further than the cap.
+    #[test]
+    fn the_leading_edge_lands_before_the_trailing_edge() {
+        let (a, b) = (super::super::Id::new("t", 0), super::super::Id::new("t", 1));
+        for (dist, most) in [(120.0, 1.30), (1000.0, 1.30)] {
+            let mut p = Plate::default();
+            let from = Rect::from_xywh(0.0, 0.0, 100.0, 60.0);
+            let to = from.with_offset((dist, 0.0));
+            p.step(a, from, 8.0, 1.0 / 60.0, None, (0.0, 0.0));
+            let (mut lead, mut trail, mut widest) = (None, None, 0.0f32);
+            for i in 0..120 {
+                p.step(b, to, 8.0, 1.0 / 60.0, None, (0.0, 0.0));
+                let (r, _) = p.rect().unwrap();
+                widest = widest.max(r.width() / 100.0);
+                lead = lead.or((r.right >= to.right - 0.5).then_some(i));
+                trail = trail.or((r.left >= to.left - 0.5).then_some(i));
+            }
+            let (lead, trail) = (lead.unwrap(), trail.unwrap());
+            assert!(
+                lead < trail,
+                "{dist}: lead lands at {lead}, trail at {trail}"
+            );
+            assert!(widest > 1.1 && widest <= most + 0.01, "{dist}: {widest}");
+            assert_eq!(p.rect().unwrap().0, to);
+        }
     }
 }
