@@ -136,6 +136,23 @@ pub struct SpeedStatus {
     pub key: String,
     pub name: String,
     pub phase: SpeedPhase,
+    /// The burst's live throughput as it arrived: seconds since measuring began, kbps.
+    #[serde(default)]
+    pub trace: Vec<(f32, u32)>,
+    #[serde(skip)]
+    pub trace_start: Option<std::time::Instant>,
+}
+
+impl SpeedStatus {
+    pub fn new(key: String, name: String) -> SpeedStatus {
+        SpeedStatus {
+            key,
+            name,
+            phase: SpeedPhase::Connecting,
+            trace: Vec::new(),
+            trace_start: None,
+        }
+    }
 }
 
 /// Where a speed test is: it connects, it measures, then it has an answer or a reason.
@@ -143,6 +160,11 @@ pub struct SpeedStatus {
 pub enum SpeedPhase {
     Connecting,
     Measuring,
+    /// A mid-burst report of the live throughput. The status stays `Measuring` and the
+    /// value joins its trace, stamped on arrival: drivers poll at their own pace.
+    Progress {
+        kbps: u32,
+    },
     Failed(String),
     /// `recommended_kbps` keeps headroom under `throughput_kbps` for FEC and for the loss a
     /// real stream meets — [`pf_client_core::speed::recommended_kbps`], so every client
@@ -213,11 +235,28 @@ impl ConsoleShared {
 
     /// Report a new phase for the test on `key`. A no-op once the shell has cleared the slot,
     /// and a no-op for a different host: the burst outlives a dismiss, so its result must
-    /// neither reopen the takeover nor land under the name of a test started since.
+    /// neither reopen the takeover nor land under the name of a test started since. A
+    /// `Progress` after the answer is a straggler and changes nothing.
     pub fn advance_speed(&self, key: &str, phase: SpeedPhase) {
         let mut s = self.0.lock().unwrap();
-        if let Some(sp) = s.speed.as_mut().filter(|sp| sp.key == key) {
-            sp.phase = phase;
+        let Some(sp) = s.speed.as_mut().filter(|sp| sp.key == key) else {
+            return;
+        };
+        match phase {
+            SpeedPhase::Progress { kbps } => {
+                if matches!(sp.phase, SpeedPhase::Failed(_) | SpeedPhase::Done { .. }) {
+                    return;
+                }
+                let start = *sp.trace_start.get_or_insert_with(std::time::Instant::now);
+                sp.trace.push((start.elapsed().as_secs_f32(), kbps));
+                sp.phase = SpeedPhase::Measuring;
+            }
+            phase => {
+                if phase == SpeedPhase::Measuring {
+                    sp.trace_start.get_or_insert_with(std::time::Instant::now);
+                }
+                sp.phase = phase;
+            }
         }
     }
 

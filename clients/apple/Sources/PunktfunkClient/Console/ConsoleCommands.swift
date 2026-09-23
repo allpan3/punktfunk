@@ -115,14 +115,17 @@ extension ConsoleModel {
             while Date() < deadline {
                 try? await Task.sleep(nanoseconds: 200_000_000)
                 guard let r = conn.probeResult() else { break }
-                if r.done {
-                    let done: [String: Any] = [
-                        "throughput_kbps": r.throughputKbps, "loss_pct": r.lossPct,
-                        "recommended_kbps": r.throughputKbps / 10 * 7,
-                    ]
-                    await self?.pushSpeed(key, ["Done": done])
-                    return
+                guard r.done else {
+                    // The live figure, for the console's graph.
+                    await self?.pushSpeed(key, ["Progress": ["kbps": r.throughputKbps]])
+                    continue
                 }
+                let done: [String: Any] = [
+                    "throughput_kbps": r.throughputKbps, "loss_pct": r.lossPct,
+                    "recommended_kbps": r.throughputKbps / 10 * 7,
+                ]
+                await self?.pushSpeed(key, ["Done": done])
+                return
             }
             await self?.pushSpeed(
                 key, ["Failed": "The measurement never finished — the connection may have dropped."])

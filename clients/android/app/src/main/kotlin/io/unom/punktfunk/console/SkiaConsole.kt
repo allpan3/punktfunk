@@ -964,7 +964,10 @@ object SkiaConsole {
         // console keeps drawing.
         ioPool.execute {
             kotlinx.coroutines.runBlocking {
-                runSpeedTest(app, id, addr, port, fp) { p -> main.post { advanceSpeed(key, p) } }
+                runSpeedTest(
+                    app, id, addr, port, fp,
+                    onProgress = { kbps -> main.post { advanceSpeedProgress(key, kbps) } },
+                ) { p -> main.post { advanceSpeed(key, p) } }
             }
         }
     }
@@ -983,6 +986,12 @@ object SkiaConsole {
                     .put("recommended_kbps", p.recommendedKbps),
             ).toString()
         }
+        NativeBridge.nativeConsoleAdvanceSpeed(handle, key, json)
+    }
+
+    /** A mid-burst figure for the console's graph, as `SpeedPhase::Progress`. */
+    private fun advanceSpeedProgress(key: String, kbps: Int) {
+        val json = JSONObject().put("Progress", JSONObject().put("kbps", kbps)).toString()
         NativeBridge.nativeConsoleAdvanceSpeed(handle, key, json)
     }
 

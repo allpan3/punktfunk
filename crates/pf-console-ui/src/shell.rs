@@ -1746,11 +1746,8 @@ impl Shell {
             // before the connect blocks, and seeding it on the side that clears it is what
             // makes a dismissed test's late report a no-op (`ConsoleShared::advance_speed`).
             if let ConsoleCmd::SpeedTest { key, host_name, .. } = &cmd {
-                self.console.set_speed(Some(SpeedStatus {
-                    key: key.clone(),
-                    name: host_name.clone(),
-                    phase: SpeedPhase::Connecting,
-                }));
+                let status = SpeedStatus::new(key.clone(), host_name.clone());
+                self.console.set_speed(Some(status));
                 self.speed = self.console.speed();
             }
             self.bus.send(cmd);

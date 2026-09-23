@@ -595,7 +595,7 @@ impl ServiceState {
             } => {
                 // A worker like every other command here, but a long one: the probe opens
                 // its own session and bursts for two seconds. The shell already raised the
-                // takeover, so this only advances the phase.
+                // takeover, so this only advances the phase and feeds its graph.
                 let identity = self.identity.clone();
                 let console = self.console.clone();
                 std::thread::Builder::new()
@@ -603,7 +603,10 @@ impl ServiceState {
                     .spawn(move || {
                         console.advance_speed(&key, SpeedPhase::Measuring);
                         let fp = (!fp_hex.is_empty()).then_some(fp_hex.as_str());
-                        match pf_client_core::speed::run_speed_probe(&addr, port, fp, identity) {
+                        let progress =
+                            |kbps| console.advance_speed(&key, SpeedPhase::Progress { kbps });
+                        let run = pf_client_core::speed::run_speed_probe_with;
+                        match run(&addr, port, fp, identity, progress) {
                             Ok(r) => {
                                 tracing::info!(
                                     host = %host_name,

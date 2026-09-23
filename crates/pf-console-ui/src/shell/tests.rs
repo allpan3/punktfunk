@@ -2901,14 +2901,48 @@ fn apply_is_offered_only_when_the_default_is_the_layer_that_wins() {
         rows[0].bound_preset = bound;
         let (mut s, console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
         console.set_hosts(rows);
-        console.set_speed(Some(SpeedStatus {
-            key: "aa11".into(),
-            name: "Living Room PC".into(),
-            phase: done.clone(),
-        }));
+        console.set_speed(Some(SpeedStatus::new(
+            "aa11".into(),
+            "Living Room PC".into(),
+        )));
+        console.advance_speed("aa11", done.clone());
         s.sync();
         assert_eq!(s.speed_recommendation(), want);
     }
+}
+
+/// Mid-burst reports build the graph's trace and keep the test measuring; one that lands
+/// after the answer changes nothing.
+#[test]
+fn progress_reports_trace_the_burst() {
+    let (mut s, console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    console.set_speed(Some(SpeedStatus::new(
+        "aa11".into(),
+        "Living Room PC".into(),
+    )));
+    for kbps in [200_000, 600_000, 850_000] {
+        console.advance_speed("aa11", SpeedPhase::Progress { kbps });
+    }
+    s.sync();
+    let sp = s.speed.clone().expect("measuring");
+    assert_eq!(sp.phase, SpeedPhase::Measuring);
+    let kbps: Vec<u32> = sp.trace.iter().map(|p| p.1).collect();
+    assert_eq!(kbps, [200_000, 600_000, 850_000]);
+    assert!(
+        sp.trace.windows(2).all(|w| w[0].0 <= w[1].0),
+        "stamped in order"
+    );
+
+    let done = SpeedPhase::Done {
+        throughput_kbps: 840_000,
+        loss_pct: 0.1,
+        recommended_kbps: 588_000,
+    };
+    console.advance_speed("aa11", done.clone());
+    console.advance_speed("aa11", SpeedPhase::Progress { kbps: 1 });
+    s.sync();
+    let sp = s.speed.clone().expect("done");
+    assert_eq!((sp.phase, sp.trace.len()), (done, 3));
 }
 
 /// The burst outlives a dismiss: the host finishes it either way. Its report must not reopen
@@ -2916,11 +2950,10 @@ fn apply_is_offered_only_when_the_default_is_the_layer_that_wins() {
 #[test]
 fn a_dismissed_speed_test_drops_its_late_result() {
     let (mut s, console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
-    console.set_speed(Some(SpeedStatus {
-        key: "aa11".into(),
-        name: "Living Room PC".into(),
-        phase: SpeedPhase::Connecting,
-    }));
+    console.set_speed(Some(SpeedStatus::new(
+        "aa11".into(),
+        "Living Room PC".into(),
+    )));
     s.sync();
     assert!(s.speed.is_some());
 
@@ -2944,11 +2977,7 @@ fn a_dismissed_speed_test_drops_its_late_result() {
 #[test]
 fn a_superseded_speed_test_cannot_report_under_the_new_host() {
     let (mut s, console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
-    console.set_speed(Some(SpeedStatus {
-        key: "bb22".into(),
-        name: "Bedroom".into(),
-        phase: SpeedPhase::Connecting,
-    }));
+    console.set_speed(Some(SpeedStatus::new("bb22".into(), "Bedroom".into())));
     s.sync();
 
     console.advance_speed(
@@ -3139,7 +3168,7 @@ fn dump_phone_home() {
     };
     console.set_hosts(Vec::new());
     dump(&mut s, 60, "p0-no-hosts");
-    let (mut s, _console, library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    let (mut s, console, library) = shell(vec![Screen::Home(HomeScreen::new())]);
     s.fake_clock = Some((0.0, 1.0 / 60.0));
     s.platform = crate::platform::Platform::Apple;
     dump(&mut s, 60, "p1-home-empty");
@@ -3190,11 +3219,36 @@ fn dump_phone_home() {
     s.handle_menu(MenuEvent::Confirm);
     dump(&mut s, 60, "p7-card-menu");
     s.handle_menu(MenuEvent::Back);
+    // Input waits for the pop to land.
+    dump(&mut s, 30, "_popped");
     s.handle_menu(MenuEvent::Move(MenuDir::Left));
     s.handle_menu(MenuEvent::Confirm);
     dump(&mut s, 60, "p8-host-details");
     s.handle_menu(MenuEvent::Back);
     dump(&mut s, 30, "_back");
+    // The speed test mid-burst, then measured.
+    console.set_speed(Some(SpeedStatus::new(
+        "aa11".into(),
+        "Living Room PC".into(),
+    )));
+    console.advance_speed("aa11", SpeedPhase::Measuring);
+    s.sync();
+    for kbps in [120_000, 410_000, 690_000, 810_000, 780_000, 860_000] {
+        console.advance_speed("aa11", SpeedPhase::Progress { kbps });
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    dump(&mut s, 30, "pe-speed-measuring");
+    console.advance_speed(
+        "aa11",
+        SpeedPhase::Done {
+            throughput_kbps: 842_000,
+            loss_pct: 0.3,
+            recommended_kbps: 589_400,
+        },
+    );
+    dump(&mut s, 30, "pf-speed-done");
+    s.handle_menu(MenuEvent::Back);
+    dump(&mut s, 30, "_speed-closed");
     for (tab, name) in [
         (Tab::Games, "p9-games"),
         (Tab::Players, "pa-players"),
