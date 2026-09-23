@@ -34,10 +34,12 @@ import { type ConnectOptions, configDir, hostFetch, publishedMgmtUrl } from "./c
 import { connect, type PluginDef } from "./index.js";
 import {
 	bwrapArgv,
+	expandHome,
 	grantedRoots,
 	netlinkFilter,
 	type PluginManifest,
 	readManifest,
+	refusedRoot,
 	sandboxEnv,
 	sandboxProbe,
 } from "./sandbox.js";
@@ -537,6 +539,17 @@ const runSandboxed = (
 			resume(Effect.fail(new Error(`no sandbox syscall filter for ${process.arch}`)));
 			return;
 		}
+		const home = os.homedir();
+		const grants = grantedRoots(config, id);
+		const refused = [
+			...(manifest.reads ?? []),
+			...(manifest.writes ?? []),
+			...grants.map((g) => g.path),
+		]
+			.map((p) => expandHome(p, home))
+			.filter((p) => path.isAbsolute(p) && refusedRoot(p, home));
+		if (refused.length > 0)
+			log(`[runner] ${id}: not sharing ${refused.join(", ")} — no plugin gets those`, "warn");
 		const runtime = process.env.XDG_RUNTIME_DIR ?? "/tmp";
 		const socket = path.join(runtime, "punktfunk", `plugin-${id}.sock`);
 		const url = options.connect?.url ?? publishedMgmtUrl() ?? "https://127.0.0.1:47990";
@@ -559,9 +572,9 @@ const runSandboxed = (
 					pluginsDir: options.pluginsDir ?? path.join(config, "plugins"),
 					bun: process.execPath,
 					runner: runnerEntry(),
-					home: os.homedir(),
+					home,
 				},
-				grantedRoots(config, id),
+				grants,
 			),
 			process.execPath,
 			runnerEntry(),
