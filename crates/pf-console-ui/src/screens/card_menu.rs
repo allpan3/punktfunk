@@ -274,13 +274,14 @@ impl CardMenu {
             Action::TitleDetails => "info",
             Action::Browse => "gamepad-2",
             Action::Wake => "power",
-            Action::CopyLink | Action::Clipboard => "copy",
+            Action::CopyLink => "link",
+            Action::Clipboard => "copy",
             Action::Details => "info",
             Action::Unpin | Action::Pin(_) => "pin",
             Action::Pair => "lock",
             Action::AddHost => "plus",
             Action::BindPreset => "settings",
-            Action::SpeedTest => "activity",
+            Action::SpeedTest => "gauge",
             Action::Edit => "pencil",
             Action::MakeDefault => "house",
             Action::Host(i) => match self.host().actions.get(i).map(|x| x.id.as_str()) {
@@ -288,7 +289,7 @@ impl CardMenu {
                 Some("power.reboot") => "rotate-cw",
                 _ => "power",
             },
-            Action::SendLogs => "send",
+            Action::SendLogs => "scroll-text",
             Action::Forget => "trash-2",
         }
     }
