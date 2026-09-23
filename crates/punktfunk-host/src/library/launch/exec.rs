@@ -47,19 +47,10 @@ pub fn recipe(entry: &GameEntry) -> Option<ExecRecipe> {
         .ok()
 }
 
-/// Whether `spec` would resolve, without touching the filesystem beyond the manifest. The publish
-/// routes use this to refuse a bad entry at write time rather than at launch.
+/// Whether `spec` would resolve, without touching the filesystem beyond the manifest and its
+/// grants. The publish routes use this to drop a bad entry at write time rather than at launch.
 pub fn spec_is_valid(manifest: &PluginManifest, spec: &LaunchSpec) -> Result<(), &'static str> {
     build(manifest, &spec.value, spec.args.as_ref()).map(|_| ())
-}
-
-/// The publish-time gate: `provider` must have an installed manifest, and the entry must name one
-/// of its templates with arguments that manifest accepts.
-pub fn publishable(provider: &str, spec: &LaunchSpec) -> Result<(), String> {
-    let manifest = crate::plugins::manifest::for_provider(provider).ok_or_else(|| {
-        format!("needs an installed plugin whose manifest declares the provider id '{provider}'")
-    })?;
-    spec_is_valid(&manifest, spec).map_err(|reason| format!("is not resolvable: {reason}"))
 }
 
 fn build(

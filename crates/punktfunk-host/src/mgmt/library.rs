@@ -475,8 +475,20 @@ pub(crate) async fn reconcile_provider_entries(
             return api_error(StatusCode::BAD_REQUEST, &e);
         }
     }
-    if let Err(e) = crate::library::validate_provider_payload(&provider, &inputs) {
-        return api_error(StatusCode::BAD_REQUEST, &e);
+    match crate::library::validate_provider_payload(&provider, &mut inputs) {
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, &e),
+        // One warn per reconcile: a template that misses its roots misses every entry.
+        Ok(dropped) => {
+            if let Some((id, reason)) = dropped.first() {
+                tracing::warn!(
+                    provider,
+                    dropped = dropped.len(),
+                    first = %id,
+                    reason = %reason,
+                    "library reconcile dropped entries this host would not launch"
+                );
+            }
+        }
     }
     // Check every entry: one privileged field anywhere is one command the host would run.
     // Art is not in this refusal — an unservable cover is stripped below so one bad
