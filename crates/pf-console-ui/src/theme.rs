@@ -257,6 +257,18 @@ thread_local! {
     /// Per-frame `trust::Settings::reduce_motion`. Same thread-local as [`INK`].
     /// Set by [`crate::shell::Shell::render`].
     static REDUCE_MOTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static REDUCED_UI: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Publish the reduced interface for this frame, as with [`set_ink`].
+pub fn set_reduced_ui(on: bool) {
+    REDUCED_UI.with(|r| r.set(on));
+}
+
+/// The reduced interface is on this frame: a TV-class GPU. Passes that read back what is
+/// already drawn (a backdrop blur) break a tiled GPU's render pass and are skipped.
+pub fn reduced_ui() -> bool {
+    REDUCED_UI.with(std::cell::Cell::get)
 }
 
 pub fn set_ink(ink: Ink) {

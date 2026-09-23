@@ -84,6 +84,11 @@ impl Shell {
         // `settings`, so the transition arms cannot read the field.
         let reduce = self.settings.reduce_motion;
         crate::theme::set_reduce_motion(reduce);
+        crate::theme::set_reduced_ui(crate::screens::settings::reduce_ui_res(
+            &self.settings,
+            self.platform,
+            self.fallback_ui,
+        ));
         self.pads = pads.to_vec();
         self.glyphs = glyph_style(self.input_source, pad_pref, self.platform);
         // The chip names the connected pad, rebuilt only when it changes; with none there

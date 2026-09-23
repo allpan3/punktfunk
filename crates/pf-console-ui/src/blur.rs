@@ -92,8 +92,12 @@ fn pass(
     image_filters::runtime_shader(&b, "src", input)
 }
 
-/// Blur what `canvas` already holds under `rect` by `band`.
+/// Blur what `canvas` already holds under `rect` by `band`. Skipped under the reduced
+/// interface: each read-back ends a tiled GPU's render pass, more than a TV GPU has.
 pub fn backdrop(canvas: &Canvas, rect: Rect, band: Band) {
+    if crate::theme::reduced_ui() {
+        return;
+    }
     let Some(filter) = filter(rect, band) else {
         return;
     };
