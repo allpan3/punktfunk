@@ -2303,16 +2303,18 @@ pub mod gamepad {
         Some(from + REPORT_PERIOD_US)
     }
 
-    /// Write the pad's own clocks into a Sony report about to be served.
+    /// Write the pad's own clocks into a report about to be served.
     ///
     /// A USB `DualSense` advances four every report: the 8-bit counter (byte 7), a 32-bit packet
     /// sequence (12–15), `sensor_timestamp` (28–31) and a second 32-bit timer (49–52) about 2 ms
     /// after it. Motion code integrates gyro over `sensor_timestamp`, so it has to advance by the
-    /// real time between the reports a game receives. The host publishes at its client's rate and
-    /// the driver serves at the hardware's, so the driver owns every clock. `serial` is this
-    /// report's index, `elapsed_us` the time since the first report; every field wraps as hardware
-    /// does. Returns `false`, and leaves the report alone, for an identity that has no such fields.
-    pub fn stamp_sony_clock(
+    /// real time between the reports a game receives. A Deck frame carries `unPacketNum` (4–7),
+    /// and Valve's `controller_structs.h` tells readers to skip a repeated one. The host publishes
+    /// at its client's rate and the driver serves at the hardware's, so the driver owns every
+    /// clock. `serial` is this report's index, `elapsed_us` the time since the first report; every
+    /// field wraps as hardware does. Returns `false`, and leaves the report alone, for an identity
+    /// that has no such fields.
+    pub fn stamp_report_clock(
         device_type: u8,
         report: &mut [u8; 64],
         serial: u32,
@@ -2336,6 +2338,10 @@ pub mod gamepad {
                 let ts = (elapsed_us * 3 / 16) as u16;
                 report[10..12].copy_from_slice(&ts.to_le_bytes());
                 report[34] = ts as u8;
+                true
+            }
+            DEVTYPE_STEAMDECK => {
+                report[4..8].copy_from_slice(&serial.to_le_bytes());
                 true
             }
             _ => false,
@@ -2834,7 +2840,7 @@ mod tests {
     fn sony_clock_advances_like_hardware() {
         use gamepad::*;
         let mut ds = [0xAAu8; 64];
-        assert!(stamp_sony_clock(DEVTYPE_DUALSENSE, &mut ds, 5, 8_000));
+        assert!(stamp_report_clock(DEVTYPE_DUALSENSE, &mut ds, 5, 8_000));
         assert_eq!(ds[7], 5);
         let le = |r: &[u8; 64], at: usize| u32::from_le_bytes(r[at..at + 4].try_into().unwrap());
         assert_eq!(le(&ds, 12), 5, "packet sequence");
@@ -2848,13 +2854,13 @@ mod tests {
 
         // Every clock advances on every report, as on hardware.
         let mut next = ds;
-        stamp_sony_clock(DEVTYPE_DUALSENSE, &mut next, 6, 12_000);
+        stamp_report_clock(DEVTYPE_DUALSENSE, &mut next, 6, 12_000);
         for at in [12, 28, 49] {
             assert!(le(&next, at) > le(&ds, at), "field at {at} did not advance");
         }
 
         let mut edge = [0u8; 64];
-        assert!(stamp_sony_clock(
+        assert!(stamp_report_clock(
             DEVTYPE_DUALSENSE_EDGE,
             &mut edge,
             256 + 3,
@@ -2864,7 +2870,7 @@ mod tests {
 
         let mut ds4 = [0u8; 64];
         ds4[7] = 0x03; // PS + touchpad click held
-        assert!(stamp_sony_clock(
+        assert!(stamp_report_clock(
             DEVTYPE_DUALSHOCK4,
             &mut ds4,
             64 + 2,
@@ -2879,8 +2885,24 @@ mod tests {
         assert_eq!(ds4[34], 3_000u16 as u8);
 
         let mut xbox = [0x11u8; 64];
-        assert!(!stamp_sony_clock(DEVTYPE_XBOX, &mut xbox, 1, 4_000));
+        assert!(!stamp_report_clock(DEVTYPE_XBOX, &mut xbox, 1, 4_000));
         assert_eq!(xbox, [0x11u8; 64]);
+    }
+
+    /// The driver re-serves a held Deck frame every 4 ms. Readers skip a frame whose
+    /// `unPacketNum` (bytes 4..8) repeats, so every served frame needs its own.
+    #[test]
+    fn deck_packet_number_advances_per_served_report() {
+        use gamepad::*;
+        let mut held = [0x5Au8; 64];
+        held[..4].copy_from_slice(&[0x01, 0x00, 0x09, 0x40]);
+        let (mut a, mut b) = (held, held);
+        assert!(stamp_report_clock(DEVTYPE_STEAMDECK, &mut a, 41, 4_000));
+        assert!(stamp_report_clock(DEVTYPE_STEAMDECK, &mut b, 42, 8_000));
+        assert_eq!(a[4..8], 41u32.to_le_bytes());
+        assert_eq!(b[4..8], 42u32.to_le_bytes());
+        assert_eq!(a[..4], held[..4], "the header stays the host's");
+        assert_eq!(a[8..], held[8..], "controls stay the host's");
     }
 
     /// SDL and Steam merge two pads that report one serial. Every identity at every host pad

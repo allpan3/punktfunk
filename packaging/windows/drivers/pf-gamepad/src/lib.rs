@@ -945,11 +945,11 @@ static PNP_DEVTYPE: AtomicU32 = AtomicU32::new(u32::MAX);
 static TICK: AtomicU32 = AtomicU32::new(0);
 
 /// The pad's own clock: when it started (the first report served), the slot the next report is
-/// due at in µs since then, and the index of the next Sony report. See
-/// [`pf_driver_proto::gamepad::serve_due`] and [`pf_driver_proto::gamepad::stamp_sony_clock`].
+/// due at in µs since then, and the index of the next report. See
+/// [`pf_driver_proto::gamepad::serve_due`] and [`pf_driver_proto::gamepad::stamp_report_clock`].
 static PAD_EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 static SERVE_DUE_US: AtomicU64 = AtomicU64::new(0);
-static SONY_SERIAL: AtomicU32 = AtomicU32::new(0);
+static REPORT_SERIAL: AtomicU32 = AtomicU32::new(0);
 
 fn pad_elapsed_us() -> u64 {
     PAD_EPOCH
@@ -958,14 +958,6 @@ fn pad_elapsed_us() -> u64 {
         .as_micros() as u64
 }
 
-/// The identities whose reports carry a sequence counter and sensor timestamp a game can time by.
-fn is_sony(device_type: u8) -> bool {
-    use pf_driver_proto::gamepad::{DEVTYPE_DUALSENSE, DEVTYPE_DUALSENSE_EDGE, DEVTYPE_DUALSHOCK4};
-    matches!(
-        device_type,
-        DEVTYPE_DUALSENSE | DEVTYPE_DUALSENSE_EDGE | DEVTYPE_DUALSHOCK4
-    )
-}
 /// Last pump verdict, as in pf-xusb. `data()` returns the adopted view whatever the mailbox
 /// says, so the three ticks between pumps would otherwise keep serving a departed host's last
 /// report — a detached pad frozen mid-input instead of neutral.
@@ -1197,15 +1189,12 @@ extern "C" fn evt_io_device_control(
             let mut report = INPUT_REPORT.lock().map(|g| *g).unwrap_or(NEUTRAL_REPORT);
             // The pad's clock as of now, not the host's stamp: a poll must agree with the stream.
             // The counter is not advanced — a poll is not a report in the interrupt pipeline.
-            if is_sony(dt) {
-                let serial = SONY_SERIAL.load(Ordering::Relaxed);
-                pf_driver_proto::gamepad::stamp_sony_clock(
-                    dt,
-                    &mut report,
-                    serial,
-                    pad_elapsed_us(),
-                );
-            }
+            pf_driver_proto::gamepad::stamp_report_clock(
+                dt,
+                &mut report,
+                REPORT_SERIAL.load(Ordering::Relaxed),
+                pad_elapsed_us(),
+            );
             let served: &[u8] = if dt == pf_driver_proto::gamepad::DEVTYPE_TRITON {
                 // Same per-id trim as the timer's completion: Triton input reports are
                 // variable-length and id-first; an undeclared latched id falls back to neutral.
@@ -1727,10 +1716,8 @@ fn tick(queue: WDFQUEUE) {
     // EvtDeviceSelfManagedIoCleanup — the exact contract `retrieve_next_request` needs.
     if let Some(request) = unsafe { wdf::retrieve_next_request(queue) } {
         let mut report = INPUT_REPORT.lock().map(|g| *g).unwrap_or(NEUTRAL_REPORT);
-        if is_sony(dt) {
-            let serial = SONY_SERIAL.fetch_add(1, Ordering::Relaxed);
-            pf_driver_proto::gamepad::stamp_sony_clock(dt, &mut report, serial, now);
-        }
+        let serial = REPORT_SERIAL.fetch_add(1, Ordering::Relaxed);
+        pf_driver_proto::gamepad::stamp_report_clock(dt, &mut report, serial, now);
         // Serve exactly what this identity's descriptor declares — `copy_to_output` REFUSES a
         // source longer than hidclass's buffer instead of truncating, so a 64-byte hand-over for
         // the Xbox pad's 16-byte report would fail every read and the pad would look dead.
