@@ -10,12 +10,17 @@
 //! `LibraryScreen::collections_upgrade`) nothing is underneath, so this screen
 //! pumps the model's poster queue and Y opens the unfiltered list.
 //!
+//! The library's SORT pills sit over the tiles as a line: Up reaches them, Left and Right
+//! move, OK applies, Down returns. The focus plate stands behind the focused pill or tile.
+//!
 //! Pin: `as_the_librarys_root_it_takes_only_the_covers_it_fans`,
 //! `a_drill_in_from_a_shelf_leaves_the_queue_alone`,
 //! `the_way_to_all_titles_exists_only_where_there_is_no_shelf`.
 
+use super::library::bar::{pill_id, Bar, BAR_H};
 use crate::anim::{entrances, Entrance, EntranceAt, Spring};
 use crate::collate::{collate, GroupBy, GroupKey, SortKey};
+use crate::el::{El, Id, Tree};
 use crate::glyphs::{Hint, HintKey};
 use crate::library::{
     initials, step_cursor, LibraryGame, LibraryShared, StepResult, BUMP_C, BUMP_K, BUMP_PX,
@@ -25,10 +30,13 @@ use crate::model::HostRow;
 use crate::pointer::{Pointer, PointerKind};
 use crate::screens::{Ctx, Outbox, Screen};
 use crate::theme::{accent, art_sampling, edge, fg, fill, stroke, Fonts, PanelStroke, W};
-use crate::widgets::{TabStrip, TAB_STRIP_H};
 use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuPulse};
 use skia_safe::{Canvas, Color4f, Image, Matrix, Point, RRect, Rect, TileMode};
 use std::collections::HashMap;
+
+fn tile_id(i: usize) -> Id {
+    Id::new("collection-tile", i)
+}
 
 // Same numbers as home.rs — a collection tile is a host tile.
 const TILE_W: f64 = 340.0;
@@ -64,7 +72,12 @@ pub(crate) struct CollectionsScreen {
     anim: Spring,
     bump: Spring,
     sort: SortKey,
-    sort_tabs: TabStrip,
+    /// The SORT pills' capsule, and the pill focus stands on while the row has it.
+    bar: Bar,
+    pill: Option<usize>,
+    /// Pills and tiles as focus targets, so the plate travels between them. Boxed: the
+    /// screen is a variant of one enum.
+    tree: Box<Tree>,
     groups: Vec<GroupTile>,
     generation: u64,
     /// Posters borrowed by id from the library screen. This screen never fetches art;
@@ -106,7 +119,9 @@ impl CollectionsScreen {
             anim: Spring::rest(0.0),
             bump: Spring::rest(0.0),
             sort,
-            sort_tabs: TabStrip::new(),
+            bar: Bar::default(),
+            pill: None,
+            tree: Box::default(),
             groups: Vec::new(),
             generation: u64::MAX,
             art: HashMap::new(),
@@ -217,17 +232,59 @@ impl CollectionsScreen {
         }
     }
 
-    /// Step the sort and persist it. The shelf reads `library_sort` every frame, so
-    /// the tiles here and the shelf behind re-order together.
-    fn step_sort(&mut self, delta: i32, ctx: &mut Ctx) -> Option<MenuPulse> {
-        let all = SortKey::ALL;
-        let at = all.iter().position(|s| *s == self.sort).unwrap_or(0);
-        let next = (at as i32 + delta).rem_euclid(all.len() as i32) as usize;
-        self.sort = all[next];
-        super::library::store_sort(self.sort, ctx);
+    /// Apply sort `s` and persist it. The shelf reads `library_sort` every frame, so the
+    /// tiles here and the shelf behind re-order together.
+    fn apply_sort(&mut self, s: SortKey, ctx: &mut Ctx) -> Option<MenuPulse> {
+        if s == self.sort {
+            return Some(MenuPulse::Boundary);
+        }
+        self.sort = s;
+        super::library::store_sort(s, ctx);
         // Sort changed, not the library — force a re-collate.
         self.generation = u64::MAX;
-        Some(MenuPulse::Move)
+        Some(MenuPulse::Confirm)
+    }
+
+    /// The pad on the SORT pills: Left and Right move, OK applies, Down returns to the
+    /// tiles, Up is the edge.
+    fn pill_menu(
+        &mut self,
+        i: usize,
+        ev: MenuEvent,
+        ctx: &mut Ctx,
+        fx: &mut Outbox,
+    ) -> Option<MenuPulse> {
+        let len = SortKey::ALL.len();
+        let to = match ev {
+            MenuEvent::Move(MenuDir::Left) => i.checked_sub(1),
+            MenuEvent::Move(MenuDir::Right) => Some(i + 1).filter(|&j| j < len),
+            MenuEvent::Move(MenuDir::Down) => {
+                self.pill = None;
+                return Some(MenuPulse::Move);
+            }
+            MenuEvent::Move(MenuDir::Up) => return Some(MenuPulse::Boundary),
+            MenuEvent::Confirm => return self.apply_sort(SortKey::ALL[i], ctx),
+            MenuEvent::Back => {
+                fx.pop();
+                return None;
+            }
+            _ => return None,
+        };
+        match to {
+            Some(j) => {
+                self.pill = Some(j);
+                Some(MenuPulse::Move)
+            }
+            None => Some(MenuPulse::Boundary),
+        }
+    }
+
+    /// The applied sort's pill.
+    fn sort_pill(&self) -> usize {
+        SortKey::ALL
+            .iter()
+            .position(|s| *s == self.sort)
+            .unwrap_or(0)
     }
 
     pub(crate) fn menu(
@@ -237,11 +294,17 @@ impl CollectionsScreen {
         fx: &mut Outbox,
     ) -> Option<MenuPulse> {
         self.sync(ctx.library);
+        if let Some(i) = self.pill {
+            return self.pill_menu(i, ev, ctx, fx);
+        }
         match ev {
             MenuEvent::Move(MenuDir::Left) => self.step(-1),
             MenuEvent::Move(MenuDir::Right) => self.step(1),
-            MenuEvent::JumpBack => self.step_sort(-1, ctx),
-            MenuEvent::JumpForward => self.step_sort(1, ctx),
+            MenuEvent::Move(MenuDir::Up) => {
+                self.pill = Some(self.sort_pill());
+                Some(MenuPulse::Move)
+            }
+            MenuEvent::Move(MenuDir::Down) => Some(MenuPulse::Boundary),
             MenuEvent::Confirm => {
                 let g = self.groups.get(self.cursor.max(0) as usize)?;
                 // This epoch: a drill-in fetches nothing, it filters the list already
@@ -284,30 +347,30 @@ impl CollectionsScreen {
             // than the one that reaches it. The move-then-press fallback below stays for a
             // pointer that cannot hover: a touchscreen sends Press with no Move before it.
             PointerKind::Move => match p.pick(&self.geom).filter(|i| *i < self.groups.len()) {
-                Some(i) if i != self.cursor as usize => {
+                Some(i) if i != self.cursor as usize || self.pill.is_some() => {
                     self.cursor = i as i32;
+                    self.pill = None;
                     true
                 }
                 _ => false,
             },
             PointerKind::Press => {
-                if let Some(i) = self.sort_tabs.pointer(p) {
-                    let all = SortKey::ALL;
-                    if let Some(&s) = all.get(i) {
-                        self.sort = s;
-                        super::library::store_sort(s, ctx);
-                        self.generation = u64::MAX;
-                    }
+                // A pill applies on the first press.
+                let hit = self.tree.hit(p.x as f32, p.y as f32);
+                if let Some(i) = (0..SortKey::ALL.len()).find(|&i| hit == Some(pill_id(i))) {
+                    self.pill = Some(i);
+                    self.apply_sort(SortKey::ALL[i], ctx);
                     return true;
                 }
                 match p.pick(&self.geom).filter(|i| *i < self.groups.len()) {
                     // Press centres a tile; press the centred tile to open it.
-                    Some(i) if i == self.cursor as usize => {
+                    Some(i) if i == self.cursor as usize && self.pill.is_none() => {
                         self.menu(MenuEvent::Confirm, ctx, fx);
                         true
                     }
                     Some(i) => {
                         self.cursor = i as i32;
+                        self.pill = None;
                         true
                     }
                     None => false,
@@ -318,12 +381,17 @@ impl CollectionsScreen {
     }
 
     pub(crate) fn hints(&self, _ctx: &Ctx) -> Vec<Hint> {
+        if self.pill.is_some() {
+            return vec![
+                Hint::new(HintKey::Confirm, "Select"),
+                Hint::new(HintKey::Back, "Back"),
+            ];
+        }
         let mut hints = vec![Hint::new(HintKey::Confirm, "Open")];
         // Same condition the press answers, so the legend never advertises a no-op.
         if self.root {
             hints.push(Hint::new(HintKey::Secondary, "All titles"));
         }
-        hints.push(Hint::new(HintKey::Shoulders, "Sort"));
         hints.push(Hint::new(HintKey::Back, "Back"));
         hints
     }
@@ -340,28 +408,15 @@ impl CollectionsScreen {
         // Cached against the scale it will be drawn at; a decode cannot be redone.
         self.art_k = k;
         self.sync(ctx.library);
-        let labels: Vec<&str> = SortKey::ALL.iter().map(|s| s.label()).collect();
-        let selected = SortKey::ALL
-            .iter()
-            .position(|s| *s == self.sort)
-            .unwrap_or(0);
-        let strip = Rect::from_xywh(rect.left, rect.top, rect.width(), (TAB_STRIP_H * k) as f32);
-        // Same caption as the library bar: four unlabeled pills are not a sort, and
-        // this screen and the shelf behind share the key.
-        let cap_x = f64::from(strip.left) + edge(k);
-        let pills = cap_x + super::library::strip_caption(canvas, fonts, "SORT", strip, cap_x, k);
-        self.sort_tabs.render(
-            canvas,
-            Rect::from_ltrb(pills as f32, strip.top, strip.right, strip.bottom),
-            &labels,
-            selected,
-            false,
-            fonts,
-            k,
-            dt,
+        let avail = f64::from(rect.width()) - 2.0 * edge(k);
+        let applied = [self.sort_pill(), usize::MAX];
+        self.bar.step(fonts, k, avail, false, applied, dt, false);
+        let field = Rect::from_ltrb(
+            rect.left,
+            rect.top + (BAR_H * k) as f32,
+            rect.right,
+            rect.bottom,
         );
-
-        let field = Rect::from_ltrb(rect.left, strip.bottom, rect.right, rect.bottom);
         self.anim
             .step(f64::from(self.cursor), SPRING_K, SPRING_C, dt);
         self.anim.settle(f64::from(self.cursor), 0.001, 0.01);
@@ -391,6 +446,7 @@ impl CollectionsScreen {
 
         self.geom.clear();
         self.geom.resize(self.groups.len(), Rect::new_empty());
+        let mut tiles = Vec::new();
         for i in 0..self.groups.len() {
             let d = i as f64 - self.anim.pos;
             if d.abs() > 2.6 {
@@ -417,47 +473,72 @@ impl CollectionsScreen {
                 (tile_w * scale) as f32,
                 (tile_h * scale) as f32,
             );
-            canvas.save();
-            canvas.translate((cxx as f32, cyy as f32));
-            canvas.scale((scale as f32, scale as f32));
-            canvas.translate((-cxx as f32, -cyy as f32));
-            let recede = 1.0 - f;
-            // Layer only when alpha or recede does work, and bound it to the tile.
-            // Unbounded, `save_layer` allocates a screen-sized offscreen per tile.
-            // Outset covers `focus_halo` (4 + 3·10) and `drop_shadow`'s +10 drop.
-            let layered = alpha < 0.999 || recede > 0.001;
-            let bounds = tile.with_outset(((36.0 * k) as f32, (36.0 * k) as f32));
-            if layered {
-                let mut lp = crate::theme::layer();
-                lp.set_alpha_f(alpha as f32);
-                if recede > 0.001 {
-                    lp.set_color_filter(skia_safe::color_filters::matrix_row_major(
-                        &crate::theme::recede_matrix(recede),
-                        None,
-                    ));
-                }
-                canvas.save_layer(
-                    &skia_safe::canvas::SaveLayerRec::default()
-                        .bounds(&bounds)
-                        .paint(&lp),
-                );
-            }
-            crate::theme::focus_halo(canvas, tile, TILE_CORNER as f32, k as f32, f as f32);
-            if f > 0.4 {
-                crate::theme::drop_shadow(
-                    canvas,
-                    tile,
-                    TILE_CORNER as f32,
-                    k as f32,
-                    0.45 * f as f32,
-                );
-            }
-            self.draw_tile(canvas, fonts, i, tile, k);
-            if layered {
-                canvas.restore();
-            }
-            canvas.restore();
+            tiles.push((i, tile, scale, alpha, 1.0 - f));
         }
+
+        // Out of `self` while its painters borrow the screen.
+        let mut tree = std::mem::take(&mut self.tree);
+        let this = &*self;
+        let seen = |_: usize, _: Rect| {};
+        let pills = this
+            .bar
+            .el(fonts, k, avail, false, applied, this.pill, &seen)
+            .place(Rect::from_xywh(
+                edge(k) as f32,
+                0.0,
+                avail as f32,
+                (BAR_H * k) as f32,
+            ));
+        let mut root = El::column().child(pills);
+        // The plate is the focus mark and the lift, so a tile draws no halo of its own.
+        for &(i, tile, scale, alpha, recede) in &tiles {
+            let drawn = this.geom[i];
+            root = root.child(
+                El::paint(move |canvas, _| {
+                    let (cx, cy) = (tile.center_x(), tile.center_y());
+                    canvas.save();
+                    canvas.translate((cx, cy));
+                    canvas.scale((scale as f32, scale as f32));
+                    canvas.translate((-cx, -cy));
+                    // Layer only when alpha or recede does work, and bound it to the tile.
+                    // Unbounded, `save_layer` allocates a screen-sized offscreen per tile.
+                    let layered = alpha < 0.999 || recede > 0.001;
+                    if layered {
+                        let mut lp = crate::theme::layer();
+                        lp.set_alpha_f(alpha as f32);
+                        if recede > 0.001 {
+                            lp.set_color_filter(skia_safe::color_filters::matrix_row_major(
+                                &crate::theme::recede_matrix(recede),
+                                None,
+                            ));
+                        }
+                        let bounds = tile.with_outset(((4.0 * k) as f32, (4.0 * k) as f32));
+                        canvas.save_layer(
+                            &skia_safe::canvas::SaveLayerRec::default()
+                                .bounds(&bounds)
+                                .paint(&lp),
+                        );
+                    }
+                    this.draw_tile(canvas, fonts, i, tile, k);
+                    if layered {
+                        canvas.restore();
+                    }
+                    canvas.restore();
+                })
+                .id(tile_id(i))
+                .focusable((TILE_CORNER * k * scale) as f32)
+                .place(drawn.with_offset((-rect.left, -rect.top))),
+            );
+        }
+        let frame = tree.layout(root, rect);
+        let focus = match self.pill {
+            Some(i) => pill_id(i),
+            None => tile_id(self.cursor.max(0) as usize),
+        };
+        tree.set_focus(Some(focus));
+        let cheap = super::settings::reduce_ui_res(ctx.settings, ctx.platform, ctx.fallback_ui);
+        tree.paint_focus(canvas, frame, k as f32, dt, cheap);
+        self.tree = tree;
 
         if self.groups.is_empty() {
             fonts.centered(

@@ -32,6 +32,7 @@ use skia_safe::{Canvas, Color4f, Data, Image, Matrix, Point, RRect, Rect, TileMo
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+pub(crate) mod bar;
 mod games;
 pub(crate) use games::CustomizeScreen;
 use games::Zone;
