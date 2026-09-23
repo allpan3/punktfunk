@@ -1025,11 +1025,11 @@ fn collections_drill_in_reaches_one_platform_and_backs_out() {
     finish_motion(&mut s);
     assert!(matches!(s.stack.last(), Some(Screen::Library(_))));
 
-    s.handle_menu(MenuEvent::Secondary);
+    s.handle_menu(MenuEvent::Tertiary);
     finish_motion(&mut s);
     assert!(
         matches!(s.stack.last(), Some(Screen::Collections(_))),
-        "Y on a multi-group library opens the collections"
+        "X on a multi-group library opens the collections"
     );
 
     // Groups sort A–Z with launchers first: Launchers, PS3, SNES, Steam.
@@ -1103,13 +1103,13 @@ fn collections_is_offered_only_when_there_is_something_to_browse() {
     assert!(matches!(s.stack.last(), Some(Screen::Library(_))));
     let depth = s.stack.len();
     assert!(matches!(
-        s.handle_menu(MenuEvent::Secondary),
+        s.handle_menu(MenuEvent::Tertiary),
         Some(MenuPulse::Boundary)
     ));
     assert_eq!(s.stack.len(), depth, "and pushed nothing");
 
     mixed_library(&library);
-    s.handle_menu(MenuEvent::Secondary);
+    s.handle_menu(MenuEvent::Tertiary);
     finish_motion(&mut s);
     assert!(matches!(s.stack.last(), Some(Screen::Collections(_))));
 }

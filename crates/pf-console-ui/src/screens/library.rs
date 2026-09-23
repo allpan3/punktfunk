@@ -856,8 +856,17 @@ impl LibraryScreen {
             // Two values: wrap makes L1 and R1 the same button; a hold flip-flops.
             MenuEvent::JumpBack => self.step_view(-1, ctx),
             MenuEvent::JumpForward => self.step_view(1, ctx),
+            // OK flips the arrangement: a remote has no shoulders.
+            MenuEvent::Confirm => {
+                let delta = if self.view_mode == LibraryView::ALL[0] {
+                    1
+                } else {
+                    -1
+                };
+                self.step_view(delta, ctx)
+            }
             // Live already. B here, not pop: leaving the bar must not leave the library.
-            MenuEvent::Move(MenuDir::Down) | MenuEvent::Back | MenuEvent::Confirm => {
+            MenuEvent::Move(MenuDir::Down) | MenuEvent::Back => {
                 self.bar.focus = false;
                 Some(MenuPulse::Move)
             }
@@ -985,14 +994,15 @@ impl LibraryScreen {
                 });
                 Some(MenuPulse::Confirm)
             }
-            // X, not Up: the grid spends Up on rows.
-            MenuEvent::Tertiary => {
+            // The poster's menu: Y on a pad, OK held on a remote.
+            MenuEvent::Secondary => {
                 let g = self.focused()?;
                 // The desktop tile IS the host, so its menu is the host's.
                 if g.id == crate::library::DESKTOP_ID {
                     fx.options(super::card_menu::CardMenu::for_host(&self.host));
                 } else {
-                    fx.options(super::card_menu::CardMenu::for_game(&self.host, g));
+                    let cover = self.art.get(&g.id).cloned();
+                    fx.options(super::card_menu::CardMenu::for_game(&self.host, g, cover));
                 }
                 Some(MenuPulse::Confirm)
             }
@@ -1001,7 +1011,7 @@ impl LibraryScreen {
                 None
             }
             // Boundary, not silence, when there is nothing to collect or this shelf is drilled.
-            MenuEvent::Secondary => {
+            MenuEvent::Tertiary => {
                 if self.drilled || !crate::collate::worth_browsing(&self.games) {
                     return Some(MenuPulse::Boundary);
                 }
@@ -1148,7 +1158,7 @@ impl LibraryScreen {
         if self.bar.focus && self.bar_shown() {
             return vec![
                 Hint::new(HintKey::Adjust, "Sort"),
-                Hint::new(HintKey::Shoulders, "View"),
+                Hint::new(HintKey::Confirm, "View"),
                 Hint::new(HintKey::Back, "Done"),
             ];
         }
@@ -1173,11 +1183,10 @@ impl LibraryScreen {
                         (_, false, false) => "Play",
                     },
                 )];
+                hints.push(Hint::new(HintKey::Secondary, "Options"));
                 if !self.drilled && crate::collate::worth_browsing(&self.games) {
-                    hints.push(Hint::new(HintKey::Secondary, "Collections"));
+                    hints.push(Hint::new(HintKey::Tertiary, "Collections"));
                 }
-                hints.push(Hint::new(HintKey::Tertiary, "Options"));
-                hints.push(Hint::new(HintKey::Shoulders, "Jump"));
                 if self.bar_shown() {
                     hints.push(Hint::new(HintKey::Up, "Sort & view"));
                 }
@@ -1971,10 +1980,14 @@ mod tests {
         assert!(s.bar.focus, "up from the shelf reaches the bar");
 
         let cursor = s.cursor;
+        let view = settings.library_view.clone();
         let (_, fx) = press(&mut s, &library, &mut settings, MenuEvent::Confirm);
         assert!(fx.connect.is_none(), "A in the bar launched a game");
         assert!(fx.nav.is_none(), "and pushed a screen");
-        assert!(!s.bar.focus, "A means done");
+        assert_ne!(settings.library_view, view, "A flips the arrangement");
+        assert!(s.bar.focus, "and the bar keeps the pad");
+        press(&mut s, &library, &mut settings, MenuEvent::Back);
+        assert!(!s.bar.focus, "B means done");
         assert_eq!(s.cursor, cursor, "and the field never moved under it");
     }
 
@@ -2197,7 +2210,7 @@ mod tests {
         let mut settings = pf_client_core::trust::Settings::default();
         let closed = hint_keys(&s, &library, &mut settings);
         assert!(closed.contains(&HintKey::Up), "nothing leads to the bar");
-        assert!(closed.contains(&HintKey::Confirm) && closed.contains(&HintKey::Tertiary));
+        assert!(closed.contains(&HintKey::Confirm) && closed.contains(&HintKey::Secondary));
 
         press(
             &mut s,
@@ -2206,9 +2219,9 @@ mod tests {
             MenuEvent::Move(MenuDir::Up),
         );
         let open = hint_keys(&s, &library, &mut settings);
-        assert!(open.contains(&HintKey::Adjust) && open.contains(&HintKey::Shoulders));
+        assert!(open.contains(&HintKey::Adjust) && open.contains(&HintKey::Confirm));
         assert!(
-            !open.contains(&HintKey::Confirm) && !open.contains(&HintKey::Tertiary),
+            !open.contains(&HintKey::Secondary) && !open.contains(&HintKey::Tertiary),
             "the bar's legend still offered the field's actions"
         );
         assert!(
@@ -2721,7 +2734,7 @@ mod tests {
 
     /// Drilled (group or "All titles") must not loop back to collections.
     #[test]
-    fn a_drilled_shelf_neither_hands_over_nor_offers_y() {
+    fn a_drilled_shelf_neither_hands_over_nor_offers_x() {
         let library = LibraryShared::default();
         library.set_games(games(&[("Ico", Some("PS2")), ("Journey", None)]));
         let mut settings = setting_on();
@@ -2736,11 +2749,11 @@ mod tests {
                 s.all_titles();
             }
             assert!(s.collections_upgrade(&library, &settings).is_none());
-            let (pulse, fx) = press(&mut s, &library, &mut settings, MenuEvent::Secondary);
-            assert!(matches!(pulse, Some(MenuPulse::Boundary)), "Y was answered");
+            let (pulse, fx) = press(&mut s, &library, &mut settings, MenuEvent::Tertiary);
+            assert!(matches!(pulse, Some(MenuPulse::Boundary)), "X was answered");
             assert!(fx.nav.is_none(), "…and pushed a screen");
             assert!(
-                !hint_keys(&s, &library, &mut settings).contains(&HintKey::Secondary),
+                !hint_keys(&s, &library, &mut settings).contains(&HintKey::Tertiary),
                 "the legend offered a press that only thuds"
             );
         }
@@ -2766,7 +2779,7 @@ mod tests {
         assert!(s.art.is_empty(), "a different library kept the old covers");
     }
 
-    /// The tile is the host, not a title: Confirm streams it with no launch id, and X
+    /// The tile is the host, not a title: Confirm streams it with no launch id, and Y
     /// opens the HOST's options — a title menu here would offer a per-title preset
     /// binding for a title that does not exist.
     #[test]
@@ -2784,10 +2797,10 @@ mod tests {
         assert_eq!(intent.launch, None, "the desktop tile launched a title");
         assert_eq!(intent.title, "Desk", "the takeover names the host");
 
-        let (_, fx) = press(&mut s, &library, &mut settings, MenuEvent::Tertiary);
+        let (_, fx) = press(&mut s, &library, &mut settings, MenuEvent::Secondary);
         assert!(
             matches!(fx.nav, Some(crate::screens::Nav::Push(_))),
-            "X on the tile opens the host's options"
+            "Y on the tile opens the host's options"
         );
     }
 

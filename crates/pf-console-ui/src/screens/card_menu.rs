@@ -3,10 +3,10 @@
 //! offers lives in sections. One screen in three modes; the subject names the object and
 //! [`CardMenu::actions`] owns the verbs.
 //!
-//! A host card's menu is five rows at most, a pinned card's three, a discovered one's two;
-//! every row carries an icon. Back leaves any of them. Tests in this module pin each
-//! menu's rows, the arm-then-fire rule and the host-key NUL split. Rows and their order:
-//! `console-ui-redesign.md` §2.
+//! A host card's menu is five rows at most, a pinned card's three, a discovered one's two,
+//! a poster's four; a poster's Details is its card, cover and facts beside its verbs. Every
+//! row carries an icon; Back leaves any of them. Tests in this module pin each menu's rows,
+//! the arm-then-fire rule and the host-key NUL split (`console-ui-redesign.md` §2).
 
 use crate::glyphs::{Hint, HintKey};
 use crate::library::LibraryGame;
@@ -19,7 +19,7 @@ use crate::theme::{fg, Fonts, EDGE_INSET, W};
 use crate::widgets::{ListMsg, MenuList, RowSpec, ROW_MAX_W};
 use pf_client_core::menu_nav::{MenuEvent, MenuPulse};
 use pf_client_core::start;
-use skia_safe::{Canvas, Rect};
+use skia_safe::{Canvas, Image, Rect};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Action {
@@ -34,10 +34,14 @@ enum Action {
     Pair,
     /// Save a discovered host.
     AddHost,
-    /// Stream the host itself, launching nothing — "Resume <title>" when it has a game up.
-    /// A shelf's OK launches the focused title, so this is the way back into a game the
-    /// host started on its own.
-    Connect,
+    /// The presets, for one launch of this title.
+    PlayWith,
+    /// Launch the title, or bring back the one the host has up.
+    Play,
+    /// Mark or unmark the title on this device.
+    Favorite,
+    /// The poster's card: cover, facts, and its verbs.
+    TitleDetails,
     /// [`Screen::BindPreset`] for the host, or for a library title.
     BindPreset,
     /// Pin or unpin the catalog's preset `i` as a card of its own.
@@ -65,6 +69,7 @@ enum Mode {
 }
 
 /// What the menu was raised on.
+#[derive(Clone)]
 pub(crate) enum Subject {
     /// A host card: saved, pinned (the pin rides in the row) or discovered.
     Host(HostRow),
@@ -72,8 +77,8 @@ pub(crate) enum Subject {
     /// card still streams as that card does.
     Game {
         host: HostRow,
-        id: String,
-        title: String,
+        game: Box<LibraryGame>,
+        cover: Option<Image>,
     },
 }
 
@@ -93,15 +98,20 @@ impl CardMenu {
         CardMenu::on(Subject::Host(host.clone()), Mode::Menu)
     }
 
-    pub(crate) fn for_game(host: &HostRow, game: &LibraryGame) -> CardMenu {
+    pub(crate) fn for_game(host: &HostRow, game: &LibraryGame, cover: Option<Image>) -> CardMenu {
         CardMenu::on(
             Subject::Game {
                 host: host.clone(),
-                id: game.id.clone(),
-                title: game.title.clone(),
+                game: Box::new(game.clone()),
+                cover,
             },
             Mode::Menu,
         )
+    }
+
+    /// This subject in another mode, replacing this screen.
+    fn to(&self, mode: Mode) -> Screen {
+        Screen::CardMenu(CardMenu::on(self.subject.clone(), mode))
     }
 
     fn on(subject: Subject, mode: Mode) -> CardMenu {
@@ -126,12 +136,13 @@ impl CardMenu {
                 Some(p) => format!("{} \u{b7} {}", h.name, p.name),
                 None => h.name.clone(),
             },
-            Subject::Game { title, .. } => title.clone(),
+            Subject::Game { game, .. } => game.title.clone(),
         };
-        match self.mode {
-            Mode::Menu => name,
-            Mode::Details => format!("{name} \u{b7} Details"),
-            Mode::ConnectWith => format!("Connect to {name} with"),
+        match (self.mode, &self.subject) {
+            (Mode::Details, Subject::Game { .. }) | (Mode::Menu, _) => name,
+            (Mode::Details, _) => format!("{name} \u{b7} Details"),
+            (Mode::ConnectWith, Subject::Game { .. }) => format!("Play {name} with"),
+            (Mode::ConnectWith, _) => format!("Connect to {name} with"),
         }
     }
 
@@ -173,9 +184,22 @@ impl CardMenu {
                     .chain((0..store.presets().len()).map(|i| Action::Preset(Some(i))))
                     .collect();
             }
-            // No Play row: the poster's OK launches it. Connect is the other press.
+            // No Play row: the poster's OK launches it. The Mac's four rows.
+            (Subject::Game { .. }, Mode::Menu) => {
+                return vec![
+                    Action::PlayWith,
+                    Action::Favorite,
+                    Action::TitleDetails,
+                    Action::CopyLink,
+                ]
+            }
             (Subject::Game { .. }, _) => {
-                return vec![Action::Connect, Action::CopyLink, Action::BindPreset]
+                return vec![
+                    Action::Play,
+                    Action::Favorite,
+                    Action::BindPreset,
+                    Action::CopyLink,
+                ]
             }
             (Subject::Host(h), _) => h,
         };
@@ -246,7 +270,9 @@ impl CardMenu {
 
     fn icon(&self, a: Action) -> &'static str {
         match a {
-            Action::ConnectWith | Action::Connect | Action::Preset(_) => "play",
+            Action::ConnectWith | Action::PlayWith | Action::Play | Action::Preset(_) => "play",
+            Action::Favorite => "check",
+            Action::TitleDetails => "info",
             Action::Browse => "gamepad-2",
             Action::Wake => "power",
             Action::CopyLink | Action::Clipboard => "copy",
@@ -268,6 +294,16 @@ impl CardMenu {
         }
     }
 
+    /// The title is marked on this device.
+    fn is_favorite(&self, settings: &pf_client_core::trust::Settings) -> bool {
+        match &self.subject {
+            Subject::Game { host, game, .. } => {
+                crate::library::favorites(settings, &host.fp_hex).contains(&game.id)
+            }
+            Subject::Host(_) => false,
+        }
+    }
+
     /// `default` (`Settings::default_host`) names this row. A derived default reads as unset.
     fn is_default(&self, default: Option<&str>) -> bool {
         let id = self.host().id.as_deref();
@@ -286,11 +322,14 @@ impl CardMenu {
             Action::Pair if self.host().paired => "Pair again\u{2026}".into(),
             Action::Pair => "Pair\u{2026}".into(),
             Action::AddHost => "Add host".into(),
-            // Names the title: "Resume" alone would leave the player guessing which game.
-            Action::Connect => match self.host().running.as_str() {
-                "" => format!("Connect to {}", self.host().name),
-                title => format!("Resume {title}"),
+            Action::PlayWith => "Play with preset\u{2026}".into(),
+            Action::Play => match &self.subject {
+                Subject::Game { game, .. } if game.running => "Resume".into(),
+                _ => "Play".into(),
             },
+            Action::Favorite if self.is_favorite(ctx.settings) => "Remove from Favorites".into(),
+            Action::Favorite => "Add to Favorites".into(),
+            Action::TitleDetails => "Details\u{2026}".into(),
             Action::BindPreset => match self.subject {
                 Subject::Game { .. } => "Settings preset\u{2026}".into(),
                 Subject::Host(_) => "Default preset\u{2026}".into(),
@@ -400,25 +439,36 @@ impl CardMenu {
     fn link(&self, store: &dyn SettingsStore) -> Option<String> {
         match &self.subject {
             Subject::Host(h) => crate::screens::host_link(store, h),
-            Subject::Game { host, id, .. } => crate::screens::saved_host_link(
+            Subject::Game { host, game, .. } => crate::screens::saved_host_link(
                 store,
                 &host.fp_hex,
                 &host.addr,
                 host.port,
                 host.pin.as_ref().map(|p| p.id.as_str()),
-                Some(id.as_str()),
+                Some(game.id.as_str()),
             ),
         }
     }
 
+    /// A connect with `preset`: a poster's launches its title, a card's the host alone.
     fn connect(&self, preset: Option<String>) -> super::ConnectIntent {
         let host = self.host();
+        let (launch, title) = match &self.subject {
+            Subject::Game { game, .. } => (
+                Some(game.id.clone()),
+                match &host.pin {
+                    Some(p) => format!("{} \u{b7} {}", game.title, p.name),
+                    None => game.title.clone(),
+                },
+            ),
+            Subject::Host(_) => (None, self.title_for_connect()),
+        };
         super::ConnectIntent {
             addr: host.addr.clone(),
             port: host.port,
             fp_hex: host.fp_hex.clone(),
-            launch: None,
-            title: self.title_for_connect(),
+            launch,
+            title,
             request_access: false,
             preset,
         }
@@ -428,14 +478,29 @@ impl CardMenu {
         let store = ctx.store;
         let key = self.host_key().to_string();
         match action {
-            Action::ConnectWith => fx.replace(Screen::CardMenu(CardMenu::on(
-                Subject::Host(self.host().clone()),
-                Mode::ConnectWith,
-            ))),
-            Action::Details => fx.replace(Screen::CardMenu(CardMenu::on(
-                Subject::Host(self.host().clone()),
-                Mode::Details,
-            ))),
+            Action::ConnectWith | Action::PlayWith => fx.replace(self.to(Mode::ConnectWith)),
+            Action::Details | Action::TitleDetails => fx.replace(self.to(Mode::Details)),
+            Action::Play => {
+                fx.connect = Some(self.connect(self.host().pin.as_ref().map(|p| p.id.clone())));
+                fx.pop();
+            }
+            // Rebase first: the store is a whole-file writer.
+            Action::Favorite => {
+                let Subject::Game { host, game, .. } = &self.subject else {
+                    return;
+                };
+                *ctx.settings = ctx.store.load();
+                let on = crate::library::toggle_favorite(ctx.settings, &host.fp_hex, &game.id);
+                ctx.store.save(ctx.settings);
+                fx.toast = Some(if on {
+                    format!("{} is a favorite", game.title)
+                } else {
+                    format!("{} is no longer a favorite", game.title)
+                });
+                if self.mode == Mode::Menu {
+                    fx.pop();
+                }
+            }
             // The shell drops this menu as it switches; Games follows the focused card.
             Action::Browse => fx.tab = Some(Tab::Games),
             Action::Wake => {
@@ -508,12 +573,6 @@ impl CardMenu {
                 }
                 fx.pop();
             }
-            // No launch id: the host is already showing whatever is up, and launching the
-            // game it runs starts a second copy. Pop, so the session ends back here.
-            Action::Connect => {
-                fx.connect = Some(self.connect(self.host().pin.as_ref().map(|p| p.id.clone())));
-                fx.pop();
-            }
             Action::Preset(i) => {
                 let preset = i.and_then(|i| store.presets().get(i).map(|p| p.0.clone()));
                 fx.connect = Some(self.connect(preset));
@@ -526,17 +585,15 @@ impl CardMenu {
             Action::BindPreset => {
                 let host_name = self.host().name.clone();
                 let screen = match &self.subject {
-                    Subject::Game { id, title, .. } => {
-                        super::bind_preset::BindPresetScreen::for_game(
-                            key,
-                            host_name,
-                            super::bind_preset::GameSubject {
-                                id: id.clone(),
-                                title: title.clone(),
-                            },
-                            store.presets(),
-                        )
-                    }
+                    Subject::Game { game, .. } => super::bind_preset::BindPresetScreen::for_game(
+                        key,
+                        host_name,
+                        super::bind_preset::GameSubject {
+                            id: game.id.clone(),
+                            title: game.title.clone(),
+                        },
+                        store.presets(),
+                    ),
                     Subject::Host(_) => {
                         super::bind_preset::BindPresetScreen::new(key, host_name, store.presets())
                     }
@@ -644,6 +701,7 @@ impl CardMenu {
             (Subject::Host(h), _) if !h.saved => "Found on this network.".into(),
             (Subject::Host(h), Mode::Details) => format!("{}:{}", h.addr, h.port),
             (Subject::Host(_), _) => String::new(),
+            (Subject::Game { .. }, Mode::Details) => String::new(),
             (Subject::Game { host, .. }, _) => format!("On {}.", host.name),
         }
     }
@@ -668,12 +726,15 @@ impl CardMenu {
             f64::from(rect.top) + 2.0 * k,
             ROW_MAX_W * 0.72 * k,
         );
-        let list_rect = Rect::from_ltrb(
+        let mut list_rect = Rect::from_ltrb(
             rect.left,
             rect.top + (34.0 * k) as f32,
             rect.right,
             rect.bottom,
         );
+        if let (Subject::Game { game, cover, .. }, Mode::Details) = (&self.subject, self.mode) {
+            list_rect = title_card(canvas, fonts, game, cover.as_ref(), rect, k);
+        }
         let actions = self.actions(ctx.store);
         let mut last = "";
         let rows: Vec<RowSpec> = actions
@@ -691,6 +752,75 @@ impl CardMenu {
         self.list
             .render(canvas, list_rect, &rows, fonts, k, dt, true);
     }
+}
+
+/// A poster's card: the cover at the left, the facts beside it. Returns where its verbs go.
+fn title_card(
+    canvas: &Canvas,
+    fonts: &Fonts,
+    game: &LibraryGame,
+    cover: Option<&Image>,
+    rect: Rect,
+    k: f64,
+) -> Rect {
+    let pad = EDGE_INSET * k;
+    let ch = (f64::from(rect.height()) - 24.0 * k).min(420.0 * k);
+    let cw = ch * 2.0 / 3.0;
+    let art = Rect::from_xywh(
+        (f64::from(rect.left) + pad) as f32,
+        (f64::from(rect.top) + 8.0 * k) as f32,
+        cw as f32,
+        ch as f32,
+    );
+    let rr = skia_safe::RRect::new_rect_xy(art, (14.0 * k) as f32, (14.0 * k) as f32);
+    canvas.save();
+    canvas.clip_rrect(rr, None, true);
+    match cover {
+        Some(img) => {
+            let src = Rect::from_wh(img.width() as f32, img.height() as f32);
+            canvas.draw_image_rect_with_sampling_options(
+                img,
+                Some((&src, skia_safe::canvas::SrcRectConstraint::Fast)),
+                art,
+                crate::theme::art_sampling(),
+                &crate::theme::fill(fg(1.0)),
+            );
+        }
+        None => super::library::draw_poster_placeholder(canvas, fonts, Some(game), art, k),
+    }
+    canvas.restore();
+    let x = f64::from(art.right) + 28.0 * k;
+    let w = f64::from(rect.right) - x - pad;
+    let mut y = f64::from(art.top) + 26.0 * k;
+    fonts.draw_clipped(canvas, &game.title, x, y, W::Bold, 26.0 * k, fg(1.0), w);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+    let store = [Some(game.store.clone()), game.platform.clone()]
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" \u{b7} ");
+    let facts = [
+        Some(store),
+        game.developer.clone(),
+        game.year.map(|y| y.to_string()),
+        (!game.genres.is_empty()).then(|| game.genres.join(", ")),
+        game.stats
+            .as_ref()
+            .and_then(|s| crate::library::stats_line(s, now)),
+    ];
+    for line in facts.into_iter().flatten().filter(|l| !l.is_empty()) {
+        y += 24.0 * k;
+        fonts.draw_clipped(canvas, &line, x, y, W::Regular, 15.0 * k, fg(0.7), w);
+    }
+    Rect::from_ltrb(
+        (x - 24.0 * k) as f32,
+        (y + 24.0 * k) as f32,
+        rect.right,
+        rect.bottom,
+    )
 }
 
 #[cfg(test)]
@@ -1102,34 +1232,62 @@ mod tests {
         );
     }
 
-    /// Nothing the poster already does: its OK launches the title. Connect is the other press.
+    /// The Mac's four rows: nothing the poster's own OK already does.
     #[test]
-    fn a_title_offers_the_link_its_preset_and_nothing_its_cover_already_does() {
-        let s = CardMenu::for_game(&host(), &game());
+    fn a_poster_menu_is_the_macs_four_rows() {
+        let s = CardMenu::for_game(&host(), &game(), None);
         assert_eq!(
             rows(&s),
-            vec![Action::Connect, Action::CopyLink, Action::BindPreset]
+            vec![
+                Action::PlayWith,
+                Action::Favorite,
+                Action::TitleDetails,
+                Action::CopyLink
+            ]
         );
-        assert_eq!(label(&s, Action::BindPreset), "Settings preset\u{2026}");
         assert_eq!(s.title(), "Hollow Knight");
+        let details = CardMenu::on(s.subject.clone(), Mode::Details);
+        assert_eq!(
+            rows(&details),
+            vec![
+                Action::Play,
+                Action::Favorite,
+                Action::BindPreset,
+                Action::CopyLink
+            ]
+        );
+        assert_eq!(
+            label(&details, Action::BindPreset),
+            "Settings preset\u{2026}"
+        );
     }
 
     #[test]
-    fn a_titles_menu_keeps_the_shelfs_whole_host_so_a_pinned_cards_preset_survives() {
-        let s = CardMenu::for_game(&pinned(), &game());
-        let Subject::Game { host, id, .. } = &s.subject else {
-            panic!("built as a title menu");
-        };
-        assert_eq!(id, "steam:367520", "the link's launch id");
-        assert_eq!(host.pin.as_ref().map(|p| p.id.as_str()), Some("prof-1"));
+    fn a_posters_menu_keeps_the_shelfs_whole_host_so_a_pinned_cards_preset_survives() {
+        let mut s = CardMenu::for_game(&pinned(), &game(), None);
         assert_eq!(s.host_key(), "aa");
+        let mut fx = Outbox::default();
+        run_action(&mut s, Action::Preset(None), &mut fx);
+        let intent = fx.connect.expect("a launch");
+        assert_eq!(intent.launch.as_deref(), Some("steam:367520"));
+        assert_eq!(intent.preset, None, "Default settings names no preset");
+        let mut s = CardMenu::on(s.subject.clone(), Mode::Details);
+        let mut fx = Outbox::default();
+        run_action(&mut s, Action::Play, &mut fx);
+        let intent = fx.connect.expect("a launch");
+        assert_eq!(
+            intent.preset.as_deref(),
+            Some("prof-1"),
+            "the card's preset"
+        );
+        assert_eq!(intent.title, "Hollow Knight \u{b7} 4K");
     }
 
     #[test]
     fn copy_link_always_closes_the_menu_and_says_what_happened() {
         for mut s in [
             CardMenu::for_host(&host()),
-            CardMenu::for_game(&host(), &game()),
+            CardMenu::for_game(&host(), &game(), None),
         ] {
             let mut fx = Outbox::default();
             run_action(&mut s, Action::CopyLink, &mut fx);
@@ -1138,36 +1296,24 @@ mod tests {
         }
     }
 
+    /// Favorites are this device's, per host, in the settings document; the label follows.
     #[test]
-    fn a_titles_menu_leads_with_resume_when_the_host_has_a_game_up() {
-        let idle = CardMenu::for_game(&host(), &game());
-        assert_eq!(label(&idle, Action::Connect), "Connect to Desk");
-        let up = CardMenu::for_game(
-            &HostRow {
-                running: "Elden Ring".into(),
-                ..host()
-            },
-            &game(),
+    fn favorite_marks_the_title_on_this_host() {
+        let mut s = CardMenu::on(
+            CardMenu::for_game(&host(), &game(), None).subject,
+            Mode::Details,
         );
-        assert_eq!(label(&up, Action::Connect), "Resume Elden Ring");
-    }
-
-    #[test]
-    fn resume_streams_the_host_without_launching_anything() {
-        let mut s = CardMenu::for_game(
-            &HostRow {
-                running: "Elden Ring".into(),
-                ..pinned()
-            },
-            &game(),
-        );
+        let before = label(&s, Action::Favorite);
         let mut fx = Outbox::default();
-        run_action(&mut s, Action::Connect, &mut fx);
-        let intent = fx.connect.expect("a connect intent");
-        assert_eq!(intent.launch, None, "resume must not re-launch the title");
-        assert_eq!(intent.preset.as_deref(), Some("prof-1"));
-        assert_eq!(intent.title, "Elden Ring \u{b7} 4K");
-        assert!(matches!(fx.nav, Some(Nav::Pop)));
+        run_action(&mut s, Action::Favorite, &mut fx);
+        let marked = crate::library::favorites(&crate::store::file_store().load(), "aa")
+            .contains(&"steam:367520".to_string());
+        assert_ne!(label(&s, Action::Favorite), before, "the label flips");
+        assert!(fx.nav.is_none(), "the card stays up to show it");
+        run_action(&mut s, Action::Favorite, &mut fx);
+        let again = crate::library::favorites(&crate::store::file_store().load(), "aa")
+            .contains(&"steam:367520".to_string());
+        assert_ne!(marked, again, "a second press undoes the first");
     }
 
     /// The label reads back the explicit pointer; pressing the row again clears it.

@@ -1168,6 +1168,42 @@ pub fn stored_sections(sections: &[(Section, bool)]) -> String {
         .join(",")
 }
 
+/// `ms` ago, as a person says it: `just now`, `12 min ago`, `2 h ago`, `3 d ago`, `5 mo ago`.
+pub fn ago(ms: u64) -> String {
+    let min = ms / 60_000;
+    match min {
+        0 => "just now".into(),
+        1..60 => format!("{min} min ago"),
+        60..1_440 => format!("{} h ago", min / 60),
+        1_440..43_200 => format!("{} d ago", min / 1_440),
+        _ => format!("{} mo ago", min / 43_200),
+    }
+}
+
+/// The Details card's play line: `Last played 2 h ago · 14 h total · 12 launches`. `None`
+/// for a title never played here.
+pub fn stats_line(s: &pf_client_core::library::GameStats, now_ms: u64) -> Option<String> {
+    if s.last_played_unix_ms == 0 {
+        return None;
+    }
+    let mut parts = vec![format!(
+        "Last played {}",
+        ago(now_ms.saturating_sub(s.last_played_unix_ms))
+    )];
+    let hours = s.play_time_ms / 3_600_000;
+    if hours > 0 {
+        parts.push(format!("{hours} h total"));
+    }
+    if s.launch_count > 0 {
+        parts.push(format!(
+            "{} launch{}",
+            s.launch_count,
+            if s.launch_count == 1 { "" } else { "es" }
+        ));
+    }
+    Some(parts.join(" \u{b7} "))
+}
+
 /// Where a host's favorites live in the settings document's `extra` map.
 fn favorites_key(fp_hex: &str) -> String {
     format!("favorites.{fp_hex}")
@@ -1240,6 +1276,27 @@ mod tests {
             stored_sections(&s),
             "desktops,recent,-favorites,launchers,games"
         );
+    }
+
+    #[test]
+    fn the_play_line_reads_like_a_person_says_it() {
+        let s = pf_client_core::library::GameStats {
+            last_played_unix_ms: 1_000,
+            play_time_ms: 14 * 3_600_000,
+            last_run_ms: 0,
+            launch_count: 12,
+        };
+        assert_eq!(
+            stats_line(&s, 1_000 + 2 * 3_600_000).as_deref(),
+            Some("Last played 2 h ago \u{b7} 14 h total \u{b7} 12 launches")
+        );
+        assert_eq!(ago(30_000), "just now");
+        assert_eq!(ago(3 * 86_400_000), "3 d ago");
+        let never = pf_client_core::library::GameStats {
+            last_played_unix_ms: 0,
+            ..s
+        };
+        assert_eq!(stats_line(&never, 5), None);
     }
 
     #[test]
