@@ -279,20 +279,38 @@ impl PlayersScreen {
                 fg(0.45),
             );
         }
-        // The explainer reads on a tray: grant rows run under it on a short screen.
-        let detail_top = rect.bottom - (40.0 * k) as f32;
-        let band = Rect::from_ltrb(rect.left, detail_top, rect.right, rect.bottom);
-        crate::widgets::tray(canvas, band, crate::widgets::Toward::Bottom, k);
+    }
+
+    /// The explainer's band reaches the shell's tray in: grant rows run under it on a
+    /// short screen.
+    pub(crate) fn pinned(&self, k: f64) -> (f32, f32) {
+        (0.0, (crate::widgets::FOOT_DETAIL_H * k) as f32)
+    }
+
+    /// What the focus is, on the shell's tray after the trays.
+    pub(crate) fn render_pinned(
+        &mut self,
+        canvas: &Canvas,
+        rect: Rect,
+        k: f64,
+        fonts: &Fonts,
+        ctx: &Ctx,
+    ) {
         let detail = detail(self.focused(ctx), ctx);
-        fonts.leading(
+        let h = (crate::widgets::FOOT_DETAIL_H * k) as f32;
+        crate::widgets::Foot {
+            detail: Some(&detail),
+            ..Default::default()
+        }
+        .paint(
             canvas,
-            &detail,
-            W::Regular,
-            13.0 * k,
-            fg(0.55),
-            f64::from(rect.left) + edge(k),
-            f64::from(rect.bottom) - 28.0 * k,
-            w - 2.0 * edge(k),
+            fonts,
+            Rect::from_ltrb(rect.left, rect.bottom - h, rect.right, rect.bottom),
+            (
+                f64::from(rect.left) + edge(k),
+                f64::from(rect.right) - edge(k),
+            ),
+            k,
         );
     }
 }

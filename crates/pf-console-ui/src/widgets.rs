@@ -234,6 +234,129 @@ pub fn tray(canvas: &Canvas, rect: Rect, toward: Toward, k: f64) {
     };
     crate::blur::backdrop(canvas, rect, band);
 }
+/// The band at a screen's foot, on the shell's bottom tray: a focused title with its
+/// provenance, or one detail line led by a mark. A screen reaches the tray in by the
+/// band's height (`Screen::pinned`) and paints this from `render_pinned`, so one tray
+/// serves every screen and none draws its own.
+#[derive(Default)]
+pub struct Foot<'a> {
+    /// Centred, bold: the focused game.
+    pub title: Option<&'a str>,
+    /// Tracked capitals under the title: where it comes from.
+    pub subtitle: Option<&'a str>,
+    /// A short note on the leading margin, on the subtitle's line.
+    pub note: Option<&'a str>,
+    /// One explainer line at the band's top.
+    pub detail: Option<&'a str>,
+    /// Icon name leading `detail`.
+    pub mark: Option<&'a str>,
+    /// A scrim deepening toward the foot: posters are too bright for white on blur alone.
+    pub deep: bool,
+}
+
+/// Band heights, design units: a title with its line, or one detail line.
+pub const FOOT_TITLE_H: f64 = 66.0;
+pub const FOOT_DETAIL_H: f64 = 34.0;
+
+impl Foot<'_> {
+    /// Over `band`, the tray already under it; the detail runs from `left` to `right`.
+    pub fn paint(
+        &self,
+        canvas: &Canvas,
+        fonts: &Fonts,
+        band: Rect,
+        (left, right): (f64, f64),
+        k: f64,
+    ) {
+        use crate::theme::{fg, W};
+        if self.deep {
+            let clip = canvas.local_clip_bounds().unwrap_or(band);
+            let back = Rect::from_ltrb(
+                clip.left.min(band.left),
+                band.top,
+                clip.right.max(band.right),
+                clip.bottom.max(band.bottom),
+            );
+            let deep = band.top + (FOOT_TITLE_H * 0.45 * k) as f32;
+            let colors = [crate::theme::shade(0.0), crate::theme::shade(0.42)];
+            let mut scrim = crate::theme::shaded();
+            scrim.set_shader(skia_safe::gradient::shaders::linear_gradient(
+                (
+                    skia_safe::Point::new(band.left, band.top),
+                    skia_safe::Point::new(band.left, deep),
+                ),
+                &skia_safe::gradient::Gradient::new(
+                    skia_safe::gradient::Colors::new_evenly_spaced(
+                        &colors,
+                        skia_safe::TileMode::Clamp,
+                        None,
+                    ),
+                    skia_safe::gradient::Interpolation::default(),
+                ),
+                None,
+            ));
+            canvas.draw_rect(back, &scrim);
+        }
+        let cx = f64::from(band.center_x());
+        let max_w = f64::from(band.width()) - 2.0 * edge(k);
+        if let Some(title) = self.title {
+            let (w, size) = (W::Bold, 25.0 * k);
+            let tw = f64::from(fonts.measure(title, w, size)).min(max_w);
+            let base = f64::from(band.top) + 32.0 * k;
+            fonts.draw_clipped(canvas, title, cx - tw / 2.0, base, w, size, fg(1.0), max_w);
+        }
+        let base = f64::from(band.top) + 53.0 * k;
+        if let Some(note) = self.note {
+            let x = f64::from(band.left) + edge(k);
+            fonts.draw_clipped(
+                canvas,
+                note,
+                x,
+                base,
+                W::Regular,
+                11.0 * k,
+                fg(0.55),
+                max_w / 3.0,
+            );
+        }
+        if let Some(sub) = self.subtitle {
+            let (size, track) = (11.0 * k, 1.2 * k);
+            let tw = f64::from(fonts.measure(sub, W::SemiBold, size))
+                + track * sub.chars().count().saturating_sub(1) as f64;
+            fonts.draw_tracked(
+                canvas,
+                sub,
+                cx - tw / 2.0,
+                base,
+                W::SemiBold,
+                size,
+                track,
+                fg(0.55),
+            );
+        }
+        if let Some(detail) = self.detail.filter(|d| !d.is_empty()) {
+            let top = f64::from(band.top) + 6.0 * k;
+            let mark = self.mark.and_then(crate::icons::by_name);
+            let lead = if mark.is_some() { 22.0 * k } else { 0.0 };
+            let ink = fg(0.55);
+            fonts.leading(
+                canvas,
+                detail,
+                W::Regular,
+                13.0 * k,
+                ink,
+                left + lead,
+                top,
+                right - left - lead,
+            );
+            if let Some(mark) = mark {
+                let (cx, cy) = ((left + 7.0 * k) as f32, (top + 8.0 * k) as f32);
+                crate::icons::draw_icon(canvas, mark, cx, cy, (14.0 * k) as f32, ink);
+            }
+        }
+    }
+}
+
 /// A section header's band above its row, and its baseline's rise over the row: the text
 /// stays clear of the plate, stretched in flight, on the row below.
 const HEADER_H: f64 = 44.0;

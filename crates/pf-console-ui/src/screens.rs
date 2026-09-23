@@ -304,6 +304,8 @@ impl Screen {
     /// the depth of a screen's own pinned chrome, so one ramp covers it with the band's.
     pub(crate) fn pinned(&self, k: f64) -> (f32, f32) {
         match self {
+            Screen::Library(s) => s.pinned(k),
+            Screen::Players(s) => s.pinned(k),
             Screen::Settings(s) => s.pinned(k),
             _ => (0.0, 0.0),
         }
@@ -320,8 +322,11 @@ impl Screen {
         fonts: &Fonts,
         ctx: &Ctx,
     ) {
-        if let Screen::Settings(s) = self {
-            s.render_pinned(canvas, rect, k, dt, fonts, ctx);
+        match self {
+            Screen::Library(s) => s.render_pinned(canvas, rect, k, fonts, ctx),
+            Screen::Players(s) => s.render_pinned(canvas, rect, k, fonts, ctx),
+            Screen::Settings(s) => s.render_pinned(canvas, rect, k, dt, fonts, ctx),
+            _ => {}
         }
     }
 

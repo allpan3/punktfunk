@@ -14,7 +14,7 @@
 use crate::glyphs::{Hint, HintKey};
 use crate::pointer::Pointer;
 use crate::screens::{Ctx, Outbox, Screen};
-use crate::theme::{fg, Fonts, W};
+use crate::theme::Fonts;
 use crate::widgets::{
     column, permits, Charset, KeyMsg, Keyboard, ListMsg, MenuList, RowSpec, TabStrip, TAB_STRIP_H,
 };
@@ -229,7 +229,7 @@ pub(crate) fn reduce_ui_res(
 }
 
 /// The explainer band under the rows, design units.
-const DETAIL_H: f64 = 34.0;
+const DETAIL_H: f64 = crate::widgets::FOOT_DETAIL_H;
 
 // The sections, the rows a player touches most first. A child row sits right under the
 // switch it dims or drops with. Presets is empty here: its rows come from the catalog.
@@ -1099,26 +1099,19 @@ impl SettingsScreen {
         let ids = self.row_ids(ctx);
         let focused = ids.get(self.list.cursor).copied();
         let detail = focused.map_or("", |id| detail(id, ctx));
-        // The explainer under the list, led by the row's mark.
-        let x = inner;
-        let top = f64::from(list_rect.bottom) + 6.0 * k;
-        let max_w = f64::from(col.right) - inner - 22.0 * k;
-        fonts.leading(
-            canvas,
-            detail,
-            W::Regular,
-            13.0 * k,
-            fg(0.55),
-            x + 22.0 * k,
-            top,
-            max_w,
-        );
-        if let Some(icon) = focused.filter(|_| !detail.is_empty()).map(row_icon) {
-            if let Some(mark) = crate::icons::by_name(icon) {
-                let (cx, cy) = ((x + 7.0 * k) as f32, (top + 8.0 * k) as f32);
-                crate::icons::draw_icon(canvas, mark, cx, cy, (14.0 * k) as f32, fg(0.55));
-            }
+        // The explainer under the list, led by the row's mark; above the keyboard when up.
+        crate::widgets::Foot {
+            detail: Some(detail),
+            mark: focused.map(row_icon),
+            ..Default::default()
         }
+        .paint(
+            canvas,
+            fonts,
+            Rect::from_ltrb(rect.left, list_rect.bottom, rect.right, rect.bottom),
+            (inner, f64::from(col.right)),
+            k,
+        );
     }
 }
 

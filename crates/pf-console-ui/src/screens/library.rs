@@ -1244,7 +1244,7 @@ impl LibraryScreen {
         let clip = canvas.local_clip_bounds().unwrap_or(rect);
         let foot = clip.bottom.max(rect.bottom);
         let tray = if self.band_shown() {
-            card::TITLE_BAND * k
+            crate::widgets::FOOT_TITLE_H * k
         } else {
             0.0
         };
@@ -1552,12 +1552,45 @@ impl LibraryScreen {
                 self.art_seen.insert(self.games[*g].id.clone(), self.frame);
             }
         }
+    }
+
+    /// The focused title's band reaches the shell's tray in this far, over the lines' foot.
+    pub(crate) fn pinned(&self, k: f64) -> (f32, f32) {
         if self.band_shown() {
-            let r = Rect::from_ltrb(rect.left, band_top as f32, rect.right, foot);
-            let reach = (clip.left.min(rect.left), clip.right.max(rect.right));
-            self.title_band(ctx)
-                .paint(canvas, fonts, r, reach, k, cheap);
+            (0.0, (crate::widgets::FOOT_TITLE_H * k) as f32)
+        } else {
+            (0.0, 0.0)
         }
+    }
+
+    /// The focused title on the shell's tray: drawn after the trays, over the lines.
+    pub(crate) fn render_pinned(
+        &mut self,
+        canvas: &Canvas,
+        rect: Rect,
+        k: f64,
+        fonts: &Fonts,
+        ctx: &Ctx,
+    ) {
+        if !self.band_shown() {
+            return;
+        }
+        let band = self.title_band(ctx);
+        let h = (crate::widgets::FOOT_TITLE_H * k) as f32;
+        crate::widgets::Foot {
+            title: band.title.as_deref(),
+            subtitle: band.subtitle.as_deref(),
+            note: band.note,
+            deep: true,
+            ..Default::default()
+        }
+        .paint(
+            canvas,
+            fonts,
+            Rect::from_ltrb(rect.left, rect.bottom - h, rect.right, rect.bottom),
+            (0.0, 0.0),
+            k,
+        );
     }
 
     /// What the title band says for the focus: the title and, on the grid, where it comes

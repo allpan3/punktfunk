@@ -21,9 +21,6 @@ const META_LINE: f64 = 15.0;
 /// The host desk tile, design units.
 pub(super) const DESK_W: f64 = 224.0;
 pub(super) const DESK_H: f64 = 124.0;
-/// Height of the focused-title band, design units.
-pub(super) const TITLE_BAND: f64 = 66.0;
-
 /// Height under the poster, design units: two title lines, the host line, a caption line.
 pub(super) fn text_h(caption: bool) -> f64 {
     TEXT_GAP + 2.0 * TITLE_LINE + 2.0 + META_LINE + if caption { META_LINE } else { 0.0 }
@@ -306,95 +303,12 @@ pub(super) fn heading(canvas: &Canvas, fonts: &Fonts, label: &str, x: f64, basel
 }
 
 /// The one line of text a band draws, centred in `max_w`, ellipsized.
-fn centred_line(
-    canvas: &Canvas,
-    fonts: &Fonts,
-    text: &str,
-    (cx, base): (f64, f64),
-    (w, size): (W, f64),
-    ink: Color4f,
-    max_w: f64,
-) {
-    let tw = f64::from(fonts.measure(text, w, size)).min(max_w);
-    fonts.draw_clipped(canvas, text, cx - tw / 2.0, base, w, size, ink, max_w);
-}
-
 /// What the focused-title band says: the title, the provenance line under it, and the
 /// cache note that leads that line.
 pub(super) struct TitleBand<'a> {
     pub title: Option<String>,
     pub subtitle: Option<String>,
     pub note: Option<&'a str>,
-}
-
-impl TitleBand<'_> {
-    /// Over the field's foot in `r`, the backdrop reaching `reach` across: the shared tray
-    /// blurs what scrolls under toward the bottom, under a scrim that deepens with it, as
-    /// posters are too bright for white text on blur alone. `cheap` keeps only the scrim.
-    pub(super) fn paint(
-        &self,
-        canvas: &Canvas,
-        fonts: &Fonts,
-        r: Rect,
-        reach: (f32, f32),
-        k: f64,
-        cheap: bool,
-    ) {
-        let back = Rect::from_ltrb(reach.0, r.top, reach.1, r.bottom);
-        if !cheap {
-            crate::widgets::tray(canvas, back, crate::widgets::Toward::Bottom, k);
-        }
-        let deep = (r.top + (TITLE_BAND * 0.45 * k) as f32).min(r.bottom);
-        let colors = [crate::theme::shade(0.0), crate::theme::shade(0.42)];
-        let mut scrim = crate::theme::shaded();
-        scrim.set_shader(skia_safe::gradient::shaders::linear_gradient(
-            (
-                skia_safe::Point::new(r.left, r.top),
-                skia_safe::Point::new(r.left, deep),
-            ),
-            &skia_safe::gradient::Gradient::new(
-                skia_safe::gradient::Colors::new_evenly_spaced(&colors, TileMode::Clamp, None),
-                skia_safe::gradient::Interpolation::default(),
-            ),
-            None,
-        ));
-        canvas.draw_rect(back, &scrim);
-        let cx = f64::from(r.center_x());
-        let max_w = f64::from(r.width()) - 2.0 * crate::theme::edge(k);
-        if let Some(title) = &self.title {
-            let base = f64::from(r.top) + 32.0 * k;
-            centred_line(
-                canvas,
-                fonts,
-                title,
-                (cx, base),
-                (W::Bold, 25.0 * k),
-                fg(1.0),
-                max_w,
-            );
-        }
-        let base = f64::from(r.top) + 53.0 * k;
-        if let Some(note) = self.note {
-            let x = f64::from(r.left) + crate::theme::edge(k);
-            fonts.draw_clipped(
-                canvas,
-                note,
-                x,
-                base,
-                W::Regular,
-                11.0 * k,
-                fg(0.55),
-                max_w / 3.0,
-            );
-        }
-        if let Some(sub) = &self.subtitle {
-            let (size, track) = (11.0 * k, 1.2 * k);
-            let tw = f64::from(fonts.measure(sub, W::SemiBold, size))
-                + track * sub.chars().count().saturating_sub(1) as f64;
-            let x = cx - tw / 2.0;
-            fonts.draw_tracked(canvas, sub, x, base, W::SemiBold, size, track, fg(0.55));
-        }
-    }
 }
 
 #[cfg(test)]

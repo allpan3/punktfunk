@@ -477,6 +477,11 @@ impl LayerEnv<'_> {
         // A list's own soft edges copy the surface, which has none of this layer: they
         // would blur the field behind it over the rows. Off for the transition.
         crate::blur::set_in_layer(layered);
+        // Pinned chrome records over the whole canvas, past the safe area, so a band's
+        // scrim reaches the glass. Read before the slide moves the clip.
+        let edges = canvas
+            .local_clip_bounds()
+            .unwrap_or_else(|| Rect::from_wh(self.w as f32, self.h as f32));
         canvas.translate((dx as f32, dy as f32));
         let (cx, cy) = ((self.w / 2.0) as f32, (self.h / 2.0) as f32);
         canvas.translate((cx, cy));
@@ -508,8 +513,7 @@ impl LayerEnv<'_> {
             // a slide or a zoom never carries it. Its targets still count here.
             if screen.pinned(self.k) != (0.0, 0.0) {
                 let mut rec = PictureRecorder::new();
-                let bounds = Rect::from_wh(self.w as f32, self.h as f32);
-                let rc = rec.begin_recording(bounds, false);
+                let rc = rec.begin_recording(edges, false);
                 screen.render_pinned(rc, self.content, self.k, self.dt, self.fonts, &ctx);
                 pinned_pic = rec.finish_recording_as_picture(None);
             }
