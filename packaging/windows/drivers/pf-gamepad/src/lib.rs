@@ -528,23 +528,28 @@ const _: () = assert!(declared_len(&XBOX_HID_DESC) == XBOX_RDESC.len());
 const _: () = assert!(declared_len(&TRITON_HID_DESC) == pf_driver_proto::triton::RDESC.len());
 
 // HID_DEVICE_ATTRIBUTES (32 bytes): Size(u32)=32, VendorID, ProductID, VersionNumber, Reserved[11].
-// `devtype` selects the identity: PS family (same Sony VID/version), the N4-spike Deck, or one of
-// the three Xbox pads (same Microsoft VID/version — only the PID differs, which is the entire
-// difference between them; they share a report descriptor).
-//
-// ⚠️ THIS is where an Xbox identity is actually decided. Everything else in the Xbox path —
-// descriptor, HID descriptor, report length, neutral report — is shared, so a new Xbox model is a
-// PID here, a product string in `on_get_string`, an INF model line and nothing else.
+// VID/PID come from `identity_vid_pid`, the table the host checks the pad against. The three Xbox
+// pads differ only in PID and share a report descriptor. A section value this build does not know
+// keeps the DualSense answer.
 fn hid_attrs(devtype: u8) -> [u8; 32] {
-    let (vid, pid, ver) = match devtype {
-        1 => (DS_VID, DS4_PID, DS_VER),
-        2 => (DS_VID, DS_EDGE_PID, DS_VER),
-        3 => (DECK_VID, DECK_PID, DS_VER),
-        4 => (XBOX_VID, XBOX_PID, XBOX_VER),
-        5 => (XBOX_VID, XBOX_PID_ONE_S, XBOX_VER),
-        6 => (XBOX_VID, XBOX_PID_ELITE2, XBOX_VER),
-        7 => (DECK_VID, TRITON_PID, TRITON_VER),
-        _ => (DS_VID, DS_PID, DS_VER),
+    let ver = match devtype {
+        4..=6 => XBOX_VER,
+        7 => TRITON_VER,
+        _ => DS_VER,
+    };
+    let (vid, pid) =
+        pf_driver_proto::gamepad::identity_vid_pid(devtype).unwrap_or((DS_VID, DS_PID));
+    // The identity constants above document each id; the shared table must agree with them.
+    const _: () = {
+        use pf_driver_proto::gamepad::identity_vid_pid as id;
+        assert!(matches!(id(0), Some((DS_VID, DS_PID))));
+        assert!(matches!(id(1), Some((DS_VID, DS4_PID))));
+        assert!(matches!(id(2), Some((DS_VID, DS_EDGE_PID))));
+        assert!(matches!(id(3), Some((DECK_VID, DECK_PID))));
+        assert!(matches!(id(4), Some((XBOX_VID, XBOX_PID))));
+        assert!(matches!(id(5), Some((XBOX_VID, XBOX_PID_ONE_S))));
+        assert!(matches!(id(6), Some((XBOX_VID, XBOX_PID_ELITE2))));
+        assert!(matches!(id(7), Some((DECK_VID, TRITON_PID))));
     };
     let mut a = [0u8; 32];
     a[0..4].copy_from_slice(&32u32.to_le_bytes());
@@ -937,8 +942,9 @@ static CHANNEL: ChannelClient = ChannelClient::new();
 /// 7 = Steam Controller 2 ("Triton")) — the neutral-report shape when the channel detaches,
 /// and the fallback identity while unattached.
 static LAST_DEVTYPE: AtomicU32 = AtomicU32::new(0);
-/// The identity resolved from the devnode's PnP hardware ids at `EvtDeviceAdd` ([`devtype_from_hwids`]);
-/// `u32::MAX` = not resolved. See [`device_type`] for why this exists.
+/// The identity resolved from the devnode's PnP hardware ids at `EvtDeviceAdd`
+/// ([`pf_driver_proto::gamepad::devtype_from_hwids`]); `u32::MAX` = not resolved. See
+/// [`device_type`] for why this exists.
 static PNP_DEVTYPE: AtomicU32 = AtomicU32::new(u32::MAX);
 /// Timer ticks since load — picks the [`PUMP_EVERY_N_TICKS`] ticks that also do the channel
 /// handshake and health marks. Wrapping is fine: only its residue matters.
@@ -962,37 +968,6 @@ fn pad_elapsed_us() -> u64 {
 /// says, so the three ticks between pumps would otherwise keep serving a departed host's last
 /// report — a detached pad frozen mid-input instead of neutral.
 static HOST_LIVE: AtomicBool = AtomicBool::new(false);
-
-/// Map a devnode's hardware-id list (lowercase, `;`-separated — see
-/// [`wdf::query_hardware_ids`](pf_umdf_util::wdf::query_hardware_ids)) to the `device_type` the host
-/// stamps into the section. The host picks one `pf_*` id per identity and lists it FIRST (it is the
-/// INF binding contract, pinned by `dualsense_windows::drain_tests::hwid_matches_inf`), so the two
-/// can never disagree.
-///
-/// Order matters: `pf_dualsense` is a prefix of `pf_dualsenseedge`, so the Edge is tested first.
-/// (No Xbox token is a prefix of another — `pf_xboxwireless` / `pf_xboxones` / `pf_xboxelite`
-/// diverge at the 8th character — but `hwid_devtype_table_matches_the_driver` re-checks that for
-/// every pair rather than trusting this note.)
-fn devtype_from_hwids(ids: &str) -> Option<u8> {
-    for (token, devtype) in [
-        // Windows Server has no `xinputhid`, so the host binds the unfiltered line for every
-        // Xbox kind; the section corrects the PID once it attaches.
-        ("pf_xbox_nofilter", 4u8),
-        ("pf_xboxwireless", 4u8),
-        ("pf_xboxones", 5),
-        ("pf_xboxelite", 6),
-        ("pf_triton", 7),
-        ("pf_steamdeck", 3),
-        ("pf_dualsenseedge", 2),
-        ("pf_dualshock4", 1),
-        ("pf_dualsense", 0),
-    ] {
-        if ids.contains(token) {
-            return Some(devtype);
-        }
-    }
-    None
-}
 
 /// This pad's channel config (magic/size/pad_index offset + our logger).
 fn channel_cfg() -> ChannelConfig {
@@ -1079,17 +1054,20 @@ extern "C" fn evt_device_add(_driver: WDFDRIVER, mut device_init: PWDFDEVICE_INI
     // are the only identity available this early, and every descriptor/attribute answer depends on it.
     // SAFETY: `device` is the live device just created — the exact contract this fn requires.
     let hwids = unsafe { wdf::query_hardware_ids(device) };
-    match devtype_from_hwids(&hwids) {
+    match pf_driver_proto::gamepad::devtype_from_hwids(&hwids) {
         Some(t) => {
             PNP_DEVTYPE.store(t as u32, Ordering::Relaxed);
             LAST_DEVTYPE.store(t as u32, Ordering::Relaxed);
             dbglog!("[pf-gamepad] identity from PnP hardware ids: device_type={t} ({hwids})");
         }
-        // No pf_* id: an unexpected devnode (or a property query that failed). Keep the historical
-        // behaviour — wait for the channel, then fall back to DualSense.
-        None => dbglog!(
-            "[pf-gamepad] no pf_* hardware id in ({hwids}) — identity deferred to the channel"
-        ),
+        // No pf_* id: a devnode this driver cannot name, or a failed property query. Refuse it,
+        // so the devnode shows a PnP problem instead of a pad that claims to be a DualSense.
+        None => {
+            log(&format!(
+                "[pf-gamepad] no pf_* hardware id in ({hwids}); refusing the device"
+            ));
+            return pf_driver_proto::gamepad::STATUS_NO_PAD_IDENTITY as NTSTATUS;
+        }
     }
 
     // Default parallel queue handling all IOCTLs.

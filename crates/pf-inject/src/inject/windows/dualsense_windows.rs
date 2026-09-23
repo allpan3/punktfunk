@@ -1078,49 +1078,11 @@ mod drain_tests {
     }
 
     /// The driver picks HID identity from the hardware id at `EvtDeviceAdd`, before the sealed
-    /// channel exists. Every host hwid must match `devtype_from_hwids`, and longer tokens first:
-    /// `pf_dualsense` is a prefix of `pf_dualsenseedge`. A Deck frame parsed as DualSense `0x01`
-    /// pins the left stick and holds d-pad UP.
+    /// channel exists, through `pf_driver_proto::gamepad::devtype_from_hwids`. Every host hwid
+    /// must name the device_type the host stamps; a Deck frame parsed as DualSense `0x01` pins
+    /// the left stick and holds d-pad UP.
     #[test]
     fn hwid_devtype_table_matches_the_driver() {
-        let src = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../packaging/windows/drivers/pf-gamepad/src/lib.rs"
-        );
-        let driver = std::fs::read_to_string(src).expect("read pf-gamepad lib.rs");
-        let table = driver
-            .split_once("fn devtype_from_hwids")
-            .expect("devtype_from_hwids not found — did the driver's identity resolution move?")
-            .1;
-        let table = table.split_once("] {").expect("table literal").0;
-        let entries: Vec<(String, u8)> = table
-            .lines()
-            .filter_map(|l| l.trim().strip_prefix('('))
-            .filter_map(|l| l.split_once(','))
-            .filter_map(|(id, dt)| {
-                let id = id.trim().trim_matches('"').to_ascii_lowercase();
-                let dt = dt
-                    .trim()
-                    .trim_end_matches([')', ','])
-                    .trim_end_matches("u8");
-                dt.parse().ok().map(|dt| (id, dt))
-            })
-            .collect();
-        assert_eq!(
-            entries.len(),
-            9,
-            "parsed {entries:?} out of the driver's table — the shape changed and this test went \
-             vacuous; fix the parse rather than deleting the assert"
-        );
-        for (i, (id, _)) in entries.iter().enumerate() {
-            for (later, _) in &entries[i + 1..] {
-                assert!(
-                    !later.starts_with(id.as_str()),
-                    "the driver tests {id:?} before {later:?}, so a {later:?} devnode would \
-                     resolve to {id:?}'s identity — put the longer id first"
-                );
-            }
-        }
         for (hwid, devtype) in [
             (WinDsIdentity::dualsense().hwid, 0),
             (
@@ -1154,10 +1116,9 @@ mod drain_tests {
                 .iter()
                 .map(|i| (i.hwid, i.devtype)),
         ) {
-            let want = hwid.to_ascii_lowercase();
-            let got = entries.iter().find(|(id, _)| *id == want);
+            let got = pf_driver_proto::gamepad::devtype_from_hwids(&hwid.to_ascii_lowercase());
             assert_eq!(
-                got.map(|(_, dt)| *dt),
+                got,
                 Some(devtype),
                 "the host stamps device_type={devtype} for hardware id {hwid:?}, but the driver's \
                  table says {got:?} — the pad would enumerate with another controller's report \

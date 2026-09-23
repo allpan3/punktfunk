@@ -25,10 +25,13 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 use windows::core::{w, HRESULT, HSTRING, PCWSTR};
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
-    CM_Get_DevNode_Status, CM_Locate_DevNodeW, CM_DEVNODE_STATUS_FLAGS, CM_LOCATE_DEVNODE_NORMAL,
-    CM_PROB, CR_SUCCESS, DN_DRIVER_LOADED, DN_HAS_PROBLEM, DN_STARTED,
+    CM_Get_DevNode_PropertyW, CM_Get_DevNode_Status, CM_Locate_DevNodeW, CM_DEVNODE_STATUS_FLAGS,
+    CM_LOCATE_DEVNODE_NORMAL, CM_PROB, CR_SUCCESS, DN_DRIVER_LOADED, DN_HAS_PROBLEM, DN_STARTED,
 };
 use windows::Win32::Devices::Enumeration::Pnp::{SwDeviceClose, HSWDEVICE};
+use windows::Win32::Devices::Properties::{
+    DEVPKEY_Device_ProblemStatus, DEVPROPTYPE, DEVPROP_TYPE_NTSTATUS,
+};
 use windows::Win32::Foundation::{
     CloseHandle, DuplicateHandle, GetLastError, LocalFree, SetLastError, DUPLICATE_HANDLE_OPTIONS,
     ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, HANDLE, HLOCAL, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
@@ -704,8 +707,9 @@ impl Drop for SwDevice {
 const ATTACH_GRACE: Duration = Duration::from_secs(3);
 
 /// Per-pad attach watcher. Feed `driver_proto` every service tick; logs attach,
-/// version mismatch, or — after [`ATTACH_GRACE`] of silence — one diagnosis.
-/// States never repeat a log line, so the pump can call this at full rate.
+/// version mismatch, a pad that enumerated as another controller, or — after
+/// [`ATTACH_GRACE`] of silence — one diagnosis. States never repeat a log line, so the
+/// pump can call this at full rate.
 pub(super) struct DriverAttach {
     driver: &'static str,
     inf: &'static str,
@@ -713,6 +717,8 @@ pub(super) struct DriverAttach {
     shm_name: String,
     /// `None` on the out-of-band fallback path.
     instance_id: Option<String>,
+    /// The `device_type` the pad's hardware id names; `None` for the XUSB pad and the mouse.
+    identity: Option<u8>,
     created: Instant,
     state: AttachState,
 }
@@ -738,6 +744,7 @@ impl DriverAttach {
             driver_log,
             shm_name,
             instance_id,
+            identity: pf_driver_proto::gamepad::devtype_from_hwids(driver),
             created: Instant::now(),
             state: AttachState::Waiting,
         }
@@ -763,6 +770,7 @@ impl DriverAttach {
                         "gamepad driver/host protocol mismatch — update the drivers: punktfunk-host.exe driver install --gamepad"
                     );
                 }
+                self.check_identity();
                 self.state = AttachState::Attached;
             }
             AttachState::Waiting if self.created.elapsed() >= ATTACH_GRACE => {
@@ -770,6 +778,29 @@ impl DriverAttach {
                 self.state = AttachState::Warned;
             }
             _ => {}
+        }
+    }
+
+    /// WARN when the pad's HID collection reports another VID/PID than its hardware id names:
+    /// an older driver that did not know the id and answered as a DualSense.
+    fn check_identity(&self) {
+        let (Some(devtype), Some(id)) = (self.identity, self.instance_id.as_deref()) else {
+            return;
+        };
+        let want = pf_driver_proto::gamepad::identity_vid_pid(devtype);
+        let got = channel_proof::hid_vid_pid(id);
+        if got.is_some() && got != want {
+            let hex = |v: Option<(u16, u16)>| {
+                v.map_or("?".into(), |(v, p)| format!("VID_{v:04X}&PID_{p:04X}"))
+            };
+            tracing::warn!(
+                driver = self.driver,
+                devnode = id,
+                want = %hex(want),
+                got = %hex(got),
+                "virtual pad enumerated as another controller — games see the wrong pad; the \
+                 installed driver predates this host: punktfunk-host.exe driver install --gamepad"
+            );
         }
     }
 
@@ -899,11 +930,16 @@ fn devnode_status_line(instance_id: &str) -> String {
         return format!("devnode {instance_id}: status query failed (CR={})", cr.0);
     }
     if status.0 & DN_HAS_PROBLEM.0 != 0 {
+        let hint = match problem_status(devinst) {
+            Some(pf_driver_proto::gamepad::STATUS_NO_PAD_IDENTITY) => {
+                "the gamepad driver refused it: no pf_* hardware id names this pad; the host and \
+                 driver disagree on the controller list — reinstall both"
+            }
+            _ => cm_problem_hint(problem.0),
+        };
         return format!(
-            "devnode {instance_id} has PnP problem code {} ({}) [status 0x{:08x}]",
-            problem.0,
-            cm_problem_hint(problem.0),
-            status.0
+            "devnode {instance_id} has PnP problem code {} ({hint}) [status 0x{:08x}]",
+            problem.0, status.0
         );
     }
     format!(
@@ -912,6 +948,27 @@ fn devnode_status_line(instance_id: &str) -> String {
         status.0 & DN_DRIVER_LOADED.0 != 0,
         status.0 & DN_STARTED.0 != 0,
     )
+}
+
+/// The NTSTATUS a failed devnode reports (`DEVPKEY_Device_ProblemStatus`), as a raw `u32`.
+fn problem_status(devinst: u32) -> Option<u32> {
+    let mut ty = DEVPROPTYPE(0);
+    let mut value = [0u8; 4];
+    let mut size = value.len() as u32;
+    // SAFETY: `devinst` is a located devnode; the key is a static const; `value` holds `size`
+    // bytes and `ty` / `size` are valid out-params.
+    let cr = unsafe {
+        CM_Get_DevNode_PropertyW(
+            devinst,
+            &DEVPKEY_Device_ProblemStatus,
+            &mut ty,
+            Some(value.as_mut_ptr()),
+            &mut size,
+            0,
+        )
+    };
+    (cr == CR_SUCCESS && ty == DEVPROP_TYPE_NTSTATUS && size == 4)
+        .then(|| u32::from_le_bytes(value))
 }
 
 fn cm_problem_hint(problem: u32) -> &'static str {

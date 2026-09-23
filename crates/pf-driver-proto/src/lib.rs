@@ -2380,6 +2380,52 @@ pub mod gamepad {
             _ => alloc::format!("35533AD6E7{low:02X}"),
         }
     }
+
+    /// The `pf_*` hardware-id tokens the host puts first on a pad devnode, and the `device_type`
+    /// each names. A token that prefixes another comes after it (`pf_dualsense` after
+    /// `pf_dualsenseedge`), so the first match is the right one. Windows Server has no
+    /// `xinputhid`, so every Xbox kind binds `pf_xbox_nofilter`; the section fixes the PID.
+    pub const HWID_DEVTYPES: [(&str, u8); 9] = [
+        ("pf_xbox_nofilter", DEVTYPE_XBOX),
+        ("pf_xboxwireless", DEVTYPE_XBOX),
+        ("pf_xboxones", DEVTYPE_XBOX_ONE_S),
+        ("pf_xboxelite", DEVTYPE_XBOX_ELITE),
+        ("pf_triton", DEVTYPE_TRITON),
+        ("pf_steamdeck", DEVTYPE_STEAMDECK),
+        ("pf_dualsenseedge", DEVTYPE_DUALSENSE_EDGE),
+        ("pf_dualshock4", DEVTYPE_DUALSHOCK4),
+        ("pf_dualsense", DEVTYPE_DUALSENSE),
+    ];
+
+    /// The identity a devnode's lowercase hardware-id list names. `None` when no `pf_*` token is
+    /// in it: the driver refuses that devnode rather than guess one.
+    pub fn devtype_from_hwids(ids: &str) -> Option<u8> {
+        HWID_DEVTYPES
+            .iter()
+            .find(|(token, _)| ids.contains(token))
+            .map(|&(_, devtype)| devtype)
+    }
+
+    /// USB VID/PID the driver reports in each identity's HID attributes. SDL, Steam and Windows
+    /// key their stock mappings off them. `None` for a `device_type` this build does not know.
+    pub const fn identity_vid_pid(device_type: u8) -> Option<(u16, u16)> {
+        Some(match device_type {
+            DEVTYPE_DUALSENSE => (0x054C, 0x0CE6),
+            DEVTYPE_DUALSHOCK4 => (0x054C, 0x09CC),
+            DEVTYPE_DUALSENSE_EDGE => (0x054C, 0x0DF2),
+            DEVTYPE_STEAMDECK => (0x28DE, 0x1205),
+            DEVTYPE_XBOX => (0x045E, 0x0B13),
+            DEVTYPE_XBOX_ONE_S => (0x045E, 0x02FD),
+            DEVTYPE_XBOX_ELITE => (0x045E, 0x0B22),
+            DEVTYPE_TRITON => (0x28DE, 0x1302),
+            _ => return None,
+        })
+    }
+
+    /// NTSTATUS the driver fails `EvtDeviceAdd` with when no `pf_*` hardware id names the pad
+    /// (`STATUS_DEVICE_CONFIGURATION_ERROR`). The host reads it back from the devnode's problem
+    /// status to name the cause.
+    pub const STATUS_NO_PAD_IDENTITY: u32 = 0xC000_0182;
 }
 
 /// Steam Controller 2 (Triton) wire tables: UMDF driver (answers Steam synchronously) and
@@ -2934,6 +2980,39 @@ mod tests {
         assert_eq!(pad_serial(DEVTYPE_DUALSHOCK4, 0), "DEADBEEF0001");
         assert_eq!(pad_serial(DEVTYPE_STEAMDECK, 2), "FVPF50460002");
         assert_eq!(pad_serial(DEVTYPE_TRITON, 12), "FVPF130212D03");
+    }
+
+    /// The driver settles its identity from the hardware ids before hidclass asks, and refuses
+    /// a devnode none of them names. A token tested before a longer one it prefixes would hand
+    /// the longer one's pad the wrong report descriptor.
+    #[test]
+    fn hardware_ids_name_exactly_one_identity() {
+        use gamepad::*;
+        for (i, (token, devtype)) in HWID_DEVTYPES.iter().enumerate() {
+            for (later, _) in &HWID_DEVTYPES[i + 1..] {
+                assert!(!later.starts_with(token), "{token} shadows {later}");
+            }
+            assert_eq!(devtype_from_hwids(token), Some(*devtype), "{token}");
+            // The devnode carries synthesized USB ids after ours, as the host creates it.
+            let ids = alloc::format!("{token};usb\\vid_054c&pid_0ce6&rev_0100;usb\\class_03");
+            assert_eq!(devtype_from_hwids(&ids), Some(*devtype), "{ids}");
+            assert!(
+                identity_vid_pid(*devtype).is_some(),
+                "{token} has no VID/PID"
+            );
+        }
+        assert_eq!(
+            devtype_from_hwids("root\\pf_dualsense"),
+            Some(DEVTYPE_DUALSENSE)
+        );
+        assert_eq!(devtype_from_hwids("usb\\vid_054c&pid_0ce6"), None);
+        assert_eq!(devtype_from_hwids(""), None, "a failed property query");
+        assert_eq!(identity_vid_pid(DEVTYPE_TRITON + 1), None);
+        assert_eq!(
+            identity_vid_pid(DEVTYPE_DUALSENSE_EDGE),
+            Some((0x054C, 0x0DF2))
+        );
+        assert_eq!(identity_vid_pid(DEVTYPE_XBOX_ELITE), Some((0x045E, 0x0B22)));
     }
 
     /// Serves land one period apart on a fine timer, and a coarse timer restarts the schedule
