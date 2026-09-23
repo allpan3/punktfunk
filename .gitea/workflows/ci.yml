@@ -267,8 +267,9 @@ jobs:
 
       # Discovery without the desktop bundle. The workspace test above enables `desktop`,
       # which includes this feature, so it never compiles the feature on its own.
-      - name: Check discovery without desktop
-        run: cargo check -p pf-client-core --locked --no-default-features --features discovery
+      # Clippy with warnings denied: `cargo check` would stay green on a warning.
+      - name: Clippy discovery without desktop
+        run: cargo clippy -p pf-client-core --locked --no-default-features --features discovery -- -D warnings
 
       # The installer's behavioural gates — detection per family, the derived defaults, channel
       # switching both ways — driven against the binary. They ran in the docs-drift lane while
