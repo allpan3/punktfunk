@@ -713,14 +713,21 @@ impl HomeScreen {
         let fade = (1.0 - self.page.pos / block.max(1.0)).clamp(0.0, 1.0) as f32;
         let mut vx = x_of(f64::from(self.cursor));
         let vy = row_y + tile_h + VERB_AIR * k;
+        // The clip reaches left past the margin for the plate's outset.
+        let air = (32.0 * k) as f32;
         let mut under = El::scroll(Id::new("verbs", 0), Axis::Vertical)
             .group(Group::Row)
-            .place(Rect::from_xywh(0.0, 0.0, rect.width(), rect.height()));
+            .place(Rect::from_xywh(
+                -air,
+                0.0,
+                rect.width() + air,
+                rect.height(),
+            ));
         for (i, v) in verbs.iter().enumerate() {
             let label = v.label();
             let bw = button_w(fonts, label, k);
             let r = Rect::from_xywh(
-                (vx - f64::from(rect.left)) as f32,
+                (vx - f64::from(rect.left)) as f32 + air,
                 (vy - f64::from(rect.top)) as f32,
                 bw as f32,
                 (BUTTON_H * k) as f32,
