@@ -1946,6 +1946,17 @@
     }
   ],
   "$shell_tabs": "Version 3: the console's top-level tabs, in strip order. The Skia shell draws them on every platform, so its Rust twin pins them; Apple and Android hold no copy.",
+  "settings_sections": [
+    { "name": "Stream", "icon": "tv" },
+    { "name": "Picture", "icon": "film" },
+    { "name": "Sound", "icon": "volume-2" },
+    { "name": "Controllers", "icon": "gamepad-2" },
+    { "name": "Input", "icon": "mouse" },
+    { "name": "Interface", "icon": "palette" },
+    { "name": "Presets", "icon": "settings" },
+    { "name": "About", "icon": "info" }
+  ],
+  "$settings_sections": "Version 3: the Settings tab's sections and their Lucide marks, in rail order. The Skia shell draws them on every platform, so its Rust twin pins them. `tabs` below is the native shells' older list and goes with them.",
   "tabs": [
     {
       "name": "Stream"

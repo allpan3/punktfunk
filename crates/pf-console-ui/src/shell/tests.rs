@@ -559,8 +559,15 @@ fn next_section(s: &mut Shell) {
     while !matches!(s.stack.last(), Some(Screen::Settings(st)) if st.strip_focus_for_test()) {
         s.handle_menu(MenuEvent::Move(MenuDir::Up));
     }
-    s.handle_menu(MenuEvent::Move(MenuDir::Right));
-    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    // A rail walks down and returns right; a strip walks right and returns down.
+    let rail = matches!(s.stack.last(), Some(Screen::Settings(st)) if st.rail_for_test());
+    let (walk, back) = if rail {
+        (MenuDir::Down, MenuDir::Right)
+    } else {
+        (MenuDir::Right, MenuDir::Down)
+    };
+    s.handle_menu(MenuEvent::Move(walk));
+    s.handle_menu(MenuEvent::Move(back));
 }
 
 #[test]
@@ -742,7 +749,7 @@ fn a_long_press_is_secondary_on_the_row_under_the_finger() {
     use pf_client_core::console::{PointerButton, PointerInput};
     let (mut s, _) = rendered_settings();
     let bitrate = match s.stack.last() {
-        Some(Screen::Settings(scr)) => scr.row_rect_for_test(5).expect("Bitrate drew"),
+        Some(Screen::Settings(scr)) => scr.row_rect_for_test(3).expect("Bitrate drew"),
         _ => panic!("settings is not on top"),
     };
     let (x, y) = (bitrate.center_x(), bitrate.center_y());
