@@ -393,6 +393,8 @@ pub struct Palette {
     pub name: &'static str,
     /// Colour ramp, dark end first. `None` = [`MESH_COLORS`] verbatim.
     pub stops: Option<&'static [(f64, f64, f64)]>,
+    /// The two dominant colours of the console's field ([`field_sksl`]).
+    pub pair: [(f64, f64, f64); 2],
     /// The field's ground — what the corners settle onto and what the calm mix lifts toward.
     pub ground: (f64, f64, f64),
     pub accent: (f64, f64, f64),
@@ -416,6 +418,7 @@ pub const PALETTES: [Palette; 13] = [
     // --- dark fields (white ink) ---
     Palette {
         id: "violet", name: "Violet", stops: None,
+        pair: [(0.490, 0.390, 0.950), (0.200, 0.300, 0.850)],
         ground: (0.075, 0.060, 0.160), accent: (0.525, 0.471, 0.961), light: false,
     },
     Palette {
@@ -426,6 +429,7 @@ pub const PALETTES: [Palette; 13] = [
             (0.000, 0.000, 0.000), (0.000, 0.000, 0.000), (0.010, 0.020, 0.100),
             (0.045, 0.016, 0.115), (0.120, 0.024, 0.130),
         ]),
+        pair: [(0.120, 0.024, 0.130), (0.010, 0.020, 0.100)],
         ground: (0.0, 0.0, 0.0), accent: (0.525, 0.471, 0.961), light: false,
     },
     Palette {
@@ -434,6 +438,7 @@ pub const PALETTES: [Palette; 13] = [
             (0.07, 0.05, 0.20), (0.26, 0.14, 0.54), (0.52, 0.20, 0.72),
             (0.82, 0.26, 0.62), (0.98, 0.46, 0.68),
         ]),
+        pair: [(0.520, 0.200, 0.720), (0.860, 0.280, 0.620)],
         ground: (0.055, 0.040, 0.135), accent: (0.95, 0.42, 0.72), light: false,
     },
     Palette {
@@ -442,6 +447,7 @@ pub const PALETTES: [Palette; 13] = [
             (0.02, 0.10, 0.17), (0.04, 0.28, 0.42), (0.07, 0.46, 0.63),
             (0.16, 0.38, 0.78), (0.26, 0.22, 0.58),
         ]),
+        pair: [(0.070, 0.460, 0.630), (0.180, 0.360, 0.800)],
         ground: (0.018, 0.070, 0.130), accent: (0.26, 0.76, 0.92), light: false,
     },
     Palette {
@@ -450,6 +456,7 @@ pub const PALETTES: [Palette; 13] = [
             (0.16, 0.03, 0.10), (0.45, 0.06, 0.12), (0.72, 0.18, 0.06),
             (0.90, 0.42, 0.08), (0.95, 0.68, 0.18),
         ]),
+        pair: [(0.740, 0.180, 0.060), (0.920, 0.440, 0.080)],
         ground: (0.090, 0.035, 0.040), accent: (0.98, 0.62, 0.26), light: false,
     },
     Palette {
@@ -458,6 +465,7 @@ pub const PALETTES: [Palette; 13] = [
             (0.03, 0.11, 0.09), (0.06, 0.27, 0.20), (0.09, 0.45, 0.31),
             (0.28, 0.61, 0.28), (0.58, 0.77, 0.31),
         ]),
+        pair: [(0.090, 0.450, 0.310), (0.300, 0.620, 0.280)],
         ground: (0.025, 0.085, 0.070), accent: (0.48, 0.86, 0.46), light: false,
     },
     Palette {
@@ -466,6 +474,7 @@ pub const PALETTES: [Palette; 13] = [
             (0.06, 0.07, 0.11), (0.15, 0.18, 0.25), (0.30, 0.31, 0.35),
             (0.45, 0.42, 0.38), (0.60, 0.56, 0.49),
         ]),
+        pair: [(0.300, 0.310, 0.360), (0.160, 0.190, 0.270)],
         ground: (0.055, 0.055, 0.070), accent: (0.78, 0.80, 0.86), light: false,
     },
     // --- pale fields (dark ink) ---
@@ -475,6 +484,7 @@ pub const PALETTES: [Palette; 13] = [
             (0.99, 0.72, 0.90), (0.80, 0.60, 0.98), (0.58, 0.62, 0.99),
             (0.55, 0.86, 0.98), (0.94, 0.98, 1.00),
         ]),
+        pair: [(0.800, 0.600, 0.980), (0.550, 0.860, 0.980)],
         ground: (0.96, 0.92, 0.99), accent: (0.42, 0.28, 0.86), light: true,
     },
     Palette {
@@ -483,6 +493,7 @@ pub const PALETTES: [Palette; 13] = [
             (0.55, 0.45, 0.92), (0.86, 0.31, 0.66), (0.97, 0.26, 0.34),
             (0.99, 0.51, 0.18), (1.00, 0.80, 0.22),
         ]),
+        pair: [(0.970, 0.260, 0.340), (0.990, 0.510, 0.180)],
         ground: (0.98, 0.74, 0.34), accent: (0.64, 0.13, 0.44), light: true,
     },
     Palette {
@@ -491,6 +502,7 @@ pub const PALETTES: [Palette; 13] = [
             (1.00, 0.86, 0.72), (0.99, 0.73, 0.79), (0.95, 0.65, 0.89),
             (0.82, 0.68, 0.96), (0.73, 0.79, 0.99),
         ]),
+        pair: [(0.990, 0.730, 0.790), (0.820, 0.680, 0.960)],
         ground: (0.99, 0.90, 0.89), accent: (0.72, 0.24, 0.55), light: true,
     },
     Palette {
@@ -499,6 +511,7 @@ pub const PALETTES: [Palette; 13] = [
             (1.00, 0.92, 0.70), (1.00, 0.80, 0.62), (0.99, 0.66, 0.62),
             (0.90, 0.62, 0.78), (0.77, 0.69, 0.95),
         ]),
+        pair: [(1.000, 0.800, 0.620), (0.900, 0.620, 0.780)],
         ground: (1.00, 0.93, 0.82), accent: (0.82, 0.33, 0.28), light: true,
     },
     Palette {
@@ -507,6 +520,7 @@ pub const PALETTES: [Palette; 13] = [
             (0.82, 0.98, 0.90), (0.62, 0.94, 0.88), (0.55, 0.88, 0.95),
             (0.63, 0.82, 0.99), (0.82, 0.87, 1.00),
         ]),
+        pair: [(0.620, 0.940, 0.880), (0.630, 0.820, 0.990)],
         ground: (0.90, 0.98, 0.96), accent: (0.04, 0.42, 0.40), light: true,
     },
     Palette {
@@ -515,6 +529,7 @@ pub const PALETTES: [Palette; 13] = [
             (0.98, 0.92, 0.96), (0.87, 0.93, 0.99), (0.91, 0.99, 0.95),
             (0.99, 0.96, 0.88), (0.94, 0.90, 0.99),
         ]),
+        pair: [(0.870, 0.930, 0.990), (0.990, 0.960, 0.880)],
         ground: (0.97, 0.96, 0.99), accent: (0.36, 0.32, 0.44), light: true,
     },
 ];
@@ -575,31 +590,43 @@ const VIOLET_BLOBS: [(f64, f64, f64); 5] = [
     (0.53, 0.47, 0.96),
 ];
 
-/// Mesh gradient as SkSL: palette and motion baked in; resolution, time and calm are uniforms.
+/// The console's field: three large soft pools of a palette's two dominant colours on its
+/// ground. Each pool is `(colour, base x, base y, amp x, amp y, speed x, speed y, phase,
+/// sigma, weight)` in UV (x in heights), rad·s⁻¹. Periods run 200–290 s, out of phase.
+fn field_pools(pair: [(f64, f64, f64); 2]) -> [((f64, f64, f64), [f64; 9]); 3] {
+    let (a, b) = (pair[0], pair[1]);
+    let mid = ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0, (a.2 + b.2) / 2.0);
+    [
+        (a, [0.22, 0.28, 0.16, 0.12, 0.031, 0.027, 0.4, 0.42, 1.0]),
+        (b, [0.80, 0.66, 0.18, 0.14, 0.024, 0.029, 2.3, 0.46, 1.0]),
+        (mid, [0.52, 1.00, 0.20, 0.08, 0.027, 0.022, 4.1, 0.38, 0.8]),
+    ]
+}
+
+/// How much of the ground shows between the pools.
+const FIELD_GROUND_WEIGHT: f64 = 0.30;
+
+/// The field as SkSL: palette and motion baked in; resolution, time and calm are uniforms.
 ///
-/// Bicubic 16-colour blend (SwiftUI `MeshGradient(smoothsColors: true)`). Interior points
-/// drive a bounded domain warp; then ±8° / ~5 min hue sway, elliptical vignette, vertical scrim
-/// — Swift `composite(at:)`.
+/// Three pools ([`field_pools`]) blended by normalised Gaussian weights, so no edge is hard;
+/// then a ±4° hue sway, the elliptical vignette and the vertical scrim.
 ///
 /// `u_tc.y` is the calm mix (0 launcher, 1 form): flatten toward `u_lift` so a screen
 /// crossfade never jumps the field. Motion speed is unchanged.
-pub fn mesh_sksl(colors: &[(f64, f64, f64); 16]) -> String {
-    let c = |i: usize| {
-        let (r, g, b) = colors[i];
-        format!("float3({r}, {g}, {b})")
-    };
-    // Interior domain-warp, matching Swift `wob()`: x = sin(t·sx+ph), y = cos(t·sy+ph·1.3).
-    // Weight-normalised average, so |warp| ≤ max|amp|.
-    let mut warp = String::new();
-    for (bx, by, amp, sx, sy, ph) in MESH_INTERIOR {
-        warp.push_str(&format!(
-            "    q = uv - float2({bx}, {by});\n\
-                 ww = exp(-dot(q, q) / (2.0 * 0.30 * 0.30));\n\
-                 d = float2({amp} * sin(tt * {sx} + {ph}), \
-                            {amp} * cos(tt * {sy} + {ph} * 1.3));\n\
-                 wsum += d * ww; wtot += ww;\n",
+pub fn field_sksl(ground: (f64, f64, f64), pair: [(f64, f64, f64); 2]) -> String {
+    let rgb = |(r, g, b): (f64, f64, f64)| format!("float3({r}, {g}, {b})");
+    let mut pools = String::new();
+    for (col, [bx, by, ax, ay, sx, sy, ph, sigma, weight]) in field_pools(pair) {
+        pools.push_str(&format!(
+            "    c = float2({bx} * ar + {ax} * sin(tt * {sx} + {ph}), \
+                         {by} + {ay} * cos(tt * {sy} + {ph} * 1.3));\n\
+                 q = p - c;\n\
+                 ww = {weight} * exp(-dot(q, q) / (2.0 * {sigma} * {sigma}));\n\
+                 acc += {col} * ww; wtot += ww;\n",
+            col = rgb(col),
         ));
     }
+    let ground = rgb(ground);
     format!(
         "uniform float2 u_res;\n\
          // x = seconds since the shell started, y = the calm mix (0 launcher, 1 form).\n\
@@ -613,16 +640,7 @@ pub fn mesh_sksl(colors: &[(f64, f64, f64); 16]) -> String {
          // strength bleaches the chroma straight out of the gradient.\n\
          uniform float4 u_scrim;\n\
          \n\
-         // Cubic-Bézier basis over four control values — the smooth 4-point blend per axis.\n\
-         float bz(float t, float a, float b, float c, float d) {{\n\
-         \x20   float u = 1.0 - t;\n\
-         \x20   return u*u*u*a + 3.0*u*u*t*b + 3.0*u*t*t*c + t*t*t*d;\n\
-         }}\n\
-         float3 bz3(float t, float3 a, float3 b, float3 c, float3 d) {{\n\
-         \x20   return float3(bz(t, a.r, b.r, c.r, d.r), bz(t, a.g, b.g, c.g, d.g), \
-                              bz(t, a.b, b.b, c.b, d.b));\n\
-         }}\n\
-         // Hue rotation about the grey axis (Rodrigues) — the ±8° warm/cool sway.\n\
+         // Hue rotation about the grey axis (Rodrigues) — the ±4° warm/cool sway.\n\
          float3 hue(float3 col, float a) {{\n\
          \x20   float3 k = float3(0.5773503);\n\
          \x20   float cs = cos(a); float sn = sin(a);\n\
@@ -631,20 +649,15 @@ pub fn mesh_sksl(colors: &[(f64, f64, f64); 16]) -> String {
          \n\
          half4 main(float2 xy) {{\n\
          \x20   float tt = u_tc.x; float calm = u_tc.y;\n\
-         \x20   float2 uv = xy / u_res;\n\
-         \x20   // Interior control points wander → bounded domain warp (pools follow them).\n\
-         \x20   float2 wsum = float2(0.0); float wtot = 0.0; float2 q; float ww; float2 d;\n\
-         {warp}\
-         \x20   uv = clamp(uv - wsum / (wtot + 1e-4), 0.0, 1.0);\n\
+         \x20   // Heights as the unit, so a pool stays round on any aspect.\n\
+         \x20   float ar = u_res.x / u_res.y;\n\
+         \x20   float2 p = float2(xy.x / u_res.y, xy.y / u_res.y);\n\
+         \x20   float3 acc = {ground} * {gw}; float wtot = {gw};\n\
+         \x20   float2 c; float2 q; float ww;\n\
+         {pools}\
+         \x20   float3 col = acc / wtot;\n\
          \n\
-         \x20   // Bicubic blend of the 16 mesh colours: cubic-Bézier in x per row, then in y.\n\
-         \x20   float3 r0 = bz3(uv.x, {c0}, {c1}, {c2}, {c3});\n\
-         \x20   float3 r1 = bz3(uv.x, {c4}, {c5}, {c6}, {c7});\n\
-         \x20   float3 r2 = bz3(uv.x, {c8}, {c9}, {c10}, {c11});\n\
-         \x20   float3 r3 = bz3(uv.x, {c12}, {c13}, {c14}, {c15});\n\
-         \x20   float3 col = bz3(uv.y, r0, r1, r2, r3);\n\
-         \n\
-         \x20   col = hue(col, sin(tt * 0.021) * 0.1396263);\n\
+         \x20   col = hue(col, sin(tt * 0.017) * 0.0698132);\n\
          \n\
          \x20   // Calm: flatten the field toward its own corner colour — the pools dim and the\n\
          \x20   // corners lift, so a form screen keeps real colour under its glass rows while\n\
@@ -668,10 +681,7 @@ pub fn mesh_sksl(colors: &[(f64, f64, f64); 16]) -> String {
          \n\
          \x20   return half4(half3(col), 1.0);\n\
          }}\n",
-        c0 = c(0), c1 = c(1), c2 = c(2), c3 = c(3),
-        c4 = c(4), c5 = c(5), c6 = c(6), c7 = c(7),
-        c8 = c(8), c9 = c(9), c10 = c(10), c11 = c(11),
-        c12 = c(12), c13 = c(13), c14 = c(14), c15 = c(15),
+        gw = FIELD_GROUND_WEIGHT,
     )
 }
 
@@ -2053,14 +2063,36 @@ mod tests {
         assert_eq!(initials("half-life"), "H");
     }
 
-    /// Generated SkSL: 16 colours baked, five bicubic evals, four interior warp terms, braces balanced.
+    /// Generated SkSL: three pools, braces balanced, and it compiles with the 48-byte block
+    /// the shell packs.
     #[test]
-    fn mesh_sksl_shape() {
-        let src = mesh_sksl(&MESH_COLORS);
-        assert!(src.matches("float3(").count() >= 16, "16 colours baked");
-        assert_eq!(src.matches("bz3(").count(), 6); // 1 definition + 5 call sites
-        assert_eq!(src.matches("wtot +=").count(), 4); // one per interior point
-        assert_eq!(src.matches('{').count(), src.matches('}').count());
+    fn field_sksl_compiles_with_three_pools() {
+        for p in &PALETTES {
+            let src = field_sksl(p.ground, p.pair);
+            assert_eq!(src.matches("wtot +=").count(), 3, "{}", p.id);
+            assert_eq!(src.matches('{').count(), src.matches('}').count());
+            let effect = skia_safe::RuntimeEffect::make_for_shader(&src, None)
+                .unwrap_or_else(|e| panic!("{}: {e}", p.id));
+            assert_eq!(effect.uniform_size(), 48, "{}", p.id);
+        }
+    }
+
+    /// Every palette's pair vs `backdrop_pairs` in `console-vectors.json`.
+    #[test]
+    fn backdrop_pairs_match_the_shared_vectors() {
+        let raw = include_str!("../../../clients/shared/console-vectors.json");
+        let file: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let rows = file["backdrop_pairs"].as_array().expect("backdrop_pairs");
+        assert_eq!(rows.len(), PALETTES.len());
+        for (row, p) in rows.iter().zip(&PALETTES) {
+            assert_eq!(row["id"], p.id);
+            for (want, got) in row["pair"].as_array().unwrap().iter().zip(p.pair) {
+                let want: Vec<f64> = (want.as_array().unwrap().iter())
+                    .map(|v| v.as_f64().unwrap())
+                    .collect();
+                assert_eq!(want, vec![got.0, got.1, got.2], "{}", p.id);
+            }
+        }
     }
 
     #[test]

@@ -9,7 +9,7 @@
 
 use crate::anim::{springs, Spring};
 use crate::glyphs::GlyphStyle;
-use crate::library::{mesh_sksl, palette, LibraryShared};
+use crate::library::{field_sksl, palette, LibraryShared};
 use crate::model::{
     ConsoleBus, ConsoleCmd, ConsoleShared, HostRow, PairPhase, SpeedPhase, SpeedStatus, WakeStatus,
 };
@@ -2078,7 +2078,7 @@ type MeshLook = (RuntimeEffect, [f32; 3], [f32; 4], crate::theme::Ink);
 
 fn build_mesh(palette_id: &str) -> Result<MeshLook> {
     let p = palette(palette_id);
-    compile_mesh(&p.mesh_colors(), crate::theme::Ink::of(p), p.ground)
+    compile_mesh(p.pair, crate::theme::Ink::of(p), p.ground)
 }
 
 /// Follow-system field: a quiet ramp from the theme's own colours, not the
@@ -2086,39 +2086,23 @@ fn build_mesh(palette_id: &str) -> Result<MeshLook> {
 fn build_mesh_os(t: &crate::os_theme::OsTheme) -> Result<MeshLook> {
     use crate::os_theme::mix;
     let (bg, fg, ac) = (t.background, t.foreground, t.accent);
-    let stops: [(f64, f64, f64); 5] = if t.light {
-        // Pale field shades toward its text colour, not black: darkening a
-        // pastel strands dark ink on it (see `theme::Ink` scrim).
-        [
-            mix(bg, fg, 0.10),
-            bg,
-            bg,
-            mix(bg, ac, 0.08),
-            mix(bg, ac, 0.18),
-        ]
+    // A pale field shades toward its text colour, not black: darkening a pastel strands
+    // dark ink on it (see `theme::Ink` scrim).
+    let pair = if t.light {
+        [mix(bg, ac, 0.18), mix(bg, fg, 0.10)]
     } else {
-        [
-            mix(bg, (0.0, 0.0, 0.0), 0.35),
-            bg,
-            bg,
-            mix(bg, ac, 0.12),
-            mix(bg, ac, 0.30),
-        ]
+        [mix(bg, ac, 0.30), mix(bg, (0.0, 0.0, 0.0), 0.35)]
     };
-    compile_mesh(
-        &crate::library::mesh_colors_of(&stops),
-        crate::theme::Ink::of_os(t),
-        bg,
-    )
+    compile_mesh(pair, crate::theme::Ink::of_os(t), bg)
 }
 
 fn compile_mesh(
-    colors: &[(f64, f64, f64); 16],
+    pair: [(f64, f64, f64); 2],
     ink: crate::theme::Ink,
     ground: (f64, f64, f64),
 ) -> Result<MeshLook> {
-    let effect = RuntimeEffect::make_for_shader(mesh_sksl(colors), None)
-        .map_err(|e| anyhow!("mesh-gradient SkSL: {e}"))?;
+    let effect = RuntimeEffect::make_for_shader(field_sksl(ground, pair), None)
+        .map_err(|e| anyhow!("backdrop SkSL: {e}"))?;
     anyhow::ensure!(
         effect.uniform_size() == 48,
         "mesh uniform block is {} bytes, expected 48 (u_res, u_tc, u_lift, u_scrim)",
