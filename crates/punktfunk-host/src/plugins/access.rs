@@ -290,10 +290,15 @@ fn refusal_rule(
     }
     #[cfg(unix)]
     {
+        // udisks mounts second drives and SD cards below `/run/media`: volumes, like `/mnt/x`.
+        let volume = canonical
+            .parent()
+            .is_some_and(|p| within(p, Path::new("/run/media")));
         protected = protected
-            || ["/proc", "/sys", "/dev", "/run"]
-                .iter()
-                .any(|r| within(canonical, Path::new(r)));
+            || (!volume
+                && ["/proc", "/sys", "/dev", "/run"]
+                    .iter()
+                    .any(|r| within(canonical, Path::new(r))));
     }
     #[cfg(windows)]
     {
@@ -487,7 +492,7 @@ impl AccessStore {
         let entry = access.get(id).cloned().unwrap_or_default();
         let mut pending = pending_all.remove(id).unwrap_or_default();
         let mut changed = false;
-        let outcomes = paths
+        let outcomes: Vec<RequestOutcome> = paths
             .iter()
             .map(|(raw, write)| {
                 self.request_one(
@@ -501,6 +506,12 @@ impl AccessStore {
                 )
             })
             .collect();
+        // The console lists only pending rows; a refusal is visible nowhere else.
+        for o in &outcomes {
+            if let Some(rule) = o.outcome.strip_prefix("refused:") {
+                tracing::info!(plugin = id, path = %o.path, rule, "plugin folder request refused");
+            }
+        }
         if changed {
             pending_all.insert(id.to_string(), pending);
             self.write_pending(&pending_all)?;
@@ -976,6 +987,22 @@ mod tests {
                 assert_eq!(f.request(p), "refused:protected_path", "{p}");
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removable_volumes_under_run_media_are_grantable() {
+        let f = fixture();
+        let dir = PathFacts {
+            is_dir: true,
+            owner_uid: None,
+        };
+        let rule = |p: &str| refusal_rule(Path::new(p), Path::new(p), false, &f.policy, dir);
+        assert_eq!(rule("/run/media/deck/SD/Emulation/roms"), None);
+        assert_eq!(rule("/run/media/mmcblk0p1"), None);
+        assert_eq!(rule("/run/media"), Some("protected_path"));
+        assert_eq!(rule("/run/user/1000"), Some("protected_path"));
+        assert_eq!(rule("/run/mediax/games"), Some("protected_path"));
     }
 
     #[test]
