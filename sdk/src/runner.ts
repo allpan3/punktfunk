@@ -45,6 +45,7 @@ import {
 	sandboxProbe,
 } from "./sandbox.js";
 import { serveHostProxy } from "./host-proxy.js";
+import { forwardUi, type UiForward } from "./ui-forward.js";
 
 export interface RunnerOptions {
 	/** Where loose scripts live. Default `<config_dir>/scripts`. */
@@ -569,6 +570,24 @@ const runSandboxed = (
 			url,
 			fetch: ((input, init) => pinned.then((f) => f(input, init))) as typeof fetch,
 		});
+		// No network: its UI socket goes in a dir of its own, forwarded to the host's loopback.
+		let ui: { dir: string; port: number } | undefined;
+		let forward: UiForward | undefined;
+		if (!manifest.network) {
+			const dir = path.join(runtime, "punktfunk", `ui-${id}-${randomBytes(4).toString("hex")}`);
+			try {
+				fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+				forward = forwardUi(path.join(dir, "ui.sock"));
+				ui = { dir, port: forward.port };
+			} catch (e) {
+				log(`[runner] ${id}: its settings page stays unreachable — ${e}`, "warn");
+			}
+		}
+		const release = (): void => {
+			proxy.close();
+			forward?.close();
+			if (ui) fs.rmSync(ui.dir, { recursive: true, force: true });
+		};
 		const argv = [
 			...bwrapArgv(
 				manifest,
@@ -580,6 +599,7 @@ const runSandboxed = (
 					bun: process.execPath,
 					runner: runnerEntry(),
 					home,
+					...(ui ? { ui } : {}),
 				},
 				grants,
 			),
@@ -605,11 +625,11 @@ const runSandboxed = (
 		// A bwrap that dies before reading surfaces through `exit`, not an EPIPE here.
 		(child.stdio[3] as Writable).on("error", () => {}).end(filter);
 		child.on("error", (e) => {
-			proxy.close();
+			release();
 			resume(Effect.fail(e));
 		});
 		child.on("exit", (code, signal) => {
-			proxy.close();
+			release();
 			if (code === 0) {
 				resume(Effect.succeed("plugin" as const));
 				return;
@@ -628,7 +648,7 @@ const runSandboxed = (
 			// Interruption (shutdown): SIGTERM lets the plugin's finalizers run; `--die-with-parent`
 			// is the backstop if this runner is killed outright.
 			child.kill("SIGTERM");
-			proxy.close();
+			release();
 		});
 	});
 
