@@ -842,6 +842,10 @@ impl MenuList {
         } else {
             None
         };
+        // The shadow deepens with focus; an idle row casts none.
+        if f > 0.01 {
+            crate::theme::drop_shadow(canvas, r, 14.0, k as f32, 0.30 * f as f32);
+        }
         crate::theme::panel(canvas, r, 14.0, tint, stroke, k as f32);
         // Specular only on the focused row; a settings screen paints dozens of idle rows.
         if f > 0.5 {

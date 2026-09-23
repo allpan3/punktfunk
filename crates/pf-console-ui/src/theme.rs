@@ -263,7 +263,8 @@ pub enum PanelStroke {
     Brand(f32),
 }
 
-/// Glass panel. `corner` and the dash pattern are design units; the caller's `k` scales them.
+/// Glass panel with its gloss: a sheen from the top left, gone by the middle. `corner` and
+/// the dash pattern are design units; the caller's `k` scales them.
 pub fn panel(
     canvas: &Canvas,
     rect: Rect,
@@ -277,6 +278,23 @@ pub fn panel(
     if let Some(tint) = tint {
         canvas.draw_rrect(rr, &fill(tint));
     }
+    let mut sheen = shaded();
+    let colors = [
+        Color4f::new(1.0, 1.0, 1.0, SHEEN),
+        Color4f::new(1.0, 1.0, 1.0, 0.0),
+    ];
+    sheen.set_shader(gradient::shaders::linear_gradient(
+        (
+            Point::new(rect.left, rect.top),
+            Point::new(rect.center_x(), rect.center_y()),
+        ),
+        &gradient::Gradient::new(
+            gradient::Colors::new_evenly_spaced(&colors, TileMode::Clamp, None),
+            gradient::Interpolation::default(),
+        ),
+        None,
+    ));
+    canvas.draw_rrect(rr, &sheen);
     // Opaque: Plain/Brand overwrite colour; a shader's output is scaled by this paint's alpha.
     let mut sp = shaded_stroke(1.0);
     match stroke {
@@ -427,6 +445,10 @@ pub fn focus_halo(canvas: &Canvas, rect: Rect, corner: f32, k: f32, f: f32) {
     canvas.restore();
 }
 
+/// The gloss's peak white, at a panel's top-left corner.
+const SHEEN: f32 = 0.07;
+
+/// A soft shadow falling below `rect`, drawn only outside it: glass shows what lies under.
 pub fn drop_shadow(canvas: &Canvas, rect: Rect, corner: f32, k: f32, alpha: f32) {
     // Scale 0.40 at the pale pole so the caller's alpha stays dark-field strength.
     let alpha = if ink().scrim.r > 0.5 {
@@ -441,7 +463,11 @@ pub fn drop_shadow(canvas: &Canvas, rect: Rect, corner: f32, k: f32, alpha: f32)
         None,
     ));
     let shifted = rect.with_offset((0.0, 10.0 * k));
+    canvas.save();
+    let card = RRect::new_rect_xy(rect, corner * k, corner * k);
+    canvas.clip_rrect(card, skia_safe::ClipOp::Difference, true);
     canvas.draw_rrect(RRect::new_rect_xy(shifted, corner * k, corner * k), &p);
+    canvas.restore();
 }
 
 /// Loading spinner. `t` is the shell clock.
