@@ -2956,4 +2956,294 @@ mod tests {
         assert_eq!(idle.desktop_caption(), "Desktop");
         assert_eq!(idle.desktop_intent().title, "Desk");
     }
+
+    /// A 2:3 poster, PNG-encoded: a two-hue gradient with a pale disc, colour from `seed`.
+    fn poster_png(seed: usize) -> Vec<u8> {
+        let hues = [
+            (0.85, 0.30, 0.35),
+            (0.25, 0.50, 0.85),
+            (0.30, 0.72, 0.45),
+            (0.88, 0.62, 0.22),
+            (0.55, 0.30, 0.80),
+            (0.20, 0.70, 0.75),
+        ];
+        let (a, b) = (hues[seed % hues.len()], hues[(seed + 2) % hues.len()]);
+        let mut surface = skia_safe::surfaces::raster_n32_premul((300, 450)).unwrap();
+        let canvas = surface.canvas();
+        let mut p = crate::theme::shaded();
+        p.set_shader(skia_safe::gradient::shaders::linear_gradient(
+            (Point::new(0.0, 0.0), Point::new(300.0, 450.0)),
+            &skia_safe::gradient::Gradient::new(
+                skia_safe::gradient::Colors::new_evenly_spaced(
+                    &[
+                        Color4f::new(a.0, a.1, a.2, 1.0),
+                        Color4f::new(b.0 * 0.4, b.1 * 0.4, b.2 * 0.4, 1.0),
+                    ],
+                    skia_safe::TileMode::Clamp,
+                    None,
+                ),
+                skia_safe::gradient::Interpolation::default(),
+            ),
+            None,
+        ));
+        canvas.draw_rect(Rect::from_wh(300.0, 450.0), &p);
+        let disc = Color4f::new(1.0, 1.0, 1.0, 0.35);
+        canvas.draw_circle((150.0, 170.0 + (seed % 3) as f32 * 30.0), 80.0, &fill(disc));
+        surface
+            .image_snapshot()
+            .encode(None, skia_safe::EncodedImageFormat::PNG, 100)
+            .unwrap()
+            .as_bytes()
+            .to_vec()
+    }
+
+    /// Ignored eyeball dump of the Games tab, `PF_CONSOLE_DUMP=<dir> cargo test -p
+    /// pf-console-ui --release --lib -- --ignored dump_library`: the rows, the pills, the
+    /// shelf, the three list states, Collections, and a phone.
+    #[test]
+    #[ignore]
+    fn dump_library() {
+        use crate::shell::{ConsoleOptions, Shell};
+        let dir = std::env::var("PF_CONSOLE_DUMP").expect("set PF_CONSOLE_DUMP to an output dir");
+        crate::screens::settings::tests::fake_home();
+        let fonts = crate::theme::build_fonts().unwrap();
+        let hosts = || {
+            let one = HostRow {
+                key: "aa11".into(),
+                name: "Living Room PC".into(),
+                fp_hex: "aa11".into(),
+                os: "windows".into(),
+                ..host()
+            };
+            let two = HostRow {
+                key: "bb22".into(),
+                name: "Office Tower".into(),
+                fp_hex: "bb22".into(),
+                os: "fedora".into(),
+                online: false,
+                running: "Hades II".into(),
+                ..host()
+            };
+            vec![one, two]
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let titles = [
+            "Steam",
+            "Hades II",
+            "Elden Ring",
+            "Hollow Knight",
+            "Celeste",
+            "Tunic",
+            "Baldur's Gate 3",
+            "Deep Rock Galactic",
+            "Portal 2",
+            "Outer Wilds",
+            "Disco Elysium",
+            "Stardew Valley",
+            "Cyberpunk 2077",
+            "Inside",
+        ];
+        let list = || -> Vec<LibraryGame> {
+            let mut list: Vec<LibraryGame> = (titles.iter().enumerate())
+                .map(|(i, t)| LibraryGame {
+                    id: format!("steam:{i}"),
+                    title: (*t).to_string(),
+                    store: if i % 5 == 3 { "epic" } else { "steam" }.into(),
+                    launcher: i == 0,
+                    icon: if i == 0 {
+                        "steam".into()
+                    } else {
+                        String::new()
+                    },
+                    platform: (i % 4 == 2).then(|| "PC".to_string()),
+                    developer: None,
+                    year: None,
+                    genres: Vec::new(),
+                    stats: None,
+                    running: i == 1,
+                })
+                .collect();
+            for (i, hours) in [(2, 2), (3, 30), (5, 80)] {
+                list[i].stats = Some(pf_client_core::library::GameStats {
+                    last_played_unix_ms: now - hours * 3_600_000,
+                    play_time_ms: hours * 1_900_000,
+                    ..Default::default()
+                });
+            }
+            list
+        };
+        let shell = |settings: pf_client_core::trust::Settings, library: &LibraryShared, stack| {
+            let console = crate::model::ConsoleShared::default();
+            console.set_hosts(hosts());
+            let mut opts = ConsoleOptions::desktop("deck".into(), false);
+            opts.store = Some(std::sync::Arc::new(crate::store::SnapshotStore::new(
+                settings,
+                Vec::new(),
+            )));
+            let bus = crate::model::ConsoleBus::default();
+            let mut s = Shell::new(console, library.clone(), bus, opts, stack).unwrap();
+            s.fake_clock = Some((0.0, 1.0 / 60.0));
+            s
+        };
+        let dump = |s: &mut Shell, frames: usize, name: &str| {
+            let mut surface = skia_safe::surfaces::raster_n32_premul((1280, 800)).unwrap();
+            for _ in 0..frames {
+                s.render(
+                    surface.canvas(),
+                    1280,
+                    800,
+                    &fonts,
+                    Some("Xbox Wireless Controller"),
+                    Some(punktfunk_core::config::GamepadPref::Xbox360),
+                    &[],
+                );
+            }
+            let png = surface
+                .image_snapshot()
+                .encode(None, skia_safe::EncodedImageFormat::PNG, 100)
+                .unwrap();
+            std::fs::write(format!("{dir}/{name}.png"), png.as_bytes()).unwrap();
+        };
+        let tab = |view: LibraryView, sort: &str, palette: &str, library: &LibraryShared| {
+            let mut settings = pf_client_core::trust::Settings {
+                library_view: view.id().to_string(),
+                library_sort: sort.to_string(),
+                ui_palette: palette.to_string(),
+                ..Default::default()
+            };
+            crate::library::toggle_favorite(&mut settings, "aa11", "steam:4");
+            let root = Screen::Library(LibraryScreen::new(&hosts()[0], 0));
+            shell(settings, library, vec![root])
+        };
+        let games_tab =
+            |view: LibraryView, library: &LibraryShared| tab(view, "", "violet", library);
+        let full = || {
+            let library = LibraryShared::default();
+            library.set_games(list());
+            for i in 1..titles.len() {
+                if i != 6 {
+                    library.push_art(format!("steam:{i}"), poster_png(i));
+                }
+            }
+            library
+        };
+        let menu = |s: &mut Shell, evs: &[MenuEvent]| {
+            for ev in evs {
+                s.handle_menu(*ev);
+            }
+        };
+
+        let library = full();
+        let mut s = games_tab(LibraryView::Grid, &library);
+        dump(&mut s, 90, "L1-games-arrival");
+        menu(&mut s, &[down(), down(), down()]);
+        dump(&mut s, 50, "L2-games-favorites");
+        menu(&mut s, &[down(), down(), right()]);
+        dump(&mut s, 50, "L3-games-grid");
+        // Under the Recent sort each card captions when it was played; a pale palette.
+        let mut s = tab(LibraryView::Grid, "recent", "mint", &full());
+        dump(&mut s, 60, "_settle");
+        menu(&mut s, &[down(), down(), down(), down()]);
+        dump(&mut s, 50, "L3b-games-recent-mint");
+        let mut s = games_tab(LibraryView::Grid, &full());
+        dump(&mut s, 60, "_settle");
+        menu(&mut s, &[up(), up(), right()]);
+        dump(&mut s, 12, "L4-games-pills-travel");
+        dump(&mut s, 50, "L4-games-pills");
+
+        let mut s = games_tab(LibraryView::Shelf, &full());
+        dump(&mut s, 60, "_settle");
+        menu(&mut s, &[down(), down(), down(), down(), right(), right()]);
+        dump(&mut s, 60, "L5-games-shelf");
+
+        for (name, phase) in [
+            (
+                "L6-games-error",
+                Some(LibraryPhase::Error {
+                    title: "Couldn't load the library".into(),
+                    body: "The host didn't answer. Check that it is awake and on this network."
+                        .into(),
+                    can_retry: true,
+                }),
+            ),
+            ("L7-games-loading", None),
+            ("L8-games-empty", Some(LibraryPhase::Empty)),
+        ] {
+            let library = LibraryShared::default();
+            match phase {
+                Some(LibraryPhase::Empty) => library.set_games(Vec::new()),
+                Some(p) => library.set_phase(p),
+                None => {}
+            }
+            let mut s = games_tab(LibraryView::Grid, &library);
+            dump(&mut s, 60, name);
+        }
+
+        // Drilled from Collections: the pills and a coverflow of the whole library.
+        let settings = pf_client_core::trust::Settings {
+            library_view: LibraryView::Shelf.id().to_string(),
+            ..Default::default()
+        };
+        let mut drilled = LibraryScreen::new(&hosts()[0], 0);
+        drilled.all_titles();
+        let root = Screen::Library(LibraryScreen::new(&hosts()[0], 0));
+        let mut s = shell(settings, &full(), vec![root, Screen::Library(drilled)]);
+        dump(&mut s, 60, "_settle");
+        menu(&mut s, &[right(), right(), right()]);
+        dump(&mut s, 60, "L9-shelf-drilled");
+
+        let mixed = LibraryShared::default();
+        let mut games = list();
+        for (i, g) in games.iter_mut().enumerate() {
+            g.platform = Some(["PC", "PS2", "SNES"][i % 3].into());
+        }
+        mixed.set_games(games);
+        let mut coll = crate::screens::collections::CollectionsScreen::new(
+            &hosts()[0],
+            crate::collate::SortKey::HostOrder,
+        );
+        coll.own_library();
+        for i in 1..titles.len() {
+            mixed.push_art(format!("steam:{i}"), poster_png(i));
+        }
+        let root = Screen::Library(LibraryScreen::new(&hosts()[0], 0));
+        let settings = pf_client_core::trust::Settings::default();
+        let mut s = shell(settings, &mixed, vec![root, Screen::Collections(coll)]);
+        dump(&mut s, 60, "LA-collections");
+        menu(&mut s, &[up(), right()]);
+        dump(&mut s, 40, "LB-collections-pills");
+
+        // A phone in landscape, as the shell's own phone dump sizes it.
+        let (w, h) = (2868_i32, 1320_i32);
+        let viewport = crate::console::Viewport {
+            width: w as u32,
+            height: h as u32,
+            insets: crate::console::Insets {
+                left: 186.0,
+                top: 0.0,
+                right: 186.0,
+                bottom: 63.0,
+            },
+            scale: Some(2.25),
+        };
+        let mut s = games_tab(LibraryView::Grid, &full());
+        s.platform = crate::platform::Platform::Apple;
+        let phone = |s: &mut Shell, frames: usize, name: &str| {
+            let mut surface = skia_safe::surfaces::raster_n32_premul((w, h)).unwrap();
+            for _ in 0..frames {
+                s.render_in(surface.canvas(), &viewport, &fonts, None, None, &[]);
+            }
+            let png = surface
+                .image_snapshot()
+                .encode(None, skia_safe::EncodedImageFormat::PNG, 100)
+                .unwrap();
+            std::fs::write(format!("{dir}/{name}.png"), png.as_bytes()).unwrap();
+        };
+        phone(&mut s, 90, "LP1-phone-games");
+        menu(&mut s, &[down(), down(), down(), down()]);
+        phone(&mut s, 60, "LP2-phone-grid");
+    }
 }
