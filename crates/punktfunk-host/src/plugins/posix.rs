@@ -133,6 +133,12 @@ pub(super) fn disable() -> Result<()> {
     Ok(())
 }
 
+/// Shown while systemd keeps restarting a runner that dies at start — "switched off" would send
+/// the operator to a switch that is already on.
+#[cfg(target_os = "linux")]
+const RUNNER_FAILING: &str =
+    "The plugin runner keeps failing to start. Troubleshooting → Plugins shows why.";
+
 #[cfg(target_os = "linux")]
 pub(super) fn runtime_status() -> RuntimeStatus {
     let enabled_raw = systemctl_output(&["is-enabled", UNIT]);
@@ -141,16 +147,21 @@ pub(super) fn runtime_status() -> RuntimeStatus {
     // is the other half of "can we install plugins".
     let unit_known = enabled_raw.as_deref().is_some_and(|s| s != "not-found");
     let installed = unit_known || runner_command().is_ok();
+    let failing = active == "failed"
+        || systemctl_output(&["show", UNIT, "-p", "SubState", "--value"]).as_deref()
+            == Some("auto-restart");
     RuntimeStatus {
         installed,
         enabled: enabled_raw.as_deref() == Some("enabled"),
         running: active == "active",
         unit: UNIT,
         principal: None,
-        detail: if installed {
-            String::new()
-        } else {
+        detail: if !installed {
             RUNNER_MISSING.into()
+        } else if failing {
+            RUNNER_FAILING.into()
+        } else {
+            String::new()
         },
     }
 }
