@@ -198,9 +198,32 @@ const BUTTON_D: f64 = 32.0;
 const BUTTON_PITCH: f64 = 40.0;
 
 pub const ROW_H: f64 = 50.0;
-/// Full blur under the chrome, design units: Glur's radius on the Apple gamepad trays.
-const BLEED_SIGMA: f64 = 14.0;
+/// Full blur under pinned text, design units: Glur's radius on the Apple gamepad trays.
+const TRAY_SIGMA: f64 = 14.0;
 const ROW_GAP: f64 = 6.0;
+
+/// The screen edge a [`tray`] leans on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Toward {
+    Top,
+    Bottom,
+}
+
+/// The backdrop under pinned text: what already lies under `rect` blurs from nothing on
+/// its content side to full on its `toward` side. No tint, as Glur has none: text reads on
+/// the blur. Draw it after what scrolls under, before the text; trays stacked edge to edge
+/// ramp on from each other without a seam.
+pub fn tray(canvas: &Canvas, rect: Rect, toward: Toward, k: f64) {
+    if rect.height() < 1.0 {
+        return;
+    }
+    let (edge, clear) = match toward {
+        Toward::Top => (rect.top, rect.bottom),
+        Toward::Bottom => (rect.bottom, rect.top),
+    };
+    let sigma = (TRAY_SIGMA * k) as f32;
+    crate::blur::backdrop(canvas, rect, crate::blur::Band { edge, clear, sigma });
+}
 const HEADER_H: f64 = 34.0;
 pub const ROW_MAX_W: f64 = 620.0;
 
@@ -259,6 +282,61 @@ const ROW_RISE: f64 = 12.0;
 
 /// Room above a list's first row and left of its column for the plate's outset, design units.
 const PLATE_AIR: f64 = 12.0;
+/// A list's soft edge, design units: where rows hide past an edge, this much of the list
+/// fades and blurs toward it.
+const SOFT_EDGE: f64 = 40.0;
+
+/// Closes the layer a list painted into with its soft edges. `strength` is how much hides
+/// past the top and the bottom, 0–1, so a list resting on its first row keeps a crisp top.
+/// Rows fade toward an edge and what is left blurs, as a scroll view's edge does on Apple's
+/// systems; pinned text past the list sits on the field, never on a row.
+fn soft_edges(canvas: &Canvas, view: Rect, rect: Rect, depth: f32, strength: (f32, f32), k: f64) {
+    use skia_safe::{gradient, BlendMode, Color4f, Point, TileMode};
+    let (top, bottom) = strength;
+    let alpha = |a: f32| Color4f::new(0.0, 0.0, 0.0, a);
+    let edge = (depth / rect.height().max(1.0)).min(0.5);
+    let colors = [
+        alpha(1.0 - top),
+        alpha(1.0),
+        alpha(1.0),
+        alpha(1.0 - bottom),
+    ];
+    let pos = [0.0, edge, 1.0 - edge, 1.0];
+    let mut p = crate::theme::fill(alpha(1.0));
+    p.set_blend_mode(BlendMode::DstIn);
+    p.set_shader(gradient::shaders::linear_gradient(
+        (Point::new(0.0, rect.top), Point::new(0.0, rect.bottom)),
+        &gradient::Gradient::new(
+            gradient::Colors::new(&colors, Some(&pos), TileMode::Clamp, None),
+            gradient::Interpolation::default(),
+        ),
+        None,
+    ));
+    canvas.draw_rect(view, &p);
+    canvas.restore();
+    let sigma = (TRAY_SIGMA * k) as f32;
+    let (l, r) = (view.left, view.right);
+    if top > 0.0 {
+        let band = Rect::from_ltrb(l, view.top, r, rect.top + depth);
+        let clear = rect.top + depth;
+        let b = crate::blur::Band {
+            edge: rect.top,
+            clear,
+            sigma: sigma * top,
+        };
+        crate::blur::backdrop(canvas, band, b);
+    }
+    if bottom > 0.0 {
+        let band = Rect::from_ltrb(l, rect.bottom - depth, r, view.bottom);
+        let clear = rect.bottom - depth;
+        let b = crate::blur::Band {
+            edge: rect.bottom,
+            clear,
+            sigma: sigma * bottom,
+        };
+        crate::blur::backdrop(canvas, band, b);
+    }
+}
 
 struct SlipPrev {
     /// Index and label both: the screen rebuilds rows every frame, so an index
@@ -315,9 +393,6 @@ pub struct MenuList {
     /// True once nothing is still moving. `false` until the first render so a
     /// fresh list always asks for a frame.
     settled: bool,
-    /// Rows scroll on past the list's rect to the layer's edges, under whatever the screen
-    /// draws after the list, and blur there. The resting layout does not move.
-    pub bleed: bool,
 }
 
 impl Default for MenuList {
@@ -347,7 +422,6 @@ impl MenuList {
             buttons_geom: Vec::new(),
             tracks_geom: Vec::new(),
             settled: false,
-            bleed: false,
         }
     }
 
@@ -620,21 +694,16 @@ impl MenuList {
         };
         let snap = std::mem::take(&mut self.snap);
         self.tree.get_mut().tick(dt as f32);
-        // Bleeding, the viewport reaches the layer's edges and pads back to `rect`. Either way
-        // it holds the plate's outset above the first row and left of the column.
+        // The viewport holds the plate's outset around the column; rows never reach the
+        // chrome past it.
         let air = (PLATE_AIR * k) as f32;
-        let view = if self.bleed {
-            let clip = canvas.local_clip_bounds().unwrap_or(rect);
-            Rect::from_ltrb(
-                rect.left - air,
-                clip.top.min(rect.top - air),
-                rect.right,
-                clip.bottom.max(rect.bottom),
-            )
-        } else {
-            Rect::from_ltrb(rect.left - air, rect.top - air, rect.right, rect.bottom)
-        };
-        let (pad_top, pad_bottom) = (rect.top - view.top, view.bottom - rect.bottom);
+        let view = Rect::from_ltrb(
+            rect.left - air,
+            rect.top - air,
+            rect.right,
+            rect.bottom + air,
+        );
+        let (pad_top, pad_bottom) = (air, air);
         let this = &*self;
         let root = El::scroll(list, Axis::Vertical)
             .gap((ROW_GAP * k) as f32)
@@ -681,37 +750,22 @@ impl MenuList {
             tree.set_offset(list, next);
         }
         let scroll_settled = !tree.moving(list) && (!following || tree.offset(list) == target);
-        let offset = tree.offset(list);
         tree.set_focus(active.then(|| row_id(this.cursor)));
+        // How much hides past each edge, up to one soft edge's depth.
+        let soft = (SOFT_EDGE * k) as f32;
+        let offset = tree.offset(list);
+        let (above, below) = (
+            (offset / soft).clamp(0.0, 1.0),
+            ((max - offset) / soft).clamp(0.0, 1.0),
+        );
+        let edged = above > 0.0 || below > 0.0;
+        if edged {
+            canvas.save_layer(&skia_safe::canvas::SaveLayerRec::default().bounds(&view));
+        }
         tree.paint_focus(canvas, frame, k as f32, dt, false);
         drop(tree);
-        // Rows past `rect` blur more the further they go, from nothing at its edge.
-        if self.bleed {
-            let sigma = (BLEED_SIGMA * k) as f32;
-            if offset > 0.0 && pad_top > 0.0 {
-                let band = Rect::from_ltrb(view.left, view.top, view.right, rect.top);
-                crate::blur::backdrop(
-                    canvas,
-                    band,
-                    crate::blur::Band {
-                        edge: view.top,
-                        clear: rect.top,
-                        sigma,
-                    },
-                );
-            }
-            if offset < max && pad_bottom > 0.0 {
-                let band = Rect::from_ltrb(view.left, rect.bottom, view.right, view.bottom);
-                crate::blur::backdrop(
-                    canvas,
-                    band,
-                    crate::blur::Band {
-                        edge: view.bottom,
-                        clear: rect.bottom,
-                        sigma,
-                    },
-                );
-            }
+        if edged {
+            soft_edges(canvas, view, rect, soft, (above, below), k);
         }
 
         // What a pointer hits: the cells as painted, not the drawing's ease.

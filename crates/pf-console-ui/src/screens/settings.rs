@@ -512,11 +512,7 @@ impl SettingsScreen {
 
     fn with_presets(presets: Vec<(String, String)>) -> SettingsScreen {
         SettingsScreen {
-            list: {
-                let mut list = MenuList::new();
-                list.bleed = true;
-                list
-            },
+            list: MenuList::new(),
             strip: TabStrip::new(),
             tab: 0,
             tab_cursors: [0; TABS.len()],
@@ -995,8 +991,8 @@ impl SettingsScreen {
         fonts: &Fonts,
         ctx: &mut Ctx,
     ) {
-        // Strip on top, explainer under the list; rows get the band between and scroll on
-        // under both, so the list draws first.
+        // Strip on top, explainer under the list, rows in the band between; the list's soft
+        // edges keep them off both.
         let detail_h = 34.0 * k;
         let strip_h = TAB_STRIP_H * k;
         let seat = self

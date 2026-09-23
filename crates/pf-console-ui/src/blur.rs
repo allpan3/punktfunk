@@ -1,5 +1,6 @@
 //! Progressive backdrop blur: what lies under a chrome band blurs by a radius that grows
-//! from nothing at the content edge to full strength toward the screen edge.
+//! linearly from nothing at the content edge to full strength at the screen edge, as
+//! Glur's mask ramps it.
 //!
 //! The per-pixel variable Gaussian Glur's shader runs — each row's σ read off its depth
 //! into the band — not one blurred copy faded in by a gradient. It runs on a quarter-size
@@ -23,14 +24,13 @@ uniform float2 dir;
 uniform float edge;
 uniform float clear;
 uniform float sigma;
-uniform float full;
 uniform float2 lo;
 uniform float2 hi;
 uniform float fade;
 
 half4 main(float2 p) {
     float t = clamp((clear - p.y) / (clear - edge), 0.0, 1.0);
-    float s = sigma * smoothstep(0.0, full, t);
+    float s = sigma * t;
     half4 acc = src.eval(p);
     if (s >= 0.35) {
         float reach = ceil(3.0 * s);
@@ -84,9 +84,6 @@ fn pass(
     b.set_uniform_float("edge", &[band.edge]).ok()?;
     b.set_uniform_float("clear", &[band.clear]).ok()?;
     b.set_uniform_float("sigma", &[band.sigma]).ok()?;
-    // Full strength 35 % of the way in: chrome text sits near the clear edge and must read
-    // on real blur, not on a sharp row.
-    b.set_uniform_float("full", &[0.35]).ok()?;
     b.set_uniform_float("lo", &[rect.left + 0.5, rect.top + 0.5])
         .ok()?;
     b.set_uniform_float("hi", &[rect.right - 0.5, rect.bottom - 0.5])

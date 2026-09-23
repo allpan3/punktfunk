@@ -282,6 +282,10 @@ impl PlayersScreen {
                 fg(0.45),
             );
         }
+        // The explainer reads on a tray: grant rows run under it on a short screen.
+        let detail_top = rect.bottom - (40.0 * k) as f32;
+        let band = Rect::from_ltrb(rect.left, detail_top, rect.right, rect.bottom);
+        crate::widgets::tray(canvas, band, crate::widgets::Toward::Bottom, k);
         let detail = detail(self.focused(ctx), ctx);
         fonts.leading(
             canvas,

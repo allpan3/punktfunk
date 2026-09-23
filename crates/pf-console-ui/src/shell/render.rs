@@ -6,7 +6,7 @@ use crate::library::LibraryShared;
 use crate::model::HostRow;
 use crate::screens::{Bg, Ctx, Screen};
 use crate::theme::{edge, fg, Fonts, PanelStroke, EDGE_INSET, W};
-use crate::widgets::text_tab;
+use crate::widgets::{text_tab, tray, Toward};
 use pf_client_core::menu_nav::PadInfo;
 use pf_client_core::trust;
 use skia_safe::{Canvas, Rect};
@@ -507,6 +507,13 @@ impl LayerEnv<'_> {
     /// roots crossing hold it at full. Returns the last legend's hit-boxes.
     fn chrome(&mut self, layers: &[Chrome]) -> Vec<(HintKey, Rect)> {
         let canvas = self.canvas;
+        // Trays out to the screen's edges, past the safe area, behind the band and legend.
+        let (k, content) = (self.k, self.content);
+        let edges = canvas.local_clip_bounds().unwrap_or(content);
+        let top = Rect::from_ltrb(edges.left, edges.top, edges.right, content.top);
+        tray(canvas, top, Toward::Top, k);
+        let bottom = Rect::from_ltrb(edges.left, content.bottom, edges.right, edges.bottom);
+        tray(canvas, bottom, Toward::Bottom, k);
         let strip: f64 = layers
             .iter()
             .filter(|c| c.band == Band::Strip)

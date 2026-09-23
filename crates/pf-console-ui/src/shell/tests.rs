@@ -3157,6 +3157,10 @@ fn dump_phone_home() {
     s.handle_menu(MenuEvent::Move(MenuDir::Down));
     s.handle_menu(MenuEvent::Move(MenuDir::Down));
     dump(&mut s, 60, "pc-settings-rows");
+    // The typed bitrate: the keyboard over the rows, nothing between.
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    s.handle_menu(MenuEvent::Secondary);
+    dump(&mut s, 60, "pd-settings-keyboard");
 }
 
 /// Every device mark at the chip's 15 dp and the card's 44 dp, at k = 1 and 2, then the
