@@ -273,7 +273,8 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsolePadS
 /// `NativeBridge.nativeConsoleMenu(handle, event)` — a discrete menu event, for input that is
 /// already an event on the Kotlin side (a TV remote's D-pad `KeyEvent`s, the touch escape hatch):
 /// 0..3 = move up/down/left/right, 4 confirm, 5 back, 6 secondary (Y), 7 tertiary (X),
-/// 8 jump back (L1), 9 jump forward (R1).
+/// 8 jump back (L1), 9 jump forward (R1), 10/11 a remote's OK down/up (acts on release, held
+/// it is the card's menu).
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleMenu(
     _env: EnvUnowned,
@@ -293,6 +294,12 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleMenu
             7 => MenuEvent::Tertiary,
             8 => MenuEvent::JumpBack,
             9 => MenuEvent::JumpForward,
+            10 | 11 => {
+                if let Some(h) = host(handle) {
+                    h.shared.send(Cmd::Ok(event == 10));
+                }
+                return;
+            }
             _ => return,
         };
         if let Some(h) = host(handle) {

@@ -38,6 +38,8 @@ public final class ConsoleBridge {
         case up = 0, down = 1, left = 2, right = 3
         case confirm = 4, back = 5, secondary = 6, tertiary = 7
         case jumpBack = 8, jumpForward = 9
+        /// A remote's OK, both edges: the console acts on release, and a hold is the menu.
+        case okDown = 10, okUp = 11
     }
 
     /// Which device the event came from — it picks the glyph legend.

@@ -327,8 +327,9 @@ pub unsafe extern "C" fn punktfunk_console_frame(
 }
 
 /// A discrete menu event: 0..3 move up/down/left/right, 4 confirm, 5 back, 6 secondary (Y),
-/// 7 tertiary (X), 8 jump back (L1), 9 jump forward (R1). `source` 1 = a pad (its glyphs),
-/// 0 = a remote or keyboard. `false` = Back at the root: the press is the system's.
+/// 7 tertiary (X), 8 jump back (L1), 9 jump forward (R1), 10/11 a remote's OK down/up (acts
+/// on release, held it is the card's menu). `source` 1 = a pad (its glyphs), 0 = a remote or
+/// keyboard. `false` = Back at the root: the press is the system's.
 ///
 /// # Safety
 /// `c` is live.
@@ -350,6 +351,7 @@ pub unsafe extern "C" fn punktfunk_console_menu(
             7 => MenuEvent::Tertiary,
             8 => MenuEvent::JumpBack,
             9 => MenuEvent::JumpForward,
+            10 | 11 => MenuEvent::Confirm,
             _ => return true,
         };
         let source = if source == 1 {
@@ -364,7 +366,11 @@ pub unsafe extern "C" fn punktfunk_console_menu(
         let Some(mut shell) = c.shell() else {
             return true;
         };
-        if let Some(p) = shell.console.menu(ev, source) {
+        let pulse = match event {
+            10 | 11 => shell.console.ok(event == 10, source),
+            _ => shell.console.menu(ev, source),
+        };
+        if let Some(p) = pulse {
             lock(&c.events).push_back(Event::Pulse(p));
         }
         !c.publish(&mut shell)

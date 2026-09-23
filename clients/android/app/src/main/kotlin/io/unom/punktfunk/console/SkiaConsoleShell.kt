@@ -265,7 +265,7 @@ fun SkiaConsoleShell(
                     return@probe true
                 }
                 if (code == KeyEvent.KEYCODE_BUTTON_SELECT && down && ev.repeatCount == 0) {
-                    NativeBridge.nativeConsoleMenu(handle, 0) // ▲ opens the tile's options on Home
+                    NativeBridge.nativeConsoleMenu(handle, 6) // the card's menu, as Y
                     return@probe true
                 }
                 // Only a key a pad can produce stops here. A composite keyboard (dongle
@@ -276,6 +276,8 @@ fun SkiaConsoleShell(
             // A remote / keyboard. D-pad keys and DPAD_CENTER as discrete events with the
             // framework's own repeat; the rest as console keys; printable text while editing.
             if (!down) {
+                // OK acts on its release; held, the console already opened the card's menu.
+                if (ev.keyCode == KeyEvent.KEYCODE_DPAD_CENTER) NativeBridge.nativeConsoleMenu(handle, 11)
                 return@probe when (ev.keyCode) {
                     KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_LEFT,
                     KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
@@ -290,7 +292,7 @@ fun SkiaConsoleShell(
                 KeyEvent.KEYCODE_DPAD_DOWN -> NativeBridge.nativeConsoleMenu(handle, 1)
                 KeyEvent.KEYCODE_DPAD_LEFT -> NativeBridge.nativeConsoleMenu(handle, 2)
                 KeyEvent.KEYCODE_DPAD_RIGHT -> NativeBridge.nativeConsoleMenu(handle, 3)
-                KeyEvent.KEYCODE_DPAD_CENTER -> if (!repeat) NativeBridge.nativeConsoleMenu(handle, 4)
+                KeyEvent.KEYCODE_DPAD_CENTER -> if (!repeat) NativeBridge.nativeConsoleMenu(handle, 10)
                 KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> NativeBridge.nativeConsoleKey(handle, 4, ev.isShiftPressed, repeat)
                 KeyEvent.KEYCODE_SPACE -> NativeBridge.nativeConsoleKey(handle, 5, ev.isShiftPressed, repeat)
                 KeyEvent.KEYCODE_ESCAPE -> NativeBridge.nativeConsoleKey(handle, 6, ev.isShiftPressed, repeat)

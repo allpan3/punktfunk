@@ -737,8 +737,9 @@ object NativeBridge {
 
     /**
      * A discrete menu event: 0..3 move up/down/left/right, 4 confirm, 5 back, 6 secondary (Y),
-     * 7 tertiary (X), 8 jump back (L1), 9 jump forward (R1). For input that is already an event on
-     * this side (a TV remote's D-pad keys, the touch legend).
+     * 7 tertiary (X), 8 jump back (L1), 9 jump forward (R1), 10/11 a remote's OK down/up (acts on
+     * release; held, it opens the card's menu). For input that is already an event on this side
+     * (a TV remote's D-pad keys, the touch legend).
      */
     external fun nativeConsoleMenu(handle: Long, event: Int)
 

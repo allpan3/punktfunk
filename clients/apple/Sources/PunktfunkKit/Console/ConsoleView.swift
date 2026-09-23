@@ -195,7 +195,10 @@ public final class ConsoleMetalView: ConsolePlatformView {
     }
 
     public override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        // Claimed on the way down, so the matching release is ours to swallow.
+        // Claimed on the way down, so the matching release is ours; Select's release acts.
+        if presses.contains(where: { $0.key == nil && $0.type == .select }) {
+            bridge.menu(.okUp, from: .keys)
+        }
         let unclaimed = presses.filter { !claims($0) }
         if !unclaimed.isEmpty || presses.isEmpty { super.pressesEnded(unclaimed, with: event) }
     }
@@ -227,7 +230,7 @@ public final class ConsoleMetalView: ConsolePlatformView {
         }
         let event: ConsoleBridge.Menu
         switch press.type {
-        case .select: event = .confirm
+        case .select: event = .okDown
         case .upArrow: event = .up
         case .downArrow: event = .down
         case .leftArrow: event = .left
