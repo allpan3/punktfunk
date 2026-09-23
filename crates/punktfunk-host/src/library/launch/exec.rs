@@ -172,14 +172,19 @@ fn substitute(arg: &str, values: &BTreeMap<&str, &str>) -> Result<String, &'stat
 }
 
 impl ExecRecipe {
-    /// One `sh -c` string. Every element is single-quoted, so a value can never become syntax.
+    /// One `sh -c` string, run from `cwd` when the template names one. Every element is
+    /// single-quoted, so a value can never become syntax.
     #[cfg(not(windows))]
     pub fn shell_command(&self) -> String {
-        std::iter::once(&self.program)
+        let command = std::iter::once(&self.program)
             .chain(self.args.iter())
             .map(|s| sh_quote(s))
             .collect::<Vec<_>>()
-            .join(" ")
+            .join(" ");
+        match &self.cwd {
+            Some(dir) => format!("cd {} && {command}", sh_quote(&dir.to_string_lossy())),
+            None => command,
+        }
     }
 
     /// One `CreateProcess` command line, quoted the way the CRT parses it back.
@@ -327,6 +332,16 @@ mod exec_tests {
                 cwd: None,
             };
             assert_eq!(r.shell_command(), r"'bottles-cli' '-b' 'Don'\''t Starve'");
+            // A game that loads its data by relative path starts in its own folder.
+            let game = ExecRecipe {
+                program: "/games/it's here/game".into(),
+                args: vec![],
+                cwd: Some("/games/it's here".into()),
+            };
+            assert_eq!(
+                game.shell_command(),
+                r"cd '/games/it'\''s here' && '/games/it'\''s here/game'"
+            );
         }
     }
 
