@@ -3203,6 +3203,19 @@ fn dump_phone_home() {
     dump(&mut s, 60, "p3-home-down");
     s.handle_menu(MenuEvent::Move(MenuDir::Down));
     dump(&mut s, 60, "p4-home-down2");
+    let styles = |s: &mut Shell, name: &str| {
+        use crate::blur::{set_style_override, Style};
+        for (style, tag) in [
+            (Style::Pixel, "pixel"),
+            (Style::PixelFlat, "flat"),
+            (Style::Off, "off"),
+        ] {
+            set_style_override(Some(style));
+            dump(s, 2, &format!("{name}-{tag}"));
+        }
+        set_style_override(None);
+    };
+    styles(&mut s, "p4-home-down2");
     s.handle_menu(MenuEvent::Move(MenuDir::Up));
     s.handle_menu(MenuEvent::Move(MenuDir::Up));
     s.handle_menu(MenuEvent::Move(MenuDir::Up));
@@ -3260,6 +3273,7 @@ fn dump_phone_home() {
     s.handle_menu(MenuEvent::Move(MenuDir::Down));
     s.handle_menu(MenuEvent::Move(MenuDir::Down));
     dump(&mut s, 60, "pc-settings-rows");
+    styles(&mut s, "pc-settings-rows");
     // The typed bitrate: the keyboard over the rows, nothing between.
     s.handle_menu(MenuEvent::Move(MenuDir::Down));
     s.handle_menu(MenuEvent::Secondary);

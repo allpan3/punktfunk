@@ -70,6 +70,7 @@ pub mod theme;
 pub mod widgets;
 
 pub use art_stats::{art_stats, ArtStats};
+pub use blur::{set_style_override, Style as BackdropStyle};
 pub use console::{Console, ConsoleEntry, ConsoleHandles, InputSource, Insets, Viewport};
 pub use input::Key;
 pub use library::decode_poster_off_thread;
