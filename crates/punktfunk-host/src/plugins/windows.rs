@@ -510,6 +510,14 @@ pub(super) fn runtime_status() -> RuntimeStatus {
     }
 }
 
+/// Nothing to converge: the task sees the whole disk, and a grant is an ACL ([`grant`]).
+pub(super) fn converge_runner_roots(
+    _roots: &[super::access::RunnerRoot],
+    _home: &std::path::Path,
+) -> Result<bool> {
+    Ok(false)
+}
+
 /// Stop then start: there is no `Restart-ScheduledTask`, and Start on a running task is a no-op.
 pub(super) fn restart_runtime() -> Result<()> {
     powershell(&format!(

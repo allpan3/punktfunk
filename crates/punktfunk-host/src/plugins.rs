@@ -125,7 +125,8 @@ fn grant(plugin: Option<&str>, dir: Option<&str>, flags: &[String]) -> Result<()
             }
         );
     }
-    println!("Re-run the plugin's scan (or restart the runner) to pick it up.");
+    converge_runner_roots();
+    println!("The plugin restarts with the new folder within a few seconds.");
     Ok(())
 }
 
@@ -190,6 +191,7 @@ fn revoke(plugin: Option<&str>, dir: Option<&str>, flags: &[String]) -> Result<(
     let roots = store
         .revoke(plugin, std::path::Path::new(dir))
         .with_context(|| format!("revoke the grant for '{plugin}'"))?;
+    converge_runner_roots();
     println!("{plugin} may now reach:");
     for root in roots {
         println!(
@@ -396,12 +398,34 @@ pub(crate) fn converge_grants() {
 ///
 /// Discovery runs once at runner startup ([`sdk/src/runner.ts`]); this restart is
 /// how a newly installed plugin becomes active. An enabled runner that is not running
-/// (installed after login, crashed out) is started, not skipped.
+/// (installed after login, crashed out) is started, not skipped. The unit's roots are
+/// converged first: a new manifest may name paths the runner cannot see yet.
 pub(crate) fn restart_runtime() -> Result<bool> {
+    converge_runner_roots();
     let st = runtime_status();
     if !st.installed || !st.enabled {
         return Ok(false);
     }
     plat::restart_runtime()?;
     Ok(true)
+}
+
+/// Give the runner's unit every root a sandbox binds, restarting the runner when that set
+/// changed. bwrap binds from the runner's own view, and the unit empties the home, so a grant
+/// or manifest read missing from the unit never reaches the plugin.
+pub(crate) fn converge_runner_roots() {
+    // Tests never write the operator's systemd config; only a Linux unit hides the home.
+    if cfg!(test) || !cfg!(target_os = "linux") || !runtime_status().installed {
+        return;
+    }
+    let Some(home) = manifest::home_dir() else {
+        return;
+    };
+    let roots =
+        access::AccessStore::open(pf_paths::config_dir()).runner_roots(&manifest::installed());
+    match plat::converge_runner_roots(&roots, &home) {
+        Ok(true) => tracing::info!(roots = roots.len(), "plugin runner roots updated"),
+        Ok(false) => {}
+        Err(e) => tracing::warn!(error = %format!("{e:#}"), "plugin runner roots not updated"),
+    }
 }

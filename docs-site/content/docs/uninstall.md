@@ -10,7 +10,8 @@ on the machine afterwards.
 > `~/.config/punktfunk` on Linux, `%ProgramData%\punktfunk` for the Windows host. It holds the
 > host's identity, your paired devices, the console password, `host.env`, the game library, logs,
 > and [plugin](/docs/plugins) state — which is what lets a reinstall pick up where you left off.
-> Each section gives the one command that clears it for a clean slate.
+> Each section gives the one command that clears it for a clean slate. On Linux the host also
+> keeps the plugin runner's folder list in `~/.config/systemd/user/punktfunk-scripting.service.d/`.
 
 Jump to what you installed:
 

@@ -772,6 +772,8 @@ fn parse_serve(args: &[String]) -> Result<(mgmt::Options, native::NativeServe, b
         // One token per installed plugin, so the API can tell them apart: a plugin may write its
         // own registration and its own provider, and no other's.
         opts.plugin_tokens = crate::mgmt_token::load_or_generate_per_plugin()?;
+        // An upgrade or a hand-edited grants file may have changed what the runner must see.
+        crate::plugins::converge_runner_roots();
     }
     // Default all-interfaces so paired clients browse over mTLS. Admin stays loopback in
     // `require_auth`. Packaged units ship a fixed ExecStart — `host.env` is the upgrade-safe pin;
