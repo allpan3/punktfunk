@@ -6,8 +6,10 @@
 //! written tmp+rename and re-read on every operation, so a CLI write is never stale here.
 //!
 //! The runner binds these roots (read-only unless `write`); a plugin can ask, never grant —
-//! every request is validated against the real filesystem before it is stored.
+//! every request is validated against the real filesystem before it is stored. On Linux the
+//! runner's unit must see a root too: [`AccessStore::runner_roots`] feeds its drop-in.
 
+use super::manifest::PluginManifest;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io;
@@ -73,6 +75,13 @@ pub enum Decision {
 pub struct RequestOutcome {
     pub path: String,
     pub outcome: String,
+}
+
+/// A real path the plugin runner must see for a sandbox to bind it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunnerRoot {
+    pub path: PathBuf,
+    pub write: bool,
 }
 
 /// `changed` is what the caller emits `plugins.changed` on; `value` is the payload.
@@ -199,11 +208,11 @@ fn rel_after(path: &Path, base: &Path) -> Option<String> {
     }
 }
 
-/// A stored grant path: canonical, except a v1 `~/x` which expands against the policy home.
-fn grant_path(g: &Grant, policy: &PathPolicy) -> PathBuf {
-    match g.path.strip_prefix("~/") {
+/// A grant or manifest path: `~/x` expands against the policy home, anything else is as stored.
+fn home_path(p: &str, policy: &PathPolicy) -> PathBuf {
+    match p.strip_prefix("~/") {
         Some(rest) if !policy.home.as_os_str().is_empty() => policy.home.join(rest),
-        _ => PathBuf::from(&g.path),
+        _ => PathBuf::from(p),
     }
 }
 
@@ -215,7 +224,7 @@ fn covers(declared: &[PathBuf], grants: &[Grant], canonical: &Path, policy: &Pat
         within(canonical, &root)
     }) || grants
         .iter()
-        .any(|g| within(canonical, &grant_path(g, policy)))
+        .any(|g| within(canonical, &home_path(&g.path, policy)))
 }
 
 /// Windows-only refusals: `C:\Users`, the profile roots directly under it, `C:\Windows` and
@@ -734,8 +743,65 @@ impl AccessStore {
             .unwrap_or_default()
     }
 
-    /// The CLI's direct grant: an existing directory, ACL applied before it is recorded.
-    /// Re-granting the same path updates it rather than adding a second row.
+    /// Every real path some sandbox binds: manifest `reads`/`writes` plus all grants, each
+    /// judged on its real path so a link cannot bring in `~/.ssh`. A path spelled through a
+    /// link adds the real directory holding that link, which bwrap follows in the runner.
+    /// A root inside a plugin-writable root is dropped: that plugin could swap it for a link.
+    pub fn runner_roots(&self, manifests: &BTreeMap<String, PluginManifest>) -> Vec<RunnerRoot> {
+        let access = {
+            let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+            self.load_access()
+        };
+        let declared = manifests.values().flat_map(|m| {
+            let reads = m.reads.iter().map(|p| (p.as_str(), false));
+            reads.chain(m.writes.iter().map(|p| (p.as_str(), true)))
+        });
+        let granted = access
+            .values()
+            .flat_map(|a| a.grants.iter().map(|g| (g.path.as_str(), g.write)));
+        // A missing root is the drop-in's `-` prefix's business, and a root may be a file.
+        let allowed = |spelled: &Path, real: &Path, write: bool| {
+            let facts = PathFacts {
+                is_dir: true,
+                ..path_facts(real)
+            };
+            refusal_rule(spelled, real, write, &self.policy, facts).is_none()
+        };
+        let mut roots = Vec::new();
+        for (p, write) in declared.chain(granted) {
+            let spelled = home_path(p, &self.policy);
+            let real = spelled.canonicalize().unwrap_or_else(|_| spelled.clone());
+            if !allowed(&spelled, &real, write) {
+                continue;
+            }
+            if real != spelled {
+                let holder = spelled
+                    .ancestors()
+                    .skip(1)
+                    .find(|a| a.canonicalize().is_ok_and(|c| c == *a));
+                if let Some(dir) = holder.filter(|d| allowed(d, d, false)) {
+                    roots.push(RunnerRoot {
+                        path: dir.to_path_buf(),
+                        write: false,
+                    });
+                }
+            }
+            roots.push(RunnerRoot { path: real, write });
+        }
+        // Writable first, so the dedup keeps the stronger of two entries for one path.
+        roots.sort_by(|a, b| a.path.cmp(&b.path).then(b.write.cmp(&a.write)));
+        roots.dedup_by(|later, kept| later.path == kept.path);
+        let writable: Vec<PathBuf> = roots
+            .iter()
+            .filter(|r| r.write)
+            .map(|r| r.path.clone())
+            .collect();
+        roots.retain(|r| !writable.iter().any(|w| *w != r.path && within(&r.path, w)));
+        roots
+    }
+
+    /// The CLI's direct grant: an existing directory the host would grant on request, ACL
+    /// applied before it is recorded. Re-granting the same path updates it.
     pub fn grant(&self, id: &str, dir: &Path, write: bool, by: &str) -> io::Result<Vec<Grant>> {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         if !dir.is_dir() {
@@ -745,6 +811,13 @@ impl AccessStore {
             ));
         }
         let canonical = dir.canonicalize()?;
+        let facts = path_facts(&canonical);
+        if let Some(rule) = refusal_rule(&canonical, &canonical, write, &self.policy, facts) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("'{}' can't be granted ({rule})", canonical.display()),
+            ));
+        }
         let mut access = self.load_access();
         let entry = access.entry(id.to_string()).or_default();
         let path = canonical.to_string_lossy().into_owned();
@@ -1003,6 +1076,109 @@ mod tests {
         assert_eq!(rule("/run/media"), Some("protected_path"));
         assert_eq!(rule("/run/user/1000"), Some("protected_path"));
         assert_eq!(rule("/run/mediax/games"), Some("protected_path"));
+    }
+
+    fn manifest(reads: &[&str], writes: &[&str]) -> BTreeMap<String, PluginManifest> {
+        let m = PluginManifest {
+            schema: 1,
+            id: "demo".into(),
+            reads: reads.iter().map(|s| (*s).to_string()).collect(),
+            writes: writes.iter().map(|s| (*s).to_string()).collect(),
+            ..Default::default()
+        };
+        BTreeMap::from([("demo".to_string(), m)])
+    }
+
+    fn targets(roots: &[RunnerRoot]) -> Vec<(String, bool)> {
+        let s = |p: &Path| p.to_string_lossy().into_owned();
+        roots.iter().map(|r| (s(&r.path), r.write)).collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_through_a_link_brings_the_links_directory() {
+        let f = fixture();
+        let lib = f.dir("home/.local/share/Steam");
+        f.dir("home/.steam");
+        std::os::unix::fs::symlink(&lib, f.policy.home.join(".steam/steam")).unwrap();
+        std::os::unix::fs::symlink(&lib, f.policy.home.join("steam-at-home")).unwrap();
+        let roots = f
+            .store()
+            .runner_roots(&manifest(&["~/.steam/steam", "~/steam-at-home"], &[]));
+        let h = |rel: &str| f.policy.home.join(rel).to_string_lossy().into_owned();
+        // The home itself never holds a link for the runner: the second link reaches only `lib`.
+        assert_eq!(
+            targets(&roots),
+            vec![(h(".local/share/Steam"), false), (h(".steam"), false)]
+        );
+    }
+
+    #[test]
+    fn runner_roots_join_manifests_and_grants() {
+        let f = fixture();
+        let home = f.policy.home.clone();
+        let rom = f.dir("home/Emu");
+        let games = f.dir("data/games");
+        f.store().grant("demo", &rom, false, "cli").unwrap();
+        f.store().grant("demo", &games, false, "cli").unwrap();
+        let roots = f
+            .store()
+            .runner_roots(&manifest(&["~/.config/retroarch", "relative"], &["~/rw"]));
+        let h = |rel: &str| home.join(rel).to_string_lossy().into_owned();
+        assert_eq!(
+            targets(&roots),
+            vec![
+                (games.to_string_lossy().into_owned(), false),
+                (h(".config/retroarch"), false),
+                (h("Emu"), false),
+                (h("rw"), true),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_roots_refuse_protected_paths_and_links_to_them() {
+        let f = fixture();
+        f.dir("home/.ssh");
+        std::os::unix::fs::symlink(f.policy.home.join(".ssh"), f.policy.home.join("keys")).unwrap();
+        let roots = f.store().runner_roots(&manifest(
+            &["~/.ssh", "~/keys", "~", "~/.config/punktfunk"],
+            &[],
+        ));
+        assert_eq!(targets(&roots), vec![]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_roots_drop_a_root_a_plugin_can_rewrite() {
+        let f = fixture();
+        f.dir("home/rw/inner");
+        f.dir("home/ro/rw");
+        let roots = f.store().runner_roots(&manifest(
+            &["~/rw/inner", "~/ro", "~/dup"],
+            &["~/rw", "~/ro/rw", "~/dup"],
+        ));
+        let h = |rel: &str| f.policy.home.join(rel).to_string_lossy().into_owned();
+        // `~/rw/inner` sits in a writable root; a write root inside a read-only one stays.
+        assert_eq!(
+            targets(&roots),
+            vec![
+                (h("dup"), true),
+                (h("ro"), false),
+                (h("ro/rw"), true),
+                (h("rw"), true),
+            ]
+        );
+    }
+
+    #[test]
+    fn cli_grant_refuses_what_a_request_would() {
+        let f = fixture();
+        let ssh = f.dir("home/.ssh");
+        let err = f.store().grant("demo", &ssh, false, "cli").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(f.store().grants_for("demo").is_empty());
     }
 
     #[test]
