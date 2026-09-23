@@ -200,6 +200,8 @@ const BUTTON_PITCH: f64 = 40.0;
 pub const ROW_H: f64 = 50.0;
 /// Full blur under pinned text, design units: Glur's radius on the Apple gamepad trays.
 const TRAY_SIGMA: f64 = 14.0;
+/// How far a tray notionally runs past the glass, design units: Glur's 80 pt bleed.
+const TRAY_OVERHANG: f64 = 80.0;
 /// Clears the plate's 7 dp outset with air to spare.
 const ROW_GAP: f64 = 10.0;
 
@@ -223,7 +225,14 @@ pub fn tray(canvas: &Canvas, rect: Rect, toward: Toward, k: f64) {
         Toward::Bottom => (rect.bottom, rect.top),
     };
     let sigma = (TRAY_SIGMA * k) as f32;
-    crate::blur::backdrop(canvas, rect, crate::blur::Band { edge, clear, sigma });
+    let over = (TRAY_OVERHANG * k) as f32;
+    let band = crate::blur::Band {
+        edge,
+        clear,
+        sigma,
+        over,
+    };
+    crate::blur::backdrop(canvas, rect, band);
 }
 /// A section header's band above its row, and its baseline's rise over the row: the text
 /// stays clear of the plate, stretched in flight, on the row below.
@@ -379,6 +388,7 @@ fn soft_edges(canvas: &Canvas, view: Rect, rect: Rect, depth: f32, strength: (f3
             edge: rect.top,
             clear,
             sigma: sigma * top,
+            over: 0.0,
         };
         crate::blur::backdrop(canvas, band, b);
     }
@@ -389,6 +399,7 @@ fn soft_edges(canvas: &Canvas, view: Rect, rect: Rect, depth: f32, strength: (f3
             edge: rect.bottom,
             clear,
             sigma: sigma * bottom,
+            over: 0.0,
         };
         crate::blur::backdrop(canvas, band, b);
     }
@@ -449,6 +460,9 @@ pub struct MenuList {
     /// True once nothing is still moving. `false` until the first render so a
     /// fresh list always asks for a frame.
     settled: bool,
+    /// Rows run on past the list's rect to the layer's edges, under whatever the screen
+    /// draws after the list; a [`tray`] there treats them. The resting layout does not move.
+    pub bleed: bool,
 }
 
 impl Default for MenuList {
@@ -478,6 +492,7 @@ impl MenuList {
             buttons_geom: Vec::new(),
             tracks_geom: Vec::new(),
             settled: false,
+            bleed: false,
         }
     }
 
@@ -754,13 +769,26 @@ impl MenuList {
         // The viewport holds the plate's outset around the column; rows never reach the
         // chrome past it.
         let air = (PLATE_AIR * k) as f32;
-        let view = Rect::from_ltrb(
-            rect.left - air,
-            rect.top - air,
-            rect.right,
-            rect.bottom + air,
-        );
-        let (pad_top, pad_bottom) = (air, air);
+        // Bleeding, the viewport reaches the layer's edges and pads back to `rect`; else it
+        // holds the plate's outset. Without a band to treat them, rows stay in their rect.
+        let bleed = self.bleed && crate::blur::active();
+        let view = if bleed {
+            let clip = canvas.local_clip_bounds().unwrap_or(rect);
+            Rect::from_ltrb(
+                rect.left - air,
+                clip.top.min(rect.top - air),
+                rect.right,
+                clip.bottom.max(rect.bottom + air),
+            )
+        } else {
+            Rect::from_ltrb(
+                rect.left - air,
+                rect.top - air,
+                rect.right,
+                rect.bottom + air,
+            )
+        };
+        let (pad_top, pad_bottom) = (rect.top - view.top, view.bottom - rect.bottom);
         let this = &*self;
         let root = El::scroll(list, Axis::Vertical)
             .gap((ROW_GAP * k) as f32)
@@ -808,10 +836,14 @@ impl MenuList {
         }
         let scroll_settled = !tree.moving(list) && (!following || tree.offset(list) == target);
         tree.set_focus(active.then(|| row_id(this.cursor)));
-        let scrolled = (tree.offset(list), max);
-        soft_scroll(canvas, view, rect, scrolled, k, || {
+        if bleed {
             tree.paint_focus(canvas, frame, k as f32, dt, false);
-        });
+        } else {
+            let scrolled = (tree.offset(list), max);
+            soft_scroll(canvas, view, rect, scrolled, k, || {
+                tree.paint_focus(canvas, frame, k as f32, dt, false);
+            });
+        }
         drop(tree);
 
         // What a pointer hits: the cells as painted, not the drawing's ease.

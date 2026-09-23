@@ -1358,12 +1358,20 @@ impl LibraryScreen {
             (bump, 0.0)
         };
         // Room left of the first column for the plate's outset; the padding gives it back.
+        // With a band to treat them, the lines run on up under the chrome as well.
         let air = PLATE_AIR * k;
+        let bleed = crate::blur::active();
+        let top = if bleed {
+            clip.top.min(rect.top)
+        } else {
+            rect.top
+        };
+        let pad_top = rect.top - top;
         let viewport = Rect::from_xywh(
             rect.left - air as f32,
-            rect.top,
+            top,
             rect.width() + air as f32,
-            view_h as f32,
+            view_h as f32 + pad_top,
         );
         let (anchor_row, anchor_col) =
             shape.cell_of(self.entrance_anchor.min(self.len().saturating_sub(1)));
@@ -1449,6 +1457,7 @@ impl LibraryScreen {
         let mut root = El::scroll(grid, Axis::Vertical).style(|s| {
             s.align_items = Some(taffy::AlignItems::START);
             s.padding.left = taffy::LengthPercentage::length((edge(k) + air) as f32);
+            s.padding.top = taffy::LengthPercentage::length(pad_top);
         });
         for &line in &lines {
             root = match line {
@@ -1502,10 +1511,14 @@ impl LibraryScreen {
         };
         tree.set_focus((!this.quiet).then(|| games::zone_id(this.zone, field)));
         let cheap = super::settings::reduce_ui_res(ctx.settings, ctx.platform, ctx.fallback_ui);
-        let scrolled = (tree.offset(grid), frame.scroll(grid).map_or(0.0, |s| s.1));
-        crate::widgets::soft_scroll(canvas, viewport, viewport, scrolled, k, || {
+        if bleed {
             tree.paint_focus(canvas, frame, k as f32, dt, cheap);
-        });
+        } else {
+            let scrolled = (tree.offset(grid), frame.scroll(grid).map_or(0.0, |s| s.1));
+            crate::widgets::soft_scroll(canvas, viewport, viewport, scrolled, k, || {
+                tree.paint_focus(canvas, frame, k as f32, dt, cheap);
+            });
+        }
         drop(tree);
 
         // Hit rects are the cells as laid out; covers drawn this frame stay warm.

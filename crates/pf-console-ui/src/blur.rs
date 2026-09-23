@@ -1,7 +1,7 @@
 //! Progressive backdrop treatment behind pinned text: what lies under a chrome band
 //! softens with depth into the band, as the Apple client's Glur tray does — σ grows
-//! linearly from nothing at the content edge to full strength 60 % in (Glur's
-//! `interpolation: 0.6`), then holds to the screen edge.
+//! linearly from nothing at the content edge toward full strength 60 % into the band
+//! plus its overhang past the glass (Glur's `interpolation: 0.6` over an 80 pt bleed).
 //!
 //! Explicit surfaces, not an image-filter graph: the band is copied out once, halved
 //! twice (a true box filter down to quarter size), blurred there by two separable
@@ -34,10 +34,11 @@ uniform float edge;
 uniform float clear;
 uniform float sigma;
 uniform float fade;
+uniform float full;
 
 half4 main(float2 p) {
     float t = clamp((clear - p.y) / (clear - edge), 0.0, 1.0);
-    float s = sigma * min(t / 0.6, 1.0);
+    float s = sigma * min(t / full, 1.0);
     half4 acc = src.eval(p);
     if (s >= 0.35) {
         float reach = min(ceil(3.0 * s), 15.0);
@@ -66,10 +67,11 @@ uniform float edge;
 uniform float clear;
 uniform float block;
 uniform float stepped;
+uniform float full;
 
 half4 main(float2 p) {
     float t = clamp((clear - p.y) / (clear - edge), 0.0, 1.0);
-    float b = stepped > 0.5 ? min(t / 0.6, 1.0) * block : (t <= 0.0 ? 0.0 : block);
+    float b = stepped > 0.5 ? min(t / full, 1.0) * block : (t <= 0.0 ? 0.0 : block);
     if (b <= 1.0) {
         return src.eval(p);
     }
@@ -126,18 +128,40 @@ pub struct Band {
     pub clear: f32,
     /// Full-strength σ.
     pub sigma: f32,
+    /// How far past `edge` the band notionally runs on. Glur's tray bleeds 80 pt past
+    /// the screen, so its ramp reaches full strength 60 % into that longer span and a
+    /// visible band never quite gets there: a gentler rise than a ramp cut at the glass.
+    pub over: f32,
 }
 
-/// Soften what `canvas` already holds under `rect` by `band`. Skipped under the reduced
-/// interface: any read-back of the frame ends a tiled GPU's render pass, more than a
-/// TV-class GPU affords.
-pub fn backdrop(canvas: &Canvas, rect: Rect, band: Band) {
+impl Band {
+    /// The depth, as a fraction of the visible band, where σ peaks.
+    fn full(self) -> f32 {
+        let depth = (self.clear - self.edge).abs().max(1.0);
+        0.6 * (depth + self.over) / depth
+    }
+}
+
+/// The style this frame draws: the reduced interface takes the pixel treatment, one read
+/// a pixel, where a blur costs a TV-class GPU its refresh rate.
+fn style() -> Style {
     let default = if crate::theme::reduced_ui() {
-        Style::Off
+        Style::Pixel
     } else {
         Style::Blur
     };
-    match OVERRIDE.with(std::cell::Cell::get).unwrap_or(default) {
+    OVERRIDE.with(std::cell::Cell::get).unwrap_or(default)
+}
+
+/// Whether a backdrop draws anything this frame: content may run on under the chrome
+/// only when a band will treat it.
+pub fn active() -> bool {
+    style() != Style::Off
+}
+
+/// Soften what `canvas` already holds under `rect` by `band`.
+pub fn backdrop(canvas: &Canvas, rect: Rect, band: Band) {
+    match style() {
         Style::Off => {}
         Style::Blur => blur(canvas, rect, band),
         Style::Pixel => pixel(canvas, rect, band, true),
@@ -214,10 +238,11 @@ fn blur_pass(
     (edge, clear): (f32, f32),
     sigma: f32,
     fade: f32,
+    full: f32,
 ) -> Option<Image> {
     let effect = blur_effect()?;
     let child = ChildPtr::Shader(image_shader(src, FilterMode::Nearest)?);
-    let data = uniforms(&[dir.0, dir.1, edge, clear, sigma, fade]);
+    let data = uniforms(&[dir.0, dir.1, edge, clear, sigma, fade, full]);
     let shader = effect.make_shader(data, &[child], None)?;
     let mut s = offscreen(canvas, w, h)?;
     let mut paint = carrier();
@@ -247,10 +272,11 @@ fn blur(canvas: &Canvas, rect: Rect, band: Band) {
     let to_q = |y: f32| (m.map_point((0.0, y)).y - dev.top as f32) / DOWN;
     let lines = (to_q(band.edge), to_q(band.clear));
     let sigma = band.sigma * scale / DOWN;
-    let Some(x) = blur_pass(canvas, &small, q, (1.0, 0.0), lines, sigma, 0.0) else {
+    let full = band.full();
+    let Some(x) = blur_pass(canvas, &small, q, (1.0, 0.0), lines, sigma, 0.0, full) else {
         return;
     };
-    let Some(y) = blur_pass(canvas, &x, q, (0.0, 1.0), lines, sigma, FADE) else {
+    let Some(y) = blur_pass(canvas, &x, q, (0.0, 1.0), lines, sigma, FADE, full) else {
         return;
     };
     canvas.draw_image_rect_with_sampling_options(
@@ -282,6 +308,7 @@ fn pixel(canvas: &Canvas, rect: Rect, band: Band, stepped: bool) {
         to_img(band.clear),
         block.max(2.0),
         f32::from(u8::from(stepped)),
+        band.full(),
     ]);
     // Shader space is the copy's pixels; the matrix lays them over `dst`.
     let mut local = Matrix::translate((dst.left, dst.top));
@@ -314,6 +341,7 @@ mod tests {
             edge: 0.0,
             clear: 80.0,
             sigma: 8.0,
+            over: 0.0,
         };
         backdrop(canvas, Rect::from_xywh(0.0, 0.0, 64.0, 100.0), band);
         let px = surface.image_snapshot();
@@ -363,6 +391,7 @@ mod tests {
                 edge: 0.0,
                 clear: 80.0,
                 sigma: 14.0,
+                over: 0.0,
             };
             backdrop(canvas, Rect::from_xywh(0.0, 0.0, 64.0, 80.0), band);
             set_style_override(None);
