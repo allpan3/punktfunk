@@ -1016,17 +1016,12 @@ fn channel_cfg() -> ChannelConfig {
     }
 }
 
-/// The wire pad index the host stamped into the sealed section (0 while the channel hasn't
-/// attached yet). Keys every per-pad identity surface: the Deck unit id + serial, the PS
-/// identities' pairing MAC (feature 0x09/0x12) and USB serial string — SDL/Steam dedup
-/// controllers by serial, so two virtual pads must never share one (identical serials make a
-/// second pad read as the FIRST one re-appearing over another transport, and it is merged).
+/// This pad's index, from its devnode Location at `EvtDeviceAdd`. Keys every per-pad identity
+/// surface: the Deck unit id + serial, the PS pairing MAC (feature 0x09/0x12) and USB serial
+/// string. SDL and hidapi read those at arrival, before the channel attaches, and dedup pads by
+/// serial, so it cannot wait for the section. `adopt` refuses a section whose index differs.
 fn pad_index() -> u8 {
-    (CHANNEL
-        .data()
-        .map(|v| v.read_u32(OFF_PAD_INDEX))
-        .unwrap_or(0)
-        & 0xFF) as u8
+    (CHANNEL.index() & 0xFF) as u8
 }
 
 // The bring-up file log. OPT-IN — debug builds, or the `PFGAMEPAD_DEBUG_LOG` env var — so a RELEASE
@@ -1373,8 +1368,8 @@ fn on_set_feature(request: &Request) -> NTSTATUS {
 /// truth this mirrors). Anything else echoes the latched command.
 fn deck_feature_reply() -> [u8; 64] {
     let last = LAST_SET_FEATURE.lock().map(|g| *g).unwrap_or([0u8; 64]);
-    // Per-pad unit id "PF" + the pad index the host stamped into the section — matches
-    // steam_proto::deck_unit_id / deck_serial, so two virtual Decks never collide in Steam's eyes.
+    // Per-pad unit id "PF" + [`pad_index`] — matches steam_proto::deck_unit_id / deck_serial,
+    // so two virtual Decks never collide in Steam's eyes.
     let unit_id: u32 = 0x5046_0000 | pad_index() as u32;
     // Steam validates the unit serial's PREFIX before accepting it: a "PF"-leading serial is
     // REJECTED ("Invalid or missing unit serial number …") and Steam then substitutes a hash and
@@ -1441,11 +1436,10 @@ fn deck_feature_reply() -> [u8; 64] {
 /// The channel-proof GET_FEATURE answer both command-driven identities (Deck + Triton) serve:
 /// `[DECK_PROOF_CMD, ChannelProof(16 bytes), zeros…]`.
 ///
-/// ⚠️ Security-load-bearing input: the proof carries `CHANNEL.index()` — the pad index this driver
-/// read from its OWN devnode Location at `EvtDeviceAdd` — and NOT [`pad_index`], which reads the
-/// section. The host cross-checks the proof's index against the pad it is about to deliver
-/// PRECISELY because it does not yet trust any section; a section-derived index would let a forged
-/// delivery vouch for itself. Do not "simplify" the two into one.
+/// ⚠️ Security-load-bearing input: the proof carries `CHANNEL.index()`, the pad index this driver
+/// read from its OWN devnode Location at `EvtDeviceAdd`, never a value read from a section. The
+/// host cross-checks the proof's index against the pad it is about to deliver because it does not
+/// yet trust any section; a section-derived index would let a forged delivery vouch for itself.
 fn proof_reply() -> [u8; 64] {
     let proof = pf_driver_proto::gamepad::ChannelProof::new(CHANNEL.index(), std::process::id());
     let mut r = [0u8; 64];
