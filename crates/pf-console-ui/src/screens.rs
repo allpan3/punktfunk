@@ -300,6 +300,31 @@ impl Screen {
         }
     }
 
+    /// How far past the content's top and bottom edges the shell's trays reach in, px:
+    /// the depth of a screen's own pinned chrome, so one ramp covers it with the band's.
+    pub(crate) fn pinned(&self, k: f64) -> (f32, f32) {
+        match self {
+            Screen::Settings(s) => s.pinned(k),
+            _ => (0.0, 0.0),
+        }
+    }
+
+    /// A screen's own pinned chrome, drawn by the shell over its trays after [`Self::render`].
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render_pinned(
+        &mut self,
+        canvas: &Canvas,
+        rect: Rect,
+        k: f64,
+        dt: f64,
+        fonts: &Fonts,
+        ctx: &Ctx,
+    ) {
+        if let Screen::Settings(s) = self {
+            s.render_pinned(canvas, rect, k, dt, fonts, ctx);
+        }
+    }
+
     pub(crate) fn background(&self) -> Bg {
         match self {
             Screen::Home(_) | Screen::Library(_) | Screen::Collections(_) | Screen::Players(_) => {

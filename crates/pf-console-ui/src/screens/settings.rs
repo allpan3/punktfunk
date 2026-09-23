@@ -14,7 +14,7 @@
 use crate::glyphs::{Hint, HintKey};
 use crate::pointer::Pointer;
 use crate::screens::{Ctx, Outbox, Screen};
-use crate::theme::{edge, fg, Fonts, W};
+use crate::theme::{fg, Fonts, W};
 use crate::widgets::{
     column, permits, Charset, KeyMsg, Keyboard, ListMsg, MenuList, RowSpec, TabStrip, TAB_STRIP_H,
 };
@@ -227,6 +227,9 @@ pub(crate) fn reduce_ui_res(
         reduce_ui_default(platform, fallback_ui),
     )
 }
+
+/// The explainer band under the rows, design units.
+const DETAIL_H: f64 = 34.0;
 
 // The sections, the rows a player touches most first. A child row sits right under the
 // switch it dims or drops with. Presets is empty here: its rows come from the catalog.
@@ -501,6 +504,8 @@ pub(crate) struct SettingsScreen {
     custom_bitrate: Option<String>,
     /// Tray keyboard. Unused on Deck: Steam's keyboard types (same as add-host).
     keyboard: Keyboard,
+    /// How far the keyboard tray is up, 0..1, as the last frame left it.
+    seat: f64,
 }
 
 impl SettingsScreen {
@@ -521,6 +526,7 @@ impl SettingsScreen {
             strip_focus: false,
             custom_bitrate: None,
             keyboard: Keyboard::new(),
+            seat: 0.0,
         }
     }
 
@@ -650,6 +656,32 @@ impl SettingsScreen {
     #[cfg(test)]
     pub(crate) fn strip_focus_for_test(&self) -> bool {
         self.strip_focus
+    }
+
+    /// The section strip above the rows and the explainer band under them: the shell's
+    /// trays run in this far so the rows bleed under both on one ramp. The keyboard
+    /// lifts the bottom reach away, or the tray would slab the keys.
+    pub(crate) fn pinned(&self, k: f64) -> (f32, f32) {
+        let bottom = DETAIL_H * k * (1.0 - self.seat.min(1.0));
+        ((TAB_STRIP_H * k) as f32, bottom as f32)
+    }
+
+    fn tray_h(&self, k: f64) -> f64 {
+        if self.seat > 0.0 {
+            (Keyboard::tray_height() + 12.0) * k * self.seat
+        } else {
+            0.0
+        }
+    }
+
+    /// The rows' band: under the section strip, above the explainer and the keyboard.
+    fn list_rect(&self, rect: Rect, k: f64) -> Rect {
+        Rect::from_ltrb(
+            rect.left,
+            rect.top + (TAB_STRIP_H * k) as f32,
+            rect.right,
+            rect.bottom - (DETAIL_H * k + self.tray_h(k)) as f32,
+        )
     }
 
     /// OK went down on the focused row: it dips before the release acts.
@@ -991,24 +1023,10 @@ impl SettingsScreen {
         fonts: &Fonts,
         ctx: &mut Ctx,
     ) {
-        // Strip on top, explainer under the list, rows in the band between; the list's soft
-        // edges keep them off both.
-        let detail_h = 34.0 * k;
-        let strip_h = TAB_STRIP_H * k;
-        let seat = self
+        self.seat = self
             .keyboard
             .seat(self.custom_bitrate.is_some() && !ctx.deck, dt);
-        let tray_h = if seat > 0.0 {
-            (Keyboard::tray_height() + 12.0) * k * seat
-        } else {
-            0.0
-        };
-        let list_rect = Rect::from_ltrb(
-            rect.left,
-            rect.top + strip_h as f32,
-            rect.right,
-            rect.bottom - detail_h as f32 - tray_h as f32,
-        );
+        let list_rect = self.list_rect(rect, k);
         let ids = self.row_ids(ctx);
         self.clamp_cursor(ids.len());
         let mut rows: Vec<RowSpec> = ids
@@ -1028,6 +1046,9 @@ impl SettingsScreen {
             rows[i].value_dim = text.is_empty();
             rows[i].caret = true;
         }
+        // Rows run on under the section strip and the explainer, on the shell's trays;
+        // with the keyboard up they stay in their band, or a tray would slab the keys.
+        self.list.bleed = self.seat == 0.0;
         self.list.render(
             canvas,
             list_rect,
@@ -1038,18 +1059,36 @@ impl SettingsScreen {
             // No row focus ring while the tray or the strip holds it.
             self.custom_bitrate.is_none() && !self.strip_focus,
         );
-        // Section tabs and explainer on the rows' inner column, where headers and marks sit.
+        if self.seat > 0.0 {
+            self.keyboard.render(
+                canvas,
+                fonts,
+                f64::from(rect.width()),
+                f64::from(rect.bottom),
+                self.seat,
+                k,
+            );
+        }
+    }
+
+    /// The section tabs on the margin, under the shell's tabs, and the explainer on the
+    /// rows' inner column. The shell draws these over its trays, after [`Self::render`].
+    pub(crate) fn render_pinned(
+        &mut self,
+        canvas: &Canvas,
+        rect: Rect,
+        k: f64,
+        dt: f64,
+        fonts: &Fonts,
+        ctx: &Ctx,
+    ) {
+        let list_rect = self.list_rect(rect, k);
         let col = column(list_rect, k);
         let inner = f64::from(col.left) + 16.0 * k;
         let labels: Vec<&str> = TABS.iter().map(|(name, _)| *name).collect();
         self.strip.render(
             canvas,
-            Rect::from_ltrb(
-                (inner - edge(k)) as f32,
-                rect.top,
-                rect.right,
-                rect.top + strip_h as f32,
-            ),
+            Rect::from_ltrb(rect.left, rect.top, rect.right, list_rect.top),
             &labels,
             self.tab,
             self.strip_focus,
@@ -1057,11 +1096,12 @@ impl SettingsScreen {
             k,
             dt,
         );
+        let ids = self.row_ids(ctx);
         let focused = ids.get(self.list.cursor).copied();
         let detail = focused.map_or("", |id| detail(id, ctx));
         // The explainer under the list, led by the row's mark.
         let x = inner;
-        let top = f64::from(rect.bottom) - detail_h - tray_h + 6.0 * k;
+        let top = f64::from(list_rect.bottom) + 6.0 * k;
         let max_w = f64::from(col.right) - inner - 22.0 * k;
         fonts.leading(
             canvas,
@@ -1078,16 +1118,6 @@ impl SettingsScreen {
                 let (cx, cy) = ((x + 7.0 * k) as f32, (top + 8.0 * k) as f32);
                 crate::icons::draw_icon(canvas, mark, cx, cy, (14.0 * k) as f32, fg(0.55));
             }
-        }
-        if seat > 0.0 {
-            self.keyboard.render(
-                canvas,
-                fonts,
-                f64::from(rect.width()),
-                f64::from(rect.bottom),
-                seat,
-                k,
-            );
         }
     }
 }
@@ -2494,14 +2524,10 @@ pub(crate) mod tests {
             t: 0.0,
         };
         let k = f64::from(h) / 800.0;
-        screen.render(
-            surface.canvas(),
-            Rect::from_ltrb(0.0, 64.0, w as f32, h as f32 - 86.0),
-            k,
-            1.0 / 60.0,
-            &fonts,
-            &mut ctx,
-        );
+        let rect = Rect::from_ltrb(0.0, 64.0, w as f32, h as f32 - 86.0);
+        let dt = 1.0 / 60.0;
+        screen.render(surface.canvas(), rect, k, dt, &fonts, &mut ctx);
+        screen.render_pinned(surface.canvas(), rect, k, dt, &fonts, &ctx);
         k
     }
 

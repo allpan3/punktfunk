@@ -9,7 +9,7 @@ use crate::theme::{edge, fg, Fonts, PanelStroke, EDGE_INSET, W};
 use crate::widgets::{text_tab, tray, Toward};
 use pf_client_core::menu_nav::PadInfo;
 use pf_client_core::trust;
-use skia_safe::{Canvas, Rect};
+use skia_safe::{Canvas, Picture, PictureRecorder, Rect};
 use std::time::Instant;
 
 use super::{
@@ -366,6 +366,10 @@ struct Chrome {
     band: Band,
     title: Option<String>,
     hints: Vec<Hint>,
+    /// How far into the content the top and bottom trays reach for this screen, and the
+    /// screen's own chrome to draw over them, recorded while the layer painted.
+    pinned: (f32, f32),
+    pinned_pic: Option<Picture>,
 }
 
 pub(super) fn pill_id(tab: Tab) -> Id {
@@ -494,8 +498,18 @@ impl LayerEnv<'_> {
         // With focus on the tabs, a root's plate fades out. A root's target count says if
         // focus can enter.
         crate::el::set_dormant(self.strip_focus && band == Band::Strip);
+        let mut pinned_pic = None;
         let targets = crate::el::census(|| {
             screen.render(canvas, self.content, self.k, self.dt, self.fonts, &mut ctx);
+            // Pinned chrome is recorded, not drawn: it goes over the trays, in place, so
+            // a slide or a zoom never carries it. Its targets still count here.
+            if screen.pinned(self.k) != (0.0, 0.0) {
+                let mut rec = PictureRecorder::new();
+                let bounds = Rect::from_wh(self.w as f32, self.h as f32);
+                let rc = rec.begin_recording(bounds, false);
+                screen.render_pinned(rc, self.content, self.k, self.dt, self.fonts, &ctx);
+                pinned_pic = rec.finish_recording_as_picture(None);
+            }
         });
         crate::el::set_dormant(false);
         if band == Band::Strip {
@@ -515,6 +529,8 @@ impl LayerEnv<'_> {
             band,
             title,
             hints,
+            pinned: screen.pinned(self.k),
+            pinned_pic,
         }
     }
 
@@ -523,13 +539,26 @@ impl LayerEnv<'_> {
     /// roots crossing hold it at full. Returns the last legend's hit-boxes.
     fn chrome(&mut self, layers: &[Chrome]) -> Vec<(HintKey, Rect)> {
         let canvas = self.canvas;
-        // Trays out to the screen's edges, past the safe area, behind the band and legend.
+        // Trays out to the screen's edges, past the safe area, behind the band and legend,
+        // reaching in as far as the screens' own pinned chrome: one ramp, never two stacked.
         let (k, content) = (self.k, self.content);
         let edges = canvas.local_clip_bounds().unwrap_or(content);
-        let top = Rect::from_ltrb(edges.left, edges.top, edges.right, content.top);
+        let reach = |pick: fn(&Chrome) -> f32| layers.iter().map(pick).fold(0.0, f32::max);
+        let (into_top, into_bottom) = (reach(|c| c.pinned.0), reach(|c| c.pinned.1));
+        let top = Rect::from_ltrb(edges.left, edges.top, edges.right, content.top + into_top);
         tray(canvas, top, Toward::Top, k);
-        let bottom = Rect::from_ltrb(edges.left, content.bottom, edges.right, edges.bottom);
+        let foot = content.bottom - into_bottom;
+        let bottom = Rect::from_ltrb(edges.left, foot, edges.right, edges.bottom);
         tray(canvas, bottom, Toward::Bottom, k);
+        for c in layers {
+            let Some(pic) = &c.pinned_pic else {
+                continue;
+            };
+            if open_at(canvas, c.alpha) {
+                canvas.draw_picture(pic, None, None);
+                canvas.restore();
+            }
+        }
         let strip: f64 = layers
             .iter()
             .filter(|c| c.band == Band::Strip)
