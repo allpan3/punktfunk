@@ -314,9 +314,33 @@ const ROW_RISE: f64 = 12.0;
 
 /// Room above a list's first row and left of its column for the plate's outset, design units.
 const PLATE_AIR: f64 = 12.0;
-/// A list's soft edge, design units: where rows hide past an edge, this much of the list
-/// fades and blurs toward it.
+/// A scroller's soft edge, design units: where content hides past an edge, this much of
+/// the scroller fades and blurs toward it.
 const SOFT_EDGE: f64 = 40.0;
+
+/// Paints a scroller through `paint` inside `view`, with soft edges where content hides
+/// past `rect`: `scrolled` is its offset and reach. A scroller at rest on its top keeps a
+/// crisp top; pinned text past it sits on the field, never on a row.
+pub fn soft_scroll(
+    canvas: &Canvas,
+    view: Rect,
+    rect: Rect,
+    (offset, max): (f32, f32),
+    k: f64,
+    paint: impl FnOnce(),
+) {
+    let soft = (SOFT_EDGE * k) as f32;
+    let above = (offset / soft).clamp(0.0, 1.0);
+    let below = ((max - offset) / soft).clamp(0.0, 1.0);
+    let edged = above > 0.0 || below > 0.0;
+    if edged {
+        canvas.save_layer(&skia_safe::canvas::SaveLayerRec::default().bounds(&view));
+    }
+    paint();
+    if edged {
+        soft_edges(canvas, view, rect, soft, (above, below), k);
+    }
+}
 
 /// Closes the layer a list painted into with its soft edges. `strength` is how much hides
 /// past the top and the bottom, 0–1, so a list resting on its first row keeps a crisp top.
@@ -784,22 +808,11 @@ impl MenuList {
         }
         let scroll_settled = !tree.moving(list) && (!following || tree.offset(list) == target);
         tree.set_focus(active.then(|| row_id(this.cursor)));
-        // How much hides past each edge, up to one soft edge's depth.
-        let soft = (SOFT_EDGE * k) as f32;
-        let offset = tree.offset(list);
-        let (above, below) = (
-            (offset / soft).clamp(0.0, 1.0),
-            ((max - offset) / soft).clamp(0.0, 1.0),
-        );
-        let edged = above > 0.0 || below > 0.0;
-        if edged {
-            canvas.save_layer(&skia_safe::canvas::SaveLayerRec::default().bounds(&view));
-        }
-        tree.paint_focus(canvas, frame, k as f32, dt, false);
+        let scrolled = (tree.offset(list), max);
+        soft_scroll(canvas, view, rect, scrolled, k, || {
+            tree.paint_focus(canvas, frame, k as f32, dt, false);
+        });
         drop(tree);
-        if edged {
-            soft_edges(canvas, view, rect, soft, (above, below), k);
-        }
 
         // What a pointer hits: the cells as painted, not the drawing's ease.
         let tree = self.tree.get_mut();

@@ -1502,7 +1502,10 @@ impl LibraryScreen {
         };
         tree.set_focus((!this.quiet).then(|| games::zone_id(this.zone, field)));
         let cheap = super::settings::reduce_ui_res(ctx.settings, ctx.platform, ctx.fallback_ui);
-        tree.paint_focus(canvas, frame, k as f32, dt, cheap);
+        let scrolled = (tree.offset(grid), frame.scroll(grid).map_or(0.0, |s| s.1));
+        crate::widgets::soft_scroll(canvas, viewport, viewport, scrolled, k, || {
+            tree.paint_focus(canvas, frame, k as f32, dt, cheap);
+        });
         drop(tree);
 
         // Hit rects are the cells as laid out; covers drawn this frame stay warm.
