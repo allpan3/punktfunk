@@ -170,6 +170,11 @@ pub(crate) struct Plan {
 impl Plan {
     pub(crate) fn from_entry(entry: &Entry, source: &str, verified: bool) -> Result<Plan> {
         let scope = scope_of(&entry.pkg).context("catalog entry package must be scoped")?;
+        // The scope's registry lands in bunfig for every later install and the SDK refresh, so
+        // another source naming `@punktfunk` would redirect the official packages too.
+        if scope == "@punktfunk" && source != super::sources::OFFICIAL_NAME {
+            bail!("only the official source may install @punktfunk packages");
+        }
         Ok(Plan {
             pkg: Some(entry.pkg.clone()),
             spec: format!("{}@{}", entry.pkg, entry.version),
@@ -632,7 +637,16 @@ mod tests {
         );
         assert_eq!(plan.integrity.as_deref(), Some("sha512-AAAA"));
 
-        let ext = Plan::from_entry(&idx.plugins[0], "retro-hub", false).unwrap();
+        // Another source may not claim the official scope: its registry would serve every
+        // `@punktfunk` package from then on.
+        assert!(Plan::from_entry(&idx.plugins[0], "retro-hub", false).is_err());
+        let theirs = super::super::index::Index::parse(
+            br#"{"schema":1,"plugins":[{"id":"hub","pkg":"@retro/plugin-hub",
+                "registry":"https://example.org/npm/","title":"Hub",
+                "version":"1.0.0","integrity":"sha512-BBBB"}]}"#,
+        )
+        .unwrap();
+        let ext = Plan::from_entry(&theirs.plugins[0], "retro-hub", false).unwrap();
         assert_eq!(ext.tier, Tier::External);
         assert_eq!(ext.source.as_deref(), Some("retro-hub"));
     }
