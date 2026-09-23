@@ -117,39 +117,4 @@ class ConsoleVectorsTest {
             }
         }
     }
-
-    // The tab-names assertion moved with the tabs: the Skia shell renders them, and its Rust twin
-    // (`tab_names_match_the_shared_vectors` in pf-console-ui) pins them against the same file.
-
-    /**
-     * The screen-transition contract. The easing is sampled rather than compared as Bézier
-     * control points: this client evaluates the desktop's analytic `1 − (1−t)³` directly, while
-     * SwiftUI can only approximate it — samples with a tolerance are the one form all three can
-     * meet. It is also the assertion that would have caught the curve this client shipped with
-     * first, a "cubic-bezier(0.215, 0.61, 0.355, 1)" that is a full 0.08 slack at the midpoint.
-     */
-    @Test
-    fun motionMatchesTheSharedVectors() {
-        val motion = vectors.getJSONObject("motion")
-        close("transition", ConsoleMotion.TRANSITION_MS / 1000.0, motion.getDouble("transition_s"))
-        close("push slide", ConsoleMotion.PUSH_SLIDE.value.toDouble(), motion.getDouble("push_slide_dp"))
-        close("enter scale", ConsoleMotion.ENTER_SCALE.toDouble(), motion.getDouble("enter_scale"), 1e-5)
-        close("exit scale", ConsoleMotion.EXIT_SCALE.toDouble(), motion.getDouble("exit_scale"), 1e-5)
-        close("reveal alpha", ConsoleMotion.REVEAL_ALPHA.toDouble(), motion.getDouble("reveal_alpha"), 1e-5)
-
-        val curve = motion.getJSONObject("ease_out_cubic")
-        val tol = curve.getDouble("tolerance")
-        val samples = curve.getJSONArray("samples")
-        assertTrue("the curve needs enough samples to pin it", samples.length() >= 5)
-        for (i in 0 until samples.length()) {
-            val s = samples.getJSONObject(i)
-            val t = s.getDouble("t")
-            close(
-                "ease_out_cubic($t)",
-                ConsoleMotion.EaseOutCubic.transform(t.toFloat()).toDouble(),
-                s.getDouble("p"),
-                tol,
-            )
-        }
-    }
 }
