@@ -192,9 +192,8 @@ impl Shell {
             show_hints: self.connecting.is_none()
                 && self.launching.is_none()
                 && self.wake.is_none(),
+            cheap: false,
         };
-        // Only a settled top screen publishes hint hit-boxes. Mid-transition every
-        // layer is slid inside a `save_layer`, so reported rects are not the pixels.
         self.hint_rects.clear();
         // Reduced motion keeps the crossfade (an instant swap loses the only spatial
         // cue) and drops slide/scale.
@@ -202,6 +201,7 @@ impl Shell {
         // A tab's root shows the strip where a pushed screen shows its title.
         let band = |i: usize| if i == 0 { Band::Strip } else { Band::Title };
         let zoom = |s: f64| if reduce { 1.0 } else { s };
+        let mut chrome = Vec::with_capacity(2);
         match (&mut self.motion, motion_p) {
             (
                 Motion::Nav {
@@ -218,28 +218,20 @@ impl Shell {
                 if let Some(replaced) = leaving.as_mut() {
                     // REPLACE paints the swapped-out screen. Painting stack n-2 recedes its
                     // parent, so "Edit…" would flash the host list under the incoming editor.
-                    env.paint(replaced.as_mut(), 1.0 - p, 0.0, 0.0, recede, band(n - 1));
-                    env.paint(
-                        &mut self.stack[n - 1],
-                        p,
-                        0.0,
-                        enter_slide,
-                        enter_scale,
-                        band(n - 1),
-                    );
+                    let b = band(n - 1);
+                    chrome.push(env.paint(replaced.as_mut(), 1.0 - p, 0.0, 0.0, recede, b));
+                    let top = &mut self.stack[n - 1];
+                    chrome.push(env.paint(top, p, 0.0, enter_slide, enter_scale, b));
                 } else if n >= 2 {
                     let (below, top) = self.stack.split_at_mut(n - 1);
-                    env.paint(&mut below[n - 2], 1.0 - p, 0.0, 0.0, recede, band(n - 2));
-                    env.paint(&mut top[0], p, 0.0, enter_slide, enter_scale, Band::Title);
+                    let b = band(n - 2);
+                    chrome.push(env.paint(&mut below[n - 2], 1.0 - p, 0.0, 0.0, recede, b));
+                    let t = Band::Title;
+                    chrome.push(env.paint(&mut top[0], p, 0.0, enter_slide, enter_scale, t));
                 } else {
-                    env.paint(
-                        &mut self.stack[0],
-                        p,
-                        0.0,
-                        enter_slide,
-                        enter_scale,
-                        Band::Strip,
-                    );
+                    let root = &mut self.stack[0];
+                    let b = Band::Strip;
+                    chrome.push(env.paint(root, p, 0.0, enter_slide, enter_scale, b));
                 }
             }
             (
@@ -251,18 +243,19 @@ impl Shell {
                 Some(p),
             ) => {
                 let n = self.stack.len();
-                env.paint(
+                chrome.push(env.paint(
                     &mut self.stack[n - 1],
                     NAV_REVEAL_ALPHA + (1.0 - NAV_REVEAL_ALPHA) * p,
                     0.0,
                     0.0,
                     zoom(NAV_EXIT_SCALE + (1.0 - NAV_EXIT_SCALE) * p),
                     band(n - 1),
-                );
+                ));
                 let dy = slide(NAV_SLIDE_DP * k * p);
-                env.paint(leaving.as_mut(), 1.0 - p, 0.0, dy, 1.0, Band::Title);
+                chrome.push(env.paint(leaving.as_mut(), 1.0 - p, 0.0, dy, 1.0, Band::Title));
             }
             // A tab switch: the new root slides in a quarter width from the side it sits on.
+            // Both roots ask for the strip, so it holds still at full strength.
             (Motion::Tab { from, .. }, Some(p)) => {
                 let dir = if from.index() < tab.index() {
                     1.0
@@ -271,17 +264,24 @@ impl Shell {
                 };
                 let dx = |x: f64| slide(x * w * TAB_SLIDE);
                 if let Some(old) = self.parked[from.index()].as_mut() {
-                    env.paint(old, 1.0 - p, dx(-dir * p), 0.0, 1.0, Band::Empty);
+                    chrome.push(env.paint(old, 1.0 - p, dx(-dir * p), 0.0, 1.0, Band::Strip));
                 }
                 let n = self.stack.len();
                 let root = &mut self.stack[n - 1];
-                env.paint(root, p, dx(dir * (1.0 - p)), 0.0, 1.0, Band::Strip);
+                chrome.push(env.paint(root, p, dx(dir * (1.0 - p)), 0.0, 1.0, Band::Strip));
             }
             _ => {
                 let n = self.stack.len();
-                self.hint_rects =
-                    env.paint(&mut self.stack[n - 1], 1.0, 0.0, 0.0, 1.0, band(n - 1));
+                let top = &mut self.stack[n - 1];
+                chrome.push(env.paint(top, 1.0, 0.0, 0.0, 1.0, band(n - 1)));
             }
+        }
+        // Only a settled top screen publishes hint hit-boxes: mid-transition two legends
+        // share the band, so a reported rect is not necessarily the one under the pointer.
+        let settled = chrome.len() == 1 && chrome[0].alpha >= 0.999;
+        let rects = env.chrome(&chrome);
+        if settled {
+            self.hint_rects = rects;
         }
 
         if let Some(chip) = &self.chip {
@@ -346,13 +346,19 @@ fn chip_width(fonts: &Fonts, chip: &str, has_battery: bool, k: f64) -> f64 {
     pad_x + mark_w + gap + tw + pip_w + pad_x
 }
 
-/// What a layer draws in the band above its content.
+/// What a layer asks the band above its content to show.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Band {
     Title,
     Strip,
-    /// A tab root leaving: the entering one carries the strip.
-    Empty,
+}
+
+/// One layer's request of the fixed chrome, at the layer's alpha.
+struct Chrome {
+    alpha: f64,
+    band: Band,
+    title: Option<String>,
+    hints: Vec<Hint>,
 }
 
 pub(super) fn pill_id(tab: Tab) -> Id {
@@ -411,12 +417,28 @@ struct LayerEnv<'a> {
     t: f64,
     glyphs: GlyphStyle,
     show_hints: bool,
+    /// Reduced UI resolution, as the last painted screen's settings say.
+    cheap: bool,
+}
+
+/// Opens a draw at `alpha`: a layer when faded, a plain save when whole. False, and
+/// nothing opened, when there is nothing to see; the caller restores only on true.
+fn open_at(canvas: &Canvas, alpha: f64) -> bool {
+    if alpha < 0.001 {
+        return false;
+    }
+    if alpha < 0.999 {
+        canvas.save_layer_alpha_f(None, alpha as f32);
+    } else {
+        canvas.save();
+    }
+    true
 }
 
 impl LayerEnv<'_> {
-    /// One screen as a unit: fade, vertical slide, scale about centre. Title and
-    /// hint bar ride inside the layer so chrome travels with content. Hit-boxes
-    /// are only worth keeping on a settled top screen (see `Shell::render`).
+    /// One screen's content as a unit: fade, slide, scale about centre. The band and
+    /// legend stay out of the layer; the returned [`Chrome`] draws them in place, so a
+    /// tab switch or a push never moves the strip.
     #[allow(clippy::too_many_arguments)]
     fn paint(
         &mut self,
@@ -426,7 +448,7 @@ impl LayerEnv<'_> {
         dy: f64,
         scale: f64,
         band: Band,
-    ) -> Vec<(crate::glyphs::HintKey, Rect)> {
+    ) -> Chrome {
         let canvas = self.canvas;
         // Raise a layer only when alpha/scale/slide actually change. Unbounded
         // `save_layer` is a full-surface offscreen; Skia does not elide alpha ≥ 1.
@@ -459,52 +481,77 @@ impl LayerEnv<'_> {
             device_name: self.device_name,
             t: self.t,
         };
-        // Content first: a list scrolls up under the band drawn over it. With focus on the
-        // tabs, the screen keeps its plate to itself.
+        // With focus on the tabs, a root keeps its plate to itself.
         crate::el::set_dormant(self.strip_focus && band == Band::Strip);
         screen.render(canvas, self.content, self.k, self.dt, self.fonts, &mut ctx);
         crate::el::set_dormant(false);
-        let cheap =
+        self.cheap =
             crate::screens::settings::reduce_ui_res(ctx.settings, ctx.platform, ctx.fallback_ui);
         let title = (band == Band::Title).then(|| screen.title(&ctx));
-        let hints = self
-            .show_hints
-            .then(|| shortcuts(screen.hints(&ctx), self.glyphs, band == Band::Strip));
-        if let Some(title) = title {
-            self.fonts.heading(
-                canvas,
-                &title,
-                W::Bold,
-                30.0 * self.k,
-                fg(1.0),
-                edge(self.k),
-                18.0 * self.k,
-                self.title_max_w,
-            );
-        } else if band == Band::Strip {
-            self.draw_strip(canvas, cheap);
-        }
-        let rects = if let Some(hints) = hints {
-            hint_bar(
-                canvas,
-                self.fonts,
-                &hints,
-                self.glyphs,
-                18.0 * self.k,
-                self.h - 18.0 * self.k,
-                self.k,
-            )
-            .rects
+        let hints = if self.show_hints {
+            shortcuts(screen.hints(&ctx), self.glyphs, band == Band::Strip)
         } else {
             Vec::new()
         };
         canvas.restore();
+        Chrome {
+            alpha,
+            band,
+            title,
+            hints,
+        }
+    }
+
+    /// The band and legend over every layer, drawn after content so a list scrolls up
+    /// under them. The strip's strength is the sum of the layers asking for it, so two
+    /// roots crossing hold it at full. Returns the last legend's hit-boxes.
+    fn chrome(&mut self, layers: &[Chrome]) -> Vec<(HintKey, Rect)> {
+        let canvas = self.canvas;
+        let strip: f64 = layers
+            .iter()
+            .filter(|c| c.band == Band::Strip)
+            .map(|c| c.alpha)
+            .sum();
+        if open_at(canvas, strip.min(1.0)) {
+            self.draw_strip(canvas);
+            canvas.restore();
+        }
+        for c in layers {
+            let Some(title) = c.title.as_deref() else {
+                continue;
+            };
+            if open_at(canvas, c.alpha) {
+                let k = self.k;
+                let (x, top) = (edge(k), 18.0 * k);
+                let size = 30.0 * k;
+                self.fonts.heading(
+                    canvas,
+                    title,
+                    W::Bold,
+                    size,
+                    fg(1.0),
+                    x,
+                    top,
+                    self.title_max_w,
+                );
+                canvas.restore();
+            }
+        }
+        let mut rects = Vec::new();
+        for c in layers.iter().filter(|c| !c.hints.is_empty()) {
+            if open_at(canvas, c.alpha) {
+                let (k, glyphs) = (self.k, self.glyphs);
+                let bottom = self.h - 18.0 * k;
+                rects = hint_bar(canvas, self.fonts, &c.hints, glyphs, 18.0 * k, bottom, k).rects;
+                canvas.restore();
+            }
+        }
         rects
     }
 
     /// The text tabs where a root's title would be, text on the title's margin. The plate
     /// sits behind the current tab while the strip has focus.
-    fn draw_strip(&mut self, canvas: &Canvas, cheap: bool) {
+    fn draw_strip(&mut self, canvas: &Canvas) {
         let k = self.k;
         let (size, pad, gap) = (20.0 * k, 10.0 * k, 4.0 * k);
         let (h, top) = (STRIP_H * k, STRIP_TOP * k);
@@ -533,7 +580,7 @@ impl LayerEnv<'_> {
         self.strip.set_focus(Some(pill_id(self.tab)));
         if self.strip_focus {
             self.strip
-                .paint_focus(canvas, frame, k as f32, self.dt, cheap);
+                .paint_focus(canvas, frame, k as f32, self.dt, self.cheap);
         } else {
             self.strip.paint(canvas, frame);
         }

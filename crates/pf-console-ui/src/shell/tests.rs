@@ -186,6 +186,54 @@ fn shell(stack: Vec<Screen>) -> (Shell, ConsoleShared, LibraryShared) {
     (shell, console, library)
 }
 
+/// A tab switch slides the content only: mid-flight the strip's pixels match the settled
+/// frame's. Hosts and Players share the aurora, so the backdrop does not change under it.
+#[test]
+fn the_strip_holds_still_across_a_tab_switch() {
+    let fonts = crate::theme::build_fonts().unwrap();
+    let (w, h) = (1280, 800);
+    let mut surface = skia_safe::surfaces::raster_n32_premul((w, h)).unwrap();
+    let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    s.fake_clock = Some((100.0, 1.0 / 60.0));
+    // The strip's line (k = 1 at 800 tall), left half: the tabs, not the chip.
+    let (bw, bh) = (w / 2, 36);
+    let mut band = |s: &mut Shell, frames: usize| {
+        for _ in 0..frames {
+            s.render(
+                surface.canvas(),
+                w as u32,
+                h as u32,
+                &fonts,
+                None,
+                None,
+                &[],
+            );
+        }
+        let info = skia_safe::ImageInfo::new_n32_premul((bw, bh), None);
+        let mut px = vec![0u8; (bw * bh * 4) as usize];
+        assert!(surface.read_pixels(&info, &mut px, (bw * 4) as usize, (0, 32)));
+        px
+    };
+    band(&mut s, 30);
+    assert!(s.switch_tab(Tab::Players));
+    let mid = band(&mut s, 5);
+    assert!(
+        matches!(s.motion, Motion::Tab { .. }),
+        "still mid-switch after five frames"
+    );
+    let settled = band(&mut s, 90);
+    let worst = mid
+        .iter()
+        .zip(&settled)
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap();
+    assert!(
+        worst <= 12,
+        "the strip moved mid-switch (max channel diff {worst})"
+    );
+}
+
 /// A remote's whole lap: Up from the host row lands on the strip, Left and Right walk the
 /// tabs, Down returns to the screen, L1/R1 jump from content, and Back at a root leaves.
 #[test]
