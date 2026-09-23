@@ -82,12 +82,6 @@ struct ContentView: View {
     /// Owns the Live Activity for the running session (Lock Screen / Dynamic Island). Driven from
     /// the session model's published state below; iPhone/iPad only.
     @State private var liveActivity = SessionActivityController()
-    /// The window's bottom safe-area inset (the home-indicator strip), reported by
-    /// DisplayBottomInsetProbe from UIKit's own callbacks and published as
-    /// `\.displayBottomInset` for the screens that pin a legend to the display's corner. Held
-    /// HERE and read through the environment because asking UIKit for it during a body severs
-    /// the asking view's updates on device (see the probe).
-    @State private var displayBottomInset: CGFloat = 0
     #endif
     @State private var pairingTarget: StoredHost?
     /// A fresh `pair=required`/unknown host the user tapped: drives the choice between no-PIN
@@ -150,8 +144,8 @@ struct ContentView: View {
     #if !os(macOS)
     @State private var showSettings = false
     #endif
-    // A connected controller (+ the Settings toggle) swaps the whole home screen for
-    // GamepadHomeView instead of retrofitting HomeView's touch/desktop UI — see `home` below.
+    // A connected controller (+ the Settings toggle) swaps the whole home screen for the console
+    // (ConsoleHomeView) instead of retrofitting HomeView's touch/desktop UI — see `home` below.
     // On tvOS the same screens are focus-engine-driven, so the Siri Remote keeps working;
     // with no (extended) controller attached tvOS falls back to HomeView as before.
     @ObservedObject private var gamepadManager = GamepadManager.shared
@@ -302,15 +296,6 @@ struct ContentView: View {
     private var driven: some View {
         drivenBase
             .environment(\.gamepadMetrics, gamepadMetrics)
-            #if os(iOS)
-            .environment(\.displayBottomInset, displayBottomInset)
-            // The probe is UIKit's, not any screen's: mounted once here as a background so the
-            // legend-pinning screens can READ the inset from the environment without ever asking
-            // UIKit during their own body (which severs their updates — see the probe).
-            .background {
-                DisplayBottomInsetProbe { displayBottomInset = $0 }
-            }
-            #endif
             #if os(iOS) || os(macOS)
             // The console's own modal, over WHICHEVER screen is up. Not attached to `home`, which
             // renders only while `model.connection == nil`: a connection exists through the
@@ -599,41 +584,11 @@ struct ContentView: View {
         // (the "Pair with PIN instead" path disconnects first — the host's accept loop
         // is sequential, a pairing connection would queue behind the live session).
         #if !os(tvOS)
-        // macOS presents BOTH pairing UIs from here, picking by mode (the console UI's screen is
-        // gamepad-navigable; PairSheet's Form is not). iOS hides this sheet in gamepad mode
-        // instead — there the pair screen is one of the shell's in-place layers, exactly like
-        // settings and add-host (see `touchPairingTarget`).
+        // The touch UI's pairing sheet. The console pairs on its own screen, so the sheet hides
+        // while the console owns the screen (see `touchPairingTarget`).
         .sheet(item: touchPairingTarget) { host in
-            #if os(macOS)
-            if gamepadUIActive {
-                GamepadPairView(host: host, onPaired: { handlePaired(host, fingerprint: $0) })
-                    .frame(width: 660, height: 620)
-            } else {
-                PairSheet(host: host) { fingerprint in handlePaired(host, fingerprint: fingerprint) }
-            }
-            #else
             PairSheet(host: host) { fingerprint in handlePaired(host, fingerprint: fingerprint) }
-            #endif
         }
-        // The library is a full-screen presentation, not a sheet: on iPad a sheet is a centered page
-        // card, but the gamepad coverflow is meant to be an immersive, full-bleed screen (and the
-        // launcher behind it stops consuming the controller — see GamepadHomeView's `isActive`).
-        // macOS has no `fullScreenCover`, so it keeps the sheet there — with an explicit size: a
-        // macOS sheet takes its content's IDEAL size, and both library layouts are geometry-driven
-        // (the coverflow is a GeometryReader, ideal ≈ zero), so without a frame it collapses to a
-        // tiny panel.
-        #if os(macOS)
-        .sheet(item: macLibrarySheet) { shelf in
-            NavigationStack {
-                LibraryView(
-                    store: store, target: shelf, onLaunch: { launchTitle(shelf, $0) },
-                    onConnect: { connectFromShelf(shelf) })
-            }
-            .frame(minWidth: 940, minHeight: 620)
-            // The stack draws the title, outside LibraryView's own ink (see the tvOS cover).
-            .gamepadPaletteInk()
-        }
-        #endif
         #endif
     }
 
@@ -774,17 +729,12 @@ struct ContentView: View {
 
     #if os(macOS)
     /// On the Mac a shelf is the Library row's pick, not a presentation: a written `libraryTarget`
-    /// becomes that pick, selects the row and clears. Gamepad mode keeps its sheet
-    /// (`macLibrarySheet`).
+    /// becomes that pick, selects the row and clears. In gamepad mode the console takes it.
     private func showShelfInSidebar() {
         guard !gamepadUIActive, let shelf = libraryTarget else { return }
         libraryShelfID = shelf.id
         macDestination = .library
         libraryTarget = nil
-    }
-
-    private var macLibrarySheet: Binding<LibraryTarget?> {
-        Binding(get: { gamepadUIActive ? libraryTarget : nil }, set: { libraryTarget = $0 })
     }
 
     /// Run a host window's pending request here, unless another main window took it first. A
@@ -998,11 +948,7 @@ struct ContentView: View {
                     ConnectOverlay(
                         connectingHostName: connectingOverlayName,
                         waker: waker,
-                        gamepadUI: gamepadUIActive,
                         onCancelConnect: { model.disconnect() })
-                        // The takeover mounts OUTSIDE the gamepad screens (it covers the whole
-                        // home), so it publishes the palette's ink itself rather than inheriting it.
-                        .gamepadPaletteInk()
                 }
             }
     }

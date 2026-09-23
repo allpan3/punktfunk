@@ -14,7 +14,7 @@ import SwiftUI
 
 @MainActor
 final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
-    /// What the console asks the app to do — the closures `GamepadHomeView` already took.
+    /// What the console asks the app to do: connect, launch, wake, pair.
     struct Actions {
         var connect: (StoredHost, PresetSelection) -> Void
         var connectDiscovered: (DiscoveredHost) -> Void

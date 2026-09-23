@@ -17,12 +17,8 @@ let package = Package(
         .executable(name: "PunktfunkClient", targets: ["PunktfunkClient"]),
     ],
     dependencies: [
-        // Progressive (gradient) backdrop blur for the form screens' trays — a real blur with no
-        // material tint stage (see GamepadTrayBlur). Pinned by REVISION, not `from:`: the
-        // GlurBackdrop product exists only on main — no release carries it (the newest tag,
-        // `1.1`, predates it, and is not three-component semver anyway, so version-based
-        // resolution stops at 1.0.4). The revision is main's head at adoption time; a revision
-        // pin stays reproducible when the branch moves.
+        // Progressive backdrop blur with no material tint; `pf-console-ui`'s `blur.rs` follows it.
+        // Pinned by revision: GlurBackdrop exists only on main, and no tagged release carries it.
         .package(
             url: "https://github.com/joogps/Glur.git",
             revision: "ba4f05d3c9a608ec773b9305f2af6089390de68a"),

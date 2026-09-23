@@ -31,8 +31,7 @@ extension StoredHost {
 }
 
 /// The join of live mDNS discovery against the saved-host store, shared by the touch grid
-/// (HomeView) and the gamepad launcher (GamepadHomeView) so both screens classify hosts the same
-/// way. Presence is NOT part of it: whether a host is up is `HostStore.isReachable`, because an
+/// (HomeView) and the console (ConsoleModel) so both classify hosts the same way. Presence is NOT part of it: whether a host is up is `HostStore.isReachable`, because an
 /// advert outlives the machine it describes by up to 75 minutes.
 extension HostDiscovery {
     /// Discovered hosts not already saved — the saved list shows the rest, so this only surfaces
