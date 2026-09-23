@@ -76,15 +76,62 @@ extension ConsoleModel {
             platformScreen = a["id"] as? String
         case "PadAction":
             padAction(a["action"] as? String ?? "", key: a["pad_key"] as? String ?? "")
-        // Owed: the link speed test, a second connect through `startSpeedTest`.
         case "SpeedTest":
-            notice("That isn't here yet on this device.")
+            speedTest(
+                key: a["key"] as? String ?? "", addr: a["addr"] as? String ?? "",
+                port: port(a["port"]), fp: a["fp_hex"] as? String ?? "")
         default:
             break
         }
     }
 
     private func port(_ value: Any?) -> UInt16 { UInt16(value as? Int ?? 0) }
+
+    /// The console's link test: one probe burst over a second connect, each phase pushed back
+    /// as `SpeedPhase`. The console raised the takeover itself and owns clearing it. 720p60, as
+    /// `pf_client_core::speed` connects: nothing presents a frame, and a 4K encode for a burst
+    /// would be slower for nothing. The recommendation is that module's integer rule.
+    private func speedTest(key: String, addr: String, port: UInt16, fp: String) {
+        guard let identity = (try? ClientIdentityStore.shared.load())?.identity else {
+            pushSpeed(key, ["Failed": "This device has no client certificate yet."])
+            return
+        }
+        let pin = host(fp: fp, addr: addr, port: port)?.pinnedSHA256
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let conn: PunktfunkConnection
+            do {
+                conn = try PunktfunkConnection(
+                    host: addr, port: port, width: 1280, height: 720, refreshHz: 60,
+                    pinSHA256: pin, identity: identity)
+            } catch {
+                await self?.pushSpeed(key, ["Failed": "Couldn't reach \(addr) — it may be asleep."])
+                return
+            }
+            defer { conn.close() }
+            conn.startSpeedTest(targetKbps: 3_000_000, durationMs: 5_000)
+            await self?.pushSpeed(key, "Measuring")
+            // The host clamps the burst to five seconds; its report lands just after.
+            let deadline = Date().addingTimeInterval(13)
+            while Date() < deadline {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                guard let r = conn.probeResult() else { break }
+                if r.done {
+                    let done: [String: Any] = [
+                        "throughput_kbps": r.throughputKbps, "loss_pct": r.lossPct,
+                        "recommended_kbps": r.throughputKbps / 10 * 7,
+                    ]
+                    await self?.pushSpeed(key, ["Done": done])
+                    return
+                }
+            }
+            await self?.pushSpeed(
+                key, ["Failed": "The measurement never finished — the connection may have dropped."])
+        }
+    }
+
+    private func pushSpeed(_ key: String, _ phase: Any) {
+        bridge.push(.speed, ConsoleJSON.string(["key": key, "phase": phase]))
+    }
 
     /// The Players card's rumble test: one firm pulse on the pad it names. The grants are
     /// Android's and never reach here.
