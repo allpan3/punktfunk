@@ -184,6 +184,9 @@ impl Hint {
 
 const LABEL_SIZE: f64 = 14.0;
 const BADGE_D: f64 = 22.0; // dp
+/// The legend pill's inner pad, dp: a bar placed this far left of a column starts its
+/// first glyph on it.
+pub const HINT_PAD: f64 = 13.0;
 
 pub struct HintBar {
     pub size: (f64, f64),
@@ -207,7 +210,7 @@ pub fn hint_bar(
             rects: Vec::new(),
         };
     }
-    let pad = 13.0 * k;
+    let pad = HINT_PAD * k;
     let gap_hint = 18.0 * k;
     let gap_glyph = 7.0 * k;
     // Drop unresolvable hints before layout so they take no width or hit box.

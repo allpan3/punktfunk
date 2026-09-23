@@ -568,9 +568,11 @@ pub fn spinner(canvas: &Canvas, cx: f64, cy: f64, r: f64, t: f64) {
     );
 }
 
-/// Chrome inset from the screen edge, design units. 24 matches Apple `.horizontal, 24`
-/// and Android `ConsoleEdgeInset`. Not the legend's 18 (a pill edge).
-pub const EDGE_INSET: f64 = 24.0;
+/// Content inset from the screen edge, design units: a ten-foot column, read from a sofa.
+pub const EDGE_INSET: f64 = 40.0;
+/// Least air between the safe area and content, design units. A notch or a rounded
+/// corner is not a margin.
+const EDGE_AIR: f64 = 20.0;
 
 thread_local! {
     /// The safe area's left inset this frame, px. Set by [`crate::shell::Shell::render`].
@@ -582,9 +584,10 @@ pub fn set_side_inset(px: f64) {
 }
 
 /// The margin every screen shares, px from the layout's edge: [`EDGE_INSET`] from the
-/// screen's edge, of which a safe-area inset already gives its share.
+/// screen's edge, of which a safe-area inset gives its share, and never under
+/// [`EDGE_AIR`] past the safe area.
 pub fn edge(k: f64) -> f64 {
-    (EDGE_INSET * k - SIDE_INSET.with(Cell::get)).max(0.0)
+    (EDGE_INSET * k - SIDE_INSET.with(Cell::get)).max(EDGE_AIR * k)
 }
 
 /// Geist weights, matching the Apple client's `.geist(size, weight)`.

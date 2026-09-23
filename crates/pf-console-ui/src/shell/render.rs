@@ -17,7 +17,7 @@ use super::{
     NAV_SLIDE_DP, TABS, TAB_SLIDE, TOP_BAND,
 };
 use crate::el::{El, Id, Tree};
-use crate::glyphs::{Hint, HintKey};
+use crate::glyphs::{Hint, HintKey, HINT_PAD};
 
 /// The tab strip's top and height, design units.
 const STRIP_TOP: f64 = 32.0;
@@ -541,8 +541,8 @@ impl LayerEnv<'_> {
         for c in layers.iter().filter(|c| !c.hints.is_empty()) {
             if open_at(canvas, c.alpha) {
                 let (k, glyphs) = (self.k, self.glyphs);
-                let bottom = self.h - 18.0 * k;
-                rects = hint_bar(canvas, self.fonts, &c.hints, glyphs, 18.0 * k, bottom, k).rects;
+                let (x, bottom) = (edge(k) - HINT_PAD * k, self.h - 18.0 * k);
+                rects = hint_bar(canvas, self.fonts, &c.hints, glyphs, x, bottom, k).rects;
                 canvas.restore();
             }
         }
