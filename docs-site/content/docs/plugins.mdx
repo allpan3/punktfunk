@@ -135,7 +135,8 @@ refused unless you add `--allow-public-registry` — a guard against typos and l
 ## Where a plugin runs
 
 On Linux each plugin runs in its own sandbox — a separate process with an empty home, no network
-unless it asked for one, and access to just the paths it declared (plus what you granted it). It
+unless it asked for one (the runner still forwards its settings page to the console), and access to
+just the paths it declared (plus what you granted it). It
 reaches the host through a socket the runner holds, with a token of its own, so it can publish its
 own library entries and nothing else's. The sandbox is built from the `punktfunk` block in the
 plugin's `package.json` (below), so a plugin without one does not start; update it.

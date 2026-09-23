@@ -175,6 +175,16 @@ describe("bwrapArgv", () => {
 		expect(bwrapArgv(manifest({ network: true }), paths)).toContain("--share-net");
 	});
 
+	test("without network the UI gets the runner's socket dir and port", () => {
+		const ui = { dir: "/run/user/1000/punktfunk/ui-demo-ab12", port: 41234 };
+		const argv = bwrapArgv(manifest(), { ...paths, ui }).join(" ");
+		expect(argv).toContain(`--bind ${ui.dir} /run/punktfunk/ui`);
+		expect(argv).toContain("--setenv PUNKTFUNK_UI_PORT 41234");
+		// A plugin on the host's network serves its UI on the host's loopback itself.
+		const shared = bwrapArgv(manifest({ network: true }), { ...paths, ui }).join(" ");
+		expect(shared).not.toContain("PUNKTFUNK_UI_PORT");
+	});
+
 	test("grants bind read-only by default and writable only when they say so", () => {
 		const argv = bwrapArgv(manifest({ writes: ["/tmp/vhclient"] }), paths, [
 			{ path: "/mnt/legacy", write: false },

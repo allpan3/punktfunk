@@ -7,10 +7,12 @@
 // so there is nothing to reach through.
 //
 // Each plugin gets: an empty home, its own state dir, the paths its manifest declares, its own
-// token, and a unix socket to the host. No network unless it declared one. Pin: `sandbox.test.ts`.
+// token, and a unix socket to the host. No network unless it declared one; then its UI reaches the
+// console through a second socket (`ui-forward.ts`). Pin: `sandbox.test.ts`.
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { UI_DIR } from "./ui-forward.js";
 
 /** A plugin's `punktfunk` block — the half of it a sandbox is built from. */
 export interface PluginManifest {
@@ -62,6 +64,8 @@ export interface SandboxPaths {
 	bun: string;
 	runner: string;
 	home: string;
+	/** A plugin without network: the runner's dir its UI socket goes in, and the forwarded port. */
+	ui?: { dir: string; port: number };
 }
 
 /**
@@ -155,6 +159,11 @@ export const bwrapArgv = (
 	);
 	argv.push("--ro-bind", paths.tokenFile, "/run/punktfunk/plugin-token");
 	argv.push("--bind", paths.socket, "/run/punktfunk/host.sock");
+	// Its own loopback is unreachable, so its UI listens where the runner can forward to.
+	if (paths.ui && !manifest.network) {
+		argv.push("--bind", paths.ui.dir, UI_DIR);
+		argv.push("--setenv", "PUNKTFUNK_UI_PORT", String(paths.ui.port));
+	}
 	// What it said it needs. `-try` so an uninstalled launcher's dir is simply absent rather
 	// than a sandbox that refuses to start.
 	for (const p of manifest.reads ?? []) {
