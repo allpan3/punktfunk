@@ -337,6 +337,11 @@ pub(crate) fn runtime_status() -> RuntimeStatus {
     plat::runtime_status()
 }
 
+/// Has the operator turned the per-plugin sandbox off for the runner? Linux only.
+pub(crate) fn runner_sandbox_off() -> bool {
+    plat::runner_sandbox_off()
+}
+
 /// [`enable`]/[`disable`], also `POST /store/runtime`. Windows: the SYSTEM service
 /// already clears the elevation bar the CLI checks.
 pub(crate) fn set_runtime_enabled(enabled: bool) -> Result<()> {

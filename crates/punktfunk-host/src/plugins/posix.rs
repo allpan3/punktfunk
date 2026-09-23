@@ -200,6 +200,23 @@ fn systemctl_output(args: &[&str]) -> Option<String> {
     }
 }
 
+/// Is `PUNKTFUNK_PLUGIN_SANDBOX` off in the runner unit's own environment? The host's
+/// environment says nothing about it: the runner reads only what its unit sets.
+#[cfg(target_os = "linux")]
+pub(super) fn runner_sandbox_off() -> bool {
+    systemctl_output(&["show", UNIT, "-p", "Environment", "--value"]).is_some_and(|env| {
+        env.split_whitespace().any(|kv| {
+            kv.strip_prefix("PUNKTFUNK_PLUGIN_SANDBOX=")
+                .is_some_and(|v| matches!(v.trim_matches('"'), "0" | "off" | "false"))
+        })
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn runner_sandbox_off() -> bool {
+    false
+}
+
 #[cfg(target_os = "linux")]
 pub(super) fn restart_runtime() -> Result<()> {
     run_systemctl(&["restart", UNIT])

@@ -510,6 +510,11 @@ pub(super) fn runtime_status() -> RuntimeStatus {
     }
 }
 
+/// Windows has no per-plugin sandbox to turn off; the diagnostic that asks is Linux's.
+pub(super) fn runner_sandbox_off() -> bool {
+    false
+}
+
 /// Nothing to converge: the task sees the whole disk, and a grant is an ACL ([`grant`]).
 pub(super) fn converge_runner_roots(
     _roots: &[super::access::RunnerRoot],
