@@ -249,14 +249,22 @@ pub(crate) async fn list_library_scanners() -> Json<Vec<crate::library::ScannerI
     responses(
         (status = OK, description = "Toggle stored; the full scanner list", body = [crate::library::ScannerInfo]),
         (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
+        (status = FORBIDDEN, description = "A plugin toggled another plugin's source", body = ApiError),
         (status = NOT_FOUND, description = "No such scanner on this platform", body = ApiError),
         (status = INTERNAL_SERVER_ERROR, description = "Couldn't save the settings", body = ApiError),
     )
 )]
 pub(crate) async fn set_library_scanner(
+    who: Option<Extension<crate::mgmt::auth::PluginIdentity>>,
     Path(id): Path<String>,
     ApiJson(toggle): ApiJson<ScannerToggle>,
 ) -> Response {
+    if !crate::mgmt::auth::plugin_owns(who.as_ref().map(|e| &e.0), &id) {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "a plugin may only toggle its own source",
+        );
+    }
     match crate::library::set_scanner_enabled(&id, toggle.enabled) {
         Ok(Some(scanners)) => {
             tracing::info!(
@@ -647,12 +655,21 @@ pub(crate) struct ProviderRunningAccepted {
         (status = OK, description = "The report was accepted", body = ProviderRunningAccepted),
         (status = BAD_REQUEST, description = "Invalid provider id or payload", body = ApiError),
         (status = UNAUTHORIZED, description = "Missing or invalid bearer token", body = ApiError),
+        (status = FORBIDDEN, description = "A plugin reported another plugin's titles", body = ApiError),
     )
 )]
 pub(crate) async fn report_provider_running(
+    who: Option<Extension<crate::mgmt::auth::PluginIdentity>>,
     Path(provider): Path<String>,
     ApiJson(input): ApiJson<ProviderRunningInput>,
 ) -> Response {
+    // Another plugin's report would end or prolong that provider's game lease.
+    if !crate::mgmt::auth::plugin_owns(who.as_ref().map(|e| &e.0), &provider) {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "a plugin may only report its own titles",
+        );
+    }
     if let Err(e) = crate::library::validate_provider_name(&provider) {
         return api_error(StatusCode::BAD_REQUEST, &e);
     }
