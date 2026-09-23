@@ -358,6 +358,11 @@ pub(crate) fn grant_acl(dir: &std::path::Path, write: bool) -> std::io::Result<(
     plat::grant(dir, write).map_err(|e| std::io::Error::other(e.to_string()))
 }
 
+/// Take the runner's ACE off a folder no plugin holds any more. POSIX has none to take.
+pub(crate) fn revoke_acl(dir: &std::path::Path) -> std::io::Result<()> {
+    plat::revoke(dir).map_err(|e| std::io::Error::other(e.to_string()))
+}
+
 /// Keep a rewritten runner credential readable by the enabled Windows service. POSIX runners
 /// inherit access from the operator and need no ACL adjustment.
 pub(crate) fn converge_runner_credential(path: &std::path::Path) -> Result<()> {

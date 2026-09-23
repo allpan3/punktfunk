@@ -471,6 +471,26 @@ pub(super) fn grant(dir: &std::path::Path, write: bool) -> Result<()> {
     Ok(())
 }
 
+/// Remove the runner's ACE from one directory: the inverse of [`grant`]. A folder that is gone
+/// has nothing left to remove.
+pub(super) fn revoke(dir: &std::path::Path) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    let ok = Command::new(icacls_path())
+        .arg(dir)
+        .args(["/remove:g", LOCAL_SERVICE_SID])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .context("run icacls")?
+        .success();
+    if !ok {
+        bail!("remove the runner's ACE from {}", dir.display());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     /// Read grants are read-only ACEs; a write grant is the one that carries Modify.

@@ -397,14 +397,43 @@ fn apply_acl(dir: &Path, write: bool) -> io::Result<()> {
     super::grant_acl(dir, write)
 }
 
+/// Match the ACL on `path` to the grants left after one came off. Every Windows plugin is the
+/// same principal, so the ACE goes only when no plugin holds the folder, and a write ACE falls
+/// back to read when only read grants remain. Best-effort: the record is already written.
+fn settle_acl(access: &BTreeMap<String, PluginAccess>, path: &str) {
+    let held: Vec<bool> = access
+        .values()
+        .flat_map(|a| a.grants.iter())
+        .filter(|g| same_path(&g.path, path))
+        .map(|g| g.write)
+        .collect();
+    let dir = Path::new(path);
+    let result = if held.is_empty() {
+        #[cfg(test)]
+        ACL_REMOVES.with(|calls| calls.set(calls.get() + 1));
+        super::revoke_acl(dir)
+    } else {
+        apply_acl(dir, held.contains(&true))
+    };
+    if let Err(e) = result {
+        tracing::warn!(path, error = %e, "revoked folder keeps its runner ACE");
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     static ACL_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static ACL_REMOVES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
 fn acl_calls() -> usize {
     ACL_CALLS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn acl_removes() -> usize {
+    ACL_REMOVES.with(std::cell::Cell::get)
 }
 
 /// Grants + denials in the runner-data directory, plus the pending queue under the config dir.
@@ -633,6 +662,7 @@ impl AccessStore {
         let mut pending_all = self.load_pending();
         let mut grants_changed = false;
         let mut pending_changed = false;
+        let mut ungranted = false;
         match decision {
             Decision::Allow => {
                 // The cap is checked before the ACL and before the pending row moves: a
@@ -706,7 +736,9 @@ impl AccessStore {
             Decision::Forget => {
                 if let Some(entry) = access.get_mut(id) {
                     let before = entry.grants.len() + entry.denied.len();
+                    let granted = entry.grants.len();
                     entry.grants.retain(|g| !same_path(&g.path, &stored_path));
+                    ungranted = entry.grants.len() != granted;
                     entry.denied.retain(|d| !same_path(d, &stored_path));
                     grants_changed = entry.grants.len() + entry.denied.len() != before;
                 }
@@ -714,6 +746,9 @@ impl AccessStore {
         }
         if grants_changed {
             self.write_access(&access)?;
+        }
+        if ungranted {
+            settle_acl(&access, &stored_path);
         }
         if pending_changed {
             self.write_pending(&pending_all)?;
@@ -886,6 +921,7 @@ impl AccessStore {
         };
         if changed {
             self.write_access(&access)?;
+            settle_acl(&access, &stored);
         }
         Ok(grants)
     }
@@ -1392,6 +1428,31 @@ mod tests {
             .decide("demo", gone, Decision::Forget, "console")
             .unwrap();
         assert!(!m.changed, "a second forget is a no-op");
+    }
+
+    #[test]
+    fn a_shared_folder_keeps_its_ace_until_the_last_grant_goes() {
+        let f = fixture();
+        let games = f.dir("data/games");
+        f.store().grant("demo", &games, true, "cli").unwrap();
+        f.store().grant("other", &games, false, "cli").unwrap();
+        let (calls, removes) = (acl_calls(), acl_removes());
+        // One plugin still reads it: the ACE stays, down to read.
+        f.store().revoke("demo", &games).unwrap();
+        assert_eq!((acl_calls(), acl_removes()), (calls + 1, removes));
+        f.store()
+            .decide(
+                "other",
+                &games.to_string_lossy(),
+                Decision::Forget,
+                "console",
+            )
+            .unwrap();
+        assert_eq!(
+            acl_removes(),
+            removes + 1,
+            "the last grant takes the ACE with it"
+        );
     }
 
     #[test]
