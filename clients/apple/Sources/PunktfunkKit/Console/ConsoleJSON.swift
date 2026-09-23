@@ -154,6 +154,57 @@ public enum ConsoleJSON {
         ])
     }
 
+    /// One connected controller as the Players tab shows it.
+    public struct Pad {
+        public var name: String
+        /// Stable across a refresh: the rumble test names the pad by it.
+        public var key: String
+        /// The virtual-pad type's wire byte, which picks the card's glyph family.
+        public var pref: UInt32
+        public var detail: String
+        public var forwarded: Bool
+        public var rumble: Bool
+        /// 0...1, nil when the pad reports none.
+        public var battery: Float?
+        public var charging: Bool
+
+        public init(_ c: GamepadManager.DiscoveredController, forwarded: Bool) {
+            self.init(
+                name: c.name, key: c.id, pref: c.kind.rawValue, detail: c.productCategory,
+                forwarded: forwarded, rumble: c.hasHaptics, battery: c.batteryLevel,
+                charging: c.isCharging)
+        }
+
+        public init(
+            name: String, key: String, pref: UInt32, detail: String, forwarded: Bool,
+            rumble: Bool, battery: Float?, charging: Bool
+        ) {
+            (self.name, self.key, self.pref, self.detail) = (name, key, pref, detail)
+            (self.forwarded, self.rumble, self.battery, self.charging) =
+                (forwarded, rumble, battery, charging)
+        }
+    }
+
+    /// The pads push: the legend's pad and its glyph family, then every pad.
+    public static func pads(_ pads: [Pad], active: Pad?) -> String {
+        var doc: [String: Any] = [
+            "pads": pads.map { pad -> [String: Any] in
+                [
+                    "name": pad.name, "key": pad.key, "pref": pad.pref, "detail": pad.detail,
+                    "forwarded": pad.forwarded, "rumble": pad.rumble,
+                    "battery": pad.battery.map {
+                        ["percent": Int(($0 * 100).rounded()), "charging": pad.charging]
+                    } as Any? ?? NSNull(),
+                ]
+            }
+        ]
+        if let active {
+            doc["label"] = active.name
+            doc["pref"] = active.pref
+        }
+        return string(doc)
+    }
+
     /// The catalog with each preset's overrides, so a settings row can say when a host's bound
     /// preset outranks the global it shows.
     public static func presets(_ presets: [StreamPreset]) -> String {

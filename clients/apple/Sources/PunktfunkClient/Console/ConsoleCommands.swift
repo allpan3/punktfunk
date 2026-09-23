@@ -2,6 +2,7 @@
 // library fetches and host actions ride this bus; what the shell wants SHOWN goes back as a
 // model push or a notice toast.
 
+import CoreHaptics
 import Foundation
 import PunktfunkKit
 import PunktfunkShared
@@ -73,9 +74,10 @@ extension ConsoleModel {
                 label: a["label"] as? String ?? "")
         case "OpenPlatformScreen":
             platformScreen = a["id"] as? String
-        // Owed: the link speed test (a second connect through `startSpeedTest`) and the pad
-        // grants, neither of which this client has a service for yet.
-        case "SpeedTest", "PadAction":
+        case "PadAction":
+            padAction(a["action"] as? String ?? "", key: a["pad_key"] as? String ?? "")
+        // Owed: the link speed test, a second connect through `startSpeedTest`.
+        case "SpeedTest":
             notice("That isn't here yet on this device.")
         default:
             break
@@ -83,6 +85,28 @@ extension ConsoleModel {
     }
 
     private func port(_ value: Any?) -> UInt16 { UInt16(value as? Int ?? 0) }
+
+    /// The Players card's rumble test: one firm pulse on the pad it names. The grants are
+    /// Android's and never reach here.
+    private func padAction(_ action: String, key: String) {
+        guard action == "rumble",
+            let pad = GamepadManager.shared.controllers.first(where: { $0.id == key }),
+            let engine = pad.controller.haptics?.createEngine(withLocality: .default)
+        else { return }
+        do {
+            try engine.start()
+            let pulse = CHHapticEvent(
+                eventType: .hapticContinuous,
+                parameters: [CHHapticEventParameter(parameterID: .hapticIntensity, value: 1)],
+                relativeTime: 0, duration: 0.35)
+            try engine.makePlayer(with: CHHapticPattern(events: [pulse], parameters: []))
+                .start(atTime: CHHapticTimeImmediate)
+            // The closure holds the engine until the pulse has played.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { engine.stop() }
+        } catch {
+            notice("Couldn't run the rumble test — \(error.localizedDescription)")
+        }
+    }
 
     // MARK: - library
 

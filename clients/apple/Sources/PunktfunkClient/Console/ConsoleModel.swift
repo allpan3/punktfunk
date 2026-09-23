@@ -101,6 +101,11 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
             presets.objectWillChange.receive(on: RunLoop.main).sink { [weak self] _ in
                 self?.pushPresets()
             })
+        pushPads()
+        watching.append(
+            GamepadManager.shared.objectWillChange.receive(on: RunLoop.main).sink { [weak self] _ in
+                self?.pushPads()
+            })
     }
 
     func detach() {
@@ -210,6 +215,16 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
     }
 
     private func pushPresets() { bridge.push(.presets, ConsoleJSON.presets(presets.presets)) }
+
+    /// The connected pads, for the Players tab and the legend's chip.
+    private func pushPads() {
+        let m = GamepadManager.shared
+        let forwarded = Set(m.forwarded.map(\.id))
+        let pad = { (c: GamepadManager.DiscoveredController) in
+            ConsoleJSON.Pad(c, forwarded: forwarded.contains(c.id))
+        }
+        bridge.push(.pads, ConsoleJSON.pads(m.controllers.map(pad), active: m.active.map(pad)))
+    }
 
     private func pushKnownHosts() {
         bridge.push(.knownHosts, ConsoleJSON.knownHosts(store.hosts))
