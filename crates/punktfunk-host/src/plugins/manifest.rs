@@ -175,33 +175,75 @@ pub fn granted_roots(id: &str) -> Vec<PathBuf> {
     granted_roots_in(id, pf_paths::config_dir())
 }
 
-/// The plugin install root: `<config>/plugins/node_modules`.
-fn install_root() -> PathBuf {
-    pf_paths::config_dir().join("plugins").join("node_modules")
-}
-
 /// Every installed plugin's manifest, keyed by the id it declares.
 ///
-/// Read fresh: installs and updates land between launches, and the whole scan is a handful of
-/// small files. A package with no `punktfunk` block, or one on a schema this host does not know,
-/// contributes nothing — it simply has no templates the host will run.
+/// Installed means what the runner discovers: the dependencies of `<config>/plugins/package.json`,
+/// not every package under `node_modules`, where a plugin's own libraries live too. Without that
+/// file the tree is scanned. An id is one lowercase path component, and an id two packages claim
+/// is refused for both. Read fresh: installs and updates land between launches.
 pub fn installed() -> BTreeMap<String, PluginManifest> {
+    installed_in(&pf_paths::config_dir().join("plugins"))
+}
+
+fn installed_in(plugins: &Path) -> BTreeMap<String, PluginManifest> {
+    let modules = plugins.join("node_modules");
+    let dirs = match top_level_packages(plugins) {
+        Some(names) => names.iter().map(|n| modules.join(n)).collect(),
+        None => package_dirs(&modules),
+    };
     let mut out = BTreeMap::new();
-    for dir in package_dirs(&install_root()) {
+    let mut claimed_twice = std::collections::BTreeSet::new();
+    for dir in dirs {
         let Some(manifest) = read_package(&dir) else {
             continue;
         };
-        if manifest.schema != 1 || manifest.id.is_empty() {
+        if manifest.schema != 1 || !valid_id(&manifest.id) {
             tracing::warn!(
                 package = %dir.display(),
                 schema = manifest.schema,
-                "plugin manifest: unusable (schema must be 1 and id must be set) — no host-run commands for it"
+                id = %manifest.id,
+                "plugin manifest unusable: schema must be 1 and the id one lowercase path component"
             );
+            continue;
+        }
+        if out.contains_key(&manifest.id) {
+            claimed_twice.insert(manifest.id.clone());
             continue;
         }
         out.insert(manifest.id.clone(), manifest);
     }
+    for id in claimed_twice {
+        tracing::warn!(%id, "plugin manifest refused: two installed packages claim this id");
+        out.remove(&id);
+    }
     out
+}
+
+/// The runner's rule for the same id: it names a state dir and a socket.
+pub(crate) fn valid_id(id: &str) -> bool {
+    let mut chars = id.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && id.len() <= 64
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// The plugins dir's own `dependencies`, or `None` when it has no readable `package.json`.
+fn top_level_packages(plugins: &Path) -> Option<Vec<String>> {
+    #[derive(Deserialize)]
+    struct Root {
+        #[serde(default)]
+        dependencies: BTreeMap<String, serde_json::Value>,
+    }
+    let text = std::fs::read_to_string(plugins.join("package.json")).ok()?;
+    let root = serde_json::from_str::<Root>(&text).ok()?;
+    let plain = |n: &String| {
+        Path::new(n)
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+    };
+    Some(root.dependencies.into_keys().filter(plain).collect())
 }
 
 /// The manifest declaring `id`, if one is installed.
@@ -271,6 +313,38 @@ mod manifest_tests {
             reads: reads.iter().map(|s| (*s).to_string()).collect(),
             ..Default::default()
         }
+    }
+
+    fn package(modules: &Path, name: &str, id: &str) {
+        let dir = modules.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let body = serde_json::json!({ "name": name, "punktfunk": { "schema": 1, "id": id } });
+        std::fs::write(dir.join("package.json"), body.to_string()).unwrap();
+    }
+
+    #[test]
+    fn installed_means_what_the_runner_discovers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path();
+        let modules = plugins.join("node_modules");
+        package(&modules, "@punktfunk/plugin-steam", "steam");
+        package(&modules, "@punktfunk/plugin-kit", "kit-library");
+        package(&modules, "plugin-twin-a", "twin");
+        package(&modules, "plugin-twin-b", "twin");
+        package(&modules, "plugin-bad", "../plugins");
+        let deps = serde_json::json!({ "dependencies": {
+            "@punktfunk/plugin-steam": "0.2.2",
+            "plugin-twin-a": "1", "plugin-twin-b": "1", "plugin-bad": "1",
+        }});
+        std::fs::write(plugins.join("package.json"), deps.to_string()).unwrap();
+        // A library is not a plugin, a claimed-twice id is nobody's, a path is not an id.
+        assert_eq!(
+            installed_in(plugins).into_keys().collect::<Vec<_>>(),
+            vec!["steam"]
+        );
+        // Without the root package.json the tree is scanned, as the runner does.
+        std::fs::remove_file(plugins.join("package.json")).unwrap();
+        assert!(installed_in(plugins).contains_key("kit-library"));
     }
 
     #[test]
