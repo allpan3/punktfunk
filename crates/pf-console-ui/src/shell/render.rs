@@ -304,7 +304,10 @@ impl Shell {
                 k as f32,
             );
             let cy = top + bh / 2.0;
-            crate::glyphs::pad_mark(canvas, self.glyphs, bx + pad_x, cy, mark_w, k, fg(0.7));
+            // The chip names a pad, so it draws that pad's family whatever drove last.
+            let mark =
+                crate::glyphs::device_icon(Some(pad_pref.unwrap_or_default()), self.platform);
+            crate::glyphs::pad_mark(canvas, mark, bx + pad_x, cy, mark_w, k, fg(0.7));
             fonts.draw(
                 canvas,
                 chip,
@@ -545,18 +548,10 @@ fn glyph_style(
     pad_pref: Option<punktfunk_core::config::GamepadPref>,
     platform: crate::platform::Platform,
 ) -> GlyphStyle {
-    let keys = || match platform {
-        // A TV remote either way — the legend says D-pad, not keys. Apple's key device in
-        // this shell is the Siri Remote; a Mac keyboard here is the exception.
-        crate::platform::Platform::Android
-        | crate::platform::Platform::WebOS
-        | crate::platform::Platform::Apple => GlyphStyle::Remote,
-        crate::platform::Platform::Desktop | crate::platform::Platform::Web => GlyphStyle::Keyboard,
-    };
     match (source, pad_pref) {
-        (Some(crate::console::InputSource::Keys), _) => keys(),
+        (Some(crate::console::InputSource::Keys), _) => GlyphStyle::keys(platform),
         (_, Some(p)) => GlyphStyle::from_pref(Some(p)),
-        (_, None) => keys(),
+        (_, None) => GlyphStyle::keys(platform),
     }
 }
 

@@ -3110,3 +3110,92 @@ fn dump_phone_home() {
     s.handle_menu(MenuEvent::Move(MenuDir::Down));
     dump(&mut s, 60, "pc-settings-rows");
 }
+
+/// Every device mark at the chip's 15 dp and the card's 44 dp, at k = 1 and 2, then the
+/// Players tab with the chip naming each of three pads.
+/// `PF_CONSOLE_DUMP=<dir> cargo test -p pf-console-ui -- --ignored dump_device_marks`.
+#[test]
+#[ignore]
+fn dump_device_marks() {
+    use crate::theme::W;
+    let dir = std::env::var("PF_CONSOLE_DUMP").expect("set PF_CONSOLE_DUMP to an output dir");
+    let fonts = crate::theme::build_fonts().unwrap();
+    let save = |surface: &mut skia_safe::Surface, name: &str| {
+        let png = surface
+            .image_snapshot()
+            .encode(None, skia_safe::EncodedImageFormat::PNG, 100)
+            .unwrap();
+        std::fs::write(format!("{dir}/{name}.png"), png.as_bytes()).unwrap();
+    };
+    let marks = crate::icons::DEVICE_MARKS;
+    // (box dp, k, row height px)
+    let rows = [
+        (15.0, 1.0, 34.0),
+        (44.0, 1.0, 64.0),
+        (15.0, 2.0, 50.0),
+        (44.0, 2.0, 110.0),
+    ];
+    let col = 132.0;
+    let height = 40.0 + rows.iter().map(|r| r.2).sum::<f64>();
+    let mut sheet =
+        skia_safe::surfaces::raster_n32_premul(((col * marks.len() as f64) as i32, height as i32))
+            .unwrap();
+    let c = sheet.canvas();
+    c.clear(skia_safe::Color4f::new(0.07, 0.08, 0.1, 1.0));
+    let ink = skia_safe::Color4f::new(0.92, 0.93, 0.95, 1.0);
+    for (i, (name, icon)) in marks.iter().enumerate() {
+        let cx = col * (i as f64 + 0.5);
+        let tw = f64::from(fonts.measure(name, W::Medium, 12.0));
+        fonts.draw(c, name, cx - tw / 2.0, 24.0, W::Medium, 12.0, ink);
+        let mut top = 40.0;
+        for (size, k, row_h) in rows {
+            let w = size * k;
+            crate::glyphs::pad_mark(c, *icon, cx - w / 2.0, top + row_h / 2.0, w, k, ink);
+            top += row_h;
+        }
+    }
+    save(&mut sheet, "device-marks");
+
+    let pad = |name: &str, id: &str, pref: GamepadPref| PadInfo {
+        name: name.into(),
+        key: format!("{}:{name}", id.to_lowercase()),
+        pref,
+        steam_virtual: false,
+        battery: None,
+        detail: format!("{id} · gamepad · dpad"),
+        forwarded: true,
+        rumble: true,
+    };
+    let pads = vec![
+        pad(
+            "DualSense Wireless Controller",
+            "054C:0CE6",
+            GamepadPref::DualSense,
+        ),
+        pad(
+            "Xbox Wireless Controller",
+            "045E:0B13",
+            GamepadPref::XboxOne,
+        ),
+        pad("Pro Controller", "057E:2009", GamepadPref::SwitchPro),
+    ];
+    for (i, chip) in pads.iter().enumerate() {
+        let (mut s, _console, _library) = shell(vec![Screen::Players(
+            crate::screens::players::PlayersScreen::new(),
+        )]);
+        s.fake_clock = Some((0.0, 1.0 / 60.0));
+        let mut surface = skia_safe::surfaces::raster_n32_premul((1920, 1080)).unwrap();
+        for _ in 0..60 {
+            s.render(
+                surface.canvas(),
+                1920,
+                1080,
+                &fonts,
+                Some(&chip.name),
+                Some(chip.pref),
+                &pads,
+            );
+        }
+        save(&mut surface, &format!("players-chip-{i}"));
+    }
+}

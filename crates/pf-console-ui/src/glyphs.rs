@@ -1,4 +1,4 @@
-//! Face-button glyphs and the bottom-leading hint-bar pill.
+//! Face-button glyphs, device marks, and the bottom-leading hint-bar pill.
 //!
 //! Style is the last driver (`Shell::glyph_style`): PlayStation shapes, Nintendo
 //! engravings, ABXY letters, desktop keycaps, or Android TV-remote marks. A
@@ -8,9 +8,11 @@
 //! Pin pads with [`GlyphStyle::from_pref`]. Keyboard vs Remote is the shell
 //! (platform). Tests in this file cover the Nintendo swap and the remote hide-set.
 
+use crate::icons::{self, Icon};
+use crate::platform::Platform;
 use crate::theme::{fg, fill, stroke, Fonts, W};
 use punktfunk_core::config::GamepadPref;
-use skia_safe::{Canvas, PathBuilder, Point, RRect, Rect};
+use skia_safe::{Canvas, Color4f, PathBuilder, Point, RRect, Rect};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GlyphStyle {
@@ -40,63 +42,53 @@ impl GlyphStyle {
             None => GlyphStyle::Keyboard,
         }
     }
+
+    /// The platform's key device. TV platforms get a remote, and so does Apple,
+    /// where this shell's key device is the Siri Remote.
+    pub fn keys(platform: Platform) -> GlyphStyle {
+        match platform {
+            Platform::Android | Platform::WebOS | Platform::Apple => GlyphStyle::Remote,
+            Platform::Desktop | Platform::Web => GlyphStyle::Keyboard,
+        }
+    }
 }
 
-/// Keyboard and Remote are outlined; pads are filled.
-pub fn pad_mark(
-    canvas: &Canvas,
-    style: GlyphStyle,
-    x: f64,
-    cy: f64,
-    w: f64,
-    k: f64,
-    ink: skia_safe::Color4f,
-) {
-    let mut p = fill(ink);
-    if style == GlyphStyle::Keyboard {
-        let h = w * 0.72;
-        let r = Rect::from_xywh(x as f32, (cy - h / 2.0) as f32, w as f32, h as f32);
-        p.set_style(skia_safe::PaintStyle::Stroke);
-        p.set_stroke_width((1.3 * k) as f32);
-        canvas.draw_rrect(
-            RRect::new_rect_xy(r, (3.0 * k) as f32, (3.0 * k) as f32),
-            &p,
-        );
-        return;
+/// A pad's family silhouette. `None` is the platform's key device. `PadInfo.pref`
+/// is already resolved; a stray `Auto` draws the Xbox 360 fallback.
+pub fn device_icon(pref: Option<GamepadPref>, platform: Platform) -> Icon {
+    let Some(pref) = pref else {
+        return match GlyphStyle::keys(platform) {
+            GlyphStyle::Remote => icons::REMOTE,
+            _ => icons::KEYBOARD,
+        };
+    };
+    match pref {
+        GamepadPref::Auto | GamepadPref::Xbox360 => icons::PAD_XBOX_360,
+        GamepadPref::XboxOne => icons::PAD_XBOX_ONE,
+        GamepadPref::XboxElite => icons::PAD_XBOX_ELITE,
+        GamepadPref::DualShock4 => icons::PAD_DUALSHOCK_4,
+        GamepadPref::DualSense => icons::PAD_DUALSENSE,
+        GamepadPref::DualSenseEdge => icons::PAD_DUALSENSE_EDGE,
+        GamepadPref::SwitchPro => icons::PAD_SWITCH_PRO,
+        GamepadPref::SteamController => icons::PAD_STEAM_CONTROLLER,
+        GamepadPref::SteamController2 => icons::PAD_STEAM_CONTROLLER_2,
+        GamepadPref::SteamController2Puck => icons::PAD_STEAM_PUCK,
+        GamepadPref::SteamDeck => icons::PAD_STEAM_DECK,
     }
-    if style == GlyphStyle::Remote {
-        // Outline, not fill — same as the keycap; filled marks are for a pad body.
-        let rw = w * 0.42;
-        let rh = w * 0.98;
-        let body = Rect::from_xywh(
-            (x + (w - rw) / 2.0) as f32,
-            (cy - rh / 2.0) as f32,
-            rw as f32,
-            rh as f32,
-        );
-        p.set_style(skia_safe::PaintStyle::Stroke);
-        p.set_stroke_width((1.3 * k) as f32);
-        canvas.draw_rrect(
-            RRect::new_rect_xy(body, (rw / 2.2) as f32, (rw / 2.2) as f32),
-            &p,
-        );
-        canvas.draw_circle(
-            ((x + w / 2.0) as f32, (cy - rh * 0.22) as f32),
-            (rw * 0.30) as f32,
-            &p,
-        );
-        return;
-    }
-    // 15 dp: silhouette only; extra detail is invisible.
-    let h = w * 0.52;
-    let body = Rect::from_xywh(x as f32, (cy - h / 2.0) as f32, w as f32, h as f32);
-    canvas.draw_rrect(
-        RRect::new_rect_xy(body, (h / 2.2) as f32, (h / 2.2) as f32),
-        &p,
+}
+
+/// One device mark: left edge `x`, centred on `cy`, in a `w`-wide 24-unit box.
+/// 1.5 dp at every size, so the 15 dp chip and the 44 dp card share one weight.
+pub fn pad_mark(canvas: &Canvas, icon: Icon, x: f64, cy: f64, w: f64, k: f64, ink: Color4f) {
+    icons::draw_icon_weight(
+        canvas,
+        icon,
+        (x + w / 2.0) as f32,
+        cy as f32,
+        w as f32,
+        (1.5 * k) as f32,
+        ink,
     );
-    let grip = (w * 0.17) as f32;
-    canvas.draw_circle(((x + w * 0.2) as f32, (cy + h * 0.36) as f32), grip, &p);
-    canvas.draw_circle(((x + w * 0.8) as f32, (cy + h * 0.36) as f32), grip, &p);
 }
 
 /// Outline is always the full cell so the chip never reflows as bars drop.
@@ -611,6 +603,21 @@ mod tests {
             GlyphStyle::Nintendo
         );
         assert_eq!(GlyphStyle::from_pref(None), GlyphStyle::Keyboard);
+    }
+
+    /// Every family draws its own mark; `Auto` and no pad fall back as documented.
+    #[test]
+    fn each_pad_family_draws_its_own_mark() {
+        let mark = |p| device_icon(Some(p), Platform::Desktop).0;
+        let families: Vec<_> = (1..12).map(GamepadPref::from_u8).collect();
+        for (i, a) in families.iter().enumerate() {
+            for b in &families[i + 1..] {
+                assert_ne!(mark(*a), mark(*b), "{a:?} and {b:?} share a mark");
+            }
+        }
+        assert_eq!(mark(GamepadPref::Auto), mark(GamepadPref::Xbox360));
+        assert_eq!(device_icon(None, Platform::Desktop).0, icons::KEYBOARD.0);
+        assert_eq!(device_icon(None, Platform::Android).0, icons::REMOTE.0);
     }
 
     #[test]

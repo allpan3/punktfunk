@@ -11,7 +11,7 @@
 //! Seat order joins when `seats.rs` lands (`console-ui-redesign.md` §2).
 
 use crate::el::{Axis, El, Group, Id, Tree};
-use crate::glyphs::{GlyphStyle, Hint};
+use crate::glyphs::{device_icon, Hint};
 use crate::model::ConsoleCmd;
 use crate::platform::Platform;
 use crate::pointer::{Pointer, PointerKind};
@@ -25,6 +25,8 @@ const CARD_W: f64 = 300.0;
 const CARD_H: f64 = 164.0;
 const CARD_GAP: f64 = 24.0;
 const CARD_CORNER: f64 = 22.0;
+/// Device mark box, dp: the size the tells inside each pad outline are drawn for.
+const MARK: f64 = 44.0;
 /// A grant row, design units.
 const ROW_W: f64 = 560.0;
 const ROW_H: f64 = 50.0;
@@ -335,16 +337,11 @@ fn card(
     let (l, t0) = (f64::from(r.left) + pad, f64::from(r.top) + pad);
     let max_w = f64::from(r.width()) - 2.0 * pad;
     let base = f64::from(r.bottom) - pad;
+    let mark_cy = t0 + 16.0 * k;
     let Target::Pad(i) = t else {
-        crate::glyphs::pad_mark(
-            canvas,
-            GlyphStyle::Remote,
-            l,
-            t0 + 16.0 * k,
-            34.0 * k,
-            k,
-            fg(0.5),
-        );
+        // No pad: the key device that drives instead.
+        let mark = device_icon(None, platform);
+        crate::glyphs::pad_mark(canvas, mark, l, mark_cy, MARK * k, k, fg(0.5));
         fonts.draw_clipped(
             canvas,
             "No controller",
@@ -368,8 +365,8 @@ fn card(
         return;
     };
     let p = &pads[i];
-    let style = GlyphStyle::from_pref(Some(p.pref));
-    crate::glyphs::pad_mark(canvas, style, l, t0 + 16.0 * k, 34.0 * k, k, accent(1.0));
+    let mark = device_icon(Some(p.pref), platform);
+    crate::glyphs::pad_mark(canvas, mark, l, mark_cy, MARK * k, k, accent(1.0));
     if let Some(b) = p.battery {
         crate::glyphs::battery_pip(
             canvas,
