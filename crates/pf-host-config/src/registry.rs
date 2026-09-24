@@ -591,7 +591,7 @@ mod tests {
     fn docs_table_is_current() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../docs-site/content/docs/configuration.md"
+            "/../../docs-site/content/docs/(reference)/configuration.md"
         );
         let doc = std::fs::read_to_string(path).expect("read configuration.md");
         let start = doc

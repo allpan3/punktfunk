@@ -846,7 +846,7 @@ jobs:
       # The support matrix, asserted rather than asserted-in-prose. Each row names the packages
       # that MUST install on that distro; anything absent from the row is expected not to and is
       # not checked here (the client's glibc 2.43 floor keeps it off 24.04 and Debian 13 —
-      # see docs-site/content/docs/debian.md).
+      # see docs-site/content/docs/(guide)/(install)/debian.mdx).
       - name: Install from the apt registry on every supported distro
         run: bash scripts/ci/deb-install-smoke.sh
         env:
