@@ -172,11 +172,17 @@ extension ConsoleModel {
                     canRetry: false))
             return
         }
-        fetching?.cancel()
-        if !refreshOnly { bridge.push(.libraryBegin, "{}") }
-        fetching = Task { [weak self] in
+        // A running-titles refresh must not cut a list fetch short; only a new fetch does.
+        if !refreshOnly {
+            fetching?.cancel()
+            artTask?.cancel()
+            bridge.push(.libraryBegin, "{}")
+        }
+        let task = Task { [weak self] in
             guard let self else { return }
-            if !refreshOnly, let cached = await LibraryCache.shared?.load(hostID: host.id.uuidString) {
+            var cached: CachedLibrary?
+            if !refreshOnly { cached = await LibraryCache.shared?.load(hostID: host.id.uuidString) }
+            if let cached {
                 bridge.push(.libraryCached, ConsoleJSON.libraryGames(cached.games))
             }
             let running = await LibraryClient.running(
@@ -194,12 +200,17 @@ extension ConsoleModel {
                 await LibraryCache.shared?.store(games, hostID: host.id.uuidString)
                 loadArt(games, host: host, identity: identity, mgmt: mgmt)
             } catch {
+                // The cached shelf stays up; its covers still come from the host's store.
+                if let cached {
+                    loadArt(cached.games, host: host, identity: identity, mgmt: mgmt)
+                }
                 bridge.push(
                     .libraryPhase,
                     ConsoleJSON.libraryError(
                         title: "Couldn't read the library", body: "\(error)", canRetry: true))
             }
         }
+        if !refreshOnly { fetching = task }
     }
 
     /// Posters, as they arrive. The shell decodes each at the size it draws.
@@ -210,7 +221,8 @@ extension ConsoleModel {
             address: host.address, port: mgmt, certPEM: identity.certPEM,
             keyPEM: identity.keyPEM, hostFingerprint: host.pinnedSHA256)
         else { return }
-        Task { [weak self] in
+        artTask?.cancel()
+        artTask = Task { [weak self] in
             for game in games {
                 if Task.isCancelled { return }
                 // The capsule first, then the header: the same order the touch grid takes.

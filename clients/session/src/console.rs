@@ -1246,11 +1246,11 @@ fn spawn_fetch(
             // Whatever we already know about this host, on screen before a single packet goes
             // out. Keyed on the pinned fingerprint, so a box that came back on a new DHCP lease
             // is still recognised as the same host with the same library.
-            let mut have_cached = false;
+            let mut cached_games = None;
             if let Some(cached) = pf_client_core::library_cache::load(&fp_hex) {
                 if !cached.games.is_empty() && mine() {
-                    have_cached = true;
                     shared.set_games_cached(to_model(&cached.games));
+                    cached_games = Some(cached.games);
                 }
             }
             // Fire-and-forget, and deliberately unconditional rather than only when the host
@@ -1289,24 +1289,34 @@ fn spawn_fetch(
                 }
             }
 
-            let Some(games) = fetched else {
-                let e = last_err.expect("the loop runs at least once and every miss records why");
-                if !mine() {
-                    return;
+            // The list the covers are for: the host's, or the cached one it left behind.
+            // A cached shelf without its covers is a wall of monograms until the host is back.
+            let (games, live) = match fetched {
+                Some(games) => (games, true),
+                None => {
+                    let e =
+                        last_err.expect("the loop runs at least once and every miss records why");
+                    if !mine() {
+                        return;
+                    }
+                    match cached_games.take() {
+                        Some(cached) => {
+                            // The shelf stays; only the words change. The player can still pick
+                            // a title — the launch will wake and dial the host on its own.
+                            tracing::info!(%addr, error = %e, "library fetch failed; keeping the cached shelf");
+                            shared.set_stale(pf_console_ui::Stale::Offline);
+                            (cached, false)
+                        }
+                        None => {
+                            shared.set_phase(LibraryPhase::Error {
+                                title: "Couldn't load the library".into(),
+                                body: e.to_string(),
+                                can_retry: true,
+                            });
+                            return;
+                        }
+                    }
                 }
-                if have_cached {
-                    // The shelf stays; only the words change. The player can still pick a title
-                    // — the launch will wake and dial the host on its own.
-                    tracing::info!(%addr, error = %e, "library fetch failed; keeping the cached shelf");
-                    shared.set_stale(pf_console_ui::Stale::Offline);
-                } else {
-                    shared.set_phase(LibraryPhase::Error {
-                        title: "Couldn't load the library".into(),
-                        body: e.to_string(),
-                        can_retry: true,
-                    });
-                }
-                return;
             };
 
             if !mine() {
@@ -1318,13 +1328,15 @@ fn spawn_fetch(
                 .map(|g| (g.id.clone(), g.art.poster_candidates(&base)))
                 .filter(|(_, candidates)| !candidates.is_empty())
                 .collect();
-            shared.set_games(to_model(&games));
-            // Remembered AFTER it is on screen: the disk write is not on the path to a shelf.
-            pf_client_core::library_cache::store(&fp_hex, &games);
-            // What the host has up right now, so a title the player can return to says so.
-            // Deliberately after the catalog — a slow `/status` must not hold the titles back —
-            // and never fatal: an older host answers nothing and every badge simply stays off.
-            shared.set_running(&library::fetch_running(&addr, mgmt, &identity, pin));
+            if live {
+                shared.set_games(to_model(&games));
+                // Remembered AFTER it is on screen: the disk write is not on the path to a shelf.
+                pf_client_core::library_cache::store(&fp_hex, &games);
+                // What the host has up right now, so a title the player can return to says so.
+                // Deliberately after the catalog — a slow `/status` must not hold the titles
+                // back — and never fatal: an older host answers nothing and every badge stays off.
+                shared.set_running(&library::fetch_running(&addr, mgmt, &identity, pin));
+            }
             if !jobs.is_empty() {
                 let rx = library::spawn_art_fetch(base, identity, pin, jobs);
                 while let Ok((id, bytes)) = rx.recv_blocking() {

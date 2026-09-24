@@ -9,7 +9,7 @@
 //! `clients/shared/console-vectors.json`, and by `GamepadPalette.kt` / `.swift`.
 
 use skia_safe::{ConditionallySend, Image};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 // --- Geometry (GTK launcher / Apple coverflow parity) ---
@@ -1074,10 +1074,12 @@ struct Shared {
     games: Vec<LibraryGame>,
     /// Disk cache vs live host. Live [`LibraryShared::set_games`] resets this to [`Stale::No`].
     stale: Stale,
-    /// Fetched poster bytes the renderer hasn't decoded yet (id, encoded image).
-    art_in: VecDeque<(String, Vec<u8>)>,
+    /// Every poster fetched for this epoch, encoded, by title id. Kept for the fetch, not
+    /// queued: whichever screen is up decodes what it lacks, and a cover a screen evicted
+    /// or never drew comes back from here. Cleared by [`LibraryShared::begin_fetch`].
+    art: HashMap<String, Arc<[u8]>>,
     /// Posters a host decoded on its own thread, waiting to be adopted. Separate from
-    /// [`Shared::art_in`] because taking one costs nothing: the work is already done.
+    /// [`Shared::art`] because taking one costs nothing: the work is already done.
     decoded_in: VecDeque<(String, DecodedPoster)>,
     /// The scale the shelf caches art at, published for hosts that decode off-thread so they
     /// size it the way this crate would. `None` until a shelf has drawn once.
@@ -1146,7 +1148,7 @@ impl Default for LibraryShared {
             phase: LibraryPhase::Loading,
             games: Vec::new(),
             stale: Stale::No,
-            art_in: VecDeque::new(),
+            art: HashMap::new(),
             decoded_in: VecDeque::new(),
             art_scale: None,
             generation: 0,
@@ -1167,6 +1169,9 @@ impl LibraryShared {
         s.phase = LibraryPhase::Loading;
         // Previous host's stale note is not this fetch's; a cached render re-declares it.
         s.stale = Stale::No;
+        // The previous host's posters are not this fetch's.
+        s.art.clear();
+        s.decoded_in.clear();
         s.fetch_epoch += 1;
         s.generation += 1;
     }
@@ -1268,7 +1273,7 @@ impl LibraryShared {
     }
 
     pub fn push_art(&self, id: String, bytes: Vec<u8>) {
-        self.0.lock().unwrap().art_in.push_back((id, bytes));
+        self.0.lock().unwrap().art.insert(id, bytes.into());
     }
 
     /// A poster a host already decoded, off the thread that draws.
@@ -1312,36 +1317,18 @@ impl LibraryShared {
         }
     }
 
-    /// At most `max` newly fetched posters; the rest stay queued.
-    ///
-    /// Bounded: the renderer decodes on the render thread. Encoded bytes left behind are
-    /// two orders smaller than the rasters they become.
-    pub(crate) fn drain_art(&self, max: usize) -> Vec<(String, Vec<u8>)> {
-        let mut s = self.0.lock().unwrap();
-        let n = max.min(s.art_in.len());
-        s.art_in.drain(..n).collect()
-    }
-
-    /// At most `max` queued posters in `want`; every other entry stays.
-    ///
-    /// Bytes are pushed once per fetch and never re-sent. A wholesale drain on collections
-    /// would drop covers the shelf still needs.
-    pub(crate) fn take_art_for(
+    /// The first `max` of `ids` that have bytes, in that order. Nothing is consumed: a screen
+    /// asks for what it lacks, on-screen titles first, and decodes at its own pace.
+    pub(crate) fn art_for<'a>(
         &self,
-        want: &std::collections::HashSet<String>,
+        ids: impl IntoIterator<Item = &'a str>,
         max: usize,
-    ) -> Vec<(String, Vec<u8>)> {
-        let mut s = self.0.lock().unwrap();
-        let mut out = Vec::new();
-        let mut i = 0;
-        while i < s.art_in.len() && out.len() < max {
-            if want.contains(&s.art_in[i].0) {
-                out.extend(s.art_in.remove(i));
-            } else {
-                i += 1;
-            }
-        }
-        out
+    ) -> Vec<(String, Arc<[u8]>)> {
+        let s = self.0.lock().unwrap();
+        ids.into_iter()
+            .filter_map(|id| s.art.get(id).map(|b| (id.to_string(), b.clone())))
+            .take(max)
+            .collect()
     }
 }
 
@@ -1675,60 +1662,31 @@ mod tests {
         }
     }
 
+    /// Poster bytes stay for the fetch: any screen takes what it lacks, in the order it asks,
+    /// as often as it asks; the next fetch starts clean.
     #[test]
-    fn art_drains_in_bounded_batches_and_keeps_the_order() {
-        let shared = LibraryShared::default();
-        for i in 0..5 {
-            shared.push_art(format!("g{i}"), vec![i as u8]);
-        }
-        let first: Vec<String> = shared.drain_art(2).into_iter().map(|(id, _)| id).collect();
-        assert_eq!(first, ["g0", "g1"]);
-        let rest: Vec<String> = shared.drain_art(9).into_iter().map(|(id, _)| id).collect();
-        assert_eq!(
-            rest,
-            ["g2", "g3", "g4"],
-            "asking for more than is there is fine"
-        );
-        assert!(shared.drain_art(2).is_empty());
-    }
-
-    /// Poster bytes are pushed once per fetch and never re-sent; anything taken and not drawn is gone.
-    #[test]
-    fn a_selective_take_leaves_everything_it_did_not_ask_for() {
+    fn art_stays_for_the_fetch_and_serves_in_asked_order() {
         let shared = LibraryShared::default();
         for i in 0..6 {
             shared.push_art(format!("g{i}"), vec![i as u8]);
         }
-        let want = ["g1".to_string(), "g4".to_string(), "g9".to_string()]
-            .into_iter()
-            .collect();
-        let took: Vec<String> = shared
-            .take_art_for(&want, 8)
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
+        let ids =
+            |got: Vec<(String, Arc<[u8]>)>| got.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
         assert_eq!(
-            took,
-            ["g1", "g4"],
+            ids(shared.art_for(["g4", "g1", "g9"], 8)),
+            ["g4", "g1"],
             "an id that never arrived is not an error"
         );
-        let rest: Vec<String> = shared.drain_art(9).into_iter().map(|(id, _)| id).collect();
-        assert_eq!(rest, ["g0", "g2", "g3", "g5"], "the rest is untouched");
-    }
-
-    #[test]
-    fn a_selective_take_is_bounded_too() {
-        let shared = LibraryShared::default();
-        for i in 0..6 {
-            shared.push_art(format!("g{i}"), vec![i as u8]);
-        }
-        let want: std::collections::HashSet<String> = (0..6).map(|i| format!("g{i}")).collect();
-        assert_eq!(shared.take_art_for(&want, 2).len(), 2);
-        assert_eq!(shared.take_art_for(&want, 2).len(), 2);
         assert_eq!(
-            shared.take_art_for(&want, 9).len(),
-            2,
-            "and then it is empty"
+            ids(shared.art_for(["g4", "g1"], 8)),
+            ["g4", "g1"],
+            "not consumed"
+        );
+        assert_eq!(shared.art_for(["g0", "g1", "g2"], 2).len(), 2, "bounded");
+        shared.begin_fetch();
+        assert!(
+            shared.art_for(["g0", "g1"], 9).is_empty(),
+            "a new fetch starts clean"
         );
     }
 

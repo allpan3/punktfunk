@@ -53,6 +53,8 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
     /// The shelf the console has open, so a fetch knows whose catalog it is filling.
     private var shelf: StoredHost?
     var fetching: Task<Void, Never>?
+    /// The posters of the last list fetch; a new fetch cancels it.
+    var artTask: Task<Void, Never>?
 
     init?(entry: StoredHost?, pin: StreamPreset?, store: HostStore, discovery: HostDiscovery,
           presets: PresetStore, power: HostPowerStore, nowPlaying: NowPlayingStore,

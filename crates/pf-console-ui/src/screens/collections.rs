@@ -83,6 +83,8 @@ pub(crate) struct CollectionsScreen {
     /// Posters borrowed by id from the library screen. This screen never fetches art;
     /// a group with none yet (or ever — art-less ROMs) fans a monogram.
     art: HashMap<String, Image>,
+    /// Posters Skia could not decode; asked once, not every frame.
+    art_failed: std::collections::HashSet<String>,
     /// Decode scale: last frame's `k`, published by `render` before `sync`.
     art_k: f64,
     /// Opened as the host's library, not from a shelf's Y. Pumps the poster queue
@@ -125,6 +127,7 @@ impl CollectionsScreen {
             groups: Vec::new(),
             generation: u64::MAX,
             art: HashMap::new(),
+            art_failed: std::collections::HashSet::new(),
             // Design scale until the first frame publishes the real `k` before `sync`.
             art_k: 1.0,
             root: false,
@@ -171,17 +174,18 @@ impl CollectionsScreen {
         }
     }
 
-    /// Decode only the covers this screen fans, and only as the library's root.
-    ///
-    /// The shelf drains the model's queue wholesale. Bytes are pushed once per fetch
-    /// and never re-sent: a wholesale drain here would keep a dozen posters and leave
-    /// the next shelf with monograms for the rest of the session.
+    /// Decode only the covers this screen fans, and only as the library's root. The model
+    /// keeps every poster's bytes for the fetch, so this takes nothing from the shelves.
     fn pump_art(&mut self, library: &LibraryShared) {
-        let want: std::collections::HashSet<String> = self
+        let want: Vec<String> = self
             .groups
             .iter()
             .flat_map(|g| g.fan.iter())
-            .filter(|c| c.icon.is_empty() && !self.art.contains_key(&c.id))
+            .filter(|c| {
+                c.icon.is_empty()
+                    && !self.art.contains_key(&c.id)
+                    && !self.art_failed.contains(&c.id)
+            })
             .map(|c| c.id.clone())
             .collect();
         if want.is_empty() {
@@ -191,14 +195,17 @@ impl CollectionsScreen {
         for (id, poster) in library.drain_decoded() {
             self.art.insert(id, poster.into_image());
         }
-        // Against the clock, like the shelf's own drain — one at a time, at least one a frame.
+        // Against the clock, like the shelf's own pass — at least one a frame.
         let started = std::time::Instant::now();
-        while let Some((id, bytes)) = library.take_art_for(&want, 1).pop() {
+        for (id, bytes) in library.art_for(want.iter().map(String::as_str), 4) {
             match super::library::decode_poster(&bytes, self.art_k) {
                 Some(img) => {
                     self.art.insert(id, img);
                 }
-                None => tracing::debug!(%id, "undecodable poster"),
+                None => {
+                    tracing::info!(%id, "undecodable poster");
+                    self.art_failed.insert(id);
+                }
             }
             if started.elapsed() >= super::library::ART_FRAME_BUDGET {
                 break;
@@ -890,10 +897,8 @@ mod tests {
         library
     }
 
-    /// As the library's root this screen feeds itself — and takes only the covers it fans.
-    ///
-    /// Poster bytes are pushed once per fetch and never re-sent. A wholesale drain
-    /// would look right here and leave the next shelf with monograms.
+    /// As the library's root this screen feeds itself — and decodes only the covers it fans.
+    /// The model keeps every poster for the fetch, so the next shelf still has them all.
     #[test]
     fn as_the_librarys_root_it_takes_only_the_covers_it_fans() {
         let library = two_platforms();
@@ -920,33 +925,24 @@ mod tests {
         let mut decoded: Vec<String> = s.art.keys().cloned().collect();
         decoded.sort();
         assert_eq!(decoded, fanned, "it decoded something it never draws");
-        let left: Vec<String> = library
-            .drain_art(99)
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
+        let all: Vec<String> = (0..8).map(|i| format!("g{i}")).collect();
         assert_eq!(
-            left,
-            ["g3", "g7"],
-            "the covers no tile fans must survive for the shelf"
+            library.art_for(all.iter().map(String::as_str), 99).len(),
+            8,
+            "every poster survives for the shelf"
         );
     }
 
-    /// From a shelf's Y that shelf is still underneath and still draining the queue.
-    /// Touching it here would starve it.
+    /// From a shelf's Y that shelf is still underneath, feeding itself; a drill-in decodes
+    /// nothing of its own.
     #[test]
-    fn a_drill_in_from_a_shelf_leaves_the_queue_alone() {
+    fn a_drill_in_from_a_shelf_decodes_nothing() {
         let library = two_platforms();
         let mut s = CollectionsScreen::new(&host(), SortKey::HostOrder);
         for _ in 0..8 {
             s.sync(&library);
         }
-        assert!(s.art.is_empty(), "it took art the shelf below is fed by");
-        assert_eq!(
-            library.drain_art(99).len(),
-            8,
-            "the whole queue is still there"
-        );
+        assert!(s.art.is_empty(), "it decoded art the shelf below draws");
     }
 
     /// Y opens the whole library only as root, where that list is otherwise unreachable.

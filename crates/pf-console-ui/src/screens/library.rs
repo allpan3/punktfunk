@@ -174,7 +174,8 @@ fn art_to_evict(live: &[String], seen: &HashMap<String, u64>) -> Vec<String> {
     }
     let mut by_age: Vec<(u64, &String)> = live
         .iter()
-        // Never-drawn stamps 0. Encoded bytes are gone after decode; this does not refill.
+        // Never-drawn stamps 0. The model keeps the bytes, so `sync` refills what comes back
+        // on screen.
         .map(|id| (seen.get(id).copied().unwrap_or(0), id))
         .collect();
     by_age.sort_unstable();
@@ -371,6 +372,8 @@ pub(crate) struct LibraryScreen {
     bump_vertical: bool,
     /// Decoded rasters at draw size, mips baked ([`decode_poster`]). Not deferred encoded.
     art: HashMap<String, Image>,
+    /// Posters Skia could not decode; asked once, not every frame.
+    art_failed: std::collections::HashSet<String>,
     /// Decode scale. This screen does not republish `k`; a grow cannot re-decode.
     art_k: f64,
     /// Last-draw frame per id. Grid pages the whole library; unstamped covers stay forever.
@@ -430,6 +433,7 @@ impl LibraryScreen {
             grid_col: 0,
             bump_vertical: false,
             art: HashMap::new(),
+            art_failed: std::collections::HashSet::new(),
             // Design scale. Decode runs at this `k` for the life of the screen.
             art_k: 1.0,
             art_seen: HashMap::new(),
@@ -752,6 +756,7 @@ impl LibraryScreen {
                 if !was_empty {
                     self.art.clear();
                     self.art_seen.clear();
+                    self.art_failed.clear();
                 }
                 self.entrance = None;
                 self.entrance_armed = false;
@@ -774,20 +779,56 @@ impl LibraryScreen {
         for (id, poster) in shared.drain_decoded() {
             self.art.insert(id, poster.into_image());
         }
-        // One at a time against the clock rather than a fixed count — see [`ART_FRAME_BUDGET`].
-        // The deadline is checked AFTER a decode so every frame lands at least one.
+        // What this screen lacks, against the clock rather than a fixed count — see
+        // [`ART_FRAME_BUDGET`]. The deadline is checked AFTER a decode so every frame lands at
+        // least one. The bytes stay in the model, so a cover another screen took, or one this
+        // screen evicted, comes back here.
+        let wanted = self.art_wanted();
         let started = std::time::Instant::now();
-        while let Some((id, bytes)) = shared.drain_art(1).pop() {
+        for (id, bytes) in shared.art_for(wanted.iter().map(String::as_str), 8) {
             match decode_poster(&bytes, k) {
                 Some(img) => {
                     self.art.insert(id, img);
                 }
-                None => tracing::debug!(%id, "undecodable poster"),
+                None => {
+                    tracing::info!(%id, "undecodable poster");
+                    self.art_failed.insert(id);
+                }
             }
             if started.elapsed() >= ART_FRAME_BUDGET {
                 break;
             }
         }
+    }
+
+    /// Titles to decode next: on screen last frame first, then the view from its first drawn
+    /// title on, so a scroll decodes ahead. Capped well under [`ART_BUDGET`], or eviction and
+    /// decode would chase each other round a long library.
+    fn art_wanted(&self) -> Vec<String> {
+        const AHEAD: usize = 48;
+        let recent = self.frame.saturating_sub(2);
+        let lacking = |id: &String| !self.art.contains_key(id) && !self.art_failed.contains(id);
+        let mut out: Vec<String> = Vec::new();
+        let mut first_seen = None;
+        for (i, &g) in self.view.iter().enumerate() {
+            let id = &self.games[g].id;
+            if self.art_seen.get(id).is_some_and(|&f| f >= recent) {
+                first_seen.get_or_insert(i);
+                if lacking(id) {
+                    out.push(id.clone());
+                }
+            }
+        }
+        for &g in self.view.iter().skip(first_seen.unwrap_or(0)) {
+            if out.len() >= AHEAD {
+                break;
+            }
+            let id = &self.games[g].id;
+            if lacking(id) && !out.contains(id) {
+                out.push(id.clone());
+            }
+        }
+        out
     }
 
     /// The pad. Off the field, [`games`] routes it between lines; on it, the grid or the
