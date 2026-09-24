@@ -1185,6 +1185,9 @@ impl Shell {
             MenuEvent::Confirm if empty => None,
             MenuEvent::Move(MenuDir::Down) | MenuEvent::Confirm => {
                 self.strip_focus = false;
+                if let Some(s) = self.stack.last_mut() {
+                    s.enter_from_top();
+                }
                 Some(Some(MenuPulse::Move))
             }
             MenuEvent::Move(MenuDir::Up) => Some(Some(MenuPulse::Boundary)),

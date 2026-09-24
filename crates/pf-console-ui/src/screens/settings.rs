@@ -684,6 +684,11 @@ impl SettingsScreen {
         )
     }
 
+    /// Down from the shell's tabs lands on the section strip, not the rows under it.
+    pub(crate) fn enter_from_top(&mut self) {
+        self.strip_focus = true;
+    }
+
     /// OK went down on the focused row: it dips before the release acts.
     pub(crate) fn press(&mut self) {
         if self.strip_focus {

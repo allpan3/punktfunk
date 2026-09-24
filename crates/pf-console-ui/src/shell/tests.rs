@@ -267,6 +267,10 @@ fn navigation_lap() {
     ));
     s.handle_menu(MenuEvent::Move(MenuDir::Down));
     assert!(!s.strip_focus, "down returns to the screen");
+    assert!(
+        matches!(s.stack.as_slice(), [Screen::Settings(st)] if st.strip_focus_for_test()),
+        "on Settings, to its sections first"
+    );
     for _ in 0..3 {
         s.handle_menu(MenuEvent::JumpBack);
         finish_motion(&mut s);

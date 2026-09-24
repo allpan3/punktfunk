@@ -214,6 +214,14 @@ impl Screen {
         }
     }
 
+    /// Focus arrives from the shell's tabs above: a screen with its own strip lands there,
+    /// the next thing down.
+    pub(crate) fn enter_from_top(&mut self) {
+        if let Screen::Settings(s) = self {
+            s.enter_from_top();
+        }
+    }
+
     /// OK went down on a remote: what has focus dips now, before the release acts on it.
     pub(crate) fn press(&mut self) {
         match self {
