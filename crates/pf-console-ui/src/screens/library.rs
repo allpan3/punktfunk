@@ -102,15 +102,19 @@ pub fn decode_poster_off_thread(bytes: &[u8], k: f64) -> Option<crate::library::
     crate::library::DecodedPoster::new(decode_poster(bytes, k)?)
 }
 
+/// A cover to decode: its id, its bytes, the scale; and what came of it.
+type ArtJob = (String, Arc<[u8]>, f64);
+type ArtDone = (String, Option<crate::library::DecodedPoster>);
+
 /// A screen's covers decoded off the thread that draws: one worker, started on first use and
 /// stopped with the screen. A TV spends 15–90 ms on one cover, a dropped frame each on the
 /// render thread, and a screen that only has a cover's bytes must decode it itself.
 #[derive(Default)]
 pub(super) struct ArtDecoder {
     #[cfg_attr(test, allow(dead_code))]
-    jobs: Option<std::sync::mpsc::Sender<(String, Arc<[u8]>, f64)>>,
+    jobs: Option<std::sync::mpsc::Sender<ArtJob>>,
     #[cfg_attr(test, allow(dead_code))]
-    done: Option<std::sync::mpsc::Receiver<(String, Option<crate::library::DecodedPoster>)>>,
+    done: Option<std::sync::mpsc::Receiver<ArtDone>>,
     pending: std::collections::HashSet<String>,
     /// Tests decode inline so a frame count stays deterministic.
     #[cfg(test)]
@@ -130,7 +134,7 @@ impl ArtDecoder {
         #[cfg(not(test))]
         {
             let jobs = self.jobs.get_or_insert_with(|| {
-                let (jobs, rx) = std::sync::mpsc::channel::<(String, Arc<[u8]>, f64)>();
+                let (jobs, rx) = std::sync::mpsc::channel::<ArtJob>();
                 let (tx, done) = std::sync::mpsc::channel();
                 self.done = Some(done);
                 let _ = std::thread::Builder::new()
