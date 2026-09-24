@@ -332,21 +332,29 @@ fn pct(sorted: &[u32], q: f64) -> u32 {
     sorted[rank.clamp(1, sorted.len()) - 1]
 }
 
-/// Global-priority classes for `PYROWAVE_QUEUE_PRIORITY`, character-identical to
-/// `patches/0005-global-priority-queue.patch`: unset → realtime ladder;
-/// ASCII-lowercased; `off` → none; `high` → `[HIGH]`; junk → `[REALTIME, HIGH]`.
+/// PCI vendor id of NVIDIA, whose REALTIME queues pay extra on every submit.
+const VENDOR_NVIDIA: u32 = 0x10de;
+
+/// Global-priority classes for `PYROWAVE_QUEUE_PRIORITY`, the grammar of
+/// `patches/0005-global-priority-queue.patch`: ASCII-lowercased; `off` → none;
+/// `high` → `[HIGH]`; `realtime`, unset and junk → `[REALTIME, HIGH]`.
+/// Linux adds one rule: unset or junk on an NVIDIA device → `[HIGH]`. Its REALTIME
+/// queue makes every `vkQueueSubmit` cost 0.4–1 ms, more than the preemption saves.
 /// The same env var drives Windows (patch live) and Linux (we pass create-infos,
 /// Granite takes `inherit_info`). `off` is the only disable spelling; `0` is not.
-/// Do not change this without the patch in the same commit.
-fn queue_priority_candidates(raw: Option<&str>) -> Vec<vk::QueueGlobalPriorityKHR> {
+/// Do not change the grammar without the patch in the same commit.
+fn queue_priority_candidates(raw: Option<&str>, vendor_id: u32) -> Vec<vk::QueueGlobalPriorityKHR> {
     let want = raw.map(|s| s.to_ascii_lowercase());
+    let ladder = vec![
+        vk::QueueGlobalPriorityKHR::REALTIME,
+        vk::QueueGlobalPriorityKHR::HIGH,
+    ];
     match want.as_deref() {
         Some("off") => Vec::new(),
         Some("high") => vec![vk::QueueGlobalPriorityKHR::HIGH],
-        _ => vec![
-            vk::QueueGlobalPriorityKHR::REALTIME,
-            vk::QueueGlobalPriorityKHR::HIGH,
-        ],
+        Some("realtime") => ladder,
+        _ if vendor_id == VENDOR_NVIDIA => vec![vk::QueueGlobalPriorityKHR::HIGH],
+        _ => ladder,
     }
 }
 
@@ -726,7 +734,7 @@ impl PyroWaveEncoder {
         }
     }
 
-    /// `intent` is the raw `PYROWAVE_QUEUE_PRIORITY` (`None` = default ladder), resolved
+    /// `intent` is the raw `PYROWAVE_QUEUE_PRIORITY` (`None` = the default class), resolved
     /// by the caller. `warn_inert` is whether this process emits the "every class refused"
     /// warning — see [`Self::open_in_worker`]. `bit_depth`/`hdr` are the negotiated stream
     /// depth and the BT.2020 PQ flag — they pick the CSC shader, the plane formats, and the
@@ -862,7 +870,7 @@ impl PyroWaveEncoder {
             // Encode shares shader cores with the game; process priority only orders
             // submission. The vendored patch is gated `if (!inherit_info)` and Linux
             // passes its own create-infos, so Granite takes the inherit branch.
-            let gp_candidates = queue_priority_candidates(intent);
+            let gp_candidates = queue_priority_candidates(intent, picked.vendor_id);
             // KHR is the promoted name; match pf-zerocopy's VkBridge probe so spellings agree.
             let gp_ext =
                 if crate::vk_util::ext_advertised(&dev_ext_props, vk::KHR_GLOBAL_PRIORITY_NAME) {
@@ -2920,37 +2928,60 @@ mod tests {
     // Windows (patch live) and Linux. Device-free: `queue_priority_candidates` takes the
     // raw string so env-var tests do not race.
 
+    const AMD: u32 = 0x1002;
+    const LADDER: [vk::QueueGlobalPriorityKHR; 2] = [
+        vk::QueueGlobalPriorityKHR::REALTIME,
+        vk::QueueGlobalPriorityKHR::HIGH,
+    ];
+
     /// Unset means the realtime ladder (REALTIME then HIGH), not a single class.
     #[test]
     fn unset_requests_the_realtime_ladder() {
+        assert_eq!(queue_priority_candidates(None, AMD), LADDER);
+    }
+
+    /// Unset on NVIDIA means HIGH alone: its REALTIME queue slows every submit.
+    #[test]
+    fn unset_on_nvidia_requests_high() {
         assert_eq!(
-            queue_priority_candidates(None),
-            vec![
-                vk::QueueGlobalPriorityKHR::REALTIME,
-                vk::QueueGlobalPriorityKHR::HIGH
-            ]
+            queue_priority_candidates(None, VENDOR_NVIDIA),
+            vec![vk::QueueGlobalPriorityKHR::HIGH]
         );
+        assert_eq!(
+            queue_priority_candidates(Some("junk"), VENDOR_NVIDIA),
+            vec![vk::QueueGlobalPriorityKHR::HIGH]
+        );
+    }
+
+    /// An explicit `realtime` wins over the NVIDIA default.
+    #[test]
+    fn realtime_asks_for_the_ladder_on_every_vendor() {
+        for vendor in [AMD, VENDOR_NVIDIA] {
+            assert_eq!(queue_priority_candidates(Some("REALTIME"), vendor), LADDER);
+        }
     }
 
     /// `off` is the only disable spelling (case-insensitive). `0` is not: the C side
     /// does not accept it either.
     #[test]
     fn only_off_disables_and_it_is_case_insensitive() {
-        assert!(queue_priority_candidates(Some("off")).is_empty());
-        assert!(queue_priority_candidates(Some("OFF")).is_empty());
-        assert!(queue_priority_candidates(Some("Off")).is_empty());
-        assert!(!queue_priority_candidates(Some("0")).is_empty());
+        for vendor in [AMD, VENDOR_NVIDIA] {
+            assert!(queue_priority_candidates(Some("off"), vendor).is_empty());
+            assert!(queue_priority_candidates(Some("OFF"), vendor).is_empty());
+            assert!(queue_priority_candidates(Some("Off"), vendor).is_empty());
+            assert!(!queue_priority_candidates(Some("0"), vendor).is_empty());
+        }
     }
 
     /// `high` is HIGH only — silently trying REALTIME first would hide "elevated, not realtime".
     #[test]
     fn high_asks_for_high_alone() {
         assert_eq!(
-            queue_priority_candidates(Some("high")),
+            queue_priority_candidates(Some("high"), AMD),
             vec![vk::QueueGlobalPriorityKHR::HIGH]
         );
         assert_eq!(
-            queue_priority_candidates(Some("HIGH")),
+            queue_priority_candidates(Some("HIGH"), AMD),
             vec![vk::QueueGlobalPriorityKHR::HIGH]
         );
     }
@@ -2958,14 +2989,9 @@ mod tests {
     /// Junk falls back to the default ladder, not to off: unparseable must not disable the lever.
     #[test]
     fn junk_falls_back_to_the_default_ladder() {
-        for raw in ["", "realtime", "REALTIME", "yes", "1", "medium", "  high"] {
-            assert!(
-                !queue_priority_candidates(Some(raw)).is_empty(),
-                "{raw:?} must not disable the priority request"
-            );
+        for raw in ["", "yes", "1", "medium", "  high"] {
+            assert_eq!(queue_priority_candidates(Some(raw), AMD), LADDER, "{raw:?}");
         }
-        // Full ladder, not HIGH alone. The C patch does not trim, so neither do we.
-        assert_eq!(queue_priority_candidates(Some("  high")).len(), 2);
     }
 
     /// A refused class walks the ladder down, never fails the open. `NOT_PERMITTED` is
