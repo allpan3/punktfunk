@@ -149,7 +149,7 @@ pub(crate) enum ToWorker {
     /// Open the encoder. [`FromWorker::Ready`] (AU memfd) or [`FromWorker::InitErr`].
     ///
     /// `priority_intent` is the host-resolved `PYROWAVE_QUEUE_PRIORITY` (`None` =
-    /// default REALTIME→HIGH). Forwarded explicitly: the worker strips the
+    /// REALTIME→HIGH, HIGH on NVIDIA). Forwarded explicitly: the worker strips the
     /// variable so one knob cannot mean two things across the process boundary.
     Hello {
         proto: u32,
