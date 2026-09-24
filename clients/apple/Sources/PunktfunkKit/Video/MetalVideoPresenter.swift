@@ -821,13 +821,14 @@ public final class MetalVideoPresenter {
     /// Drain the staged HDR grade and apply it. RENDER THREAD (or `reconcileLayer`'s caller):
     /// idempotent, so every present path can call it and the first one to run wins. Every path
     /// must — a stream whose path skipped it tone-maps against the bare reference-white anchor
-    /// with no mastering volume for the whole session.
+    /// with no mastering volume for the whole session. The host repeats the grade on every
+    /// keyframe (every PyroWave frame); an unchanged one leaves the layer alone.
     private func applyStagedHdrMeta() {
         stagingLock.lock()
         let newHdrMeta = pendingHdrMeta
         pendingHdrMeta = nil
         stagingLock.unlock()
-        guard let newHdrMeta else { return }
+        guard let newHdrMeta, newHdrMeta != lastHdrMeta else { return }
         lastHdrMeta = newHdrMeta
         // tvOS has no edrMetadata — the cached grade still matters for a later flip's
         // configureColor. macOS/iOS refine the live tone-map now.
