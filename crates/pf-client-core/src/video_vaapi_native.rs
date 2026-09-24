@@ -2120,6 +2120,44 @@ mod tests {
         );
     }
 
+    /// Wall time of each `decode` call — submit, sync and export, the span the
+    /// session reports as decode time — on `PF_VAAPI_BENCH_STREAM` (Annex-B H.265).
+    /// Three frames stay held, as a presenter holds them.
+    #[test]
+    #[ignore = "needs a machine with a libva runtime and PF_VAAPI_BENCH_STREAM"]
+    fn h265_decode_time_on_this_machines_vaapi() {
+        let path = std::env::var("PF_VAAPI_BENCH_STREAM").expect("PF_VAAPI_BENCH_STREAM");
+        let stream = std::fs::read(&path).expect("read the bench stream");
+        let units = split_h265_aus(&stream);
+        let mut decoder = NativeVaapiDecoder::new(pf_vaapi::Codec::H265, StreamFormat::SDR_420_8)
+            .expect("this box is supposed to have a VAAPI HEVC decode entry point");
+        let mut us = Vec::with_capacity(units.len());
+        let mut held = std::collections::VecDeque::new();
+        let start = std::time::Instant::now();
+        for (index, unit) in units.iter().enumerate() {
+            let t = std::time::Instant::now();
+            let frame = decoder
+                .decode(unit)
+                .unwrap_or_else(|e| panic!("unit {index}: {e:#}"));
+            us.push(t.elapsed().as_micros() as u64);
+            held.extend(frame);
+            if held.len() > 3 {
+                held.pop_front();
+            }
+        }
+        let total = start.elapsed();
+        us.sort_unstable();
+        let at = |p: usize| us[(us.len() - 1) * p / 100];
+        eprintln!(
+            "{path}: {} AUs in {total:?} ({:.0} fps); decode call p50 {} us, p95 {} us, max {} us",
+            us.len(),
+            us.len() as f64 / total.as_secs_f64(),
+            at(50),
+            at(95),
+            us[us.len() - 1]
+        );
+    }
+
     /// 250 AUs, two slices per picture. Same file the other rungs decode.
     pub(super) const H264_25FPS: &[u8] = include_bytes!(
         "../../pf-bitstream/vendor/cros-codecs/src/codec/h264/test_data/test-25fps.h264"
