@@ -176,6 +176,7 @@ Env-only additions to the **Game Mode** rows above. See [gamescope](/docs/gamesc
 
 | Variable | Values | What it does |
 |---|---|---|
+| `PUNKTFUNK_XBOX_BACKEND` | `hid` · `xusb` *(default: automatic)* | **(Windows)** Which virtual Xbox pad the host builds. `hid` is seen by Steam, SDL, DirectInput and Windows.Gaming.Input, and by XInput through Windows' `xinputhid` filter. `xusb` is an Xbox 360 pad for XInput and Windows.Gaming.Input. Unset, the host picks `hid` where `xinputhid` is installed and `xusb` where it is not, such as Windows Server. |
 | `PUNKTFUNK_PAD_AUDIO_SLOTS` | `1`–`4` (Windows `1`, Linux `4`) | How many controllers get their own [speaker and haptics](/docs/controller-audio) audio at once. |
 | `PUNKTFUNK_PAD_SINK_NAME` | template | Linux, debugging: `node.name` of each pad's mono speaker node; `{pad}` and `{mac}` expand. Each pad gets a real DualSense's three nodes: mono speaker, 4-channel speaker-haptic, and a hidden 4-channel parent. |
 | `PUNKTFUNK_PAD_SINK_DESC` | template | Linux, debugging: every pad node's `node.description` (default `Wireless Controller`). |
