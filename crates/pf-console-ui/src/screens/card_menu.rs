@@ -15,7 +15,7 @@ use crate::pointer::Pointer;
 use crate::screens::{Ctx, Outbox, Screen};
 use crate::store::SettingsStore;
 use crate::theme::{edge, fg, Fonts, W};
-use crate::widgets::{blurb, column, ListMsg, MenuList, RowSpec, TabStrip, TAB_STRIP_H};
+use crate::widgets::{blurb, ListMsg, MenuList, RowSpec, TabStrip, TAB_STRIP_H};
 use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuPulse};
 use pf_client_core::start;
 use skia_safe::{Canvas, Image, Rect};
@@ -834,10 +834,9 @@ impl CardMenu {
         self.list
             .render(canvas, list_rect, &rows, fonts, k, dt, active);
         if !sections.is_empty() {
-            // The tabs on the rows' inner column, as Settings' sections sit.
-            let inner = f64::from(column(list_rect, k).left) + 16.0 * k;
+            // The tabs on the screen's margin, under the title, as Settings' sections sit.
             let bottom = strip_top + strip_h as f32;
-            let r = Rect::from_ltrb((inner - edge(k)) as f32, strip_top, rect.right, bottom);
+            let r = Rect::from_ltrb(rect.left, strip_top, rect.right, bottom);
             let (tab, focused) = (self.tab, self.strip_focus);
             self.strip
                 .render(canvas, r, &sections, tab, focused, fonts, k, dt);
