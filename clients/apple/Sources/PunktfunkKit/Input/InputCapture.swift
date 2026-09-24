@@ -60,10 +60,8 @@ public final class InputCapture {
     private var keyboards: [GCKeyboard] = []
     #if os(macOS)
     private var keyEventMonitor: Any?
-    /// The system-shortcut tap (see `installSystemKeyTap`) and its run-loop source. Live only
-    /// while forwarding with `inhibit_shortcuts` on AND Accessibility granted; nil otherwise.
-    private var systemKeyTap: CFMachPort?
-    private var systemKeyTapSource: CFRunLoopSource?
+    /// This capture holds `SystemHotKeys` off (see `holdSystemShortcuts`).
+    private var holdsSystemShortcuts = false
     #endif
 
     // Main-queue-only state (see header comment).
@@ -213,11 +211,11 @@ public final class InputCapture {
             suppressedButton = suppressClick ? 1 : nil
             suppressedDownSeen = false
             #if os(macOS)
-            installSystemKeyTap()
+            holdSystemShortcuts()
             #endif
         } else if forwarding {
             #if os(macOS)
-            removeSystemKeyTap()
+            releaseSystemShortcuts()
             #endif
             releaseAll()
             forwarding = false
@@ -385,7 +383,7 @@ public final class InputCapture {
             NSEvent.removeMonitor(monitor)
             keyEventMonitor = nil
         }
-        removeSystemKeyTap()
+        releaseSystemShortcuts()
         #endif
         // Don't clobber the handlers if a newer capture has taken the global devices.
         if Self.activeCapture === self || Self.activeCapture == nil {
@@ -714,122 +712,22 @@ public final class InputCapture {
         commandChordVKs.removeAll()
     }
 
-    // MARK: - System shortcut tap
-
-    /// Whether the system-shortcut tap CAN run: Accessibility granted to this process. Read live
-    /// (the user flips it in System Settings while the app runs); never prompts — the prompt is the
-    /// Settings toggle's job (`requestSystemShortcutAccess`), not something a stream start springs.
-    public static var systemShortcutsAvailable: Bool { AXIsProcessTrusted() }
-
-    /// Show the one-time Accessibility prompt (a no-op once granted). Called from Settings when the
-    /// user turns "Capture system shortcuts" on or presses the grant button.
-    public static func requestSystemShortcutAccess() {
-        let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(opts)
-    }
+    // MARK: - System shortcuts
 
     /// The other half of `inhibit_shortcuts` on macOS. The keyDown monitor above claims the ⌘
-    /// chords that REACH the app — but ⌘Space, ⌘Tab, ⌃↑ and the rest of System Settings › Keyboard
-    /// › Shortcuts never do: WindowServer hands them to Spotlight / the Dock / Mission Control before
-    /// any app sees them. The SDL clients get those through a private CGS hotkey-mode call that a
-    /// sandboxed app cannot make; the sandbox-legal way is a session-level event tap, which sees
-    /// every key ahead of the hotkey dispatch and only exists with Accessibility granted.
-    ///
-    /// The tap does NOT forward anything itself. It takes each keyDown/keyUp off the system and
-    /// re-posts it, addressed to the key window, into THIS app's event queue (`NSApp.postEvent`), so
-    /// it arrives exactly where the same key would have arrived had macOS not claimed it — the
-    /// monitor first (client chords, ⌘ chords → host), then `StreamLayerView.keyDown/keyUp`
-    /// (everything else → host). One key path, no second VK table, no second release bookkeeping.
-    /// In-process posts don't re-enter the tap, so there is no loop. Keys the system would have
-    /// delivered anyway are unaffected (we drop the original and deliver the copy) — the tap only
-    /// changes what happens to the ones it wouldn't. Bonus: the keyUp of a ⌘-chord key now arrives
-    /// too (the tap sees HID, which never stopped delivering it), so `flushCommandChord` has less
-    /// to synthesize.
-    ///
-    /// Gating, every event: `forwarding` (capture engaged — and capture releases on any focus loss,
-    /// so this is never true with another app frontmost) and `NSApp.isActive` as belt-and-braces.
-    /// Anything else passes through untouched — a tap that swallows keys for the whole Mac is the
-    /// failure mode to design against. Installed on the main run loop on purpose: a hung main thread
-    /// trips the tap's timeout and macOS disables it, handing the keyboard back.
-    private func installSystemKeyTap() {
-        guard systemKeyTap == nil, connection.settings.inhibitShortcuts, AXIsProcessTrusted()
-        else { return }
-        let mask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue)
-        let callback: CGEventTapCallBack = { _, type, event, userInfo in
-            guard let userInfo else { return Unmanaged.passUnretained(event) }
-            let capture = Unmanaged<InputCapture>.fromOpaque(userInfo).takeUnretainedValue()
-            return capture.handleTapped(type: type, event: event)
-        }
-        guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
-            eventsOfInterest: CGEventMask(mask), callback: callback,
-            userInfo: Unmanaged.passUnretained(self).toOpaque())
-        else {
-            inputLog.error("system shortcut tap: tapCreate failed (Accessibility revoked?)")
-            return
-        }
-        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
-        systemKeyTap = tap
-        systemKeyTapSource = source
-        if inputDebug { inputLog.debug("system shortcut tap installed") }
+    /// chords that REACH the app; ⌘Space, ⌘Tab, Mission Control and other apps' global shortcuts
+    /// never do — WindowServer dispatches them first. While captured, `SystemHotKeys` switches that
+    /// dispatch off, so those keys arrive as ordinary key events and take the same path to the host.
+    private func holdSystemShortcuts() {
+        guard !holdsSystemShortcuts, connection.settings.inhibitShortcuts else { return }
+        holdsSystemShortcuts = true
+        SystemHotKeys.hold()
     }
 
-    private func removeSystemKeyTap() {
-        guard let tap = systemKeyTap else { return }
-        CGEvent.tapEnable(tap: tap, enable: false)
-        if let source = systemKeyTapSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
-        }
-        CFMachPortInvalidate(tap)
-        systemKeyTap = nil
-        systemKeyTapSource = nil
-        if inputDebug { inputLog.debug("system shortcut tap removed") }
-    }
-
-    /// The tap callback body (main run loop). Returns the event to let it through, nil to swallow.
-    private func handleTapped(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        switch type {
-        case .tapDisabledByTimeout, .tapDisabledByUserInput:
-            // macOS switched us off (main thread stalled past the tap's deadline, or a
-            // system-level interruption); re-arm if still wanted, else stay down.
-            if let tap = systemKeyTap, forwarding { CGEvent.tapEnable(tap: tap, enable: true) }
-            return Unmanaged.passUnretained(event)
-        case .keyDown, .keyUp:
-            // Stamped with the KEY window: `NSApp.sendEvent` routes a key event by `event.window`,
-            // and an NSEvent wrapped straight from the CGEvent has none — it reaches the local
-            // monitor but not the first responder (verified in a harness). The key window is the
-            // stream window whenever `forwarding` is true (capture releases on resignKey); if there
-            // somehow is none, let the key go rather than swallow it into nothing.
-            guard Self.tapClaims(forwarding: forwarding, appActive: NSApp.isActive),
-                  let windowNumber = NSApp.keyWindow?.windowNumber,
-                  let copy = event.copy(), let raw = NSEvent(cgEvent: copy),
-                  let stamped = Self.restamp(raw, windowNumber: windowNumber)
-            else { return Unmanaged.passUnretained(event) }
-            NSApp.postEvent(stamped, atStart: false)
-            return nil
-        default:
-            return Unmanaged.passUnretained(event)
-        }
-    }
-
-    /// The same key event, addressed to `windowNumber` (see `handleTapped`).
-    static func restamp(_ raw: NSEvent, windowNumber: Int) -> NSEvent? {
-        NSEvent.keyEvent(
-            with: raw.type, location: .zero, modifierFlags: raw.modifierFlags,
-            timestamp: raw.timestamp, windowNumber: windowNumber, context: nil,
-            characters: raw.characters ?? "",
-            charactersIgnoringModifiers: raw.charactersIgnoringModifiers ?? "",
-            isARepeat: raw.type == .keyDown && raw.isARepeat, keyCode: raw.keyCode)
-    }
-
-    /// Does the system-shortcut tap take this key off macOS and hand it to the app's own key path?
-    /// Pure, for the tests: only while captured, only with the app frontmost. The
-    /// `inhibit_shortcuts` setting is checked once at install time (the tap does not exist with it
-    /// off); the mouse model is not a condition — see `forwardsCommandChord`.
-    static func tapClaims(forwarding: Bool, appActive: Bool) -> Bool {
-        forwarding && appActive
+    private func releaseSystemShortcuts() {
+        guard holdsSystemShortcuts else { return }
+        holdsSystemShortcuts = false
+        SystemHotKeys.release()
     }
     #endif
 
@@ -1048,3 +946,92 @@ public final class InputCapture {
         #endif
     }
 }
+
+#if os(macOS)
+// Private CoreGraphics calls, linked like any other symbol — the switch UTM (Mac App Store), SDL
+// and Parsec use. C ABI: UInt32 arguments, a CGError (Int32) back.
+@_silgen_name("CGSMainConnectionID") private func CGSMainConnectionID() -> UInt32
+@_silgen_name("CGSSetGlobalHotKeyOperatingMode")
+private func CGSSetGlobalHotKeyOperatingMode(_ connection: UInt32, _ mode: UInt32) -> Int32
+@_silgen_name("CGSGetGlobalHotKeyOperatingMode")
+private func CGSGetGlobalHotKeyOperatingMode(_ connection: UInt32, _ mode: UnsafeMutablePointer<UInt32>) -> Int32
+
+/// WindowServer's global shortcuts — ⌘Tab, ⌘Space, Mission Control, Force Quit, other apps' hot
+/// keys — switched off while any capture holds them. Off, they reach the frontmost app as ordinary
+/// key events; no permission is involved. Process-wide, and macOS restores them if the process dies.
+///
+/// They come back on while the main thread has not answered for 2 s: a hung app must not keep
+/// ⌥⌘⎋ from the user. Everything runs on `queue`, so the watchdog works with main stuck.
+enum SystemHotKeys {
+    private static let queue = DispatchQueue(label: "io.unom.punktfunk.system-hot-keys")
+    // Queue-only state.
+    private static var holders = 0
+    private static var off = false
+    private static var lastAnswer = DispatchTime.now()
+    private static var pinging = false
+    private static var watchdog: DispatchSourceTimer?
+
+    /// Called from main — which is therefore alive right now.
+    static func hold() {
+        queue.async {
+            holders += 1
+            lastAnswer = .now()
+            update()
+        }
+    }
+
+    static func release() {
+        queue.async {
+            holders = max(0, holders - 1)
+            update()
+        }
+    }
+
+    /// WindowServer's own view, for the tests.
+    static var isOff: Bool {
+        var mode: UInt32 = 0
+        return CGSGetGlobalHotKeyOperatingMode(CGSMainConnectionID(), &mode) == 0 && mode == 1
+    }
+
+    /// Off only while held AND the main thread answers.
+    static func shouldBeOff(holders: Int, mainSilentFor seconds: Double) -> Bool {
+        holders > 0 && seconds < 2
+    }
+
+    private static func update() {
+        let silent = Double(DispatchTime.now().uptimeNanoseconds - lastAnswer.uptimeNanoseconds) / 1e9
+        let want = shouldBeOff(holders: holders, mainSilentFor: silent)
+        if want != off {
+            off = want // set even on failure: one log line, not one per tick
+            let err = CGSSetGlobalHotKeyOperatingMode(CGSMainConnectionID(), want ? 1 : 0)
+            if err != 0 { inputLog.error("system shortcuts: hot key mode \(want ? 1 : 0) refused (\(err))") }
+        }
+        if holders > 0, watchdog == nil {
+            let timer = DispatchSource.makeTimerSource(queue: queue)
+            timer.schedule(deadline: .now() + 0.5, repeating: 0.5)
+            timer.setEventHandler {
+                ping()
+                update()
+            }
+            timer.resume()
+            watchdog = timer
+        } else if holders == 0 {
+            watchdog?.cancel()
+            watchdog = nil
+        }
+    }
+
+    /// One main-thread round trip at a time; its answer refreshes `lastAnswer`.
+    private static func ping() {
+        guard !pinging else { return }
+        pinging = true
+        DispatchQueue.main.async {
+            queue.async {
+                pinging = false
+                lastAnswer = .now()
+                update()
+            }
+        }
+    }
+}
+#endif

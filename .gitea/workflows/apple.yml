@@ -562,6 +562,12 @@ jobs:
             MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="$BUILD_NUM" \
             CODE_SIGN_STYLE=Automatic \
             DEVELOPMENT_TEAM="$TEAM_ID"
+          # App Review rejected an Accessibility event tap under guideline 2.4.5; never upload one.
+          MAS_BIN="$RUNNER_TEMP/Punktfunk-macos-appstore.xcarchive/Products/Applications/Punktfunk.app/Contents/MacOS/Punktfunk"
+          if nm -u "$MAS_BIN" | grep -qE '_AXIsProcessTrusted|_CGEventTapCreate'; then
+            echo "::error::App Store build links an Accessibility trust check or event tap (guideline 2.4.5)"
+            exit 1
+          fi
           cat > "$RUNNER_TEMP/export-macos-appstore.plist" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
