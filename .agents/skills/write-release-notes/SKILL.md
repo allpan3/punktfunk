@@ -28,7 +28,8 @@ Ordinary PRs do not run this and do not edit `CHANGELOG.md`.
    Discord (`scripts/ci/discord-announce.sh`) posts **everything before the first `## `**. Put the 3–8 highlight bullets in that lead-in. A later `## Highlights` heading is optional duplication; prefer no heading so Discord gets the scan.
 2. `docs/releases/whatsnew/vX.Y.Z.txt` — Android only, 500 **characters** (`len()`, not `wc -c`), `whatsnew/TEMPLATE.txt`.
 3. `CHANGELOG.md` card: lead, version table, Breaking, short **Knobs / embedder** list (env, JNI arity, CLI) for actions that do not move a version integer. No Added/Changed/Fixed diary.
-4. Stop. A human reads the lead-in before the tag.
+4. A `<release version="X.Y.Z" date="…">` on top of `packaging/flatpak/io.unom.Punktfunk.metainfo.xml`: one-sentence description, `details` URL to the release. Software centres show its version.
+5. Stop. A human reads the lead-in before the tag.
 
 Voice: `docs/writing.md` §2. Name the thing, then what the reader gets. Do not paste `git log`. Do not invent version numbers.
 
