@@ -1358,19 +1358,15 @@ impl LibraryScreen {
             }
         };
         // Scroll only as far as it takes to show the item and a breath round it, above the
-        // band; a line taller than the view shows its top. Under two rows of room (a phone)
-        // the item is centred instead: at the band's edge its caption reads as under it.
+        // band; a line taller than the view shows its top. Never centred: on a phone that
+        // walked the first row up over the host's verbs.
         let breath = REVEAL_AIR * k;
         let mut want = self.scroll.pos;
-        if usable < 2.0 * (card_h + gap_y) {
-            want = item_top + item_h / 2.0 - usable / 2.0;
-        } else {
-            if item_top + item_h + breath > want + usable {
-                want = item_top + item_h + breath - usable;
-            }
-            if item_top - breath < want {
-                want = item_top - breath;
-            }
+        if item_top + item_h + breath > want + usable {
+            want = item_top + item_h + breath - usable;
+        }
+        if item_top - breath < want {
+            want = item_top - breath;
         }
         let want = want.clamp(0.0, (content_h - view_h).max(0.0));
         let grid = Id::new(GRID, 0);
