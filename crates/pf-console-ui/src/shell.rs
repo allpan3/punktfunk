@@ -411,6 +411,8 @@ pub(crate) struct Shell {
     /// itself, so the service thread only ever advances the phase and `sync` can mirror
     /// the slot verbatim — including the `None` a dismiss writes.
     speed: Option<SpeedStatus>,
+    /// The speed chart as drawn, chasing `speed` every frame.
+    speed_view: overlays::SpeedView,
     toast: Option<Toast>,
     /// Fingerprint of a first pairing whose shelf has not opened yet. See
     /// [`Self::open_first_paired_library`].
@@ -537,6 +539,7 @@ impl Shell {
             wake: None,
             wake_optimistic: false,
             speed: None,
+            speed_view: overlays::SpeedView::default(),
             toast: None,
             first_pair: None,
             exit_armed: None,
