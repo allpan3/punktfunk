@@ -182,6 +182,16 @@ extension ConsoleModel {
     /// runs, then what the host answers. `refreshOnly` asks about running titles alone.
     func fetchLibrary(addr: String, mgmt: UInt16, fp: String, refreshOnly: Bool) {
         guard let host = host(fp: fp, addr: addr, port: 0) else { return }
+        // The demo host serves no management API; its shelf is built in.
+        if DemoMode.isDemo(host) {
+            bridge.push(.libraryRunning, ConsoleJSON.runningGames([]))
+            if refreshOnly { return }
+            bridge.push(.libraryBegin, "{}")
+            bridge.push(.libraryGames, ConsoleJSON.libraryGames(DemoMode.games))
+            bridge.push(.libraryPhase, "\"Ready\"")
+            pushArt(DemoMode.games, from: DemoMode.art)
+            return
+        }
         guard let identity = (try? ClientIdentityStore.shared.load())?.identity else {
             bridge.push(
                 .libraryPhase,
@@ -239,6 +249,11 @@ extension ConsoleModel {
             address: host.address, port: mgmt, certPEM: identity.certPEM,
             keyPEM: identity.keyPEM, hostFingerprint: host.pinnedSHA256)
         else { return }
+        pushArt(games, from: loader)
+    }
+
+    /// Each title's first poster that loads, in the order the touch grid takes them.
+    private func pushArt(_ games: [GameEntry], from loader: any LibraryArtSource) {
         artTask?.cancel()
         artTask = Task { [weak self] in
             for game in games {
