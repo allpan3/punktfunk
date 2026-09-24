@@ -79,6 +79,22 @@ describe("refusedRoot", () => {
 		}
 	});
 
+	test("sees the home behind a link, as on Fedora Atomic", () => {
+		const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pf-linkhome-")));
+		const real = path.join(root, "var/home/u");
+		fs.mkdirSync(path.join(real, ".ssh"), { recursive: true });
+		fs.mkdirSync(path.join(real, "Games"), { recursive: true });
+		fs.symlinkSync(path.join(root, "var/home"), path.join(root, "home"));
+		const home = path.join(root, "home/u");
+		try {
+			expect(refusedRoot(real, home)).toBe(true);
+			expect(refusedRoot(path.join(real, ".ssh"), home)).toBe(true);
+			expect(refusedRoot(path.join(real, "Games"), home)).toBe(false);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	test("a manifest or grant naming a refused root is never bound", () => {
 		const argv = bwrapArgv(
 			manifest({ reads: ["/proc", "~/.config/punktfunk/plugin-run", "~/Games"] }),
