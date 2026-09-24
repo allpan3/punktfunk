@@ -1433,6 +1433,7 @@ fn reduce_motion_freezes_the_field_and_shortens_the_transition() {
     let (w, h) = (1280u32, 800u32);
     let mut surface = skia_safe::surfaces::raster_n32_premul((w as i32, h as i32)).unwrap();
     let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    let _slot = crate::os_theme::REDUCE_MOTION_TEST.lock().unwrap();
 
     assert!(!s.settings.reduce_motion, "off by default");
     assert_eq!(s.field_clock(12.5), 12.5);
@@ -1458,6 +1459,20 @@ fn reduce_motion_freezes_the_field_and_shortens_the_transition() {
     s.settings.reduce_motion = false;
     s.store.save(&s.settings);
     assert!(!s.store.load().reduce_motion, "and back off again");
+}
+
+/// An OS that answers wins over the console's own row, which then leaves Settings; one that
+/// stops answering hands both back.
+#[test]
+fn the_os_reduce_motion_wins_and_hides_the_row() {
+    let (s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    let _slot = crate::os_theme::REDUCE_MOTION_TEST.lock().unwrap();
+    assert!(!s.reduce_motion());
+    crate::os_theme::set_os_reduce_motion(Some(true));
+    assert!(s.reduce_motion(), "the OS asked for less motion");
+    assert_eq!(s.field_clock(12.5), 0.0);
+    crate::os_theme::set_os_reduce_motion(None);
+    assert!(!s.reduce_motion(), "no answer: the stored setting again");
 }
 
 /// The backdrop keeps its offscreen and re-renders only when an input moves: a frame

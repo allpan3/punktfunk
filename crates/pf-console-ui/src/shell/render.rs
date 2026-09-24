@@ -83,7 +83,7 @@ impl Shell {
         crate::theme::set_ink(self.ink);
         // Same publish-once contract as ink. Also a local: `LayerEnv` mut-borrows
         // `settings`, so the transition arms cannot read the field.
-        let reduce = self.settings.reduce_motion;
+        let reduce = self.reduce_motion();
         crate::theme::set_reduce_motion(reduce);
         crate::theme::set_reduced_ui(crate::screens::settings::reduce_ui_res(
             &self.settings,

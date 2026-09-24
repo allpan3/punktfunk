@@ -36,6 +36,23 @@ pub(crate) fn available() -> bool {
     CURRENT.lock().unwrap().1.is_some()
 }
 
+static REDUCE_MOTION: Mutex<Option<bool>> = Mutex::new(None);
+
+/// The OS's own reduce-motion switch, when the embedder can read it. An answer wins over
+/// the stored setting and hides its row; `None` leaves the row in charge.
+pub fn set_os_reduce_motion(reduce: Option<bool>) {
+    *REDUCE_MOTION.lock().unwrap() = reduce;
+}
+
+pub(crate) fn os_reduce_motion() -> Option<bool> {
+    *REDUCE_MOTION.lock().unwrap()
+}
+
+/// Held by every test that sets [`set_os_reduce_motion`] or reads the effective value: libtest
+/// runs siblings on threads, and the slot is process-wide.
+#[cfg(test)]
+pub(crate) static REDUCE_MOTION_TEST: Mutex<()> = Mutex::new(());
+
 /// Nudge accent toward foreground until contrast vs background is ≥ 3:1 (WCAG non-text).
 /// Ten steps of 0.15; an accent already equal to the foreground has nowhere to go.
 pub(crate) fn readable_accent(t: &OsTheme) -> (f64, f64, f64) {

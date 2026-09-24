@@ -875,6 +875,11 @@ impl Shell {
         &self.device_name
     }
 
+    /// The OS's answer when the host read one, else the console's own row.
+    pub(crate) fn reduce_motion(&self) -> bool {
+        crate::os_theme::os_reduce_motion().unwrap_or(self.settings.reduce_motion)
+    }
+
     pub(crate) fn session_ended(&mut self, reason: Option<&str>) {
         self.connecting = None;
         self.launching = None;
@@ -1890,7 +1895,7 @@ impl Shell {
     /// Reduced motion stays a spring (`REDUCED_NAV`); `render.rs` flattens
     /// geometry into the crossfade the setting promises.
     fn nav_spec(&self) -> crate::anim::SpringSpec {
-        if self.settings.reduce_motion {
+        if self.reduce_motion() {
             REDUCED_NAV
         } else {
             springs::NAV
@@ -2049,7 +2054,7 @@ impl Shell {
     /// is the picked palette and a still gradient is what an OLED can hold.
     /// Calm mix is not frozen — that tracks which screen is up.
     fn field_clock(&self, t: f64) -> f64 {
-        if self.settings.reduce_motion {
+        if self.reduce_motion() {
             0.0
         } else {
             t

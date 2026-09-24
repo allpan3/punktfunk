@@ -1218,6 +1218,8 @@ pub fn row_applies(id: RowId, ctx: &Ctx) -> bool {
         // The phone's own motor, gyro and SC2 dongle: only a handheld sends its screen
         // (`ConsoleOptions::screen`), so a TV or a Mac never offers them.
         RowId::PhoneRumble | RowId::PhoneGyro | RowId::Sc2Passthrough => ctx.screen.is_some(),
+        // The OS answered, and the console follows it: no second switch.
+        RowId::ReduceMotion => crate::os_theme::os_reduce_motion().is_none(),
         // `os_theme::available()`, not platform: a new publisher needs no edit here.
         RowId::FollowOsTheme => crate::os_theme::available(),
         // Hidden while follow_os_theme; sits below the switch that drops it.
@@ -4196,6 +4198,19 @@ pub(crate) mod tests {
                 safe: (2796, 1290),
             });
             assert!(phone_rows.iter().all(|id| row_applies(*id, ctx)));
+        });
+    }
+
+    /// An OS that answers takes the row's place; no answer puts the row back.
+    #[test]
+    fn the_reduce_motion_row_steps_aside_for_the_os() {
+        let _slot = crate::os_theme::REDUCE_MOTION_TEST.lock().unwrap();
+        with_ctx(|ctx| {
+            assert!(row_applies(RowId::ReduceMotion, ctx));
+            crate::os_theme::set_os_reduce_motion(Some(false));
+            assert!(!row_applies(RowId::ReduceMotion, ctx));
+            crate::os_theme::set_os_reduce_motion(None);
+            assert!(row_applies(RowId::ReduceMotion, ctx));
         });
     }
 }

@@ -60,6 +60,16 @@ pub fn run(target: Option<&str>) -> u8 {
             std::thread::sleep(std::time::Duration::from_secs(2));
         });
     }
+    // The desktop's reduce-motion switch, followed while it answers. A desktop that says
+    // nothing starts no thread and keeps the console's own row.
+    if let Some(reduce) = pf_client_core::os_prefs::reduce_motion() {
+        pf_console_ui::os_theme::set_os_reduce_motion(Some(reduce));
+        std::thread::spawn(|| loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            let reduce = pf_client_core::os_prefs::reduce_motion();
+            pf_console_ui::os_theme::set_os_reduce_motion(reduce);
+        });
+    }
     let identity = match trust::load_or_create_identity() {
         Ok(i) => i,
         Err(e) => {
