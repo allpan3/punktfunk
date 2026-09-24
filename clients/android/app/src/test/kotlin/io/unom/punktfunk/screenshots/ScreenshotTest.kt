@@ -135,7 +135,7 @@ class ScreenshotTest {
 
     @Test
     fun consoleLicensesLight() =
-        shootRoot("console-licenses-light", statusBar = false) { ConsoleLicensesScene(paletteId = "holo") }
+        shootRoot("console-licenses-light", statusBar = false) { ConsoleLicensesScene(paletteId = "paper") }
 
     /**
      * The touch presentation, pads connected — landscape, like every store frame: the app is

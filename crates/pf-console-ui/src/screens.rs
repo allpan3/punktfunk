@@ -12,6 +12,7 @@ pub(crate) mod home;
 pub(crate) mod library;
 
 pub(crate) mod pair;
+pub(crate) mod palette;
 pub(crate) mod pin_hosts;
 pub(crate) mod players;
 pub(crate) mod ring_editor;
@@ -171,6 +172,8 @@ pub(crate) enum Screen {
     CardMenu(card_menu::CardMenu),
     /// The Games tab's sections: order and switches.
     Customize(library::CustomizeScreen),
+    /// The Background row's cards. Raised by the Interface section.
+    Palette(palette::PaletteScreen),
 }
 
 impl Screen {
@@ -203,6 +206,7 @@ impl Screen {
             Screen::Players(s) => s.menu(ev, ctx, fx),
             Screen::CardMenu(s) => s.menu(ev, ctx, fx),
             Screen::Customize(s) => s.menu(ev, ctx, fx),
+            Screen::Palette(s) => s.menu(ev, ctx, fx),
         }
     }
 
@@ -219,6 +223,7 @@ impl Screen {
             Screen::BindPreset(s) => s.list.dip(),
             Screen::CardMenu(s) => s.press(),
             Screen::Customize(s) => s.list.dip(),
+            Screen::Palette(s) => s.press(),
             _ => {}
         }
     }
@@ -237,6 +242,7 @@ impl Screen {
             Screen::BindPreset(s) => s.list.pan(p),
             Screen::CardMenu(s) => s.list.pan(p),
             Screen::Customize(s) => s.list.pan(p),
+            Screen::Palette(s) => s.pan(p),
             Screen::ShortcutEditor(s) => s.pan_list().is_some_and(|l| l.pan(p)),
             Screen::RingEditor(s) => s.pan_list().pan(p),
             Screen::Library(s) => s.pan(p),
@@ -263,6 +269,7 @@ impl Screen {
             Screen::Players(s) => s.pointer(p, ctx, fx),
             Screen::CardMenu(s) => s.pointer(p, ctx, fx),
             Screen::Customize(s) => s.pointer(p, ctx, fx),
+            Screen::Palette(s) => s.pointer(p, ctx, fx),
         }
     }
 
@@ -354,6 +361,7 @@ impl Screen {
             Screen::Players(_) => "Players".into(),
             Screen::CardMenu(s) => s.title(),
             Screen::Customize(_) => "Customize".into(),
+            Screen::Palette(_) => "Background".into(),
         }
     }
 
@@ -365,6 +373,7 @@ impl Screen {
             Screen::Library(s) => s.announcement(ctx),
             Screen::Collections(s) => s.announcement(),
             Screen::Customize(s) => s.announcement(ctx),
+            Screen::Palette(s) => s.announcement(ctx),
             Screen::Settings(s) => s.announcement(ctx),
             Screen::Players(s) => s.announcement(ctx),
             _ => None,
@@ -386,6 +395,7 @@ impl Screen {
             Screen::Players(s) => s.hints(ctx),
             Screen::CardMenu(s) => s.hints(ctx),
             Screen::Customize(s) => s.hints(ctx),
+            Screen::Palette(s) => s.hints(ctx),
         }
     }
 
@@ -417,6 +427,7 @@ impl Screen {
             Screen::Players(s) => s.render(canvas, rect, k, dt, fonts, ctx),
             Screen::CardMenu(s) => s.render(canvas, rect, k, dt, fonts, ctx),
             Screen::Customize(s) => s.render(canvas, rect, k, dt, fonts, ctx),
+            Screen::Palette(s) => s.render(canvas, rect, k, dt, fonts, ctx),
         }
     }
 }

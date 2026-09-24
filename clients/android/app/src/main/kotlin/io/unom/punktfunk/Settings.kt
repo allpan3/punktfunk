@@ -181,8 +181,8 @@ data class Settings(
     val gamepadUiMode: String = GAMEPAD_UI_WHEN_CONNECTED,
     /**
      * Which colour family the console (gamepad) UI's living backdrop drifts through — the
-     * cross-client `ui_palette` key: `"violet"` (the brand default), then `"oled"`, `"nebula"`,
-     * `"abyss"`, `"ember"`, `"moss"`, `"graphite"`, then the six pale fields. See
+     * cross-client `ui_palette` key: `"violet"` (the brand default), then the other dark
+     * fields, then the six pale ones. See
      * [GamepadPalette], whose table and maths mirror the desktop console's and the Apple
      * client's under the same names. Presentation only: nothing
      * about a stream depends on it, so it is a device preference and never part of a preset.

@@ -108,6 +108,31 @@ pub fn layer() -> Paint {
     Paint::default()
 }
 
+/// A 10/10/10/2 canvas has two bits of alpha, so a fade or a mask layered on it steps in
+/// quarters: the layer goes F16 there. Every `save_layer` in the crate carries this.
+pub fn layer_flags(canvas: &Canvas) -> skia_safe::canvas::SaveLayerFlags {
+    use skia_safe::ColorType::{BGRA1010102, RGBA1010102};
+    if matches!(canvas.image_info().color_type(), RGBA1010102 | BGRA1010102) {
+        skia_safe::canvas::SaveLayerFlags::F16_COLOR_TYPE
+    } else {
+        skia_safe::canvas::SaveLayerFlags::empty()
+    }
+}
+
+/// `Canvas::save_layer_alpha_f` with [`layer_flags`].
+pub fn save_layer_alpha(canvas: &Canvas, bounds: impl Into<Option<Rect>>, alpha: f32) -> usize {
+    let mut paint = layer();
+    paint.set_alpha_f(alpha);
+    let bounds = bounds.into();
+    let mut rec = skia_safe::canvas::SaveLayerRec::default()
+        .paint(&paint)
+        .flags(layer_flags(canvas));
+    if let Some(b) = bounds.as_ref() {
+        rec = rec.bounds(b);
+    }
+    canvas.save_layer(&rec)
+}
+
 /// Linear + linear mipmap. `draw_image_rect` defaults to nearest with no mipmaps;
 /// a poster shrunk into a cell then drops whole source rows.
 pub fn art_sampling() -> skia_safe::SamplingOptions {
@@ -1069,7 +1094,7 @@ mod tests {
         assert!(ink().scrim.r < 0.5, "violet is a dark field");
         let dark_side = apply(&recede_matrix(1.0), card);
 
-        set_ink(Ink::of(crate::library::palette("mint")));
+        set_ink(Ink::of(crate::library::palette("sky")));
         assert!(ink().scrim.r > 0.5, "mint is a pale field");
         let pale_side = apply(&recede_matrix(1.0), card);
 

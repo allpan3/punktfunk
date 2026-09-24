@@ -878,6 +878,18 @@ impl SettingsScreen {
                     ListMsg::None => pulse,
                 };
             }
+            RowId::Palette => {
+                return match msg {
+                    ListMsg::Activate => {
+                        fx.push(Screen::Palette(super::palette::PaletteScreen::new(
+                            &ctx.settings.ui_palette,
+                        )));
+                        pulse
+                    }
+                    ListMsg::Adjust(_) => Some(MenuPulse::Boundary),
+                    ListMsg::None => pulse,
+                };
+            }
             // Action row: adjust is a boundary.
             RowId::QuickActions => {
                 return match msg {
@@ -992,7 +1004,9 @@ impl SettingsScreen {
             Some(RowId::NoPresets | RowId::Version) | None => {
                 vec![Hint::new(HintKey::Back, "Done")]
             }
-            Some(RowId::Controllers | RowId::Licenses | RowId::LibrarySections) => vec![
+            Some(
+                RowId::Controllers | RowId::Licenses | RowId::LibrarySections | RowId::Palette,
+            ) => vec![
                 Hint::new(HintKey::Confirm, "Open"),
                 Hint::new(HintKey::Back, "Done"),
             ],
@@ -1381,6 +1395,18 @@ fn row_spec_base(id: RowId, ctx: &Ctx, presets: &[(String, String)]) -> RowSpec 
         RowId::Controllers => return RowSpec::action("Players", true),
         RowId::Licenses => return RowSpec::action("Open-source licences", true),
         RowId::QuickActions => return RowSpec::action("Quick actions", true),
+        // Opens the cards: the value names the pick, no ‹ › to step it.
+        RowId::Palette => {
+            return RowSpec {
+                label: "Background".into(),
+                value: Some(
+                    crate::library::palette(&ctx.settings.ui_palette)
+                        .name
+                        .into(),
+                ),
+                ..RowSpec::default()
+            };
+        }
         RowId::LibrarySections => {
             let on = crate::library::sections(&ctx.settings.library_sections)
                 .iter()
@@ -1597,11 +1623,6 @@ fn row_spec_base(id: RowId, ctx: &Ctx, presets: &[(String, String)]) -> RowSpec 
             "Follow system theme",
             on_off(s.follow_os_theme).into(),
         ),
-        RowId::Palette => (
-            None,
-            "Background",
-            crate::library::palette(&s.ui_palette).name.into(),
-        ),
         // Label is the reduction, so On means it is in effect.
         RowId::ReduceMotion => (None, "Reduce motion", on_off(s.reduce_motion).into()),
         RowId::ReduceUiResolution => (
@@ -1694,6 +1715,7 @@ fn row_spec_base(id: RowId, ctx: &Ctx, presets: &[(String, String)]) -> RowSpec 
         | RowId::Licenses
         | RowId::QuickActions
         | RowId::LibrarySections
+        | RowId::Palette
         | RowId::Version => {
             unreachable!("returned above")
         }
@@ -1859,8 +1881,8 @@ pub fn detail(id: RowId, ctx: &Ctx) -> &'static str {
              follows a theme switch live. Off, the Background row below picks the look."
         }
         RowId::Palette => {
-            "The colour family this backdrop drifts through — it changes as you step, so \
-             pick by looking. Appearance only; nothing about a stream depends on it."
+            "The colour family this backdrop drifts through. Appearance only; nothing \
+             about a stream depends on it."
         }
         RowId::ReduceMotion => {
             "Freezes the backdrop and replaces the console's slides and pops with plain \
@@ -2233,11 +2255,6 @@ pub fn adjust(id: RowId, delta: i32, wrap: bool, ctx: &mut Ctx) -> bool {
         }
         RowId::AdvancedStats => toggle(&mut s.advanced_stats, delta, wrap),
         RowId::FollowOsTheme => toggle(&mut s.follow_os_theme, delta, wrap),
-        RowId::Palette => {
-            let all = &crate::library::PALETTES;
-            let cur = all.iter().position(|p| p.id == s.ui_palette);
-            step_option(cur, all.len(), delta, wrap).map(|i| s.ui_palette = all[i].id.to_string())
-        }
         RowId::ReduceMotion => toggle(&mut s.reduce_motion, delta, wrap),
         RowId::ReduceUiResolution => toggle_extra(
             s,
@@ -2294,6 +2311,7 @@ pub fn adjust(id: RowId, delta: i32, wrap: bool, ctx: &mut Ctx) -> bool {
         | RowId::Licenses
         | RowId::QuickActions
         | RowId::LibrarySections
+        | RowId::Palette
         | RowId::Version => None,
     }
     .is_some()
@@ -3997,7 +4015,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn palette_row_steps_the_shared_key() {
+    fn palette_row_names_the_pick_and_opens_the_cards() {
         let (mut settings, pads) = ctx_parts();
         let library = crate::library::LibraryShared::default();
         let mut ctx = Ctx {
@@ -4023,17 +4041,9 @@ pub(crate) mod tests {
             Some("Violet")
         );
         assert!(
-            !adjust(RowId::Palette, -1, false, &mut ctx),
-            "already the first = thud"
+            !adjust(RowId::Palette, 1, true, &mut ctx),
+            "a button, not a stepper"
         );
-        assert!(adjust(RowId::Palette, 1, false, &mut ctx));
-        assert_eq!(ctx.settings.ui_palette, crate::library::PALETTES[1].id);
-        ctx.settings.ui_palette = crate::library::PALETTES
-            .last()
-            .expect("non-empty")
-            .id
-            .to_string();
-        assert!(adjust(RowId::Palette, 1, true, &mut ctx));
         assert_eq!(ctx.settings.ui_palette, "violet");
         ctx.settings.ui_palette = "chartreuse".into();
         assert_eq!(
@@ -4043,6 +4053,21 @@ pub(crate) mod tests {
             Some("Violet"),
             "an unknown palette reads as the default it actually draws"
         );
+        // Confirm on the row pushes the picker, opened on the palette in force.
+        let mut s = SettingsScreen::with_presets(Vec::new());
+        s.tab = TABS
+            .iter()
+            .position(|(name, _)| *name == "Interface")
+            .expect("the Interface section");
+        let ids = s.row_ids(&ctx);
+        s.list.cursor = ids
+            .iter()
+            .position(|r| *r == RowId::Palette)
+            .expect("the Interface section lists Background");
+        let mut fx = Outbox::default();
+        s.apply_row(ListMsg::Activate, None, &ids, &mut ctx, &mut fx);
+        assert!(matches!(fx.nav, Some(crate::screens::Nav::Push(ref b))
+            if matches!(**b, Screen::Palette(_))));
     }
 
     /// The value names where a launch will land, not what the key holds: with no

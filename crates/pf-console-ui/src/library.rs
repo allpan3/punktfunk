@@ -452,10 +452,10 @@ const CELL_RAMP: [f64; 16] = [
     -0.10,  0.08, -0.06,  0.12,
 ];
 
-/// Brand default, six dark fields, then six pale. Dark → light is cycle order.
+/// Brand default, 19 more dark fields, then 16 pale. Dark → light is cycle order.
 /// Adding a row here is not enough: Apple and Android tables must gain the same `ui_palette` id.
 #[rustfmt::skip]
-pub const PALETTES: [Palette; 13] = [
+pub const PALETTES: [Palette; 36] = [
     // --- dark fields (white ink) ---
     Palette {
         // The brand default: a bright periwinkle field with lavender pools, still white ink.
@@ -468,47 +468,21 @@ pub const PALETTES: [Palette; 13] = [
         // Id stays `"oled"` — stored `ui_palette` key; renaming orphans saved choices.
         id: "oled", name: "Eclipse",
         stops: Some(&[
-            (0.000, 0.000, 0.000), (0.000, 0.000, 0.000), (0.010, 0.020, 0.100),
-            (0.045, 0.016, 0.115), (0.120, 0.024, 0.130),
+            (0.00, 0.00, 0.00), (0.00, 0.00, 0.00), (0.01, 0.02, 0.10),
+            (0.045, 0.016, 0.115), (0.12, 0.024, 0.13),
         ]),
         pair: [(0.120, 0.024, 0.130), (0.010, 0.020, 0.100)],
-        ground: (0.0, 0.0, 0.0), accent: (0.525, 0.471, 0.961), light: false,
+        ground: (0.000, 0.000, 0.000), accent: (0.525, 0.471, 0.961), light: false,
     },
     Palette {
-        id: "nebula", name: "Nebula",
+        // Nothing at all: every pixel off. The accent is the only colour on it.
+        id: "void", name: "Void",
         stops: Some(&[
-            (0.07, 0.05, 0.20), (0.26, 0.14, 0.54), (0.52, 0.20, 0.72),
-            (0.82, 0.26, 0.62), (0.98, 0.46, 0.68),
+            (0.00, 0.00, 0.00), (0.00, 0.00, 0.00), (0.00, 0.00, 0.00),
+            (0.00, 0.00, 0.00), (0.00, 0.00, 0.00),
         ]),
-        pair: [(0.520, 0.200, 0.720), (0.860, 0.280, 0.620)],
-        ground: (0.055, 0.040, 0.135), accent: (0.95, 0.42, 0.72), light: false,
-    },
-    Palette {
-        id: "abyss", name: "Abyss",
-        stops: Some(&[
-            (0.02, 0.10, 0.17), (0.04, 0.28, 0.42), (0.07, 0.46, 0.63),
-            (0.16, 0.38, 0.78), (0.26, 0.22, 0.58),
-        ]),
-        pair: [(0.070, 0.460, 0.630), (0.180, 0.360, 0.800)],
-        ground: (0.018, 0.070, 0.130), accent: (0.26, 0.76, 0.92), light: false,
-    },
-    Palette {
-        id: "ember", name: "Ember",
-        stops: Some(&[
-            (0.16, 0.03, 0.10), (0.45, 0.06, 0.12), (0.72, 0.18, 0.06),
-            (0.90, 0.42, 0.08), (0.95, 0.68, 0.18),
-        ]),
-        pair: [(0.740, 0.180, 0.060), (0.920, 0.440, 0.080)],
-        ground: (0.090, 0.035, 0.040), accent: (0.98, 0.62, 0.26), light: false,
-    },
-    Palette {
-        id: "moss", name: "Moss",
-        stops: Some(&[
-            (0.03, 0.11, 0.09), (0.06, 0.27, 0.20), (0.09, 0.45, 0.31),
-            (0.28, 0.61, 0.28), (0.58, 0.77, 0.31),
-        ]),
-        pair: [(0.090, 0.450, 0.310), (0.300, 0.620, 0.280)],
-        ground: (0.025, 0.085, 0.070), accent: (0.48, 0.86, 0.46), light: false,
+        pair: [(0.000, 0.000, 0.000), (0.000, 0.000, 0.000)],
+        ground: (0.000, 0.000, 0.000), accent: (0.525, 0.471, 0.961), light: false,
     },
     Palette {
         id: "graphite", name: "Graphite",
@@ -519,60 +493,326 @@ pub const PALETTES: [Palette; 13] = [
         pair: [(0.300, 0.310, 0.360), (0.160, 0.190, 0.270)],
         ground: (0.055, 0.055, 0.070), accent: (0.78, 0.80, 0.86), light: false,
     },
+    Palette {
+        // Cool neutral: blue-grey warming to stone at the top.
+        id: "slate", name: "Slate",
+        stops: Some(&[
+            (0.06, 0.08, 0.11), (0.14, 0.18, 0.24), (0.24, 0.30, 0.38),
+            (0.40, 0.44, 0.48), (0.60, 0.58, 0.52),
+        ]),
+        pair: [(0.240, 0.300, 0.380), (0.140, 0.180, 0.240)],
+        ground: (0.060, 0.080, 0.110), accent: (0.60, 0.80, 1.00), light: false,
+    },
+    Palette {
+        // Indigo shadow, cobalt body, a teal break.
+        id: "midnight", name: "Midnight",
+        stops: Some(&[
+            (0.05, 0.02, 0.16), (0.05, 0.11, 0.36), (0.08, 0.24, 0.60),
+            (0.14, 0.42, 0.80), (0.36, 0.76, 0.86),
+        ]),
+        pair: [(0.080, 0.240, 0.600), (0.140, 0.420, 0.800)],
+        ground: (0.030, 0.050, 0.160), accent: (0.40, 0.72, 1.00), light: false,
+    },
+    Palette {
+        // Ultraviolet into an electric blue and cyan.
+        id: "electric", name: "Electric",
+        stops: Some(&[
+            (0.02, 0.00, 0.10), (0.14, 0.02, 0.50), (0.30, 0.10, 0.95),
+            (0.10, 0.45, 1.00), (0.20, 0.90, 1.00),
+        ]),
+        pair: [(0.300, 0.100, 0.950), (0.100, 0.450, 1.000)],
+        ground: (0.020, 0.000, 0.100), accent: (0.45, 0.85, 1.00), light: false,
+    },
+    Palette {
+        // Deep water rising through teal to foam.
+        id: "ocean", name: "Ocean",
+        stops: Some(&[
+            (0.01, 0.05, 0.14), (0.02, 0.18, 0.40), (0.02, 0.40, 0.62),
+            (0.05, 0.66, 0.72), (0.55, 0.92, 0.80),
+        ]),
+        pair: [(0.020, 0.400, 0.620), (0.050, 0.660, 0.720)],
+        ground: (0.010, 0.050, 0.140), accent: (0.45, 0.95, 0.90), light: false,
+    },
+    Palette {
+        // Deep teal into green, then a violet curtain.
+        id: "aurora", name: "Aurora",
+        stops: Some(&[
+            (0.02, 0.07, 0.11), (0.03, 0.24, 0.28), (0.05, 0.46, 0.40),
+            (0.14, 0.60, 0.72), (0.44, 0.42, 0.86),
+        ]),
+        pair: [(0.050, 0.460, 0.400), (0.140, 0.600, 0.720)],
+        ground: (0.020, 0.070, 0.110), accent: (0.36, 0.90, 0.78), light: false,
+    },
+    Palette {
+        // Deep water into jade and a leaf-green lift.
+        id: "jade", name: "Jade",
+        stops: Some(&[
+            (0.02, 0.07, 0.10), (0.03, 0.22, 0.19), (0.05, 0.40, 0.34),
+            (0.16, 0.58, 0.46), (0.60, 0.84, 0.52),
+        ]),
+        pair: [(0.050, 0.400, 0.340), (0.160, 0.580, 0.460)],
+        ground: (0.020, 0.070, 0.100), accent: (0.52, 0.90, 0.62), light: false,
+    },
+    Palette {
+        // Saturated green, forest floor to lime.
+        id: "emerald", name: "Emerald",
+        stops: Some(&[
+            (0.01, 0.07, 0.04), (0.02, 0.26, 0.12), (0.04, 0.50, 0.22),
+            (0.16, 0.74, 0.34), (0.60, 0.92, 0.40),
+        ]),
+        pair: [(0.040, 0.500, 0.220), (0.160, 0.740, 0.340)],
+        ground: (0.010, 0.070, 0.040), accent: (0.55, 1.00, 0.55), light: false,
+    },
+    Palette {
+        // Plum shadow, crimson body, a coral edge.
+        id: "crimson", name: "Crimson",
+        stops: Some(&[
+            (0.10, 0.02, 0.10), (0.34, 0.03, 0.12), (0.62, 0.06, 0.20),
+            (0.86, 0.20, 0.28), (0.98, 0.52, 0.32),
+        ]),
+        pair: [(0.620, 0.060, 0.200), (0.860, 0.200, 0.280)],
+        ground: (0.080, 0.020, 0.060), accent: (1.00, 0.42, 0.42), light: false,
+    },
+    Palette {
+        // Violet shadow under a hot pink-red.
+        id: "ruby", name: "Ruby",
+        stops: Some(&[
+            (0.06, 0.00, 0.20), (0.40, 0.02, 0.16), (0.80, 0.06, 0.30),
+            (1.00, 0.28, 0.48), (1.00, 0.62, 0.56),
+        ]),
+        pair: [(0.800, 0.060, 0.300), (1.000, 0.280, 0.480)],
+        ground: (0.080, 0.000, 0.060), accent: (1.00, 0.50, 0.62), light: false,
+    },
+    Palette {
+        // Black rock, red heat, a yellow glow.
+        id: "lava", name: "Lava",
+        stops: Some(&[
+            (0.06, 0.01, 0.02), (0.42, 0.02, 0.04), (0.86, 0.12, 0.02),
+            (1.00, 0.45, 0.02), (1.00, 0.85, 0.20),
+        ]),
+        pair: [(0.860, 0.120, 0.020), (1.000, 0.450, 0.020)],
+        ground: (0.060, 0.010, 0.020), accent: (1.00, 0.72, 0.20), light: false,
+    },
+    Palette {
+        // Bronze shadow under copper, a verdigris lift.
+        id: "copper", name: "Copper",
+        stops: Some(&[
+            (0.08, 0.05, 0.04), (0.36, 0.15, 0.08), (0.66, 0.32, 0.14),
+            (0.85, 0.56, 0.26), (0.50, 0.78, 0.62),
+        ]),
+        pair: [(0.660, 0.320, 0.140), (0.850, 0.560, 0.260)],
+        ground: (0.070, 0.050, 0.040), accent: (1.00, 0.70, 0.36), light: false,
+    },
+    Palette {
+        // Wine shadow into amber and gold.
+        id: "amber", name: "Amber",
+        stops: Some(&[
+            (0.10, 0.02, 0.10), (0.36, 0.16, 0.02), (0.66, 0.36, 0.04),
+            (0.88, 0.58, 0.08), (0.92, 0.86, 0.36),
+        ]),
+        pair: [(0.660, 0.360, 0.040), (0.880, 0.580, 0.080)],
+        ground: (0.100, 0.040, 0.020), accent: (1.00, 0.80, 0.30), light: false,
+    },
+    Palette {
+        // Indigo through mauve to a peach horizon.
+        id: "dusk", name: "Dusk",
+        stops: Some(&[
+            (0.08, 0.04, 0.14), (0.26, 0.10, 0.34), (0.50, 0.20, 0.48),
+            (0.78, 0.38, 0.50), (0.96, 0.62, 0.48),
+        ]),
+        pair: [(0.500, 0.200, 0.480), (0.780, 0.380, 0.500)],
+        ground: (0.070, 0.040, 0.120), accent: (1.00, 0.62, 0.56), light: false,
+    },
+    Palette {
+        // Purple climbing to orchid and pink.
+        id: "grape", name: "Grape",
+        stops: Some(&[
+            (0.08, 0.02, 0.16), (0.28, 0.06, 0.48), (0.52, 0.14, 0.78),
+            (0.78, 0.30, 0.92), (1.00, 0.55, 0.80),
+        ]),
+        pair: [(0.520, 0.140, 0.780), (0.780, 0.300, 0.920)],
+        ground: (0.080, 0.020, 0.160), accent: (0.85, 0.55, 1.00), light: false,
+    },
+    Palette {
+        // Magenta, electric blue and a lime flash on black.
+        id: "neon", name: "Neon",
+        stops: Some(&[
+            (0.05, 0.00, 0.12), (0.40, 0.00, 0.60), (0.90, 0.05, 0.55),
+            (0.15, 0.35, 0.95), (0.30, 0.95, 0.55),
+        ]),
+        pair: [(0.900, 0.050, 0.550), (0.150, 0.350, 0.950)],
+        ground: (0.050, 0.000, 0.120), accent: (0.40, 1.00, 0.70), light: false,
+    },
+    Palette {
+        // Teal shade, orange sun, a pink bloom.
+        id: "tropic", name: "Tropic",
+        stops: Some(&[
+            (0.02, 0.10, 0.12), (0.02, 0.42, 0.42), (0.95, 0.45, 0.10),
+            (0.98, 0.20, 0.45), (0.40, 0.10, 0.55),
+        ]),
+        pair: [(0.020, 0.420, 0.420), (0.950, 0.450, 0.100)],
+        ground: (0.020, 0.080, 0.100), accent: (1.00, 0.60, 0.30), light: false,
+    },
     // --- pale fields (dark ink) ---
     Palette {
-        id: "holo", name: "Holo",
+        // Near-white: warm cream, cool blue and a rose tint in turn.
+        id: "paper", name: "Paper",
         stops: Some(&[
-            (0.99, 0.72, 0.90), (0.80, 0.60, 0.98), (0.58, 0.62, 0.99),
-            (0.55, 0.86, 0.98), (0.94, 0.98, 1.00),
+            (0.99, 0.95, 0.88), (0.91, 0.94, 0.98), (0.98, 0.91, 0.94),
+            (0.99, 0.97, 0.89), (0.90, 0.94, 0.99),
         ]),
-        pair: [(0.800, 0.600, 0.980), (0.550, 0.860, 0.980)],
-        ground: (0.96, 0.92, 0.99), accent: (0.42, 0.28, 0.86), light: true,
+        pair: [(0.910, 0.940, 0.980), (0.990, 0.970, 0.890)],
+        ground: (0.970, 0.960, 0.940), accent: (0.42, 0.30, 0.28), light: true,
     },
     Palette {
-        id: "sunset", name: "Sunset",
+        // Pale blue through periwinkle to a mint edge.
+        id: "sky", name: "Sky",
         stops: Some(&[
-            (0.55, 0.45, 0.92), (0.86, 0.31, 0.66), (0.97, 0.26, 0.34),
-            (0.99, 0.51, 0.18), (1.00, 0.80, 0.22),
+            (0.76, 0.87, 1.00), (0.62, 0.78, 0.99), (0.72, 0.76, 0.99),
+            (0.84, 0.82, 1.00), (0.86, 0.98, 0.96),
         ]),
-        pair: [(0.970, 0.260, 0.340), (0.990, 0.510, 0.180)],
-        ground: (0.98, 0.74, 0.34), accent: (0.64, 0.13, 0.44), light: true,
+        pair: [(0.620, 0.780, 0.990), (0.840, 0.820, 1.000)],
+        ground: (0.920, 0.950, 1.000), accent: (0.12, 0.30, 0.62), light: true,
     },
     Palette {
-        id: "bloom", name: "Bloom",
+        // Saturated sky blue cooling into violet.
+        id: "glacier", name: "Glacier",
         stops: Some(&[
-            (1.00, 0.86, 0.72), (0.99, 0.73, 0.79), (0.95, 0.65, 0.89),
-            (0.82, 0.68, 0.96), (0.73, 0.79, 0.99),
+            (0.45, 0.70, 1.00), (0.60, 0.80, 1.00), (0.75, 0.85, 1.00),
+            (0.85, 0.80, 1.00), (0.95, 0.85, 1.00),
         ]),
-        pair: [(0.990, 0.730, 0.790), (0.820, 0.680, 0.960)],
-        ground: (0.99, 0.90, 0.89), accent: (0.72, 0.24, 0.55), light: true,
+        pair: [(0.600, 0.800, 1.000), (0.850, 0.800, 1.000)],
+        ground: (0.780, 0.880, 1.000), accent: (0.10, 0.20, 0.55), light: true,
     },
     Palette {
-        id: "dawn", name: "Dawn",
+        // Lavender and periwinkle, warming to a pink bloom.
+        id: "lilac", name: "Lilac",
         stops: Some(&[
-            (1.00, 0.92, 0.70), (1.00, 0.80, 0.62), (0.99, 0.66, 0.62),
-            (0.90, 0.62, 0.78), (0.77, 0.69, 0.95),
+            (0.84, 0.76, 0.99), (0.74, 0.70, 0.99), (0.88, 0.74, 0.98),
+            (0.98, 0.82, 0.94), (0.96, 0.94, 1.00),
         ]),
-        pair: [(1.000, 0.800, 0.620), (0.900, 0.620, 0.780)],
-        ground: (1.00, 0.93, 0.82), accent: (0.82, 0.33, 0.28), light: true,
+        pair: [(0.740, 0.700, 0.990), (0.980, 0.820, 0.940)],
+        ground: (0.950, 0.920, 0.990), accent: (0.44, 0.24, 0.66), light: true,
     },
     Palette {
-        id: "mint", name: "Mint",
+        // Vivid purple and periwinkle, a pink edge.
+        id: "iris", name: "Iris",
         stops: Some(&[
-            (0.82, 0.98, 0.90), (0.62, 0.94, 0.88), (0.55, 0.88, 0.95),
-            (0.63, 0.82, 0.99), (0.82, 0.87, 1.00),
+            (0.60, 0.35, 0.95), (0.55, 0.50, 1.00), (0.65, 0.65, 1.00),
+            (0.85, 0.60, 0.98), (1.00, 0.70, 0.90),
         ]),
-        pair: [(0.620, 0.940, 0.880), (0.630, 0.820, 0.990)],
-        ground: (0.90, 0.98, 0.96), accent: (0.04, 0.42, 0.40), light: true,
+        pair: [(0.550, 0.500, 1.000), (0.850, 0.600, 0.980)],
+        ground: (0.800, 0.720, 1.000), accent: (0.25, 0.05, 0.55), light: true,
     },
     Palette {
-        id: "opal", name: "Opal",
+        // Hot pink cooling into a baby blue.
+        id: "bubblegum", name: "Bubblegum",
         stops: Some(&[
-            (0.98, 0.92, 0.96), (0.87, 0.93, 0.99), (0.91, 0.99, 0.95),
-            (0.99, 0.96, 0.88), (0.94, 0.90, 0.99),
+            (1.00, 0.50, 0.80), (1.00, 0.62, 0.85), (0.92, 0.70, 0.95),
+            (0.70, 0.75, 1.00), (0.60, 0.85, 1.00),
         ]),
-        pair: [(0.870, 0.930, 0.990), (0.990, 0.960, 0.880)],
-        ground: (0.97, 0.96, 0.99), accent: (0.36, 0.32, 0.44), light: true,
+        pair: [(1.000, 0.620, 0.850), (0.700, 0.750, 1.000)],
+        ground: (1.000, 0.780, 0.900), accent: (0.55, 0.05, 0.35), light: true,
+    },
+    Palette {
+        // Pink into coral, fading to a warm cream.
+        id: "coral", name: "Coral",
+        stops: Some(&[
+            (1.00, 0.58, 0.62), (1.00, 0.68, 0.56), (1.00, 0.80, 0.64),
+            (0.99, 0.88, 0.72), (1.00, 0.96, 0.80),
+        ]),
+        pair: [(1.000, 0.680, 0.560), (0.990, 0.880, 0.720)],
+        ground: (1.000, 0.900, 0.800), accent: (0.68, 0.14, 0.22), light: true,
+    },
+    Palette {
+        // Hot pink into orange, fully saturated.
+        id: "flamingo", name: "Flamingo",
+        stops: Some(&[
+            (1.00, 0.30, 0.60), (1.00, 0.42, 0.55), (1.00, 0.55, 0.45),
+            (1.00, 0.70, 0.45), (1.00, 0.85, 0.60),
+        ]),
+        pair: [(1.000, 0.420, 0.550), (1.000, 0.700, 0.450)],
+        ground: (1.000, 0.720, 0.660), accent: (0.50, 0.00, 0.20), light: true,
+    },
+    Palette {
+        // Pink into peach and apricot.
+        id: "peach", name: "Peach",
+        stops: Some(&[
+            (1.00, 0.45, 0.60), (1.00, 0.60, 0.44), (1.00, 0.72, 0.52),
+            (1.00, 0.82, 0.58), (0.98, 0.92, 0.72),
+        ]),
+        pair: [(1.000, 0.600, 0.440), (1.000, 0.820, 0.580)],
+        ground: (1.000, 0.820, 0.660), accent: (0.60, 0.16, 0.10), light: true,
+    },
+    Palette {
+        // Pink, peach, lime and sky in one bag.
+        id: "candy", name: "Candy",
+        stops: Some(&[
+            (1.00, 0.40, 0.70), (1.00, 0.55, 0.60), (1.00, 0.75, 0.40),
+            (0.80, 0.90, 0.50), (0.55, 0.85, 0.95),
+        ]),
+        pair: [(1.000, 0.550, 0.600), (0.800, 0.900, 0.500)],
+        ground: (1.000, 0.800, 0.750), accent: (0.55, 0.05, 0.30), light: true,
+    },
+    Palette {
+        // Lemon through lime to a pale green.
+        id: "lemon", name: "Lemon",
+        stops: Some(&[
+            (1.00, 0.86, 0.44), (0.98, 0.96, 0.56), (0.70, 0.94, 0.64),
+            (0.84, 0.97, 0.78), (0.98, 0.99, 0.90),
+        ]),
+        pair: [(0.980, 0.960, 0.560), (0.700, 0.940, 0.640)],
+        ground: (1.000, 0.980, 0.860), accent: (0.30, 0.36, 0.08), light: true,
+    },
+    Palette {
+        // Orange into a full yellow and a green edge.
+        id: "sunflower", name: "Sunflower",
+        stops: Some(&[
+            (1.00, 0.60, 0.10), (1.00, 0.75, 0.10), (1.00, 0.88, 0.20),
+            (0.95, 0.95, 0.40), (0.75, 0.92, 0.60),
+        ]),
+        pair: [(1.000, 0.750, 0.100), (1.000, 0.880, 0.200)],
+        ground: (1.000, 0.880, 0.400), accent: (0.40, 0.22, 0.00), light: true,
+    },
+    Palette {
+        // Orange, lemon and lime scoops.
+        id: "sherbet", name: "Sherbet",
+        stops: Some(&[
+            (1.00, 0.55, 0.25), (1.00, 0.72, 0.30), (1.00, 0.90, 0.40),
+            (0.85, 0.95, 0.50), (0.60, 0.92, 0.70),
+        ]),
+        pair: [(1.000, 0.720, 0.300), (0.850, 0.950, 0.500)],
+        ground: (1.000, 0.850, 0.600), accent: (0.45, 0.18, 0.02), light: true,
+    },
+    Palette {
+        // Sage into pale olive and cream.
+        id: "sage", name: "Sage",
+        stops: Some(&[
+            (0.72, 0.84, 0.70), (0.80, 0.90, 0.76), (0.90, 0.94, 0.80),
+            (0.96, 0.96, 0.84), (0.99, 0.97, 0.90),
+        ]),
+        pair: [(0.800, 0.900, 0.760), (0.960, 0.960, 0.840)],
+        ground: (0.940, 0.960, 0.900), accent: (0.18, 0.36, 0.24), light: true,
+    },
+    Palette {
+        // Grass green into a warm yellow.
+        id: "meadow", name: "Meadow",
+        stops: Some(&[
+            (0.30, 0.80, 0.40), (0.55, 0.90, 0.40), (0.80, 0.95, 0.45),
+            (0.95, 0.95, 0.55), (1.00, 0.90, 0.65),
+        ]),
+        pair: [(0.550, 0.900, 0.400), (0.950, 0.950, 0.550)],
+        ground: (0.850, 0.950, 0.600), accent: (0.10, 0.35, 0.12), light: true,
+    },
+    Palette {
+        // Turquoise water into a pale green shore.
+        id: "lagoon", name: "Lagoon",
+        stops: Some(&[
+            (0.20, 0.75, 0.80), (0.35, 0.85, 0.85), (0.55, 0.92, 0.80),
+            (0.70, 0.95, 0.70), (0.92, 0.98, 0.75),
+        ]),
+        pair: [(0.350, 0.850, 0.850), (0.700, 0.950, 0.700)],
+        ground: (0.750, 0.950, 0.900), accent: (0.02, 0.30, 0.35), light: true,
     },
 ];
 
@@ -635,7 +875,7 @@ const VIOLET_BLOBS: [(f64, f64, f64); 5] = [
 /// The console's field: three large soft pools of a palette's two dominant colours on its
 /// ground. Each pool is `(colour, base x, base y, amp x, amp y, speed x, speed y, phase,
 /// sigma, weight)` in UV (x in heights), rad·s⁻¹. Periods run 200–290 s, out of phase.
-fn field_pools(pair: [(f64, f64, f64); 2]) -> [((f64, f64, f64), [f64; 9]); 3] {
+pub(crate) fn field_pools(pair: [(f64, f64, f64); 2]) -> [((f64, f64, f64), [f64; 9]); 3] {
     let (a, b) = (pair[0], pair[1]);
     let mid = ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0, (a.2 + b.2) / 2.0);
     [
@@ -1366,7 +1606,7 @@ mod tests {
     /// Parity with `clients/shared/console-vectors.json` (`include_str!`: missing file fails compile).
     ///
     /// Three copies: here, `GamepadPalette.kt`, `GamepadPalette.swift`. The file pins the
-    /// 13 palettes and the derived 16-cell mesh each one produces.
+    /// 36 palettes and the derived 16-cell mesh each one produces.
     #[test]
     fn shared_console_vectors() {
         let raw = include_str!("../../../clients/shared/console-vectors.json");
@@ -2193,6 +2433,10 @@ mod tests {
     #[test]
     fn every_palette_is_multi_tone() {
         for p in &PALETTES {
+            // Graphite, Paper and Slate are near-neutral; Void has no hue at all.
+            if p.id == "void" {
+                continue;
+            }
             let hues: Vec<f64> = p.mesh_colors().iter().filter_map(|c| hue(*c)).collect();
             assert!(hues.len() >= 8, "{}: too few coloured cells", p.id);
             let spread = hues
@@ -2204,8 +2448,7 @@ mod tests {
                     })
                 })
                 .fold(0.0f64, f64::max);
-            // Graphite and Opal are deliberately near-neutral.
-            let floor = if matches!(p.id, "graphite" | "opal") {
+            let floor = if matches!(p.id, "graphite" | "paper" | "slate") {
                 20.0
             } else {
                 45.0
@@ -2222,8 +2465,42 @@ mod tests {
         assert_eq!(
             ids,
             [
-                "violet", "oled", "nebula", "abyss", "ember", "moss", "graphite", "holo", "sunset",
-                "bloom", "dawn", "mint", "opal",
+                "violet",
+                "oled",
+                "void",
+                "graphite",
+                "slate",
+                "midnight",
+                "electric",
+                "ocean",
+                "aurora",
+                "jade",
+                "emerald",
+                "crimson",
+                "ruby",
+                "lava",
+                "copper",
+                "amber",
+                "dusk",
+                "grape",
+                "neon",
+                "tropic",
+                "paper",
+                "sky",
+                "glacier",
+                "lilac",
+                "iris",
+                "bubblegum",
+                "coral",
+                "flamingo",
+                "peach",
+                "candy",
+                "lemon",
+                "sunflower",
+                "sherbet",
+                "sage",
+                "meadow",
+                "lagoon",
             ]
         );
         // Dark fields lead, pale ones follow, so stepping the row walks one direction.
@@ -2232,7 +2509,7 @@ mod tests {
             .position(|p| p.light)
             .expect("some are light");
         assert!(PALETTES[first_light..].iter().all(|p| p.light));
-        assert_eq!(first_light, 7);
+        assert_eq!(first_light, 20);
     }
 
     /// `oled` is genuinely black: pure-black corners, mean under every other field, ground lifts to nothing.
@@ -2253,7 +2530,7 @@ mod tests {
         let mean = cells.iter().map(|c| luma(*c)).sum::<f64>() / 16.0;
         let darkest_other = PALETTES
             .iter()
-            .filter(|p| p.id != "oled")
+            .filter(|p| !matches!(p.id, "oled" | "void"))
             .map(|p| p.mesh_colors().iter().map(|c| luma(*c)).sum::<f64>() / 16.0)
             .fold(f64::MAX, f64::min);
         assert!(

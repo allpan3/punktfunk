@@ -306,8 +306,8 @@ public enum DefaultsKey {
     /// `"connected"`. A device preference, never part of a stream preset.
     public static let gamepadUIMode = "punktfunk.gamepadUIMode"
     /// Which colour family the gamepad UI's living backdrop drifts through — a
-    /// `GamepadPalette` id ("violet" = the brand default, then "oled"/"nebula"/"abyss"/"ember"/
-    /// "moss"/"graphite", then the pale ones). The cross-client `ui_palette` key: the desktop
+    /// `GamepadPalette` id ("violet" = the brand default, then the other dark fields, then the
+    /// pale ones). The cross-client `ui_palette` key: the desktop
     /// console and the Android client carry the same table under the same names. Presentation
     /// only, so it is a device preference and never part of a stream preset. An unknown value
     /// reads as the default rather than failing — a newer client may have shipped a palette this

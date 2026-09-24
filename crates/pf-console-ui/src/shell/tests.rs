@@ -1320,7 +1320,7 @@ fn the_rescan_tile_probes_and_never_connects() {
     );
 }
 
-/// Error tint is fixed, not palette-derived. `moss` accent is green; reporting
+/// Error tint is fixed, not palette-derived. `jade` accent is green; reporting
 /// a failure in the colour the rest of the UI uses for "this is fine" is the bug.
 #[test]
 fn toast_kinds_are_visually_distinct() {
@@ -1336,16 +1336,16 @@ fn toast_kinds_are_visually_distinct() {
     assert_ne!(rgb(ok_c), rgb(err_c));
 
     // Green-accented palette: Success follows it, Error must not.
-    crate::theme::set_ink(crate::theme::Ink::of(crate::library::palette("moss")));
-    let (ok_moss, _) = ToastKind::Success.look();
-    let (err_moss, _) = ToastKind::Error.look();
+    crate::theme::set_ink(crate::theme::Ink::of(crate::library::palette("jade")));
+    let (ok_jade, _) = ToastKind::Success.look();
+    let (err_jade, _) = ToastKind::Error.look();
     assert_ne!(
-        rgb(ok_moss),
+        rgb(ok_jade),
         rgb(ok_c),
         "Success takes the palette's accent, so it moved"
     );
     assert_eq!(
-        rgb(err_moss),
+        rgb(err_jade),
         rgb(err_c),
         "Error is fixed and must NOT follow the palette"
     );
@@ -1501,7 +1501,25 @@ fn dump_console_screens() {
     for _ in 0..5 {
         next_section(&mut s);
     }
-    for id in ["violet", "oled", "ember", "abyss", "holo", "sunset", "mint"] {
+    // Confirm on Background: the cards. A pick recolours the field behind them.
+    s.handle_menu(MenuEvent::Confirm);
+    dump(&mut s, 40, 8, "03d-background", true);
+    for _ in 0..2 {
+        s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    }
+    s.handle_menu(MenuEvent::Confirm);
+    dump(&mut s, 40, 8, "03e-background-pick", true);
+    // Five rows down at four across lands on a pale card: ink and scrims flip live.
+    for _ in 0..5 {
+        s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    }
+    s.handle_menu(MenuEvent::Confirm);
+    dump(&mut s, 40, 8, "03f-background-pale", true);
+    s.handle_menu(MenuEvent::Back);
+    dump(&mut s, 20, 8, "_settle-background", true);
+    for id in [
+        "violet", "oled", "crimson", "midnight", "paper", "coral", "sky",
+    ] {
         s.settings.ui_palette = id.to_string();
         dump(&mut s, 40, 8, &format!("03-settings-{id}"), true);
     }
@@ -1537,7 +1555,7 @@ fn dump_console_screens() {
     // Home at full contrast under a few palettes: the backdrop's loudest form.
     s.switch_tab(Tab::Hosts);
     dump(&mut s, 20, 8, "_settle", true);
-    for id in ["nebula", "sunset", "holo"] {
+    for id in ["dusk", "coral", "paper"] {
         s.settings.ui_palette = id.to_string();
         dump(&mut s, 40, 8, &format!("01-home-{id}"), true);
     }
@@ -1655,7 +1673,7 @@ fn dump_console_screens() {
     // poles — `accent(0.14)` reads differently over dark than pale.
     for (name, palette) in [
         ("07c-library-bar", "violet"),
-        ("07c-library-bar-mint", "mint"),
+        ("07c-library-bar-sky", "sky"),
     ] {
         let mut s4 = shelf_shell();
         s4.settings.ui_palette = palette.to_string();
@@ -1744,7 +1762,7 @@ fn dump_console_screens() {
     // the collection tile, not the entrance.
     for (name, palette) in [
         ("07b-collections", "violet"),
-        ("07b-collections-mint", "mint"),
+        ("07b-collections-sky", "sky"),
     ] {
         let (mut s3, _c3, _l3) = collections_shell();
         s3.settings.ui_palette = palette.to_string();
@@ -1756,7 +1774,7 @@ fn dump_console_screens() {
     // art-less ROM entries. Pale, where a hardcoded face strands its initials.
     {
         let (mut s3, _c3, _l3) = collections_shell_no_art();
-        s3.settings.ui_palette = "mint".to_string();
+        s3.settings.ui_palette = "sky".to_string();
         dump(&mut s3, 12, 8, "_noart-settle", true);
         s3.handle_menu(MenuEvent::Secondary);
         dump(&mut s3, 40, 8, "07b-collections-noart", true);

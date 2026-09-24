@@ -33,14 +33,18 @@ class GamepadPaletteTest {
     fun tableMatchesTheOtherClients() {
         assertEquals(
             listOf(
-                "violet", "oled", "nebula", "abyss", "ember", "moss", "graphite",
-                "holo", "sunset", "bloom", "dawn", "mint", "opal",
+                "violet", "oled", "void", "graphite", "slate", "midnight", "electric",
+                "ocean", "aurora", "jade", "emerald", "crimson", "ruby", "lava",
+                "copper", "amber", "dusk", "grape", "neon", "tropic", "paper",
+                "sky", "glacier", "lilac", "iris", "bubblegum", "coral", "flamingo",
+                "peach", "candy", "lemon", "sunflower", "sherbet", "sage", "meadow",
+                "lagoon",
             ),
             GamepadPalette.ALL.map { it.id },
         )
         // Dark fields lead, pale ones follow, so stepping the row walks one direction.
         val firstLight = GamepadPalette.ALL.indexOfFirst { it.light }
-        assertEquals(7, firstLight)
+        assertEquals(20, firstLight)
         assertTrue(GamepadPalette.ALL.drop(firstLight).all { it.light })
         // An unknown name is a newer client's palette, not an error.
         assertEquals("violet", GamepadPalette.named("chartreuse").id)
@@ -56,6 +60,7 @@ class GamepadPaletteTest {
     @Test
     fun everyPaletteIsMultiTone() {
         for (p in GamepadPalette.ALL) {
+            if (p.id == "void") continue
             val stops = p.stops.ifEmpty { continue }
             val hues = stops.mapNotNull { hue(it) }
             assertTrue("${p.id}: too few coloured stops", hues.size >= 3)
@@ -66,8 +71,8 @@ class GamepadPaletteTest {
                     spread = maxOf(spread, minOf(d, 360.0 - d))
                 }
             }
-            // Graphite and Opal are deliberately near-neutral; the rest must travel.
-            val floor = if (p.id == "graphite" || p.id == "opal") 20.0 else 45.0
+            // Graphite, Paper and Slate are near-neutral; Void has no hue; the rest must travel.
+            val floor = if (p.id == "graphite" || p.id == "paper" || p.id == "slate") 20.0 else 45.0
             assertTrue("${p.id} spans only $spread° of hue", spread >= floor)
         }
     }
@@ -86,7 +91,7 @@ class GamepadPaletteTest {
         assertEquals(0f, oled.blobColors[0].blue, 1e-6f)
         val mean = oled.stops.sumOf { luma(it) } / oled.stops.size
         val darkestOther = GamepadPalette.ALL
-            .filter { it.id != "oled" && it.stops.isNotEmpty() }
+            .filter { it.id != "oled" && it.id != "void" && it.stops.isNotEmpty() }
             .minOf { p -> p.stops.sumOf { luma(it) } / p.stops.size }
         assertTrue("oled means $mean, barely under $darkestOther", mean < darkestOther / 2)
     }
@@ -129,7 +134,7 @@ class GamepadPaletteTest {
         assertEquals(1f, dark.fg.red, 1e-6f)
         assertEquals(1f, dark.shadeScale, 1e-6f)
 
-        val light = GamepadInk.of(GamepadPalette.named("holo"))
+        val light = GamepadInk.of(GamepadPalette.named("paper"))
         assertTrue(light.isLight)
         assertTrue("pale fields need dark ink", light.fg.red < 0.3f)
         // A pale field's scrims must pull far less, or they bleach the gradient.
