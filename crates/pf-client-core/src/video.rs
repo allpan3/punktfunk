@@ -723,11 +723,11 @@ pub fn native_evidence(rung: NativeRung, wire: u8) -> RungEvidence {
         // Keep `verified` false: flipping it would move `auto` off Vulkan Video on every Linux AMD/Intel client.
         (NativeRung::Vaapi, _) => (
             false,
-            "7 legs bit-identical to libavcodec on RDNA3 (Mesa 26.0.3, 2026-08-08) - H.264, \
-             H.265, HEVC Main 10 and AV1, on both the conformance vectors and our own host's \
-             low-delay streams - but has NEVER run on a second vendor and has never been \
-             soaked, and `verified` here would move `auto` off Vulkan Video on every Linux \
-             AMD/Intel client (M6/M7)",
+            "7 legs bit-identical to libavcodec on RDNA3 (Mesa 26.0.3, 2026-08-08) and Intel \
+             Xe-LP (iHD 26.1.2, 2026-09-24) - H.264, H.265, HEVC Main 10 and AV1, on both the \
+             conformance vectors and our own host's low-delay streams - but never soaked, and \
+             `verified` here would move `auto` off Vulkan Video on every Linux AMD/Intel \
+             client (M6/M7)",
         ),
         // rav1d uses two frame contexts so a damaged reference returns an error instead of aborting.
         (NativeRung::Software, CODEC_H264 | CODEC_AV1) => (
@@ -877,7 +877,7 @@ const VENDOR_INTEL: u32 = 0x8086;
 
 /// The decode ops the native Vulkan rung may use, from what the device advertises.
 /// Intel's Mesa driver decodes H.264 and HEVC bit-exact with libavcodec but not AV1,
-/// so Linux Intel keeps AV1 off Vulkan: never advertised through it, never decoded on it.
+/// so Linux Intel keeps AV1 off Vulkan; its AV1 goes through the VAAPI rung.
 pub fn usable_decode_ops(vendor_id: u32, advertised: u32) -> u32 {
     if cfg!(target_os = "linux") && vendor_id == VENDOR_INTEL {
         advertised & !VIDEO_CODEC_OP_DECODE_AV1
@@ -886,22 +886,29 @@ pub fn usable_decode_ops(vendor_id: u32, advertised: u32) -> u32 {
     }
 }
 
+/// Does the presenter's VAAPI node decode AV1, where its Vulkan does not? The presenter
+/// asks once at setup. NVIDIA is never asked: the ladder never enters its VAAPI.
+#[cfg(target_os = "linux")]
+pub fn vaapi_av1_decodable(vendor_id: u32, vulkan_av1: bool) -> bool {
+    !vulkan_av1
+        && vendor_id != crate::video_vk::VENDOR_NVIDIA
+        && crate::video_vaapi_native::av1_decodable(vendor_id)
+}
+
 /// Can this machine decode AV1 in hardware? Device facts only, never a decoder existing:
-/// Vulkan `DECODE_AV1` on the decode family, or (Windows) D3D11 import so DXVA
-/// can run Profile 0. The CPU AV1 rung still exists; the wire promise is made once.
-///
-/// VAAPI is not consulted: opening a display is too early and too often; the
-/// Vulkan bit covers the Mesa devices where VAAPI AV1 exists.
+/// Vulkan `DECODE_AV1` on the decode family; (Windows) D3D11 import so DXVA can run
+/// Profile 0; (Linux) the presenter's VAAPI AV1 entry point, on a presenter the VAAPI
+/// rung may feed. The CPU AV1 rung still exists; the wire promise is made once.
 pub fn av1_hardware_decodable(vk: Option<&VulkanDecodeDevice>) -> bool {
     if vk.is_some_and(|v| v.video_decode && v.decode_video_caps & VIDEO_CODEC_OP_DECODE_AV1 != 0) {
         return true;
     }
     // Per-platform second answer, bound to a name: a cfg'd `return` is `needless_return` on Windows (`-D warnings`).
     #[cfg(windows)]
-    let d3d11 = vk.is_some_and(|v| v.d3d11_import);
-    #[cfg(not(windows))]
-    let d3d11 = false;
-    d3d11
+    let platform = vk.is_some_and(|v| v.d3d11_import);
+    #[cfg(target_os = "linux")]
+    let platform = vk.is_some_and(|v| v.vaapi_av1_decode && vaapi_auto_ok(Some(v)));
+    platform
 }
 
 /// Can this client decode 4:4:4 HEVC — the promise `VIDEO_CAP_444` makes.
@@ -2111,6 +2118,7 @@ mod tests {
             present_timing: false,
             d3d11_import: false,
             dmabuf_import: true,
+            vaapi_av1_decode: false,
             d3d11_hdr10: false,
             d3d11_nv12: false,
             d3d11_p010: false,
@@ -2192,6 +2200,34 @@ mod tests {
         // Discrete Arc advertises Vulkan Video and must still land on D3D11VA in auto.
         assert!(!decode_device(0x8086, "Intel(R) Arc(TM) B580 Graphics").prefer_vulkan_first());
         assert!(!decode_device(0x8086, "Intel(R) Arc(TM) Pro Graphics").prefer_vulkan_first());
+    }
+
+    /// Where Vulkan has no AV1, the presenter's VAAPI answer advertises it, but only on a
+    /// presenter the VAAPI rung may feed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_vaapi_av1_is_advertised_where_the_vaapi_rung_runs() {
+        let mut intel = decode_device(0x8086, "Intel(R) Graphics (RKL GT1)");
+        intel.decode_video_caps = usable_decode_ops(
+            0x8086,
+            VIDEO_CODEC_OP_DECODE_H265 | VIDEO_CODEC_OP_DECODE_AV1,
+        );
+        assert!(
+            !av1_hardware_decodable(Some(&intel)),
+            "Vulkan AV1 is masked on Intel"
+        );
+        intel.vaapi_av1_decode = true;
+        assert!(av1_hardware_decodable(Some(&intel)));
+        assert_ne!(decodable_codecs_for(Some(&intel), "auto") & CODEC_AV1, 0);
+        intel.dmabuf_import = false;
+        assert!(
+            !av1_hardware_decodable(Some(&intel)),
+            "VAAPI frames need dmabuf import"
+        );
+
+        let mut nvidia = decode_device(0x10DE, "NVIDIA GeForce RTX 3070 Ti");
+        nvidia.vaapi_av1_decode = true;
+        assert!(!av1_hardware_decodable(Some(&nvidia)));
     }
 
     #[test]
@@ -2522,7 +2558,7 @@ mod tests {
                 rung.name()
             );
             assert!(
-                e.note.contains("second vendor") && e.note.contains("soak"),
+                e.note.contains("never soaked"),
                 "{} / {codec:#x}: the warning note must name the missing priority \
                  coverage, got {:?}",
                 rung.name(),
