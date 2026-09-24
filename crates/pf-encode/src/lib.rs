@@ -367,25 +367,11 @@ fn open_video_backend_linux(
     // so the stream does not die. `format`/`bit_depth`/`chroma` are VAAPI-only
     // — Vulkan imports the dmabuf and does its own CSC.
     let open_amd_intel = || -> Result<(Box<dyn Encoder>, &'static str)> {
-        // HDR keeps Vulkan when the device probe says yes (same profile query
-        // the open makes). Gamescope has no embedded cursor — CSC blend is the
-        // only pointer path. A `no` goes to VAAPI here, not a failed open.
+        // Vulkan when the device probe says yes (same profile query the open makes). Gamescope
+        // has no embedded cursor — CSC blend is the only pointer path. A `no` goes to VAAPI here,
+        // not a failed open. Vulkan gets `bit_depth`; the rule only picks the arm.
         #[cfg(feature = "vulkan-encode")]
-        let is_hdr = format.is_hdr();
-        // 10-bit SDR (8-bit capture, depth 10). HEVC stays on VAAPI (Main10 under BT.709); AV1 has
-        // no VAAPI path, so it takes Vulkan with the depth forced (Vulkan gets `bit_depth`) and the
-        // BT.709 colour axis (`rgb2yuv10_709.comp`).
-        #[cfg(feature = "vulkan-encode")]
-        let sdr10 = bit_depth == 10 && !is_hdr;
-        // Depth Vulkan opens at: HDR-10, or AV1 10-bit SDR; else 8-bit.
-        #[cfg(feature = "vulkan-encode")]
-        let vk_ten_bit = bit_depth == 10 && (is_hdr || codec == Codec::Av1);
-        #[cfg(feature = "vulkan-encode")]
-        if !(sdr10 && codec == Codec::H265)
-            && matches!(codec, Codec::H265 | Codec::Av1)
-            && vulkan_encode_enabled()
-            && vulkan_encode_available_at(codec, vk_ten_bit)
-        {
+        if amd_intel_opens_vulkan(codec, bit_depth == 10, format.is_hdr()) {
             match vulkan_video::VulkanVideoEncoder::open(
                 codec,
                 format,
@@ -756,37 +742,60 @@ pub fn linux_hdr_cuda_ok() -> bool {
 /// the compositor must embed the pointer.
 ///
 /// `cuda_planned` is the caller's CUDA-payload prediction; `ten_bit` the
-/// negotiated depth. A CPU payload is uploaded, and never blended.
-/// 10-bit keeps Vulkan Video only where the device advertises that profile
-/// (`vulkan_encode_available_at`, the same query the open makes).
+/// negotiated depth and `hdr` the colour verdict. A CPU payload is uploaded, and
+/// never blended. The AMD/Intel arm asks [`amd_intel_opens_vulkan`], the rule the
+/// open takes, so a 10-bit SDR HEVC session predicts the VAAPI encoder it gets.
 #[cfg(target_os = "linux")]
-pub fn cursor_blend_capable(codec: Codec, cuda_planned: bool, ten_bit: bool) -> bool {
+pub fn cursor_blend_capable(codec: Codec, cuda_planned: bool, ten_bit: bool, hdr: bool) -> bool {
     // Negotiated PyroWave is selected before the pref; its CSC composites the cursor.
     if codec == Codec::PyroWave {
         return true;
     }
     let direct_nvenc = cfg!(feature = "nvenc");
-    let vulkan_csc = {
-        // Compute-CSC arm (the one that blends). Probe last: it opens a Vulkan instance.
-        #[cfg(feature = "vulkan-encode")]
-        {
-            // Same as `open_amd_intel`, depth included, so prediction and open agree.
-            matches!(codec, Codec::H265 | Codec::Av1)
-                && vulkan_encode_enabled()
-                && vulkan_encode_available_at(codec, ten_bit)
-        }
-        #[cfg(not(feature = "vulkan-encode"))]
-        {
-            let _ = ten_bit; // the depth only ever narrows the Vulkan arm
-            false
-        }
-    };
     let backend = resolve_linux_backend(
         pf_host_config::config().encoder_pref.as_str(),
         linux_auto_is_vaapi,
         cuda_planned,
     );
+    let vulkan_csc = {
+        // Compute-CSC arm (the one that blends). Probe last: it opens a Vulkan instance.
+        #[cfg(feature = "vulkan-encode")]
+        {
+            if matches!(backend, Some(LinuxBackend::AmdIntel)) {
+                amd_intel_opens_vulkan(codec, ten_bit, hdr)
+            } else {
+                // An explicit Vulkan pref opens Vulkan at the negotiated depth.
+                matches!(codec, Codec::H265 | Codec::Av1)
+                    && vulkan_encode_enabled()
+                    && vulkan_encode_available_at(codec, ten_bit)
+            }
+        }
+        #[cfg(not(feature = "vulkan-encode"))]
+        {
+            let _ = (ten_bit, hdr); // they only ever narrow the Vulkan arm
+            false
+        }
+    };
     cursor_blend_capable_for(backend, cuda_planned, direct_nvenc, vulkan_csc)
+}
+
+/// The depth the AMD/Intel arm asks Vulkan Video for, or `None` when it goes straight to VAAPI.
+/// HEVC 10-bit SDR stays on VAAPI (Main10 under BT.709), which has no cursor blend. AV1 has no
+/// VAAPI path, so its 10-bit SDR takes Vulkan (`rgb2yuv10_709.comp`).
+#[cfg(all(target_os = "linux", feature = "vulkan-encode"))]
+fn amd_intel_vulkan_depth(codec: Codec, ten_bit: bool, hdr: bool) -> Option<bool> {
+    match codec {
+        Codec::H265 if ten_bit && !hdr => None,
+        Codec::H265 | Codec::Av1 => Some(ten_bit),
+        _ => None,
+    }
+}
+
+/// Whether `open_amd_intel` tries Vulkan Video. The open and the cursor prediction both read it.
+#[cfg(all(target_os = "linux", feature = "vulkan-encode"))]
+fn amd_intel_opens_vulkan(codec: Codec, ten_bit: bool, hdr: bool) -> bool {
+    amd_intel_vulkan_depth(codec, ten_bit, hdr)
+        .is_some_and(|ten| vulkan_encode_enabled() && vulkan_encode_available_at(codec, ten))
 }
 
 /// Dispatch-mirroring core of [`cursor_blend_capable`], device-free for tests.
@@ -1941,6 +1950,23 @@ mod tests {
         assert!(cursor_blend_capable_for(Some(Vulkan), false, false, true));
         assert!(!cursor_blend_capable_for(Some(Software), false, true, true));
         assert!(!cursor_blend_capable_for(None, false, true, true));
+    }
+
+    #[cfg(all(target_os = "linux", feature = "vulkan-encode"))]
+    #[test]
+    fn amd_intel_hevc_sdr10_never_predicts_the_vulkan_blend() {
+        assert_eq!(
+            amd_intel_vulkan_depth(Codec::H265, true, false),
+            None,
+            "HEVC 10-bit SDR opens VAAPI, which cannot blend"
+        );
+        assert_eq!(amd_intel_vulkan_depth(Codec::H265, true, true), Some(true));
+        assert_eq!(
+            amd_intel_vulkan_depth(Codec::H265, false, false),
+            Some(false)
+        );
+        assert_eq!(amd_intel_vulkan_depth(Codec::Av1, true, false), Some(true));
+        assert_eq!(amd_intel_vulkan_depth(Codec::H264, false, false), None);
     }
 
     /// Every `Encoder` method must be forwarded by `TrackedEncoder`. An

@@ -445,6 +445,7 @@ impl StreamState {
                         c,
                         self.plan.codec,
                         self.plan.bit_depth,
+                        self.plan.hdr,
                         rebuilt_route.as_ref(),
                     );
                     self.plan.gamescope_cursor = crate::session_plan::gamescope_cursor_for(

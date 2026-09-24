@@ -774,7 +774,7 @@ fn blend_capable_metadata_cursor(cfg: &StreamConfig) -> bool {
     #[cfg(target_os = "linux")]
     {
         let cuda_planned = !crate::encode::linux_zero_copy_is_vaapi() && crate::zerocopy::enabled();
-        crate::encode::cursor_blend_capable(cfg.codec, cuda_planned, cfg.hdr)
+        crate::encode::cursor_blend_capable(cfg.codec, cuda_planned, cfg.hdr, cfg.hdr)
     }
     #[cfg(not(target_os = "linux"))]
     {

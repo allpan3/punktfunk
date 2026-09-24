@@ -314,6 +314,7 @@ impl StreamState {
                 ctx.compositor,
                 ctx.codec,
                 ctx.bit_depth,
+                ctx.hdr,
                 ctx.gamescope_route.as_ref(),
             ),
             ctx.cursor_forward,

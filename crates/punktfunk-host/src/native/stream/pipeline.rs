@@ -56,7 +56,14 @@ pub(in crate::native) fn prepare_display(
         hdr,
         chroma,
         codec,
-        crate::session_plan::cursor_blend_for(cursor_forward, compositor, codec, bit_depth, None),
+        crate::session_plan::cursor_blend_for(
+            cursor_forward,
+            compositor,
+            codec,
+            bit_depth,
+            hdr,
+            None,
+        ),
         cursor_forward,
         multi_slice,
     );
