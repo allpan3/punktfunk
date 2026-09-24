@@ -77,6 +77,38 @@ struct GroupBox {
     parent: Option<usize>,
 }
 
+/// A plate that stopped being live this paint leaves its rect for another tree's plate;
+/// one whose rect was taken hides.
+fn hand_off(plate: &mut super::Plate, canvas: &Canvas, was: bool) {
+    let id = plate.id();
+    if was && !plate.live() {
+        let m = canvas.local_to_device_as_3x3();
+        if let Some((r, corner)) = plate.rect().filter(|_| m.is_scale_translate()) {
+            super::focus::offer(id, m.map_rect(r).0, corner * m.scale_y());
+        }
+    }
+    if super::focus::taken_from(id) {
+        plate.hide();
+    }
+}
+
+/// A plate waiting for focus to arrive from another tree starts where that tree's left.
+fn take_over(plate: &mut super::Plate, canvas: &Canvas, space: Option<Id>, shift: (f32, f32)) {
+    if !plate.waiting() {
+        return;
+    }
+    let m = canvas.local_to_device_as_3x3();
+    let Some(inv) = m.invert().filter(|_| m.is_scale_translate()) else {
+        return;
+    };
+    let id = plate.id();
+    if let Some((dev, corner)) = super::focus::take(id) {
+        // Local to the canvas, then into the scroll's content: the plate draws content - shift.
+        let local = inv.map_rect(dev).0.with_offset(shift);
+        plate.seed(local, corner / m.scale_y(), space, shift);
+    }
+}
+
 /// One laid-out tree: nodes in paint order at content-space rects, before scroll offsets.
 pub struct Frame<'a> {
     nodes: Vec<Node<'a>>,
@@ -222,7 +254,9 @@ impl Tree {
             if let Some(i) = i {
                 canvas.clip_rect(clip[i], None, true);
             }
+            let was = self.plate.live();
             self.plate.lose(dt, i.map(|i| shift[i]));
+            hand_off(&mut self.plate, canvas, was);
             self.plate.draw(canvas, k, cheap);
             canvas.restore();
         }
@@ -234,7 +268,10 @@ impl Tree {
                 if let Some(c) = c {
                     canvas.clip_rect(c, None, true);
                 }
+                let was = self.plate.live();
+                take_over(&mut self.plate, canvas, space, d);
                 self.plate.step(id, target, corner, dt, space, d);
+                hand_off(&mut self.plate, canvas, was);
                 self.plate.draw(canvas, k, cheap);
                 canvas.restore();
             }

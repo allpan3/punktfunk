@@ -205,6 +205,58 @@ fn ids_are_stable_and_distinct() {
     assert_ne!(Id::new("row", 3), Id::new("tab", 3));
 }
 
+/// Focus moving between two trees glides from where the plate left, whichever tree paints
+/// first, and the plate that left hides as the other takes over.
+#[test]
+fn the_plate_glides_between_trees() {
+    for upper_first in [true, false] {
+        let mut surface = canvas();
+        let (mut upper, mut lower) = (Tree::new(), Tree::new());
+        let lower_rect = Rect::from_xywh(400.0, 500.0, 100.0, 60.0);
+        let frame = |upper: &mut Tree, lower: &mut Tree, s: &mut skia_safe::Surface| {
+            super::begin_frame();
+            let paint = |t: &mut Tree, el: El<'_>, s: &mut skia_safe::Surface| {
+                let root = El::column().child(el);
+                let f = t.layout(root, Rect::from_xywh(0.0, 0.0, 1280.0, 800.0));
+                t.paint_focus(s.canvas(), f, 1.0, 1.0 / 120.0, false);
+            };
+            if upper_first {
+                paint(upper, target("up", 0, card(0)), s);
+                paint(lower, target("low", 0, lower_rect), s);
+            } else {
+                paint(lower, target("low", 0, lower_rect), s);
+                paint(upper, target("up", 0, card(0)), s);
+            }
+        };
+        upper.set_focus(Some(Id::new("up", 0)));
+        lower.set_focus(None);
+        for _ in 0..40 {
+            frame(&mut upper, &mut lower, &mut surface);
+        }
+        assert_eq!(upper.plate_rect().map(|p| p.0.left), Some(0.0));
+        upper.set_focus(None);
+        lower.set_focus(Some(Id::new("low", 0)));
+        frame(&mut upper, &mut lower, &mut surface);
+        frame(&mut upper, &mut lower, &mut surface);
+        let left = lower.plate_rect().map(|p| p.0.left);
+        assert!(
+            left.is_some_and(|l| l < 100.0),
+            "starts where the other plate left, not on its target: {left:?} ({upper_first})"
+        );
+        // Painting first, the plate that left learns of it a frame later.
+        frame(&mut upper, &mut lower, &mut surface);
+        assert_eq!(upper.plate_rect(), None, "the plate that left hides");
+        for _ in 0..240 {
+            frame(&mut upper, &mut lower, &mut surface);
+        }
+        assert_eq!(
+            lower.plate_rect().map(|p| p.0.left),
+            Some(400.0),
+            "and lands"
+        );
+    }
+}
+
 fn target<'a>(name: &str, i: usize, r: Rect) -> El<'a> {
     El::paint(|_, _| {})
         .id(Id::new(name, i))
@@ -276,9 +328,15 @@ fn the_plate_travels_lands_and_settles() {
     tree.set_focus(Some(Id::new("card", 0)));
     draw(&mut tree, &mut surface);
     assert_eq!(
+        tree.plate_rect(),
+        None,
+        "waits a frame for a plate leaving another tree"
+    );
+    draw(&mut tree, &mut surface);
+    assert_eq!(
         tree.plate_rect().map(|p| p.0.left),
         Some(0.0),
-        "starts on its target"
+        "none left, so it starts on its target"
     );
     tree.move_focus(Right);
     draw(&mut tree, &mut surface);
@@ -319,6 +377,8 @@ fn cards(tree: &mut Tree, shown: &[usize]) {
 fn a_vanished_target_hands_focus_to_the_nearest_and_the_plate_glides() {
     let mut tree = Tree::new();
     tree.set_focus(Some(Id::new("card", 2)));
+    // The first frame waits for a plate leaving another tree; none does.
+    cards(&mut tree, &[0, 1, 2]);
     cards(&mut tree, &[0, 1, 2]);
     assert_eq!(tree.plate_rect().map(|p| p.0.left), Some(240.0));
 
@@ -352,6 +412,11 @@ fn a_held_focus_the_frame_lacks_fades_the_plate_out() {
     assert!(!tree.plate_busy(), "and the frames stop");
 
     tree.set_focus(Some(Id::new("card", 2)));
+    cards(&mut tree, &[0, 1, 2]);
+    assert!(
+        tree.plate_rect().is_none(),
+        "a frame's wait for another tree's plate"
+    );
     cards(&mut tree, &[0, 1, 2]);
     assert_eq!(
         tree.plate_rect().map(|p| p.0.left),

@@ -95,6 +95,62 @@ const LAND_CROSS: f64 = 0.6;
 /// Fade time constant, seconds: out with no target or while dormant, in on the way back.
 const FADE_TAU: f64 = 0.06;
 
+thread_local! {
+    /// The last plate to give up focus, for a plate in another tree to glide on from.
+    static HANDOFF: std::cell::Cell<Option<Handoff>> = const { std::cell::Cell::new(None) };
+    /// Surface frames begun ([`begin_frame`]); a handoff keeps for its frame and the next.
+    static FRAME: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static NEXT_PLATE: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+/// Where a plate stood when it gave up focus: device px, so any tree can read it.
+#[derive(Clone, Copy)]
+struct Handoff {
+    owner: u64,
+    rect: Rect,
+    corner: f32,
+    frame: u64,
+    taken: bool,
+}
+
+/// One frame of the whole surface is starting. Called once per shell render.
+pub fn begin_frame() {
+    FRAME.with(|f| f.set(f.get() + 1));
+}
+
+/// `owner`'s plate just gave up focus at `rect`, device px.
+pub(crate) fn offer(owner: u64, rect: Rect, corner: f32) {
+    let frame = FRAME.with(std::cell::Cell::get);
+    HANDOFF.with(|h| {
+        h.set(Some(Handoff {
+            owner,
+            rect,
+            corner,
+            frame,
+            taken: false,
+        }));
+    });
+}
+
+/// The rect another plate left this frame or the last, once: a plate that takes it glides
+/// on from there, and the one that left hides.
+pub(crate) fn take(taker: u64) -> Option<(Rect, f32)> {
+    let frame = FRAME.with(std::cell::Cell::get);
+    HANDOFF.with(|h| {
+        let mut o = h
+            .get()
+            .filter(|o| o.owner != taker && !o.taken && frame <= o.frame + 1)?;
+        o.taken = true;
+        h.set(Some(o));
+        Some((o.rect, o.corner))
+    })
+}
+
+/// Another plate took up where `owner`'s left off.
+pub(crate) fn taken_from(owner: u64) -> bool {
+    HANDOFF.with(|h| h.get().is_some_and(|o| o.owner == owner && o.taken))
+}
+
 /// Sprung rect behind the focused node. It springs in its scroll's content space, so it
 /// rides a scrolling list rigidly and only its own travel lags. In flight it stretches
 /// toward where it is going by its own speed; with nothing to rest on it glides on and
@@ -125,6 +181,12 @@ pub struct Plate {
     peak: f64,
     /// OK went down: the plate's scale, springing back to 1.
     press: Option<Spring>,
+    /// This plate's name in a [`Handoff`]; 0 until first asked.
+    id: u64,
+    /// Focus arrived with nothing on screen: this frame the plate waits, unseen, for a plate
+    /// leaving another tree ([`take`]); `fresh` if it had never been drawn.
+    waiting: bool,
+    fresh: bool,
 }
 
 impl Plate {
@@ -178,6 +240,21 @@ impl Plate {
             }
         }
         self.to = Some(id);
+        // Nothing on screen and focus arriving: wait one frame, unseen, for a plate leaving
+        // another tree to glide on from. The leaving tree may paint after this one.
+        let empty = self.edges.is_none() || self.shown == 0.0;
+        if empty && live && !reduced && !self.waiting {
+            self.waiting = true;
+            self.fresh = self.edges.is_none();
+            self.edges = Some(self.goal.map(Spring::rest));
+            self.shown = 0.0;
+            self.armed = true;
+            return;
+        }
+        if std::mem::take(&mut self.waiting) && empty && self.fresh {
+            // No plate left one: the first appears in place, as it always did.
+            self.shown = 1.0;
+        }
         if self.edges.is_none() {
             self.shown = if live && !reduced { 1.0 } else { 0.0 };
         }
@@ -193,7 +270,63 @@ impl Plate {
         if let Some(s) = shift {
             self.shift = s;
         }
+        self.waiting = false;
         self.travel(dt, false);
+    }
+
+    /// This plate's name in a handoff.
+    pub(crate) fn id(&mut self) -> u64 {
+        if self.id == 0 {
+            self.id = NEXT_PLATE.with(|n| n.replace(n.get() + 1));
+        }
+        self.id
+    }
+
+    /// Showing, and staying: what a plate is when it can hand off.
+    pub(crate) fn live(&self) -> bool {
+        self.fade_to == 1.0 && self.shown > 0.0
+    }
+
+    /// Waiting this frame for a plate to glide on from.
+    pub(crate) fn waiting(&self) -> bool {
+        self.waiting
+    }
+
+    /// Start from `rect` (content px of `space`, shifted by `shift`), fully shown: the next
+    /// step glides from here to the target.
+    pub(crate) fn seed(
+        &mut self,
+        rect: Rect,
+        corner: f32,
+        space: Option<super::Id>,
+        shift: (f32, f32),
+    ) {
+        let at = [
+            f64::from(rect.left),
+            f64::from(rect.top),
+            f64::from(rect.right),
+            f64::from(rect.bottom),
+            f64::from(corner),
+        ];
+        let (dx, dy) = (
+            self.goal[0] + self.goal[2] - at[0] - at[2],
+            self.goal[1] + self.goal[3] - at[1] - at[3],
+        );
+        if dx.hypot(dy) > 1.0 {
+            self.axis = (dx / dx.hypot(dy), dy / dx.hypot(dy));
+        }
+        self.edges = Some(at.map(Spring::rest));
+        self.space = space;
+        self.shift = shift;
+        self.shown = 1.0;
+        self.fade_to = 1.0;
+        self.waiting = false;
+    }
+
+    /// Gone at once: another plate took up where this one left.
+    pub(crate) fn hide(&mut self) {
+        self.shown = 0.0;
+        self.fade_to = 0.0;
     }
 
     /// The scroll the plate lives in.

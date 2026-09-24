@@ -59,6 +59,7 @@ impl Shell {
         pad_pref: Option<punktfunk_core::config::GamepadPref>,
         pads: &[PadInfo],
     ) {
+        crate::el::begin_frame();
         let now = Instant::now();
         let dt = self
             .last_frame
@@ -637,13 +638,12 @@ impl LayerEnv<'_> {
         let frame = self
             .strip
             .layout(row, Rect::from_xywh(0.0, 0.0, self.w as f32, self.h as f32));
-        self.strip.set_focus(Some(pill_id(self.tab)));
-        if self.strip_focus {
-            self.strip
-                .paint_focus(canvas, frame, k as f32, self.dt, self.cheap);
-        } else {
-            self.strip.paint(canvas, frame);
-        }
+        // Unfocused, the strip's plate fades like any tree's, so focus arriving here glides
+        // in from the content rather than showing on the pill at once.
+        self.strip
+            .set_focus(self.strip_focus.then(|| pill_id(self.tab)));
+        self.strip
+            .paint_focus(canvas, frame, k as f32, self.dt, self.cheap);
     }
 }
 

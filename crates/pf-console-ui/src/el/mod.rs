@@ -17,7 +17,7 @@
 mod focus;
 mod layout;
 
-pub use focus::{Group, Plate};
+pub use focus::{begin_frame, Group, Plate};
 pub use layout::{Frame, Tree};
 
 thread_local! {
