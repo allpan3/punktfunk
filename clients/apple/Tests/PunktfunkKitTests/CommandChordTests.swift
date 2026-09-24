@@ -104,17 +104,32 @@ final class CommandChordTests: XCTestCase {
         XCTAssertEqual(InputCapture.keyCodeToVK[leftArrow], 0x25) // VK_LEFT
     }
 
-    /// The system-shortcut tap (⌘Space, ⌘Tab — the keys macOS claims before the app sees them)
-    /// takes keys off the system ONLY while captured, with the app frontmost. Any other state must
-    /// pass through: a tap that eats keys for the whole Mac is the failure to pin here.
-    func testTheSystemShortcutTapOnlyClaimsWhileCapturedAndFrontmost() {
-        XCTAssertTrue(InputCapture.tapClaims(forwarding: true, appActive: true))
-        XCTAssertFalse(InputCapture.tapClaims(forwarding: false, appActive: true))
-        XCTAssertFalse(InputCapture.tapClaims(forwarding: true, appActive: false))
+    /// The Mac's global shortcuts are off only while a capture holds them AND the main thread
+    /// answers — a hung client must not keep ⌥⌘⎋ from the user.
+    func testSystemShortcutsAreOffOnlyWhileHeldByALiveApp() {
+        XCTAssertTrue(SystemHotKeys.shouldBeOff(holders: 1, mainSilentFor: 0.5))
+        XCTAssertFalse(SystemHotKeys.shouldBeOff(holders: 0, mainSilentFor: 0))
+        XCTAssertFalse(SystemHotKeys.shouldBeOff(holders: 1, mainSilentFor: 2.5))
     }
 
-    /// The keys the tap exists for must have host VKs — it reposts them into the ordinary key path,
-    /// which drops unmapped keyCodes on the floor.
+    /// The watchdog end to end, against WindowServer: hang main, the shortcuts come back; main
+    /// answers again, they go off again; release, they are back for good.
+    func testAHungMainThreadGivesTheSystemShortcutsBack() throws {
+        try XCTSkipIf(ProcessInfo.processInfo.environment["CI"] != nil, "toggles this Mac's shortcuts")
+        SystemHotKeys.hold()
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.3))
+        XCTAssertTrue(SystemHotKeys.isOff)
+        Thread.sleep(forTimeInterval: 3) // main hangs
+        XCTAssertFalse(SystemHotKeys.isOff)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 1))
+        XCTAssertTrue(SystemHotKeys.isOff)
+        SystemHotKeys.release()
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.3))
+        XCTAssertFalse(SystemHotKeys.isOff)
+    }
+
+    /// Captured, ⌘Space, ⌘Tab and Mission Control arrive as ordinary key events and need host
+    /// VKs: the key path ignores an unmapped keyCode.
     func testTheSystemShortcutKeysMapToHostVKs() {
         XCTAssertEqual(InputCapture.keyCodeToVK[49], 0x20) // Space (⌘Space)
         XCTAssertEqual(InputCapture.keyCodeToVK[48], 0x09) // Tab (⌘Tab)
