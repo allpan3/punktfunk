@@ -1,4 +1,4 @@
-//! Players: the connected pads as cards, and on Android a last "Not showing?" card that
+//! Controllers: the connected pads as cards, and on Android a last "Not showing?" card that
 //! opens the grants and tests only the host can perform ([`super::grants`]). The fourth tab.
 //!
 //! Cards are one focus row. OK on a pad is its rumble test. Only devices the OS classifies

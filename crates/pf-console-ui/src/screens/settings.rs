@@ -114,7 +114,7 @@ pub enum RowId {
     /// Long-press the remote's OK to send a right click. webOS only — it exists because a
     /// Magic Remote has no second button.
     CursorGestures,
-    /// Action row: jumps to the Players tab.
+    /// Action row: jumps to the Controllers tab.
     Controllers,
     /// Action row: asks the host to open the platform licences screen.
     Licenses,
@@ -1392,7 +1392,7 @@ fn row_spec_base(id: RowId, ctx: &Ctx, presets: &[(String, String)]) -> RowSpec 
         RowId::NoPresets => {
             return RowSpec::action("No presets yet", false);
         }
-        RowId::Controllers => return RowSpec::action("Players", true),
+        RowId::Controllers => return RowSpec::action("Controllers", true),
         RowId::Licenses => return RowSpec::action("Open-source licences", true),
         RowId::QuickActions => return RowSpec::action("Quick actions", true),
         // Opens the cards: the value names the pick, no ‹ › to step it.

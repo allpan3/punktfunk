@@ -1,5 +1,5 @@
 //! Controller access: the grants and tests only the host can perform, one row each.
-//! Reached from the Players tab's "Not showing?" card, Android's alone.
+//! Reached from the Controllers tab's "Not showing?" card, Android's alone.
 //!
 //! OK on a row asks the host through [`ConsoleCmd::PadAction`]; nothing here edits.
 

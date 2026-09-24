@@ -3305,7 +3305,7 @@ fn dump_phone_home() {
 }
 
 /// Every device mark at the chip's 15 dp and the card's 44 dp, at k = 1 and 2, then the
-/// Players tab with the chip naming each of three pads.
+/// Controllers tab with the chip naming each of three pads.
 /// `PF_CONSOLE_DUMP=<dir> cargo test -p pf-console-ui -- --ignored dump_device_marks`.
 #[test]
 #[ignore]

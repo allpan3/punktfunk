@@ -86,7 +86,8 @@ impl Tab {
         match self {
             Tab::Hosts => "Hosts",
             Tab::Games => "Games",
-            Tab::Players => "Players",
+            // Named for what it lists today; a players feature would rename it back.
+            Tab::Players => "Controllers",
             Tab::Settings => "Settings",
         }
     }

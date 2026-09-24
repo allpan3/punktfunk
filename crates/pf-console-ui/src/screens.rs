@@ -165,7 +165,7 @@ pub(crate) enum Screen {
     PinHosts(pin_hosts::PinHostsScreen),
     /// Which preset the host's primary tile connects with.
     BindPreset(bind_preset::BindPresetScreen),
-    /// The Players tab: attached pads, and the platform's grants and tests.
+    /// The Controllers tab: attached pads, and the platform's grants and tests.
     Players(players::PlayersScreen),
     /// In-stream ring, editing mode. Raised by the Quick actions settings row.
     RingEditor(Box<ring_editor::RingEditorScreen>),
@@ -175,7 +175,7 @@ pub(crate) enum Screen {
     Customize(library::CustomizeScreen),
     /// The Background row's cards. Raised by the Interface section.
     Palette(palette::PaletteScreen),
-    /// Controller grants and tests. Raised by the Players tab's last card.
+    /// Controller grants and tests. Raised by the Controllers tab's last card.
     Grants(grants::GrantsScreen),
 }
 
@@ -367,7 +367,7 @@ impl Screen {
             Screen::Pair(s) => format!("Pair with {}", s.host_name()),
             Screen::PinHosts(s) => format!("Pin \u{201c}{}\u{201d}", s.preset_name()),
             Screen::BindPreset(s) => s.heading(),
-            Screen::Players(_) => "Players".into(),
+            Screen::Players(_) => "Controllers".into(),
             Screen::CardMenu(s) => s.title(),
             Screen::Customize(_) => "Customize".into(),
             Screen::Palette(_) => "Background".into(),
