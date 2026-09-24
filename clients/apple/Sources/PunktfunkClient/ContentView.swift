@@ -1477,7 +1477,7 @@ struct ContentView: View {
                 let i = order.firstIndex(of: TouchInputMode.current(conn.settings)) ?? 0
                 TouchInputMode.sessionOverride = order[(i + 1) % order.count]
             },
-            keyboard: { NotificationCenter.default.post(name: .punktfunkShowSoftKeyboard, object: nil) },
+            keyboard: { NotificationCenter.default.post(name: .punktfunkToggleSoftKeyboard, object: nil) },
             stats: { [model] in model.statsVerbosity },
             cycleStats: { [model] in model.cycleStats() },
             micAvailable: { [model] in model.micAvailable },

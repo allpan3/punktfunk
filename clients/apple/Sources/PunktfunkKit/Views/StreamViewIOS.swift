@@ -649,13 +649,14 @@ public final class StreamViewController: StreamViewControllerBase {
                   self.view.window?.windowScene?.activationState == .foregroundActive else { return }
             self.setCaptured(false)
         })
-        // The ring's Keyboard slot summons the soft keyboard the three-finger swipe does.
+        // The ring's Keyboard slot shows the soft keyboard, and hides it when it is up. iPhone's
+        // keyboard has no dismiss key, and passthrough has no three-finger swipe.
         observers.append(NotificationCenter.default.addObserver(
-            forName: .punktfunkShowSoftKeyboard, object: nil, queue: .main
+            forName: .punktfunkToggleSoftKeyboard, object: nil, queue: .main
         ) { [weak self] _ in
             guard let self,
                   self.view.window?.windowScene?.activationState == .foregroundActive else { return }
-            self.streamView.setSoftKeyboardVisible(true)
+            self.streamView.setSoftKeyboardVisible(!self.streamView.isFirstResponder)
         })
         // A monitor plugged in or pulled mid-session takes the picture or hands it back.
         observers.append(NotificationCenter.default.addObserver(
