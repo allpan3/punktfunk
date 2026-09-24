@@ -1,147 +1,127 @@
 ---
 title: PyroWave (wired-LAN codec)
-description: The opt-in ultra-low-latency wavelet codec for wired links — what it is, the bandwidth it needs, and how to turn it on.
+description: The wavelet codec for wired links — near-zero codec latency for a bitrate you set in bits per pixel.
 ---
 
-PyroWave is an **opt-in** video codec mode for links that can afford real bandwidth: wired
-Ethernet, a docked Steam Deck, a 2.5GbE LAN. It trades bitrate for latency — instead of
-H.264/HEVC/AV1 on the GPU's video engine, frames are compressed with
-[PyroWave](https://github.com/Themaister/pyrowave), an intra-only wavelet codec running as plain
-Vulkan compute. Punktfunk vendors a pinned copy and runs it on both ends.
+PyroWave is an opt-in video codec for wired links. Every frame is a complete picture, compressed
+with a wavelet transform in Vulkan compute ([upstream](https://github.com/Themaister/pyrowave)).
+It encodes and decodes in a fraction of a millisecond, and pays for that with far more bandwidth
+than HEVC or AV1.
 
-**It is never selected automatically.** HEVC/AV1 remain the codecs for Wi-Fi and everything
-else; PyroWave engages only when *you* pick it on the client **and** the host supports it. If
-either side can't, the session silently falls back to the normal codec ladder.
+Punktfunk never picks it for you. It runs when you choose it on the client and the host supports
+it; otherwise the session uses the normal codecs.
 
-## Why you'd want it
+## Why use it
 
-- **Codec latency drops by an order of magnitude.** Encode and decode each take a fraction of a
-  millisecond of GPU compute (measured ~0.15 ms encode / ~0.07 ms decode at 1080p on an
-  RTX 5070 Ti), versus one-to-several milliseconds per side for the hardware H.26x pipelines.
-- **Every frame is a keyframe.** There is no GOP, no reference chain, no keyframe round-trip
-  after packet loss — a lost frame costs exactly that frame, and the next one is already a
-  complete picture. The whole IDR/recovery apparatus that produces loss-time stutter simply
-  doesn't exist in this mode.
-- **Uniform frame sizes.** The rate control hits its per-frame byte budget exactly, so the
-  pacer sees a flat load instead of 20–40× keyframe spikes.
+- **Codec latency almost disappears.** Encode takes ~0.15 ms and decode ~0.07 ms at 1080p on an
+  RTX 5070 Ti. Hardware HEVC takes one to several milliseconds on each side.
+- **Packet loss costs one frame.** No frame depends on another: a lost frame is gone, the next
+  one is whole. No keyframe request, no stutter while the stream recovers.
+- **Every frame is the same size.** The network sees a steady load instead of keyframe bursts.
 
-## What it costs
+## Bits per pixel
 
-Bandwidth. At the codec's ~1.6 bits-per-pixel operating point (4:2:0, SDR):
+PyroWave has no quality setting of its own. Its encoder fills the byte budget each frame gets,
+exactly. Punktfunk sets that budget in **bits per pixel**, so one number means the same picture
+at every resolution and frame rate.
 
-| Mode | Bitrate |
+The default is **1.6 bits per pixel**, the codec author's clean point: at 200 Mbps for 1080p60
+he [could not spot compression artifacts](https://themaister.net/blog/2025/06/16/i-designed-my-own-ridiculously-fast-game-streaming-video-codec-pyrowave/)
+without comparing side by side and zooming in.
+
+| Mode (4:2:0, 8-bit) | At 1.6 bits/pixel |
 |---|---|
-| 1280×800 @ 60 (Deck) | ≈ 100 Mbps |
+| 1280×800 @ 60 (Steam Deck) | ≈ 100 Mbps |
 | 1920×1080 @ 60 | ≈ 200 Mbps |
 | 1920×1080 @ 120 | ≈ 400 Mbps |
-| 2560×1440 @ 60 | ≈ 355 Mbps |
 | 2560×1440 @ 120 | ≈ 710 Mbps |
 | 3840×2160 @ 60 | ≈ 800 Mbps |
 | 3840×2160 @ 120 | ≈ 1.6 Gbps |
 
-Frame rate scales the rate linearly, [4:4:4](#444-and-hdr) multiplies it by ~1.6, and an
-[HDR](#444-and-hdr) (10-bit) session adds ~15 %. Estimate any combination:
+### Lower works, and looks softer
+
+1.6 is a target, not a floor. PyroWave streams at any bitrate: fewer bits never break the
+stream, they soften the picture.
+
+HEVC and AV1 reuse the previous frame and send mostly what changed. PyroWave sends every frame
+whole, and keeps its coding stage simple for speed, which
+[costs the most at low bitrates](https://github.com/Themaister/pyrowave#trivial-entropy-coding).
+When bits run short it drops fine detail first: text, thin UI lines and texture go soft, and
+hard edges ring.
+
+For scale: Steam Remote Play's PyroWave
+[tops out at 500 Mbit/s](https://steamcommunity.com/groups/homestream/discussions/0/564794422009744473).
+At 4K120 that is 0.5 bits per pixel, a third of the clean point.
 
 <BitrateCalculator />
 
-Packet framing and FEC add ~15 % on top of these rates, and Gigabit Ethernet tops out around
-940 Mbps of payload, so 4K60 wants 2.5GbE even at 4:2:0 and the big 4:4:4 / HDR / high-refresh
-modes want 5GbE or 10GbE. **Do not run this over Wi-Fi** — that's
-what HEVC/AV1 are for.
+### Why Punktfunk can carry it
+
+A 4K120 frame at 1.6 bits per pixel is 1.66 MB, 120 times a second. The native protocol is
+built for frames that size:
+
+- **Error correction sized for big frames.** Punktfunk corrects losses in blocks of up to 4096
+  packets (Reed–Solomon over GF(2¹⁶)). The GameStream protocol Moonlight speaks allows 255
+  packets a block and four blocks a frame: 1,020 packets, parity included. That 1.66 MB frame
+  needs more than 1,100 before any parity.
+- **Paced sending.** Each frame goes out in small bursts, not all at once, so a multi-megabyte
+  frame does not overrun the send buffer and stall the stream.
+- **Batched packets.** `sendmmsg`/`recvmmsg` on Linux, UDP segmentation offload on Windows,
+  `recvmsg_x` on macOS keep the per-packet cost small at gigabit rates.
+- **Room at the top.** The host accepts up to 8 Gbps, so 2.5, 5 and 10 GbE links get used.
+
+## Setting it up
+
+**Host:** Linux and Windows hosts support PyroWave with nothing to install. On Linux it runs on
+AMD, Intel and NVIDIA alike.
+
+**Client:** set the video codec to **PyroWave (wired LAN)**. The option appears only on devices
+whose GPU passes the decode check.
+
+| Client | Setting | Needs |
+|---|---|---|
+| Linux (desktop app, controller UI, docked Deck) | Settings → Video codec | — |
+| Windows | Settings → Video codec | x64 |
+| Mac, iPhone, iPad, Apple TV | Settings → Codec | Apple Silicon or A13 and newer |
+| Android | Settings → Video codec | 64-bit, Vulkan 1.3 GPU |
+
+The stats overlay shows `pyrowave` as the decode path while it runs.
+
+**Bits per pixel:** web console **Host → Settings → Video → PyroWave quality**, or
+`PUNKTFUNK_PYROWAVE_BPP` in `host.env`. Any value from 0.25 to 4, from the next session. One
+setting covers every client: a Deck and a 4K desktop get the same quality, each at its own
+bitrate. The client's bitrate setting does not apply to PyroWave.
+
+**Automatic fits the link.** Before the first frame the client tests the link. If it cannot
+carry the rate with room to spare, the session drops to 70 % of what the link delivered, so
+4K120 on Gigabit still streams, at fewer bits per pixel. The rate never rises afterwards and
+the adaptive bitrate stays off; under sustained loss, switch to HEVC. To hold every session
+under a fixed rate, set **PyroWave bitrate cap** (`PUNKTFUNK_PYROWAVE_MAX_MBPS`).
 
 ## 4:4:4 and HDR
 
-PyroWave carries **full-chroma 4:4:4** and **HDR** the same way it carries everything else —
-intra-only, every frame a keyframe — so the low-latency and clean-loss properties above hold
-in these modes too. Both are negotiated per session from your client's settings, exactly like
-HEVC/AV1; nothing PyroWave-specific to turn on beyond picking the codec.
+Both follow the client's settings, as with HEVC and AV1, and scale from your bits per pixel:
 
-- **4:4:4 (full chroma).** With your client's **4:4:4** setting on, the session encodes chroma
-  at full resolution instead of subsampled 4:2:0 — sharp coloured text, thin UI lines, and
-  red/blue edges that 4:2:0 softens. It costs ~1.6× the bitrate (chroma compresses better than
-  luma, so it is less than the 2× the extra samples imply). Available on Linux and Windows
-  hosts.
-- **HDR (10-bit, BT.2020 PQ).** With HDR on, the session carries the 10-bit BT.2020 PQ signal in
-  16-bit planes and adds ~15 % to the bitrate. Available on Windows and Linux hosts — on Linux it
-  needs the same HDR source as the other codecs (a `punktfunk-gamescope` virtual output; see
-  [the HDR chain](/docs/hdr#per-host)). It combines with 4:4:4 on both.
-- **10-bit SDR.** A client that asks for 10-bit but not HDR gets the same 16-bit plane depth with
-  ordinary BT.709 colour — on Linux too, since the colour conversion is PyroWave's own.
-- The two combine: a 4:4:4 **and** HDR session applies both factors (~1.6 × 1.15 ≈ 1.9× the
-  4:2:0 SDR rate). The Apple and Rust clients decode whatever the session negotiated — 4:2:0
-  or 4:4:4, SDR or HDR — with no extra setup.
+- **4:4:4** (full chroma, sharp coloured text): ×1.625, so 2.6 at the default. Chroma
+  compresses better than luma, so it costs less than the 2× its extra samples imply.
+- **10-bit and HDR** (BT.2020 PQ): +15 %. On Linux, HDR needs a `punktfunk-gamescope` output
+  ([the HDR chain](/docs/hdr#per-host)).
 
-At the top end this gets demanding: 4:4:4 + HDR at a super-ultrawide 5120×1440@240 pins around
-5.3 Gbps, which is more than a 5GbE link carries. An Automatic session catches this itself:
-the bring-up ramp measures the link before the first frame and drops the pin to fit — a 2.5GbE
-path settles near 1.7 Gbps. A client bitrate does not lower it: PyroWave ignores it. When the
-measurement can't help — an older host, or a ceiling you want tighter than the link's wall —
-cap the host's pin with [`PUNKTFUNK_PYROWAVE_MAX_MBPS`](/docs/configuration).
+Together, 4:4:4 HDR at the default is ~3.0 bits per pixel.
 
-## Turning it on
+## Checking a Linux host is zero-copy
 
-1. **Host** (Linux): nothing to do — default builds ship the codec and every Linux GPU host
-   advertises it. AMD, Intel and NVIDIA hosts all encode straight from the capture dmabuf: the
-   wavelet encoder owns its own Vulkan device and imports the buffer on any vendor, so there is
-   no CPU copy on the host. (A compositor that refuses every offered dmabuf format still falls
-   back to the CPU path, as it does for the other codecs.)
-2. **Client**:
-   - Linux client: set **Settings → Video codec → PyroWave (wired LAN)** — the same setting in
-     the GTK desktop app and in the full-screen controller UI. Or launch with
-     `PUNKTFUNK_PREFER_PYROWAVE=1`.
-   - Windows client: set **Settings → Video codec → PyroWave (wired LAN)** (Intel, AMD and
-     NVIDIA alike; x64 only — the ARM64 build does not include the decoder).
-   - Apple (Mac, Apple TV 4K, iPad — wired networking strongly recommended): set
-     **Settings → Codec → PyroWave (wired LAN)**. The option appears only on devices whose
-     GPU passes the decode probe (Apple Silicon and A13-class or newer). The decoder follows
-     the stream: 4:2:0 or 4:4:4, SDR or HDR, per what the session negotiated.
-   - Android (phone, tablet, TV box — wired Ethernet strongly recommended): set
-     **Settings → Video codec → PyroWave (wired LAN)**. The row appears only on a 64-bit device
-     whose GPU passes the decode probe: Vulkan 1.3 with the codec's compute feature set, which
-     recent Adreno and Mali parts have and older ones do not. This one codec decodes on the GPU
-     and presents through its own swapchain rather than through the hardware video decoder, so
-     the low-latency and presentation settings that tune MediaCodec do not apply to it.
-3. Leave the bitrate on Automatic: a PyroWave session pins itself to the ~1.6 bpp rate for
-   your mode (≈200 Mbps at 1080p60; ~2.6 bpp for 4:4:4, +15 % for HDR). Before the first
-   frame the client runs the same bring-up ramp the adaptive bitrate uses and fits the pin to
-   it: only a measured link wall moves it, down to ~0.7× what the ramp proved — it never
-   rises, and a ramp that measured nothing (or an older host that never ran one) leaves the
-   pin exactly where it resolved. A client bitrate is ignored, and the adaptive-bitrate
-   controller stays off — this codec has no useful low-rate regime, so under sustained loss
-   the right move is switching back to HEVC, not degrading. The pin follows the resolution:
-   a mid-stream resize (e.g. Match window) re-pins the rate for the new mode, so resizing a
-   window down also cuts the bandwidth.
-
-The stats overlay shows `pyrowave` as the decode path when the mode is active.
-
-## Checking the host is really zero-copy
-
-On a Linux host the CPU fallback mentioned above is not an error — the session still streams, it
-just pays a full-resolution copy of every frame, which shows up as a lower frame-rate ceiling and
-higher CPU use rather than as anything obviously broken. The host log states which path a session
-took, once, when the capture starts:
+The host logs which capture path a session took, once:
 
 ```
 capture pipeline resolved: dmabuf-passthrough → pyrowave
 ```
 
-`dmabuf-passthrough` is the good one: the compositor's buffer goes straight into the wavelet
-encoder. `cpu` means the copy is happening, and a second line says why — a compositor that would
-not allocate a dmabuf, `PUNKTFUNK_ZEROCOPY` set to `0`, or a per-frame fall-through such as the
-compositor serving shared memory after agreeing to dmabufs. Each distinct reason is logged once per
-session with a running count, so a persistent downgrade is easy to tell from a hiccup while the
-display mode settles.
+`dmabuf-passthrough` is zero-copy. `cpu` means every frame is copied, which lowers the frame-rate
+ceiling and raises CPU use; the next line names the cause, such as `PUNKTFUNK_ZEROCOPY=0` or a
+compositor that would not hand over a dmabuf.
 
-If you see `cpu` and did not ask for it, check that `PUNKTFUNK_ZEROCOPY` is unset (it defaults to
-on) and read the accompanying line — it names the cause and the fix.
+## Limits
 
-## Current limits
-
-- Linux and Windows hosts; Linux clients (the GTK desktop app and the session client, including
-  a docked Deck), the Windows client on x64, Apple clients (native Metal decode on Mac, and on
-  A13-or-newer iPhone, iPad and Apple TV hardware), and 64-bit Android devices with a Vulkan 1.3
-  GPU. The 32-bit Android build carries no decoder, and Wi-Fi cannot carry these rates on any
-  client — this is a wired-LAN codec everywhere.
-- PyroWave HDR on **Linux** needs the same HDR source as the other codecs — a `punktfunk-gamescope`
-  virtual output ([the HDR chain](/docs/hdr#per-host)). Without it the session is SDR, as it is for
-  HEVC and AV1.
+- Wired links only. Wi-Fi cannot carry these rates; use HEVC or AV1 there.
+- No decoder in the Windows ARM64 client or the 32-bit Android build.

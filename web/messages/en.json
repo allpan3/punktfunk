@@ -1003,6 +1003,8 @@
 	"setting_lazy_capture_hint": "Lets the stream ask for each frame on compositors that support it.",
 	"setting_kwin_paced": "KWin capture pacing",
 	"setting_kwin_paced_hint": "Turn it on if KWin drops frames while the pointer moves.",
+	"setting_pyrowave_bpp": "PyroWave quality",
+	"setting_pyrowave_bpp_hint": "1.6 looks clean. Lower saves bandwidth and softens the picture.",
 	"setting_pyrowave_max_mbps": "PyroWave bitrate cap",
 	"setting_pyrowave_max_mbps_hint": "Caps every PyroWave stream. 0 means no cap.",
 	"setting_audio_quality": "Audio quality",

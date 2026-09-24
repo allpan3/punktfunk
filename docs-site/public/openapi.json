@@ -11369,6 +11369,7 @@
         "enum": [
           "bool",
           "int",
+          "decimal",
           "enum",
           "text",
           "list"
@@ -11428,11 +11429,11 @@
           },
           "max": {
             "type": [
-              "integer",
+              "number",
               "null"
             ],
-            "format": "int64",
-            "description": "`int` only."
+            "format": "double",
+            "description": "`int` and `decimal` only."
           },
           "max_len": {
             "type": [
@@ -11445,11 +11446,11 @@
           },
           "min": {
             "type": [
-              "integer",
+              "number",
               "null"
             ],
-            "format": "int64",
-            "description": "`int` only."
+            "format": "double",
+            "description": "`int` and `decimal` only."
           },
           "options": {
             "type": [
@@ -11487,7 +11488,7 @@
               "string",
               "null"
             ],
-            "description": "`int` only, e.g. `fps`."
+            "description": "`int` and `decimal` only, e.g. `fps`."
           },
           "value": {
             "description": "The value in force."

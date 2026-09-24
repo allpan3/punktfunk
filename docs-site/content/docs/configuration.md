@@ -65,6 +65,7 @@ more about some of them.
 | Direct capture (Linux) | `PUNKTFUNK_DIRECT_CAPTURE` | `on` · `off` | `on` | next session |
 | On-demand capture (Linux) | `PUNKTFUNK_LAZY_CAPTURE` | `on` · `off` | `on` | next session |
 | KWin capture pacing (Linux) | `PUNKTFUNK_KWIN_PACED` | `on` · `off` | `off` | next session |
+| PyroWave quality | `PUNKTFUNK_PYROWAVE_BPP` | 0.25–4 bits/pixel | `1.6` | next session |
 | PyroWave bitrate cap | `PUNKTFUNK_PYROWAVE_MAX_MBPS` | 0–10000 Mbps | `0` | next session |
 | Where audio plays (Linux, Windows) | `PUNKTFUNK_AUDIO_OUTPUT_MODE` | `client_only` · `host_and_client` · `follow_default` | `client_only` | next session |
 | Audio quality | `PUNKTFUNK_AUDIO_QUALITY` | `low` · `standard` · `high` | `high` | next session |

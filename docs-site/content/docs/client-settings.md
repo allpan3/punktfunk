@@ -54,10 +54,10 @@ fixed for the session, clamped to **500 kbps – 8 Gbps**. Every client takes a 
 its list: type it, or slide to it on iPhone, iPad and Mac. A host card's menu has **Test network
 speed…** to suggest a value.
 
-PyroWave is **always Automatic**: a fixed per-pixel budget for the negotiated mode (hundreds of
-Mbps), fitted once to the link during bring-up. A fixed kbps is meaningless for the all-intra
-codec, so the bitrate setting is disabled while PyroWave is selected — your stored value is
-kept.
+PyroWave is **always Automatic**: the host's bits per pixel for the negotiated mode (hundreds of
+Mbps), fitted once to the link during bring-up. The bitrate setting is disabled while PyroWave is
+selected, and your stored value is kept. To trade quality for bandwidth, change the host's
+[bits per pixel](/docs/pyrowave#bits-per-pixel).
 
 **Render scale** — *default: Native (1×).* The host renders and encodes at your mode times this;
 your device resamples to its window. Above 1× supersamples at more bandwidth and decode work; below
@@ -382,7 +382,7 @@ exactly [what a preset can't change](/docs/presets-and-links#what-a-preset-cant-
 | You ask for | What the host does |
 |---|---|
 | Resolution and refresh | Builds a display at exactly that mode. A host pinned to a real monitor keeps that monitor's resolution and you scale locally. A size the encoder can't take — odd, or past the codec's per-axis limit — fails the connect rather than being quietly changed. |
-| A bitrate | Clamps it to 500 kbps – 8 Gbps, or uses its 20 Mbps default for Automatic. PyroWave ignores the number entirely — every PyroWave session gets the per-pixel budget. |
+| A bitrate | Clamps it to 500 kbps – 8 Gbps, or uses its 20 Mbps default for Automatic. PyroWave ignores the number entirely — every PyroWave session gets the host's bits per pixel. |
 | A codec | Honors it when it can encode it, else the best shared codec in the order HEVC → AV1 → H.264. |
 | 10-bit HDR | Upgrades only for HDR content on an encoder that can do 10-bit; otherwise 8-bit SDR. |
 | 4:4:4 chroma | Sends it only when every gate passes; otherwise 4:2:0. |

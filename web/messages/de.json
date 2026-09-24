@@ -982,6 +982,8 @@
 	"setting_lazy_capture_hint": "Der Stream fordert jedes Bild an, wo der Compositor das kann.",
 	"setting_kwin_paced": "KWin-Taktung",
 	"setting_kwin_paced_hint": "Einschalten, wenn KWin bei Mausbewegung Bilder verliert.",
+	"setting_pyrowave_bpp": "PyroWave-Qualität",
+	"setting_pyrowave_bpp_hint": "1,6 sieht sauber aus. Weniger spart Bandbreite und macht das Bild weicher.",
 	"setting_pyrowave_max_mbps": "PyroWave-Bitratenlimit",
 	"setting_pyrowave_max_mbps_hint": "Begrenzt jeden PyroWave-Stream. 0 heißt kein Limit.",
 	"setting_audio_quality": "Audioqualität",
