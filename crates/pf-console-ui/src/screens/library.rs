@@ -1918,9 +1918,10 @@ impl LibraryScreen {
             None => draw_poster_placeholder(canvas, fonts, Some(game), crect, k),
         }
         // Inside the recede layer so a neighbour's badges fade with its cover.
-        card::store_badge(canvas, fonts, game, crect, k, true);
+        // Inside the card's entrance layer, which does the fading.
+        card::store_badge(canvas, fonts, game, crect, k, true, 1.0);
         if game.running {
-            card::running_badge(canvas, fonts, crect, k);
+            card::running_badge(canvas, fonts, crect, k, 1.0);
         }
         canvas.draw_rrect(rr.with_inset((0.5, 0.5)), &stroke(fg(0.12), 1.0));
         if layered {
