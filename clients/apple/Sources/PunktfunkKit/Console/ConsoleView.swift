@@ -35,6 +35,10 @@ public final class ConsoleMetalView: ConsolePlatformView {
     private var link: CADisplayLink?
     /// Touch state: the console takes one finger, the first one down.
     private var tracked: ObjectIdentifier?
+    /// Where the remote's swipe last stepped from.
+    private var swipeFrom: CGPoint?
+    /// A held remote direction and the timer that repeats it.
+    private var held: (press: ObjectIdentifier, timer: Timer)?
 
     public init(bridge: ConsoleBridge, device: MTLDevice, queue: MTLCommandQueue, delegate: ConsoleViewDelegate?) {
         self.bridge = bridge
@@ -85,6 +89,8 @@ public final class ConsoleMetalView: ConsolePlatformView {
     public func stop() {
         link?.invalidate()
         link = nil
+        held?.timer.invalidate()
+        held = nil
     }
 
     @objc private func tick() {
@@ -147,8 +153,8 @@ public final class ConsoleMetalView: ConsolePlatformView {
     // MARK: - pointer
 
     #if canImport(UIKit)
-    // Touches are a finger on the glass, so iOS only. A Siri Remote's clickpad sends indirect
-    // touches that start at the screen's centre, which the shell would take as a tap there.
+    // On iOS touches are a finger on the glass. A Siri Remote's clickpad sends indirect touches
+    // that start at the screen's centre, so on tvOS they are only a swipe's travel.
     #if os(iOS)
     public override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard tracked == nil, let touch = touches.first else { return }
@@ -178,6 +184,23 @@ public final class ConsoleMetalView: ConsolePlatformView {
         let p = touch.location(in: self)
         bridge.pointer(kind, x: Float(p.x * scale), y: Float(p.y * scale))
     }
+    #elseif os(tvOS)
+    public override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        swipeFrom = touches.first?.location(in: self)
+    }
+
+    /// One step each time the thumb travels a sixth of the screen, along the axis it travelled
+    /// most. A click's own wobble stays well short of that.
+    public override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let from = swipeFrom, let p = touches.first?.location(in: self) else { return }
+        let (dx, dy) = (p.x - from.x, p.y - from.y)
+        guard max(abs(dx), abs(dy)) >= bounds.width / 6 else { return }
+        bridge.menu(abs(dx) >= abs(dy) ? (dx > 0 ? .right : .left) : (dy > 0 ? .down : .up), from: .keys)
+        swipeFrom = p
+    }
+
+    public override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) { swipeFrom = nil }
+    public override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) { swipeFrom = nil }
     #endif
 
     // MARK: - presses
@@ -206,11 +229,13 @@ public final class ConsoleMetalView: ConsolePlatformView {
         if presses.contains(where: { $0.key == nil && $0.type == .select && !fromPad($0) }) {
             bridge.menu(.okUp, from: .keys)
         }
+        release(presses)
         let unclaimed = presses.filter { !claims($0) }
         if !unclaimed.isEmpty || presses.isEmpty { super.pressesEnded(unclaimed, with: event) }
     }
 
     public override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        release(presses)
         let unclaimed = presses.filter { !claims($0) }
         if !unclaimed.isEmpty || presses.isEmpty { super.pressesCancelled(unclaimed, with: event) }
     }
@@ -256,7 +281,27 @@ public final class ConsoleMetalView: ConsolePlatformView {
         default: return false
         }
         bridge.menu(event, from: .keys)
+        if [.up, .down, .left, .right].contains(event) { hold(press, event) }
         return true
+    }
+
+    /// Repeat a held direction at the pad poller's pace until its press ends.
+    private func hold(_ press: UIPress, _ event: ConsoleBridge.Menu) {
+        held?.timer.invalidate()
+        let timer = Timer(
+            fire: Date() + GamepadMenuInput.initialRepeatDelay,
+            interval: GamepadMenuInput.repeatInterval, repeats: true
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { _ = self?.bridge.menu(event, from: .keys) }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        held = (ObjectIdentifier(press), timer)
+    }
+
+    private func release(_ presses: Set<UIPress>) {
+        guard let held, presses.contains(where: { ObjectIdentifier($0) == held.press }) else { return }
+        held.timer.invalidate()
+        self.held = nil
     }
 
     /// A hardware keyboard's key, when the console has a use for it.
