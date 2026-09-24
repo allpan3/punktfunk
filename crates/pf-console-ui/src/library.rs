@@ -898,8 +898,9 @@ pub fn field_camera(aspect: f64) -> (f64, f64) {
 /// stage displaced a sphere by a Perlin height field and coloured each point by that
 /// height through an OKLab gradient; here a pixel's view ray meets the sphere, the hit's
 /// direction gives the height, the sphere is re-sized by it and hit once more, and the
-/// second height picks the colour. Detail 3.33, intensity 4.29, flow 0.26, twist 0.04,
-/// morph 3.74 and speed 12 % are the mockup's; `stops` are the gradient, even spaced.
+/// second height picks the colour. Detail 3.33, intensity 4.29, flow 0.26, twist 0.04 and
+/// speed 12 % are the mockup's; morph runs at a quarter of its 3.74, which read too fast on
+/// a phone. `stops` are the gradient, even spaced.
 ///
 /// `u_tc.y` is the calm mix (0 launcher, 1 form): flatten toward `u_lift` so a screen
 /// crossfade never jumps the field. `u_cam` is [`field_camera`].
@@ -947,7 +948,7 @@ pub fn field_sksl(ground: (f64, f64, f64), stops: &[(f64, f64, f64)]) -> String 
          const float INTENSITY = 4.29;\n\
          const float TWIST = 0.04;\n\
          const float WARP = 0.26;\n\
-         const float MORPH = 3.74;\n\
+         const float MORPH = 0.9;\n\
          const float ROT = 0.03;\n\
          \n\
          float3 hash33(float3 p) {{\n\
