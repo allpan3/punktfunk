@@ -1437,20 +1437,20 @@ fn the_backdrop_caches_its_field() {
         s.field.borrow().as_ref().map(|c| (c.size, c.t))
     };
 
-    assert_eq!(frame(&mut s, 0.0), Some(((384, 240), 0.0)));
+    assert_eq!(frame(&mut s, 0.0), Some(((192, 120), 0.0)));
     // Inside FIELD_STEP the cached field is blitted, not re-rendered.
-    assert_eq!(frame(&mut s, FIELD_STEP / 2.0), Some(((384, 240), 0.0)));
+    assert_eq!(frame(&mut s, FIELD_STEP / 2.0), Some(((192, 120), 0.0)));
     // Past it the field re-renders at the new clock.
     assert_eq!(
         frame(&mut s, FIELD_STEP + 0.01),
-        Some(((384, 240), FIELD_STEP + 0.01))
+        Some(((192, 120), FIELD_STEP + 0.01))
     );
 
     // A new target size invalidates the offscreen; 480 wide still scales to the edge.
     let mut small = skia_safe::surfaces::raster_n32_premul((480, 300)).unwrap();
     s.fake_clock = Some((2.0, 0.0));
     s.render(small.canvas(), 480, 300, &fonts, None, None, &pads);
-    assert_eq!(s.field.borrow().as_ref().map(|c| c.size), Some((384, 240)));
+    assert_eq!(s.field.borrow().as_ref().map(|c| c.size), Some((192, 120)));
 
     // Flag off: still the offscreen, now at the full edge — 1280 wide is 512.
     s.settings

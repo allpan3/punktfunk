@@ -9,7 +9,9 @@
 
 use crate::anim::{springs, Spring};
 use crate::glyphs::GlyphStyle;
-use crate::library::{field_camera, field_sksl, palette, LibraryShared, VIOLET_FIELD};
+use crate::library::{
+    field_camera, field_motion, field_sksl, palette, LibraryShared, VIOLET_FIELD,
+};
 use crate::model::{
     ConsoleBus, ConsoleCmd, ConsoleShared, HostRow, PairPhase, SpeedPhase, SpeedStatus, WakeStatus,
 };
@@ -109,9 +111,10 @@ impl Tab {
 
 /// Long edge of the backdrop's offscreen, px. The field is a pure function of `xy/u_res`
 /// and soft, so a small buffer blitted up holds the same picture at any glass size — its
-/// per-pixel noise never scales with a 4K surface. The reduced interface takes less.
+/// per-pixel noise never scales with a 4K surface. The reduced interface takes a quarter of
+/// 384's pixels: on a 2025 LG TV the noise costs ~29 ms of GPU at 384 and ~8 ms at 192.
 const FIELD_EDGE: f64 = 512.0;
-const FIELD_EDGE_REDUCED: f64 = 384.0;
+const FIELD_EDGE_REDUCED: f64 = 192.0;
 /// Seconds between backdrop re-renders (~25 Hz). The field morphs slowly, so the step is
 /// invisible; a frozen (reduce-motion) field renders once.
 const FIELD_STEP: f64 = 0.04;
@@ -1969,9 +1972,10 @@ impl Shell {
     /// `passes` is the shader's work per pixel: 2 hits the displaced surface, 1 the plain
     /// sphere — the reduced path's saving on a TV, where the offscreen hides the difference.
     fn aurora_paint(&self, w: f64, h: f64, t: f64, calm: f64, passes: f32) -> Option<Paint> {
-        // Matches the SkSL block: u_res, u_tc, u_lift, u_scrim, u_cam (each float2/4).
+        // Matches the SkSL block: u_res, u_tc, u_lift, u_scrim, u_cam, then `field_motion`'s
+        // u_rot0..2, u_mot, u_wmot.
         let (focal, scale) = field_camera(w / h.max(1.0));
-        let uniforms: [f32; 16] = [
+        let head: [f32; 16] = [
             w as f32,
             h as f32,
             t as f32,
@@ -1989,6 +1993,9 @@ impl Shell {
             passes,
             0.0,
         ];
+        let mut uniforms = [0.0f32; 36];
+        uniforms[..16].copy_from_slice(&head);
+        uniforms[16..].copy_from_slice(&field_motion(t));
         let words = uniforms.map(f32::to_ne_bytes);
         let bytes = words.as_flattened();
         self.mesh
@@ -2157,8 +2164,8 @@ fn compile_mesh(
     let effect = RuntimeEffect::make_for_shader(field_sksl(ground, stops), None)
         .map_err(|e| anyhow!("backdrop SkSL: {e}"))?;
     anyhow::ensure!(
-        effect.uniform_size() == 64,
-        "mesh uniform block is {} bytes, expected 64 (u_res, u_tc, u_lift, u_scrim, u_cam)",
+        effect.uniform_size() == 144,
+        "mesh uniform block is {} bytes, expected 144 (u_res … u_cam, u_rot0..2, u_mot, u_wmot)",
         effect.uniform_size()
     );
     let g = ground;
