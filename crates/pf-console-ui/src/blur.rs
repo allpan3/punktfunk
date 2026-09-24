@@ -145,15 +145,10 @@ impl Band {
     }
 }
 
-/// The style this frame draws: the reduced interface takes the pixel treatment, one read
-/// a pixel, where a blur costs a TV-class GPU its refresh rate.
+/// The style this frame draws: the blur everywhere, the reduced interface included — the
+/// pixel treatment stays behind the A/B override until it is wanted.
 fn style() -> Style {
-    let default = if crate::theme::reduced_ui() {
-        Style::Pixel
-    } else {
-        Style::Blur
-    };
-    OVERRIDE.with(std::cell::Cell::get).unwrap_or(default)
+    OVERRIDE.with(std::cell::Cell::get).unwrap_or(Style::Blur)
 }
 
 /// Whether a backdrop draws anything this frame: content may run on under the chrome
