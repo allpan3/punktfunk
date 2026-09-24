@@ -147,6 +147,9 @@ public enum ConsoleSettings {
         .bool("library_collections", DefaultsKey.libraryCollections, false),
         .string("start_in", DefaultsKey.startIn, StartIn.hosts.stored),
         .bool("auto_wake", DefaultsKey.autoWake, true),
+        // The console's own off switch lands on the touch, TV or Mac UI.
+        .bool("gamepad_ui_enabled", DefaultsKey.gamepadUIEnabled, true),
+        .string("gamepad_ui_mode", DefaultsKey.gamepadUIMode, GamepadUIEnvironment.modeWhenConnected),
         // `Settings::extra` (flattened, so plain top-level keys). The `android.` prefix is
         // where these were first written; the console reads the same names here.
         .bool("android.rumble_on_phone", DefaultsKey.rumbleOnDevice, false),

@@ -138,6 +138,19 @@ public enum ConsoleJSON {
         return string(["library": row])
     }
 
+    /// `{"pair": HostRow}`: the console's Pair screen for this host, over Home.
+    public static func pairEntry(_ host: StoredHost, presets: [StreamPreset]) -> String {
+        string([
+            "pair": row(
+                host, advert: nil, online: true, presets: presets, hostActions: [:], running: [:]),
+        ])
+    }
+
+    /// A question the console asks in place of a system alert; `choices` lead with the default.
+    public static func prompt(id: String, title: String, message: String, choices: [String]) -> String {
+        string(["id": id, "title": title, "message": message, "choices": choices])
+    }
+
     /// `KnownHosts` — what the console needs to build a `punktfunk://` link.
     public static func knownHosts(_ saved: [StoredHost]) -> String {
         string([

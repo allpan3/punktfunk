@@ -76,6 +76,8 @@ extension ConsoleModel {
             platformScreen = a["id"] as? String
         case "PadAction":
             padAction(a["action"] as? String ?? "", key: a["pad_key"] as? String ?? "")
+        case "PromptAnswer":
+            answerPrompt(id: a["id"] as? String ?? "", choice: a["choice"] as? Int)
         case "SpeedTest":
             speedTest(
                 key: a["key"] as? String ?? "", addr: a["addr"] as? String ?? "",

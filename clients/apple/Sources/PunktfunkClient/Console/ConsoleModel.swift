@@ -18,6 +18,10 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
     struct Actions {
         var connect: (StoredHost, PresetSelection) -> Void
         var connectDiscovered: (DiscoveredHost) -> Void
+        /// The Pair screen's "Request access": the long approval dial. A discovered host is
+        /// saved first.
+        var requestAccess: (StoredHost) -> Void
+        var requestAccessDiscovered: (DiscoveredHost) -> Void
         var launchTitle: (LibraryTarget, String) -> Void
         var connectShelf: (LibraryTarget) -> Void
         var wakeOnly: (StoredHost) -> Void
@@ -49,6 +53,12 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
         }
     }
     private let pads = GamepadMenuInput(manager: .shared)
+    private let haptics = MenuHaptics(manager: .shared)
+    /// When the pad last drove the console. A pulse from a remote, keyboard or finger is
+    /// felt by nobody holding the pad, so it stays silent.
+    private var padInputAt: TimeInterval = 0
+    /// Open prompts by id, each with what its answer does.
+    private var prompts: [String: (Int?) -> Void] = [:]
     private var watching: [AnyCancellable] = []
     /// The shelf the console has open, so a fetch knows whose catalog it is filling.
     private var shelf: StoredHost?
@@ -114,6 +124,7 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
     func detach() {
         watching.removeAll()
         pads.stop()
+        haptics.stop()
         fetching?.cancel()
         // The touch UI runs its own browse; two subscribers would keep the radio up between them.
         discovery.stop()
@@ -124,9 +135,23 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
         bridge.push(.navigate, ConsoleJSON.entry(shelf.host, pin: pin, presets: presets.presets))
     }
 
-    /// Hold the pad while something the console did not draw is up.
-    func suspend(_ held: Bool) {
-        if held { pads.stop() } else { pads.start() }
+    /// Open the console's Pair screen for `host`: a pairing the app was asked for elsewhere.
+    func pair(_ host: StoredHost) {
+        bridge.push(.navigate, ConsoleJSON.pairEntry(host, presets: presets.presets))
+    }
+
+    /// Ask in the console instead of a system alert a pad cannot answer. `answer` gets the
+    /// chosen index, or nil for Back.
+    func prompt(
+        id: String, title: String, message: String, choices: [String],
+        answer: @escaping (Int?) -> Void
+    ) {
+        prompts[id] = answer
+        bridge.push(.prompt, ConsoleJSON.prompt(id: id, title: title, message: message, choices: choices))
+    }
+
+    func answerPrompt(id: String, choice: Int?) {
+        prompts.removeValue(forKey: id)?(choice)
     }
 
     /// Where the session the console asked for stands, so the takeover can narrate it.
@@ -260,8 +285,8 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
 
     // MARK: - input
 
-    /// The pad drives the console through the same poller the SwiftUI shell used: GameController's
-    /// handlers do not fire on device outside a stream (`GamepadMenuInput`'s header).
+    /// The pad drives the console through `GamepadMenuInput`'s poller: GameController's handlers
+    /// do not fire on device outside a stream (its header).
     private func wirePads() {
         pads.onMove = { [weak self] (direction: GamepadMenuInput.Direction) in
             let event: ConsoleBridge.Menu =
@@ -271,18 +296,35 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
                 case .left: .left
                 case .right: .right
                 }
-            self?.bridge.menu(event, from: .pad)
+            self?.fromPad(event)
         }
-        pads.onConfirm = { [weak self] in self?.bridge.menu(.confirm, from: .pad) }
-        pads.onSecondary = { [weak self] in self?.bridge.menu(.secondary, from: .pad) }
-        pads.onTertiary = { [weak self] in self?.bridge.menu(.tertiary, from: .pad) }
+        pads.onConfirm = { [weak self] in self?.fromPad(.confirm) }
+        pads.onSecondary = { [weak self] in self?.fromPad(.secondary) }
+        pads.onTertiary = { [weak self] in self?.fromPad(.tertiary) }
         pads.onBack = { [weak self] in
             guard let self else { return }
             // `false` = the shell let it go, which at the root is the system's press.
-            if !bridge.menu(.back, from: .pad) { actions.quit() }
+            if !fromPad(.back) { actions.quit() }
         }
         pads.onShoulder = { [weak self] forward in
-            self?.bridge.menu(forward ? .jumpForward : .jumpBack, from: .pad)
+            self?.fromPad(forward ? .jumpForward : .jumpBack)
+        }
+    }
+
+    @discardableResult
+    private func fromPad(_ event: ConsoleBridge.Menu) -> Bool {
+        padInputAt = ProcessInfo.processInfo.systemUptime
+        return bridge.menu(event, from: .pad)
+    }
+
+    /// The shell's haptic cue, on the pad, when the pad caused it.
+    private func pulse(_ kind: String) {
+        guard ProcessInfo.processInfo.systemUptime - padInputAt < 0.5 else { return }
+        switch kind {
+        case "move": haptics.move()
+        case "confirm": haptics.confirm()
+        case "boundary": haptics.boundary()
+        default: break
         }
     }
 
@@ -303,8 +345,10 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
             announce(text)
         } else if let action = event["action"] {
             handle(action: action)
+        } else if let kind = event["pulse"] as? String {
+            pulse(kind)
         }
-        // `pulse` is the haptic cue and `editing` the shell's own keyboard: neither is ours.
+        // `editing` is the shell's own keyboard: not ours.
     }
 
     private func announce(_ text: String) {
@@ -336,14 +380,21 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
         let addr = a["addr"] as? String ?? ""
         let port = UInt16(a["port"] as? Int ?? 0)
         let preset: PresetSelection = (a["preset"] as? String).map { .preset($0) } ?? .inherit
+        let requestAccess = a["request_access"] as? Bool ?? false
         guard let host = host(fp: fp, addr: addr, port: port) else {
             // Not saved yet: the row came from an advert, so dial it as a discovery does.
             if let found = discovery.hosts.first(where: { $0.host == addr && $0.port == port }) {
-                actions.connectDiscovered(found)
+                if requestAccess {
+                    actions.requestAccessDiscovered(found)
+                } else {
+                    actions.connectDiscovered(found)
+                }
             }
             return
         }
-        if let title = a["launch"] as? String {
+        if requestAccess {
+            actions.requestAccess(host)
+        } else if let title = a["launch"] as? String {
             actions.launchTitle(LibraryTarget(host: host, preset: preset), title)
         } else {
             actions.connect(host, preset)

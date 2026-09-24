@@ -31,6 +31,7 @@ public final class ConsoleBridge {
         case knownHosts = 13
         case pads = 14
         case navigate = 15
+        case prompt = 16
     }
 
     /// A discrete menu event, as the shell numbers them.

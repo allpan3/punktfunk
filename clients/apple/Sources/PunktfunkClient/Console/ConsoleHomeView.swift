@@ -18,12 +18,19 @@ struct ConsoleHomeView: View {
     /// Something to say that has no screen of its own — a deep link that went nowhere. The
     /// console shows it as a toast; the app's alert stays out of the way while the console is up.
     @Binding var notice: String?
-    /// An app modal the console has no screen for is up: stand down rather than let one press
-    /// drive both.
-    var suspended = false
+    /// A pairing asked for outside the console (the trust card's "Pair instead", a Mac host
+    /// window): the console's Pair screen takes it. Cleared once taken.
+    @Binding var pairing: StoredHost?
+    /// A link waiting on the player's word: the console asks, in place of a system alert.
+    @Binding var linkConfirm: ContentView.DeepLinkConfirm?
+    let runLink: (ContentView.DeepLinkConfirm) -> Void
+    /// The console could not be built (no Metal device, or the shell refused).
+    let onFailed: () -> Void
     let onPaired: (StoredHost, Data) -> Void
     let connect: (StoredHost, PresetSelection) -> Void
     let connectDiscovered: (DiscoveredHost) -> Void
+    let requestAccess: (StoredHost) -> Void
+    let requestAccessDiscovered: (DiscoveredHost) -> Void
     let launchTitle: (LibraryTarget, String) -> Void
     let connectShelf: (LibraryTarget) -> Void
     let wakeOnly: (StoredHost) -> Void
@@ -54,12 +61,13 @@ struct ConsoleHomeView: View {
                 console?.notice(text)
                 notice = nil
             }
-            .onChange(of: suspended) { _, held in console?.suspend(held) }
             .onChange(of: entry) { _, shelf in
                 guard let shelf, let console else { return }
                 console.navigate(to: shelf, pin: preset(of: shelf))
                 entry = nil
             }
+            .onChange(of: pairing?.id) { _, _ in takePairing() }
+            .onChange(of: linkConfirm?.id) { _, _ in takeLinkConfirm() }
             .onChange(of: waker.waking) { _, _ in console?.pushWake() }
             // A screen this app owns, asked for by a console row (`PlatformScreen`). The console
             // keeps drawing underneath and takes no input while one is up.
@@ -75,8 +83,7 @@ struct ConsoleHomeView: View {
                 delegate: console
             )
         } else {
-            // No Metal device, or the shell refused to build: the app's own UI is the fallback,
-            // and `ConsoleModel` has already said why in the log.
+            // Black for the frame before `onFailed` swaps in the app's own UI.
             Color.black
         }
     }
@@ -85,18 +92,51 @@ struct ConsoleHomeView: View {
         guard console == nil else { return }
         let opening = entry
         entry = nil
-        let model = ConsoleModel(
-            entry: opening?.host, pin: opening.flatMap(preset(of:)), store: store,
-            discovery: discovery, presets: presets, power: .shared, nowPlaying: .shared,
-            waker: waker,
-            actions: ConsoleModel.Actions(
-                connect: connect, connectDiscovered: connectDiscovered, launchTitle: launchTitle,
-                connectShelf: connectShelf, wakeOnly: wakeOnly,
-                cancelConnect: { self.model.disconnect() },
-                showStream: { self.model.revealStream() },
-                paired: onPaired, quit: onQuit))
-        model?.attach()
-        console = model
+        guard
+            let built = ConsoleModel(
+                entry: opening?.host, pin: opening.flatMap(preset(of:)), store: store,
+                discovery: discovery, presets: presets, power: .shared, nowPlaying: .shared,
+                waker: waker,
+                actions: ConsoleModel.Actions(
+                    connect: connect, connectDiscovered: connectDiscovered,
+                    requestAccess: requestAccess, requestAccessDiscovered: requestAccessDiscovered,
+                    launchTitle: launchTitle, connectShelf: connectShelf, wakeOnly: wakeOnly,
+                    cancelConnect: { self.model.disconnect() },
+                    showStream: { self.model.revealStream() },
+                    paired: onPaired, quit: onQuit))
+        else {
+            onFailed()
+            return
+        }
+        built.attach()
+        console = built
+        // Set while the console was off screen: a session that just ended says why here, since
+        // `onChange` never sees a value that was already there at mount.
+        if let message = model.errorMessage, !message.isEmpty {
+            built.session(.ended, message: message)
+            model.errorMessage = nil
+        }
+        takePairing()
+        takeLinkConfirm()
+    }
+
+    private func takePairing() {
+        guard let host = pairing, let console else { return }
+        pairing = nil
+        console.pair(host)
+    }
+
+    private func takeLinkConfirm() {
+        guard let confirm = linkConfirm, let console else { return }
+        console.prompt(
+            id: "link", title: "Open this link?", message: confirm.message,
+            choices: [confirm.actionTitle, "Cancel"]
+        ) { choice in
+            // The link may have been replaced while the question was up.
+            guard linkConfirm?.id == confirm.id else { return }
+            linkConfirm = nil
+            if choice == 0 { runLink(confirm) }
+        }
     }
 
     private var platformScreen: Binding<Bool> {

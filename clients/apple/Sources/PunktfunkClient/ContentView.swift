@@ -59,7 +59,9 @@ struct ContentView: View {
     /// name, its address, or the `host=` recovery parameter — instead of by its stable record id.
     /// Anything that can open a URL can guess "Gaming PC", so the link's action waits for this
     /// confirmation; a link that names the id (every shortcut this app emits) still runs on its own.
-    private struct DeepLinkConfirm {
+    struct DeepLinkConfirm {
+        /// Which question an answer belongs to: a newer link replaces the one on screen.
+        let id = UUID()
         let host: StoredHost
         let launch: String?
         let preset: PresetSelection
@@ -78,6 +80,8 @@ struct ContentView: View {
         }
     }
     @State private var deepLinkConfirm: DeepLinkConfirm?
+    /// The console could not be built on this device (`ConsoleHomeView.onFailed`).
+    @State private var consoleFailed = false
     #if os(iOS)
     /// Owns the Live Activity for the running session (Lock Screen / Dynamic Island). Driven from
     /// the session model's published state below; iPhone/iPad only.
@@ -206,10 +210,12 @@ struct ContentView: View {
         gamepadUIActive && (model.phase == .idle || model.phase == .connecting)
     }
 
+    /// A console that could not be built hands the screen back to this app's own UI.
     private var gamepadUIActive: Bool {
-        GamepadUIEnvironment.isActive(
-            gamepadConnected: gamepadManager.uiPadConnected, enabledSetting: gamepadUIEnabled,
-            mode: gamepadUIMode)
+        !consoleFailed
+            && GamepadUIEnvironment.isActive(
+                gamepadConnected: gamepadManager.uiPadConnected, enabledSetting: gamepadUIEnabled,
+                mode: gamepadUIMode)
     }
 
     // The body is split in two — `driven` (the screen plus its lifecycle drivers and sheets) and
@@ -602,9 +608,10 @@ struct ContentView: View {
             set: { if !$0 { deepLinkNotice = nil } })
     }
 
+    /// Down while the console is up: it asks the same question in a way a pad can answer.
     private var deepLinkConfirmPresented: Binding<Bool> {
         Binding(
-            get: { deepLinkConfirm != nil && !consolePromptShowing },
+            get: { deepLinkConfirm != nil && !consolePromptShowing && !consoleOwnsScreen },
             set: { if !$0 { deepLinkConfirm = nil } })
     }
 
@@ -1007,9 +1014,11 @@ struct ContentView: View {
     private var console: some View {
         ConsoleHomeView(
             store: store, model: model, discovery: discovery, waker: waker,
-            entry: $libraryTarget, notice: $deepLinkNotice,
-            suspended: deepLinkConfirm != nil, onPaired: handlePaired,
+            entry: $libraryTarget, notice: $deepLinkNotice, pairing: $pairingTarget,
+            linkConfirm: $deepLinkConfirm, runLink: runDeepLinkConfirm,
+            onFailed: { consoleFailed = true }, onPaired: handlePaired,
             connect: { connect($0, preset: $1) }, connectDiscovered: connectDiscovered,
+            requestAccess: consoleRequestAccess, requestAccessDiscovered: requestAccessDiscovered,
             launchTitle: launchTitle, connectShelf: connectFromShelf,
             wakeOnly: { wakeOnly($0) })
     }
@@ -1690,12 +1699,7 @@ struct ContentView: View {
     /// inside `connect`.)
     private func connectDiscovered(_ d: DiscoveredHost) {
         guard !model.isBusy else { return }
-        let host = StoredHost(
-            name: d.name, address: d.host, port: d.port,
-            mgmtPort: d.mgmtPort,
-            macAddresses: d.macAddresses.isEmpty ? nil : d.macAddresses,
-            osChain: d.osChain.isEmpty ? nil : d.osChain)
-        store.add(host)
+        let host = save(d)
         if d.allowsTofu {
             connect(host, allowTofu: true)
         } else {
@@ -1703,6 +1707,33 @@ struct ContentView: View {
             approvalChoice = ApprovalRequest(
                 host: host, advertisedFingerprint: pinFingerprint(d.fingerprintHex))
         }
+    }
+
+    /// A discovered host as a saved record, so a session has a stored identity to pin.
+    private func save(_ d: DiscoveredHost) -> StoredHost {
+        let host = StoredHost(
+            name: d.name, address: d.host, port: d.port,
+            mgmtPort: d.mgmtPort,
+            macAddresses: d.macAddresses.isEmpty ? nil : d.macAddresses,
+            osChain: d.osChain.isEmpty ? nil : d.osChain)
+        store.add(host)
+        return host
+    }
+
+    /// The console Pair screen's "Request access" on a saved host: keep its pin, else take
+    /// the one its advert carries.
+    private func consoleRequestAccess(_ host: StoredHost) {
+        requestAccess(
+            ApprovalRequest(
+                host: host,
+                advertisedFingerprint: host.pinnedSHA256 ?? advertisedFingerprint(for: host)))
+    }
+
+    /// The same on a host the console only saw advertised: saved first, as a tap on it would.
+    private func requestAccessDiscovered(_ d: DiscoveredHost) {
+        guard !model.isBusy else { return }
+        requestAccess(
+            ApprovalRequest(host: save(d), advertisedFingerprint: pinFingerprint(d.fingerprintHex)))
     }
 
     /// Pairing ceremony succeeded — pin the host and connect. The guard backstops a stale
