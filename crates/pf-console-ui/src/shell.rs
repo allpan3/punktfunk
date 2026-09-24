@@ -9,7 +9,7 @@
 
 use crate::anim::{springs, Spring};
 use crate::glyphs::GlyphStyle;
-use crate::library::{mesh_sksl, palette, LibraryShared};
+use crate::library::{field_camera, field_sksl, palette, LibraryShared, VIOLET_FIELD};
 use crate::model::{
     ConsoleBus, ConsoleCmd, ConsoleShared, HostRow, PairPhase, SpeedPhase, SpeedStatus, WakeStatus,
 };
@@ -17,6 +17,7 @@ use crate::platform::Platform;
 #[cfg(test)]
 use crate::pointer::DRAG_TICK_DP;
 use crate::pointer::{Pointer, PointerKind, Touch};
+use crate::screens::home::HomeScreen;
 use crate::screens::{Bg, ConnectIntent, Ctx, Nav, Outbox, Screen};
 use crate::store::SettingsStore;
 use anyhow::{anyhow, Result};
@@ -52,15 +53,67 @@ const NAV_REVEAL_ALPHA: f64 = 0.4;
 /// the question is whether the screen under the cursor is the one being aimed at.
 const NAV_INPUT_OPENS: f64 = 0.85;
 /// Chrome bands, design units: pinned title above, hints below.
-const TOP_BAND: f64 = 64.0;
+const TOP_BAND: f64 = 88.0;
 const BOTTOM_BAND: f64 = 86.0;
+/// A tab switch slides the new root this share of the width.
+pub(crate) const TAB_SLIDE: f64 = 0.25;
+/// Seconds OK stays down on a remote before it opens the focused card's menu instead.
+const HOLD_S: f64 = 0.5;
 
-/// Long edge of the reduced backdrop's offscreen, px. The field is a pure function of
-/// `xy/u_res`, so a small buffer holds the same picture — the per-pixel exp/sin/Bézier
-/// work is exactly what a TV GPU cannot afford.
+/// Top-level tabs, in strip order.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Tab {
+    Hosts,
+    Games,
+    Players,
+    Settings,
+}
+
+pub(crate) const TABS: [Tab; 4] = [Tab::Hosts, Tab::Games, Tab::Players, Tab::Settings];
+
+impl Tab {
+    /// The id `console-vectors.json` pins; also the pill's element id.
+    pub(crate) fn id(self) -> &'static str {
+        match self {
+            Tab::Hosts => "hosts",
+            Tab::Games => "games",
+            Tab::Players => "players",
+            Tab::Settings => "settings",
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Tab::Hosts => "Hosts",
+            Tab::Games => "Games",
+            // Named for what it lists today; a players feature would rename it back.
+            Tab::Players => "Controllers",
+            Tab::Settings => "Settings",
+        }
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    /// The tab a root screen belongs to.
+    fn of(root: &Screen) -> Tab {
+        match root {
+            Screen::Library(_) | Screen::Collections(_) => Tab::Games,
+            Screen::Players(_) => Tab::Players,
+            Screen::Settings(_) => Tab::Settings,
+            _ => Tab::Hosts,
+        }
+    }
+}
+
+/// Long edge of the backdrop's offscreen, px. The field is a pure function of `xy/u_res`
+/// and soft, so a small buffer blitted up holds the same picture at any glass size — its
+/// per-pixel noise never scales with a 4K surface. The reduced interface takes less.
 const FIELD_EDGE: f64 = 512.0;
-/// Seconds between reduced-backdrop re-renders (~25 Hz). The field drifts on ~90–130 s
-/// periods, so the step is invisible; a frozen (reduce-motion) field renders once.
+const FIELD_EDGE_REDUCED: f64 = 384.0;
+/// Seconds between backdrop re-renders (~25 Hz). The field morphs slowly, so the step is
+/// invisible; a frozen (reduce-motion) field renders once.
 const FIELD_STEP: f64 = 0.04;
 
 /// Paint recipe for a transition. Distinct from spring direction: a reversed
@@ -87,6 +140,11 @@ enum Motion {
         /// carries one. A REPLACE does too: `n - 2` would be the replaced
         /// screen's parent. A plain push does not — the parent stays at `n - 2`.
         leaving: Option<Box<Screen>>,
+    },
+    /// A tab switch: the new root slides in a quarter width over the parked one.
+    Tab {
+        spring: Spring,
+        from: Tab,
     },
 }
 
@@ -302,7 +360,26 @@ pub const DEFAULT_GPU_CACHE_BYTES: usize = 160 << 20;
 pub const MIN_GPU_CACHE_BYTES: usize = 96 << 20;
 
 pub(crate) struct Shell {
+    /// `stack[0]` is [`Self::tab`]'s root.
     stack: Vec<Screen>,
+    tab: Tab,
+    /// The other tabs' roots, kept while another tab is up. Indexed by [`Tab::index`].
+    parked: [Option<Screen>; TABS.len()],
+    /// The host key the Games root was built for.
+    games_key: Option<String>,
+    /// Whose list the shared library holds: the host of the last `FetchLibrary` sent.
+    library_fp: Option<String>,
+    /// Focus is on the tab strip, not the screen.
+    strip_focus: bool,
+    /// The shell moved focus to the strip because the root had nothing to focus. It goes
+    /// back once the root has something, unless the strip is used meanwhile.
+    strip_parked: bool,
+    /// Focus targets the root placed when last painted; `None` until it paints.
+    root_targets: Option<usize>,
+    /// The strip's pills and focus plate.
+    strip: crate::el::Tree,
+    /// OK down on a remote: when, and whether the hold already fired.
+    ok_down: Option<(f64, bool)>,
     motion: Motion,
     console: ConsoleShared,
     library: LibraryShared,
@@ -425,7 +502,16 @@ impl Shell {
             Bg::Form => 1.0,
         };
         Ok(Shell {
+            tab: Tab::of(&stack[0]),
             stack,
+            parked: [None, None, None, None],
+            games_key: None,
+            library_fp: None,
+            strip_focus: false,
+            strip_parked: false,
+            root_targets: None,
+            strip: crate::el::Tree::new(),
+            ok_down: None,
             motion: Motion::None,
             console,
             library,
@@ -494,6 +580,14 @@ impl Shell {
         if stack.is_empty() {
             return;
         }
+        let tab = Tab::of(&stack[0]);
+        if tab != self.tab {
+            self.parked[self.tab.index()] = self.stack.drain(..).next();
+        }
+        self.parked[tab.index()] = None;
+        self.tab = tab;
+        self.strip_focus = false;
+        self.root_targets = None;
         self.stack = stack;
         self.motion = Motion::None;
         self.bg_mix = match self.stack.last().expect("non-empty").background() {
@@ -574,6 +668,9 @@ impl Shell {
             || self.speed.is_some()
         {
             return None;
+        }
+        if self.strip_focus && self.stack.len() == 1 {
+            return Some(format!("{} tab", self.tab.name()));
         }
         let t = self.t();
         let screen = self.stack.last()?;
@@ -764,7 +861,7 @@ impl Shell {
         // Stack survives a stream, so nothing else refreshes the running set:
         // without this the Resume badge still names the title they just quit.
         // Catalog is left alone — a re-fetch would swap the shelf for a spinner.
-        if let Some(Screen::Library(lib)) = self.stack.last() {
+        if let Some(lib) = self.stack.last().and_then(Screen::shelf) {
             self.bus.send(ConsoleCmd::RefreshRunning {
                 addr: lib.host_addr().to_string(),
                 mgmt: lib.host_mgmt_port(),
@@ -938,7 +1035,46 @@ impl Shell {
         }
 
         self.collections_handover();
+        self.home_shelf();
         self.tick_launch();
+        self.settle_focus();
+    }
+
+    /// A root with nothing to focus parks focus on the tab strip; once it has something
+    /// again, a parked focus goes back.
+    fn settle_focus(&mut self) {
+        if self.stack.len() > 1 {
+            return;
+        }
+        match self.root_targets {
+            Some(0) if !self.strip_focus => (self.strip_focus, self.strip_parked) = (true, true),
+            Some(n) if n > 0 && self.strip_parked => {
+                (self.strip_focus, self.strip_parked) = (false, false);
+            }
+            _ => {}
+        }
+    }
+
+    /// Fetch the games under the Hosts row once it rests on a host. Lives here, like
+    /// [`Self::collections_handover`]: a screen cannot send while it draws.
+    fn home_shelf(&mut self) {
+        let Some(Screen::Home(home)) = self.stack.last_mut() else {
+            return;
+        };
+        let Some(host) = home.wants_shelf(&self.hosts, self.library_fp.as_deref()) else {
+            return;
+        };
+        let host = host.clone();
+        let epoch = self.library.fetch_epoch();
+        self.library_fp = Some(host.fp_hex.clone());
+        self.bus.send(ConsoleCmd::FetchLibrary {
+            addr: host.addr.clone(),
+            mgmt: host.mgmt_port,
+            fp_hex: host.fp_hex.clone(),
+        });
+        home.set_shelf(crate::screens::library::LibraryScreen::embedded(
+            &host, epoch,
+        ));
     }
 
     /// Swap a library shelf for the collections screen once it holds more
@@ -992,22 +1128,15 @@ impl Shell {
             self.first_pair = Some(key);
             return;
         };
-        self.bus.send(ConsoleCmd::FetchLibrary {
-            addr: row.addr.clone(),
-            mgmt: row.mgmt_port,
-            fp_hex: row.fp_hex.clone(),
-        });
-        let epoch = self.library.fetch_epoch();
-        self.apply_nav(Nav::Push(Box::new(Screen::Library(
-            crate::screens::library::LibraryScreen::new(&row, epoch),
-        ))));
+        let root = self.shelf_root(&row);
+        self.mount(Tab::Games, root);
     }
 
     pub(crate) fn start_connect(&mut self, intent: ConnectIntent) {
         // A game launch comes off a shelf, which knows both the host's management
         // port and where it just drew the tile.
-        let launch = match (&intent.launch, self.stack.last()) {
-            (Some(id), Some(Screen::Library(lib))) => Some((
+        let launch = match (&intent.launch, self.stack.last().and_then(Screen::shelf)) {
+            (Some(id), Some(lib)) => Some((
                 LaunchHost {
                     id: id.clone(),
                     addr: intent.addr.clone(),
@@ -1036,7 +1165,195 @@ impl Shell {
         });
     }
 
+    /// The strip's share of a menu event: L1/R1 from anywhere but a text field, every
+    /// direction while the strip has focus. `None` leaves the event to the screen. Over a
+    /// root with nothing to focus, Down stays on the strip and OK is the screen's.
+    fn tab_menu(&mut self, ev: MenuEvent) -> Option<Option<MenuPulse>> {
+        let editing = self.stack.last().is_some_and(Screen::editing);
+        match ev {
+            MenuEvent::JumpBack if !editing => return Some(self.step_tab(-1)),
+            MenuEvent::JumpForward if !editing => return Some(self.step_tab(1)),
+            _ if !self.strip_focus || self.stack.len() > 1 => return None,
+            _ => {}
+        }
+        self.strip_parked = false;
+        let empty = self.root_targets == Some(0);
+        match ev {
+            MenuEvent::Move(MenuDir::Left) => Some(self.step_tab(-1)),
+            MenuEvent::Move(MenuDir::Right) => Some(self.step_tab(1)),
+            MenuEvent::Move(MenuDir::Down) if empty => Some(Some(MenuPulse::Boundary)),
+            MenuEvent::Confirm if empty => None,
+            MenuEvent::Move(MenuDir::Down) | MenuEvent::Confirm => {
+                self.strip_focus = false;
+                if let Some(s) = self.stack.last_mut() {
+                    s.enter_from_top();
+                }
+                Some(Some(MenuPulse::Move))
+            }
+            MenuEvent::Move(MenuDir::Up) => Some(Some(MenuPulse::Boundary)),
+            // The root's Back: out of the console.
+            MenuEvent::Back => None,
+            _ => Some(None),
+        }
+    }
+
+    /// The next tab `delta` along the strip that has something to show.
+    fn step_tab(&mut self, delta: i32) -> Option<MenuPulse> {
+        let mut i = self.tab.index() as i32;
+        loop {
+            i += delta;
+            let Some(&tab) = usize::try_from(i).ok().and_then(|i| TABS.get(i)) else {
+                return Some(MenuPulse::Boundary);
+            };
+            if self.switch_tab(tab) {
+                return Some(MenuPulse::Move);
+            }
+        }
+    }
+
+    /// Make `to` the active tab. `false` when it has nothing to show.
+    fn switch_tab(&mut self, to: Tab) -> bool {
+        if to == self.tab {
+            return false;
+        }
+        match self.tab_root(to) {
+            Some(root) => {
+                self.mount(to, root);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `root` becomes the stack; the current root parks and a pushed screen is dropped.
+    /// What it can focus is unknown until it paints.
+    fn mount(&mut self, to: Tab, root: Screen) {
+        self.stack.truncate(1);
+        self.parked[self.tab.index()] = self.stack.pop();
+        self.stack.push(root);
+        self.root_targets = None;
+        let from = std::mem::replace(&mut self.tab, to);
+        self.motion = Motion::Tab {
+            spring: Spring::rest(0.0),
+            from,
+        };
+    }
+
+    /// `tab`'s parked root, or a fresh one. Games needs a paired host and follows the one
+    /// focused on Hosts.
+    fn tab_root(&mut self, tab: Tab) -> Option<Screen> {
+        let parked = self.parked[tab.index()].take();
+        match tab {
+            Tab::Hosts => Some(parked.unwrap_or_else(|| Screen::Home(HomeScreen::new()))),
+            Tab::Players => {
+                Some(parked.unwrap_or_else(|| {
+                    Screen::Players(crate::screens::players::PlayersScreen::new())
+                }))
+            }
+            Tab::Settings => Some(parked.unwrap_or_else(|| {
+                Screen::Settings(crate::screens::settings::SettingsScreen::new(&*self.store))
+            })),
+            Tab::Games => {
+                let Some(host) = self.games_host() else {
+                    self.parked[tab.index()] = parked;
+                    return None;
+                };
+                // The shared list is one host's: a root whose host is not the last fetched
+                // would show another host's games.
+                let mine = self.library_fp.as_deref() == Some(host.fp_hex.as_str());
+                match parked {
+                    Some(root) if mine && self.games_key.as_deref() == Some(host.key.as_str()) => {
+                        Some(root)
+                    }
+                    _ => Some(self.shelf_root(&host)),
+                }
+            }
+        }
+    }
+
+    /// The host Games shows: the one focused on Hosts when it is paired, else the first
+    /// paired one.
+    fn games_host(&self) -> Option<HostRow> {
+        let home = self
+            .stack
+            .first()
+            .into_iter()
+            .chain(self.parked[Tab::Hosts.index()].as_ref())
+            .find_map(|s| match s {
+                Screen::Home(h) => Some(h),
+                _ => None,
+            });
+        let usable = |h: &&HostRow| h.paired && h.saved;
+        home.and_then(HomeScreen::focused_key)
+            .and_then(|k| self.hosts.iter().find(|h| h.key == k))
+            .filter(usable)
+            .or_else(|| self.hosts.iter().find(usable))
+            .cloned()
+    }
+
+    /// A fresh shelf for `host`, its fetch sent after the epoch it compares against.
+    fn shelf_root(&mut self, host: &HostRow) -> Screen {
+        let epoch = self.library.fetch_epoch();
+        self.bus.send(ConsoleCmd::FetchLibrary {
+            addr: host.addr.clone(),
+            mgmt: host.mgmt_port,
+            fp_hex: host.fp_hex.clone(),
+        });
+        self.games_key = Some(host.key.clone());
+        self.library_fp = Some(host.fp_hex.clone());
+        Screen::Library(crate::screens::library::LibraryScreen::new(host, epoch))
+    }
+
+    /// OK from a remote, both edges. A press acts on release; held [`HOLD_S`] it opens the
+    /// focused card's menu, as Y does on a pad.
+    pub(crate) fn ok(&mut self, down: bool) -> Option<MenuPulse> {
+        self.last_input = Instant::now();
+        let t = self.t();
+        if down {
+            // A fresh press restarts the hold, so a lost release cannot strand it.
+            self.ok_down = Some((t, false));
+            self.dip();
+            return None;
+        }
+        match self.ok_down.take() {
+            Some((_, false)) => self.menu_event(MenuEvent::Confirm),
+            _ => None,
+        }
+    }
+
+    /// OK went down on what has focus: its plate and the element dip.
+    fn dip(&mut self) {
+        if self.connecting.is_some() || self.launching.is_some() {
+            return;
+        }
+        if self.strip_focus {
+            self.strip.press();
+        } else if let Some(s) = self.stack.last_mut() {
+            s.press();
+        }
+    }
+
+    /// Once a frame: an OK held long enough becomes the hold.
+    fn tick_ok(&mut self) {
+        if let Some((t0, false)) = self.ok_down {
+            if self.t() - t0 >= HOLD_S {
+                self.ok_down = Some((t0, true));
+                self.handle_menu(MenuEvent::Secondary);
+            }
+        }
+    }
+
+    /// A menu event from a pad, the keys, or a clicked hint.
     pub(crate) fn handle_menu(&mut self, ev: MenuEvent) -> Option<MenuPulse> {
+        // A pad's A dips what it acts on; a remote's OK dipped on its way down.
+        if ev == MenuEvent::Confirm {
+            self.dip();
+        }
+        self.menu_event(ev)
+    }
+
+    /// [`Self::handle_menu`] without the Confirm dip.
+    fn menu_event(&mut self, ev: MenuEvent) -> Option<MenuPulse> {
         self.last_input = Instant::now();
         self.sync();
         // The launch hold owns the buttons while it is up: before the dial lands B
@@ -1114,6 +1431,9 @@ impl Shell {
                 return None;
             }
         }
+        if let Some(pulse) = self.tab_menu(ev) {
+            return pulse;
+        }
 
         let mut fx = Outbox::default();
         let pulse = {
@@ -1137,7 +1457,17 @@ impl Shell {
                 .expect("non-empty stack")
                 .menu(ev, &mut ctx, &mut fx)
         };
+        // Up that a root screen bumps or leaves unanswered lands on its tab.
+        let to_strip = self.stack.len() == 1
+            && ev == MenuEvent::Move(MenuDir::Up)
+            && matches!(pulse, Some(MenuPulse::Boundary) | None)
+            && fx.nav.is_none()
+            && !self.stack[0].editing();
         self.apply(fx);
+        if to_strip {
+            self.strip_focus = true;
+            return Some(MenuPulse::Move);
+        }
         pulse
     }
 
@@ -1209,11 +1539,6 @@ impl Shell {
                     crate::glyphs::HintKey::Back => Some(MenuEvent::Back),
                     crate::glyphs::HintKey::Secondary => Some(MenuEvent::Secondary),
                     crate::glyphs::HintKey::Tertiary => Some(MenuEvent::Tertiary),
-                    // Home carousel: Up is "open this tile's menu", not nav.
-                    // Without this the host-link copy path is pad-only.
-                    crate::glyphs::HintKey::Up => Some(MenuEvent::Move(MenuDir::Up)),
-                    // Home carousel: Down is "open Settings", not nav.
-                    crate::glyphs::HintKey::Down => Some(MenuEvent::Move(MenuDir::Down)),
                     _ => None,
                 };
                 if let Some(ev) = ev {
@@ -1222,7 +1547,31 @@ impl Shell {
                 return true;
             }
         }
-        self.screen_pointer(p)
+        if let Some(tab) = self.pill_at(p) {
+            if p.press() {
+                self.strip_focus = false;
+                self.switch_tab(tab);
+            }
+            return true;
+        }
+        if !p.press() {
+            return self.screen_pointer(p);
+        }
+        self.strip_focus = false;
+        let depth = self.stack.len();
+        let used = self.screen_pointer(p);
+        // A tap dips what it landed on, unless it opened a screen over it.
+        if self.stack.len() == depth && matches!(self.motion, Motion::None) {
+            self.dip();
+        }
+        used
+    }
+
+    /// The strip pill under `p`, when the strip is up.
+    fn pill_at(&self, p: Pointer) -> Option<Tab> {
+        let id = self.strip.hit(p.x as f32, p.y as f32)?;
+        (self.stack.len() == 1).then_some(())?;
+        TABS.into_iter().find(|t| render::pill_id(*t) == id)
     }
 
     /// The top screen's turn at a pointer already in safe-area space.
@@ -1375,6 +1724,9 @@ impl Shell {
 
     fn apply(&mut self, fx: Outbox) {
         for cmd in fx.cmds {
+            if let ConsoleCmd::FetchLibrary { fp_hex, .. } = &cmd {
+                self.library_fp = Some(fp_hex.clone());
+            }
             // Gate wake in this call, like `connecting`. First WakeStatus is
             // ~100 ms–1 s away; without a placeholder the cursor keeps moving
             // and a fast wake never shows "Waking…". `sync` supersedes it.
@@ -1399,11 +1751,8 @@ impl Shell {
             // before the connect blocks, and seeding it on the side that clears it is what
             // makes a dismissed test's late report a no-op (`ConsoleShared::advance_speed`).
             if let ConsoleCmd::SpeedTest { key, host_name, .. } = &cmd {
-                self.console.set_speed(Some(SpeedStatus {
-                    key: key.clone(),
-                    name: host_name.clone(),
-                    phase: SpeedPhase::Connecting,
-                }));
+                let status = SpeedStatus::new(key.clone(), host_name.clone());
+                self.console.set_speed(Some(status));
                 self.speed = self.console.speed();
             }
             self.bus.send(cmd);
@@ -1417,8 +1766,21 @@ impl Shell {
         if let Some(intent) = fx.connect {
             self.start_connect(intent);
         }
+        if let Some(tab) = fx.tab {
+            self.switch_tab(tab);
+        }
         if let Some(nav) = fx.nav {
             self.apply_nav(nav);
+        }
+        if fx.browse {
+            let hosts = &self.hosts;
+            let below = match self.stack.first_mut() {
+                Some(Screen::Home(home)) => home.browse(hosts),
+                _ => false,
+            };
+            if !below {
+                self.switch_tab(Tab::Games);
+            }
         }
     }
 
@@ -1495,7 +1857,7 @@ impl Shell {
     fn nav_pos(&self) -> f64 {
         match &self.motion {
             Motion::None => 1.0,
-            Motion::Nav { spring, .. } => spring.pos,
+            Motion::Nav { spring, .. } | Motion::Tab { spring, .. } => spring.pos,
         }
     }
 
@@ -1547,6 +1909,11 @@ impl Shell {
                 // only way out of Nav.
                 (spring.pos != *target || spring.vel != 0.0).then_some(spring.pos)
             }
+            Motion::Tab { spring, .. } => {
+                spring.step_spec(1.0, spec, dt);
+                spring.settle(1.0, 0.001, 0.01);
+                (spring.pos != 1.0 || spring.vel != 0.0).then_some(spring.pos)
+            }
         };
         if p.is_none() {
             self.finish_nav();
@@ -1591,9 +1958,12 @@ impl Shell {
     /// The field as a paint for an `w`×`h` target — `u_res` is the TARGET's pixels,
     /// the shader's `xy/u_res` normalises everything, so the reduced pass's small
     /// offscreen renders the same picture the full surface would.
-    fn aurora_paint(&self, w: f64, h: f64, t: f64, calm: f64) -> Option<Paint> {
-        // Matches the SkSL block: u_res, u_tc, u_lift, u_scrim (each float2/4).
-        let uniforms: [f32; 12] = [
+    /// `passes` is the shader's work per pixel: 2 hits the displaced surface, 1 the plain
+    /// sphere — the reduced path's saving on a TV, where the offscreen hides the difference.
+    fn aurora_paint(&self, w: f64, h: f64, t: f64, calm: f64, passes: f32) -> Option<Paint> {
+        // Matches the SkSL block: u_res, u_tc, u_lift, u_scrim, u_cam (each float2/4).
+        let (focal, scale) = field_camera(w / h.max(1.0));
+        let uniforms: [f32; 16] = [
             w as f32,
             h as f32,
             t as f32,
@@ -1606,6 +1976,10 @@ impl Shell {
             self.mesh_scrim[1],
             self.mesh_scrim[2],
             self.mesh_scrim[3],
+            focal as f32,
+            scale as f32,
+            passes,
+            0.0,
         ];
         let words = uniforms.map(f32::to_ne_bytes);
         let bytes = words.as_flattened();
@@ -1627,29 +2001,21 @@ impl Shell {
             self.fallback_ui,
         );
         let mut cache = self.field.borrow_mut();
-        if !reduced {
-            // Hand the offscreen back while the full-rate path runs — it is dead weight
-            // under the resource cache until the switch comes back on.
-            cache.take();
-            match self.aurora_paint(w, h, t, calm) {
-                Some(paint) => {
-                    canvas.draw_rect(Rect::from_wh(w as f32, h as f32), &paint);
-                }
-                None => {
-                    canvas.clear(Color4f::new(0.0, 0.0, 0.0, 1.0));
-                }
-            }
-            return;
-        }
-        self.draw_field_reduced(canvas, &mut cache, w, h, t, calm);
+        // The reduced interface takes a smaller buffer and one pass over the sphere.
+        let (edge, passes) = if reduced {
+            (FIELD_EDGE_REDUCED, 1.0)
+        } else {
+            (FIELD_EDGE, 2.0)
+        };
+        self.draw_field(canvas, &mut cache, w, h, t, calm, edge, passes);
     }
 
-    /// The reduced-interface pass: the field into a ≤[`FIELD_EDGE`]-px offscreen, blitted
-    /// up with bilinear sampling. Re-rendered only when an input moved — size, palette,
-    /// calm, or the clock past [`FIELD_STEP`]. The takeover's `calm = 0` and the base
-    /// field's share one slot: when both differ each gets a small re-render a frame,
-    /// still a fraction of the full-surface cost.
-    fn draw_field_reduced(
+    /// The field into a ≤`edge`-px offscreen, blitted up with bilinear sampling.
+    /// Re-rendered only when an input moved — size, palette, calm, or the clock past
+    /// [`FIELD_STEP`]. The takeover's `calm = 0` and the base field's share one slot: when
+    /// both differ each gets a small re-render a frame, still a fraction of a surface pass.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_field(
         &self,
         canvas: &Canvas,
         cache: &mut Option<FieldCache>,
@@ -1657,8 +2023,10 @@ impl Shell {
         h: f64,
         t: f64,
         calm: f64,
+        edge: f64,
+        passes: f32,
     ) {
-        let scale = (FIELD_EDGE / w.max(h)).min(1.0);
+        let scale = (edge / w.max(h)).min(1.0);
         let size = ((w * scale).ceil() as i32, (h * scale).ceil() as i32);
         // `t < c.t` is the test clock rewinding, not a direction the field moves.
         let stale = cache.as_ref().is_none_or(|c| {
@@ -1672,7 +2040,9 @@ impl Shell {
         if stale {
             if let Some(mut surface) = field_surface(canvas, size) {
                 // u_res is the offscreen's own pixels — `aurora_paint` is resolution-free.
-                if let Some(paint) = self.aurora_paint(size.0 as f64, size.1 as f64, t, calm) {
+                if let Some(paint) =
+                    self.aurora_paint(size.0 as f64, size.1 as f64, t, calm, passes)
+                {
                     surface
                         .canvas()
                         .draw_rect(Rect::from_wh(size.0 as f32, size.1 as f32), &paint);
@@ -1686,9 +2056,9 @@ impl Shell {
                 }
                 // A rejected shader keeps whatever the cache held: a stale field beats black.
             } else {
-                // No offscreen (context teardown): the full-rate draw is the fallback,
-                // never a black frame — the same stance the unreduced path takes.
-                match self.aurora_paint(w, h, t, calm) {
+                // No offscreen (context teardown): a full-surface draw is the fallback,
+                // never a black frame.
+                match self.aurora_paint(w, h, t, calm, passes) {
                     Some(paint) => {
                         canvas.draw_rect(Rect::from_wh(w as f32, h as f32), &paint);
                     }
@@ -1735,39 +2105,11 @@ struct FieldCache {
     mesh: (String, Option<u64>),
 }
 
-/// The reduced backdrop's offscreen: a GPU render target on `canvas`'s own context
-/// where one exists, a raster surface where none does (tests, a software host) — the
-/// cheap pass still applies there.
-#[cfg(any(feature = "gl", feature = "vulkan-overlay"))]
+/// The reduced backdrop's offscreen, on `canvas`'s own backend ([`crate::blur::offscreen`]).
+/// A raster offscreen under a GPU canvas runs the field's SkSL on the CPU, several frames'
+/// worth on a TV.
 fn field_surface(canvas: &Canvas, size: (i32, i32)) -> Option<Surface> {
-    use skia_safe::gpu;
-    let info = skia_safe::ImageInfo::new_n32_premul(size, None);
-    canvas
-        .recording_context()
-        .and_then(|mut rc| {
-            gpu::surfaces::render_target(
-                &mut rc,
-                gpu::Budgeted::Yes,
-                &info,
-                None,
-                gpu::SurfaceOrigin::TopLeft,
-                None,
-                false,
-                None,
-            )
-        })
-        .or_else(|| skia_safe::surfaces::raster(&info, None, None))
-}
-
-/// The reduced backdrop's offscreen where the build has no GPU backend: a raster
-/// surface — same pass, just CPU-painted.
-#[cfg(not(any(feature = "gl", feature = "vulkan-overlay")))]
-fn field_surface(_canvas: &Canvas, size: (i32, i32)) -> Option<Surface> {
-    skia_safe::surfaces::raster(
-        &skia_safe::ImageInfo::new_n32_premul(size, None),
-        None,
-        None,
-    )
+    crate::blur::offscreen(canvas, size.0, size.1)
 }
 
 /// Compile the mesh for a palette and the lift, scrim, and ink it decides.
@@ -1777,7 +2119,11 @@ type MeshLook = (RuntimeEffect, [f32; 3], [f32; 4], crate::theme::Ink);
 
 fn build_mesh(palette_id: &str) -> Result<MeshLook> {
     let p = palette(palette_id);
-    compile_mesh(&p.mesh_colors(), crate::theme::Ink::of(p), p.ground)
+    compile_mesh(
+        p.stops.unwrap_or(&VIOLET_FIELD),
+        crate::theme::Ink::of(p),
+        p.ground,
+    )
 }
 
 /// Follow-system field: a quiet ramp from the theme's own colours, not the
@@ -1785,42 +2131,26 @@ fn build_mesh(palette_id: &str) -> Result<MeshLook> {
 fn build_mesh_os(t: &crate::os_theme::OsTheme) -> Result<MeshLook> {
     use crate::os_theme::mix;
     let (bg, fg, ac) = (t.background, t.foreground, t.accent);
-    let stops: [(f64, f64, f64); 5] = if t.light {
-        // Pale field shades toward its text colour, not black: darkening a
-        // pastel strands dark ink on it (see `theme::Ink` scrim).
-        [
-            mix(bg, fg, 0.10),
-            bg,
-            bg,
-            mix(bg, ac, 0.08),
-            mix(bg, ac, 0.18),
-        ]
+    // A pale field shades toward its text colour, not black: darkening a pastel strands
+    // dark ink on it (see `theme::Ink` scrim).
+    let stops = if t.light {
+        [mix(bg, fg, 0.10), mix(bg, ac, 0.18), bg]
     } else {
-        [
-            mix(bg, (0.0, 0.0, 0.0), 0.35),
-            bg,
-            bg,
-            mix(bg, ac, 0.12),
-            mix(bg, ac, 0.30),
-        ]
+        [mix(bg, (0.0, 0.0, 0.0), 0.35), mix(bg, ac, 0.30), bg]
     };
-    compile_mesh(
-        &crate::library::mesh_colors_of(&stops),
-        crate::theme::Ink::of_os(t),
-        bg,
-    )
+    compile_mesh(&stops, crate::theme::Ink::of_os(t), bg)
 }
 
 fn compile_mesh(
-    colors: &[(f64, f64, f64); 16],
+    stops: &[(f64, f64, f64)],
     ink: crate::theme::Ink,
     ground: (f64, f64, f64),
 ) -> Result<MeshLook> {
-    let effect = RuntimeEffect::make_for_shader(mesh_sksl(colors), None)
-        .map_err(|e| anyhow!("mesh-gradient SkSL: {e}"))?;
+    let effect = RuntimeEffect::make_for_shader(field_sksl(ground, stops), None)
+        .map_err(|e| anyhow!("backdrop SkSL: {e}"))?;
     anyhow::ensure!(
-        effect.uniform_size() == 48,
-        "mesh uniform block is {} bytes, expected 48 (u_res, u_tc, u_lift, u_scrim)",
+        effect.uniform_size() == 64,
+        "mesh uniform block is {} bytes, expected 64 (u_res, u_tc, u_lift, u_scrim, u_cam)",
         effect.uniform_size()
     );
     let g = ground;

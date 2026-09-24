@@ -61,6 +61,25 @@ final class ConsoleJSONTests: XCTestCase {
         XCTAssertEqual(row["can_wake"] as? Bool, true)
     }
 
+    /// The pads push in `bridge::PadsJson`'s shape: the legend names the active pad, battery
+    /// is a percentage or null.
+    func testPadsCarryTheCardsFields() throws {
+        let pad = ConsoleJSON.Pad(
+            name: "DualSense", key: "DualSense|Gamepad", pref: 2, detail: "Gamepad",
+            forwarded: true, rumble: true, battery: 0.42, charging: false)
+        var wired = pad
+        wired.key = "Xbox|Gamepad"
+        wired.battery = nil
+        let data = try XCTUnwrap(ConsoleJSON.pads([pad, wired], active: pad).data(using: .utf8))
+        let doc = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(doc["label"] as? String, "DualSense")
+        XCTAssertEqual(doc["pref"] as? Int, 2)
+        let pads = try XCTUnwrap(doc["pads"] as? [[String: Any]])
+        XCTAssertEqual(pads.first?["key"] as? String, "DualSense|Gamepad")
+        XCTAssertEqual((pads.first?["battery"] as? [String: Any])?["percent"] as? Int, 42)
+        XCTAssertTrue(pads.last?["battery"] is NSNull)
+    }
+
     func testKnownHostsCarryWhatALinkNeeds() throws {
         let saved = host(name: "Desk")
         let data = try XCTUnwrap(ConsoleJSON.knownHosts([saved]).data(using: .utf8))

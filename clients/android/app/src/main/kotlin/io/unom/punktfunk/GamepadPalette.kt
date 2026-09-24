@@ -128,79 +128,40 @@ class GamepadPalette(
         )
 
         /**
-         * The thirteen shipped palettes: the brand default, six more dark fields, then six pale
-         * ones. Cycling order runs dark → light, so stepping the row walks the range one way.
+         * The 36 shipped palettes: the brand default, 19 more dark fields, then 16 pale
+         * ones. Cycling order runs dark → light, so a walk of the table goes one way.
          */
         val ALL = listOf(
             // --- dark fields (white ink) ---
             GamepadPalette(
+                // The brand default: a bright periwinkle field with lavender pools, still white ink.
                 "violet", "Violet", emptyList(),
-                ground = Triple(0.075, 0.060, 0.160),
+                ground = Triple(0.510, 0.470, 0.960),
                 accent = Triple(0.525, 0.471, 0.961), light = false,
             ),
             GamepadPalette(
-                // For OLED and AMOLED panels, where a black pixel is a pixel switched off — no
-                // glow, no power. The first two stops are literally (0,0,0), so the shaded half
-                // of the field is genuinely off rather than "very dark grey", and the ground is
-                // pure black too: the calm mix on the form screens lifts toward nothing. What is
-                // left is a faint indigo→violet ember in the bright corner. The accent stays the
-                // brand violet — focus has to be findable on black.
-                // Named for the look, not the panel technology — black with a thin violet corona
-                // belongs beside Nebula and Abyss. ⚠ The ID stays "oled": it is the stored
-                // `ui_palette` value and the cross-client key, so renaming it would orphan saved
-                // choices and desync the clients.
+                // First two stops are (0,0,0): OLED pixels off, not dark grey. Ground is black so
+                // the calm mix lifts to nothing. The id stays "oled": it is the stored `ui_palette`
+                // value and the cross-client key, so renaming it would orphan saved choices.
                 "oled", "Eclipse",
                 listOf(
-                    Triple(0.000, 0.000, 0.000), Triple(0.000, 0.000, 0.000),
-                    Triple(0.010, 0.020, 0.100), Triple(0.045, 0.016, 0.115),
-                    Triple(0.120, 0.024, 0.130),
+                    Triple(0.00, 0.00, 0.00), Triple(0.00, 0.00, 0.00), Triple(0.01, 0.02, 0.10),
+                    Triple(0.045, 0.016, 0.115), Triple(0.12, 0.024, 0.13),
                 ),
-                ground = Triple(0.0, 0.0, 0.0),
+                ground = Triple(0.000, 0.000, 0.000),
                 accent = Triple(0.525, 0.471, 0.961), light = false,
             ),
             GamepadPalette(
-                // Deep indigo climbing through violet into a hot magenta.
-                "nebula", "Nebula",
+                // Nothing at all: every pixel off. The accent is the only colour on it.
+                "void", "Void",
                 listOf(
-                    Triple(0.07, 0.05, 0.20), Triple(0.26, 0.14, 0.54), Triple(0.52, 0.20, 0.72),
-                    Triple(0.82, 0.26, 0.62), Triple(0.98, 0.46, 0.68),
+                    Triple(0.00, 0.00, 0.00), Triple(0.00, 0.00, 0.00), Triple(0.00, 0.00, 0.00),
+                    Triple(0.00, 0.00, 0.00), Triple(0.00, 0.00, 0.00),
                 ),
-                ground = Triple(0.055, 0.040, 0.135),
-                accent = Triple(0.95, 0.42, 0.72), light = false,
+                ground = Triple(0.000, 0.000, 0.000),
+                accent = Triple(0.525, 0.471, 0.961), light = false,
             ),
             GamepadPalette(
-                // Ink-blue water: teal → cerulean → a violet undertow.
-                "abyss", "Abyss",
-                listOf(
-                    Triple(0.02, 0.10, 0.17), Triple(0.04, 0.28, 0.42), Triple(0.07, 0.46, 0.63),
-                    Triple(0.16, 0.38, 0.78), Triple(0.26, 0.22, 0.58),
-                ),
-                ground = Triple(0.018, 0.070, 0.130),
-                accent = Triple(0.26, 0.76, 0.92), light = false,
-            ),
-            GamepadPalette(
-                // Banked coals: plum embers → crimson → burnt orange → gold.
-                "ember", "Ember",
-                listOf(
-                    Triple(0.16, 0.03, 0.10), Triple(0.45, 0.06, 0.12), Triple(0.72, 0.18, 0.06),
-                    Triple(0.90, 0.42, 0.08), Triple(0.95, 0.68, 0.18),
-                ),
-                ground = Triple(0.090, 0.035, 0.040),
-                accent = Triple(0.98, 0.62, 0.26), light = false,
-            ),
-            GamepadPalette(
-                // Forest floor into moss and a lime break.
-                "moss", "Moss",
-                listOf(
-                    Triple(0.03, 0.11, 0.09), Triple(0.06, 0.27, 0.20), Triple(0.09, 0.45, 0.31),
-                    Triple(0.28, 0.61, 0.28), Triple(0.58, 0.77, 0.31),
-                ),
-                ground = Triple(0.025, 0.085, 0.070),
-                accent = Triple(0.48, 0.86, 0.46), light = false,
-            ),
-            GamepadPalette(
-                // Neutral, but never flat: barely-there saturation that still travels from a cool
-                // charcoal to a warm stone.
                 "graphite", "Graphite",
                 listOf(
                     Triple(0.06, 0.07, 0.11), Triple(0.15, 0.18, 0.25), Triple(0.30, 0.31, 0.35),
@@ -209,66 +170,326 @@ class GamepadPalette(
                 ground = Triple(0.055, 0.055, 0.070),
                 accent = Triple(0.78, 0.80, 0.86), light = false,
             ),
+            GamepadPalette(
+                // Cool neutral: blue-grey warming to stone at the top.
+                "slate", "Slate",
+                listOf(
+                    Triple(0.06, 0.08, 0.11), Triple(0.14, 0.18, 0.24), Triple(0.24, 0.30, 0.38),
+                    Triple(0.40, 0.44, 0.48), Triple(0.60, 0.58, 0.52),
+                ),
+                ground = Triple(0.060, 0.080, 0.110),
+                accent = Triple(0.60, 0.80, 1.00), light = false,
+            ),
+            GamepadPalette(
+                // Indigo shadow, cobalt body, a teal break.
+                "midnight", "Midnight",
+                listOf(
+                    Triple(0.05, 0.02, 0.16), Triple(0.05, 0.11, 0.36), Triple(0.08, 0.24, 0.60),
+                    Triple(0.14, 0.42, 0.80), Triple(0.36, 0.76, 0.86),
+                ),
+                ground = Triple(0.030, 0.050, 0.160),
+                accent = Triple(0.40, 0.72, 1.00), light = false,
+            ),
+            GamepadPalette(
+                // Ultraviolet into an electric blue and cyan.
+                "electric", "Electric",
+                listOf(
+                    Triple(0.02, 0.00, 0.10), Triple(0.14, 0.02, 0.50), Triple(0.30, 0.10, 0.95),
+                    Triple(0.10, 0.45, 1.00), Triple(0.20, 0.90, 1.00),
+                ),
+                ground = Triple(0.020, 0.000, 0.100),
+                accent = Triple(0.45, 0.85, 1.00), light = false,
+            ),
+            GamepadPalette(
+                // Deep water rising through teal to foam.
+                "ocean", "Ocean",
+                listOf(
+                    Triple(0.01, 0.05, 0.14), Triple(0.02, 0.18, 0.40), Triple(0.02, 0.40, 0.62),
+                    Triple(0.05, 0.66, 0.72), Triple(0.55, 0.92, 0.80),
+                ),
+                ground = Triple(0.010, 0.050, 0.140),
+                accent = Triple(0.45, 0.95, 0.90), light = false,
+            ),
+            GamepadPalette(
+                // Deep teal into green, then a violet curtain.
+                "aurora", "Aurora",
+                listOf(
+                    Triple(0.02, 0.07, 0.11), Triple(0.03, 0.24, 0.28), Triple(0.05, 0.46, 0.40),
+                    Triple(0.14, 0.60, 0.72), Triple(0.44, 0.42, 0.86),
+                ),
+                ground = Triple(0.020, 0.070, 0.110),
+                accent = Triple(0.36, 0.90, 0.78), light = false,
+            ),
+            GamepadPalette(
+                // Deep water into jade and a leaf-green lift.
+                "jade", "Jade",
+                listOf(
+                    Triple(0.02, 0.07, 0.10), Triple(0.03, 0.22, 0.19), Triple(0.05, 0.40, 0.34),
+                    Triple(0.16, 0.58, 0.46), Triple(0.60, 0.84, 0.52),
+                ),
+                ground = Triple(0.020, 0.070, 0.100),
+                accent = Triple(0.52, 0.90, 0.62), light = false,
+            ),
+            GamepadPalette(
+                // Saturated green, forest floor to lime.
+                "emerald", "Emerald",
+                listOf(
+                    Triple(0.01, 0.07, 0.04), Triple(0.02, 0.26, 0.12), Triple(0.04, 0.50, 0.22),
+                    Triple(0.16, 0.74, 0.34), Triple(0.60, 0.92, 0.40),
+                ),
+                ground = Triple(0.010, 0.070, 0.040),
+                accent = Triple(0.55, 1.00, 0.55), light = false,
+            ),
+            GamepadPalette(
+                // Plum shadow, crimson body, a coral edge.
+                "crimson", "Crimson",
+                listOf(
+                    Triple(0.10, 0.02, 0.10), Triple(0.34, 0.03, 0.12), Triple(0.62, 0.06, 0.20),
+                    Triple(0.86, 0.20, 0.28), Triple(0.98, 0.52, 0.32),
+                ),
+                ground = Triple(0.080, 0.020, 0.060),
+                accent = Triple(1.00, 0.42, 0.42), light = false,
+            ),
+            GamepadPalette(
+                // Violet shadow under a hot pink-red.
+                "ruby", "Ruby",
+                listOf(
+                    Triple(0.06, 0.00, 0.20), Triple(0.40, 0.02, 0.16), Triple(0.80, 0.06, 0.30),
+                    Triple(1.00, 0.28, 0.48), Triple(1.00, 0.62, 0.56),
+                ),
+                ground = Triple(0.080, 0.000, 0.060),
+                accent = Triple(1.00, 0.50, 0.62), light = false,
+            ),
+            GamepadPalette(
+                // Black rock, red heat, a yellow glow.
+                "lava", "Lava",
+                listOf(
+                    Triple(0.06, 0.01, 0.02), Triple(0.42, 0.02, 0.04), Triple(0.86, 0.12, 0.02),
+                    Triple(1.00, 0.45, 0.02), Triple(1.00, 0.85, 0.20),
+                ),
+                ground = Triple(0.060, 0.010, 0.020),
+                accent = Triple(1.00, 0.72, 0.20), light = false,
+            ),
+            GamepadPalette(
+                // Bronze shadow under copper, a verdigris lift.
+                "copper", "Copper",
+                listOf(
+                    Triple(0.08, 0.05, 0.04), Triple(0.36, 0.15, 0.08), Triple(0.66, 0.32, 0.14),
+                    Triple(0.85, 0.56, 0.26), Triple(0.50, 0.78, 0.62),
+                ),
+                ground = Triple(0.070, 0.050, 0.040),
+                accent = Triple(1.00, 0.70, 0.36), light = false,
+            ),
+            GamepadPalette(
+                // Wine shadow into amber and gold.
+                "amber", "Amber",
+                listOf(
+                    Triple(0.10, 0.02, 0.10), Triple(0.36, 0.16, 0.02), Triple(0.66, 0.36, 0.04),
+                    Triple(0.88, 0.58, 0.08), Triple(0.92, 0.86, 0.36),
+                ),
+                ground = Triple(0.100, 0.040, 0.020),
+                accent = Triple(1.00, 0.80, 0.30), light = false,
+            ),
+            GamepadPalette(
+                // Indigo through mauve to a peach horizon.
+                "dusk", "Dusk",
+                listOf(
+                    Triple(0.08, 0.04, 0.14), Triple(0.26, 0.10, 0.34), Triple(0.50, 0.20, 0.48),
+                    Triple(0.78, 0.38, 0.50), Triple(0.96, 0.62, 0.48),
+                ),
+                ground = Triple(0.070, 0.040, 0.120),
+                accent = Triple(1.00, 0.62, 0.56), light = false,
+            ),
+            GamepadPalette(
+                // Purple climbing to orchid and pink.
+                "grape", "Grape",
+                listOf(
+                    Triple(0.08, 0.02, 0.16), Triple(0.28, 0.06, 0.48), Triple(0.52, 0.14, 0.78),
+                    Triple(0.78, 0.30, 0.92), Triple(1.00, 0.55, 0.80),
+                ),
+                ground = Triple(0.080, 0.020, 0.160),
+                accent = Triple(0.85, 0.55, 1.00), light = false,
+            ),
+            GamepadPalette(
+                // Magenta, electric blue and a lime flash on black.
+                "neon", "Neon",
+                listOf(
+                    Triple(0.05, 0.00, 0.12), Triple(0.40, 0.00, 0.60), Triple(0.90, 0.05, 0.55),
+                    Triple(0.15, 0.35, 0.95), Triple(0.30, 0.95, 0.55),
+                ),
+                ground = Triple(0.050, 0.000, 0.120),
+                accent = Triple(0.40, 1.00, 0.70), light = false,
+            ),
+            GamepadPalette(
+                // Teal shade, orange sun, a pink bloom.
+                "tropic", "Tropic",
+                listOf(
+                    Triple(0.02, 0.10, 0.12), Triple(0.02, 0.42, 0.42), Triple(0.95, 0.45, 0.10),
+                    Triple(0.98, 0.20, 0.45), Triple(0.40, 0.10, 0.55),
+                ),
+                ground = Triple(0.020, 0.080, 0.100),
+                accent = Triple(1.00, 0.60, 0.30), light = false,
+            ),
             // --- pale fields (dark ink) ---
             GamepadPalette(
-                // The holographic foil: rose → lilac → periwinkle → aqua, with a white bloom.
-                "holo", "Holo",
+                // Near-white: warm cream, cool blue and a rose tint in turn.
+                "paper", "Paper",
                 listOf(
-                    Triple(0.99, 0.72, 0.90), Triple(0.80, 0.60, 0.98), Triple(0.58, 0.62, 0.99),
-                    Triple(0.55, 0.86, 0.98), Triple(0.94, 0.98, 1.00),
+                    Triple(0.99, 0.95, 0.88), Triple(0.91, 0.94, 0.98), Triple(0.98, 0.91, 0.94),
+                    Triple(0.99, 0.97, 0.89), Triple(0.90, 0.94, 0.99),
                 ),
-                ground = Triple(0.96, 0.92, 0.99),
-                accent = Triple(0.42, 0.28, 0.86), light = true,
+                ground = Triple(0.970, 0.960, 0.940),
+                accent = Triple(0.42, 0.30, 0.28), light = true,
             ),
             GamepadPalette(
-                // The poster sunset: periwinkle → magenta → scarlet → tangerine → gold.
-                "sunset", "Sunset",
+                // Pale blue through periwinkle to a mint edge.
+                "sky", "Sky",
                 listOf(
-                    Triple(0.55, 0.45, 0.92), Triple(0.86, 0.31, 0.66), Triple(0.97, 0.26, 0.34),
-                    Triple(0.99, 0.51, 0.18), Triple(1.00, 0.80, 0.22),
+                    Triple(0.76, 0.87, 1.00), Triple(0.62, 0.78, 0.99), Triple(0.72, 0.76, 0.99),
+                    Triple(0.84, 0.82, 1.00), Triple(0.86, 0.98, 0.96),
                 ),
-                ground = Triple(0.98, 0.74, 0.34),
-                accent = Triple(0.64, 0.13, 0.44), light = true,
+                ground = Triple(0.920, 0.950, 1.000),
+                accent = Triple(0.12, 0.30, 0.62), light = true,
             ),
             GamepadPalette(
-                // Peach into blush and lilac — the softest of the set.
-                "bloom", "Bloom",
+                // Saturated sky blue cooling into violet.
+                "glacier", "Glacier",
                 listOf(
-                    Triple(1.00, 0.86, 0.72), Triple(0.99, 0.73, 0.79), Triple(0.95, 0.65, 0.89),
-                    Triple(0.82, 0.68, 0.96), Triple(0.73, 0.79, 0.99),
+                    Triple(0.45, 0.70, 1.00), Triple(0.60, 0.80, 1.00), Triple(0.75, 0.85, 1.00),
+                    Triple(0.85, 0.80, 1.00), Triple(0.95, 0.85, 1.00),
                 ),
-                ground = Triple(0.99, 0.90, 0.89),
-                accent = Triple(0.72, 0.24, 0.55), light = true,
+                ground = Triple(0.780, 0.880, 1.000),
+                accent = Triple(0.10, 0.20, 0.55), light = true,
             ),
             GamepadPalette(
-                // First light: pale gold → coral → lilac.
-                "dawn", "Dawn",
+                // Lavender and periwinkle, warming to a pink bloom.
+                "lilac", "Lilac",
                 listOf(
-                    Triple(1.00, 0.92, 0.70), Triple(1.00, 0.80, 0.62), Triple(0.99, 0.66, 0.62),
-                    Triple(0.90, 0.62, 0.78), Triple(0.77, 0.69, 0.95),
+                    Triple(0.84, 0.76, 0.99), Triple(0.74, 0.70, 0.99), Triple(0.88, 0.74, 0.98),
+                    Triple(0.98, 0.82, 0.94), Triple(0.96, 0.94, 1.00),
                 ),
-                ground = Triple(1.00, 0.93, 0.82),
-                accent = Triple(0.82, 0.33, 0.28), light = true,
+                ground = Triple(0.950, 0.920, 0.990),
+                accent = Triple(0.44, 0.24, 0.66), light = true,
             ),
             GamepadPalette(
-                // Sea glass: mint → aqua → a pale sky.
-                "mint", "Mint",
+                // Vivid purple and periwinkle, a pink edge.
+                "iris", "Iris",
                 listOf(
-                    Triple(0.82, 0.98, 0.90), Triple(0.62, 0.94, 0.88), Triple(0.55, 0.88, 0.95),
-                    Triple(0.63, 0.82, 0.99), Triple(0.82, 0.87, 1.00),
+                    Triple(0.60, 0.35, 0.95), Triple(0.55, 0.50, 1.00), Triple(0.65, 0.65, 1.00),
+                    Triple(0.85, 0.60, 0.98), Triple(1.00, 0.70, 0.90),
                 ),
-                ground = Triple(0.90, 0.98, 0.96),
-                accent = Triple(0.04, 0.42, 0.40), light = true,
+                ground = Triple(0.800, 0.720, 1.000),
+                accent = Triple(0.25, 0.05, 0.55), light = true,
             ),
             GamepadPalette(
-                // Near-white, but iridescent rather than flat — rose, sky, mint and cream in turn.
-                "opal", "Opal",
+                // Hot pink cooling into a baby blue.
+                "bubblegum", "Bubblegum",
                 listOf(
-                    Triple(0.98, 0.92, 0.96), Triple(0.87, 0.93, 0.99), Triple(0.91, 0.99, 0.95),
-                    Triple(0.99, 0.96, 0.88), Triple(0.94, 0.90, 0.99),
+                    Triple(1.00, 0.50, 0.80), Triple(1.00, 0.62, 0.85), Triple(0.92, 0.70, 0.95),
+                    Triple(0.70, 0.75, 1.00), Triple(0.60, 0.85, 1.00),
                 ),
-                ground = Triple(0.97, 0.96, 0.99),
-                accent = Triple(0.36, 0.32, 0.44), light = true,
+                ground = Triple(1.000, 0.780, 0.900),
+                accent = Triple(0.55, 0.05, 0.35), light = true,
+            ),
+            GamepadPalette(
+                // Pink into coral, fading to a warm cream.
+                "coral", "Coral",
+                listOf(
+                    Triple(1.00, 0.58, 0.62), Triple(1.00, 0.68, 0.56), Triple(1.00, 0.80, 0.64),
+                    Triple(0.99, 0.88, 0.72), Triple(1.00, 0.96, 0.80),
+                ),
+                ground = Triple(1.000, 0.900, 0.800),
+                accent = Triple(0.68, 0.14, 0.22), light = true,
+            ),
+            GamepadPalette(
+                // Hot pink into orange, fully saturated.
+                "flamingo", "Flamingo",
+                listOf(
+                    Triple(1.00, 0.30, 0.60), Triple(1.00, 0.42, 0.55), Triple(1.00, 0.55, 0.45),
+                    Triple(1.00, 0.70, 0.45), Triple(1.00, 0.85, 0.60),
+                ),
+                ground = Triple(1.000, 0.720, 0.660),
+                accent = Triple(0.50, 0.00, 0.20), light = true,
+            ),
+            GamepadPalette(
+                // Pink into peach and apricot.
+                "peach", "Peach",
+                listOf(
+                    Triple(1.00, 0.45, 0.60), Triple(1.00, 0.60, 0.44), Triple(1.00, 0.72, 0.52),
+                    Triple(1.00, 0.82, 0.58), Triple(0.98, 0.92, 0.72),
+                ),
+                ground = Triple(1.000, 0.820, 0.660),
+                accent = Triple(0.60, 0.16, 0.10), light = true,
+            ),
+            GamepadPalette(
+                // Pink, peach, lime and sky in one bag.
+                "candy", "Candy",
+                listOf(
+                    Triple(1.00, 0.40, 0.70), Triple(1.00, 0.55, 0.60), Triple(1.00, 0.75, 0.40),
+                    Triple(0.80, 0.90, 0.50), Triple(0.55, 0.85, 0.95),
+                ),
+                ground = Triple(1.000, 0.800, 0.750),
+                accent = Triple(0.55, 0.05, 0.30), light = true,
+            ),
+            GamepadPalette(
+                // Lemon through lime to a pale green.
+                "lemon", "Lemon",
+                listOf(
+                    Triple(1.00, 0.86, 0.44), Triple(0.98, 0.96, 0.56), Triple(0.70, 0.94, 0.64),
+                    Triple(0.84, 0.97, 0.78), Triple(0.98, 0.99, 0.90),
+                ),
+                ground = Triple(1.000, 0.980, 0.860),
+                accent = Triple(0.30, 0.36, 0.08), light = true,
+            ),
+            GamepadPalette(
+                // Orange into a full yellow and a green edge.
+                "sunflower", "Sunflower",
+                listOf(
+                    Triple(1.00, 0.60, 0.10), Triple(1.00, 0.75, 0.10), Triple(1.00, 0.88, 0.20),
+                    Triple(0.95, 0.95, 0.40), Triple(0.75, 0.92, 0.60),
+                ),
+                ground = Triple(1.000, 0.880, 0.400),
+                accent = Triple(0.40, 0.22, 0.00), light = true,
+            ),
+            GamepadPalette(
+                // Orange, lemon and lime scoops.
+                "sherbet", "Sherbet",
+                listOf(
+                    Triple(1.00, 0.55, 0.25), Triple(1.00, 0.72, 0.30), Triple(1.00, 0.90, 0.40),
+                    Triple(0.85, 0.95, 0.50), Triple(0.60, 0.92, 0.70),
+                ),
+                ground = Triple(1.000, 0.850, 0.600),
+                accent = Triple(0.45, 0.18, 0.02), light = true,
+            ),
+            GamepadPalette(
+                // Sage into pale olive and cream.
+                "sage", "Sage",
+                listOf(
+                    Triple(0.72, 0.84, 0.70), Triple(0.80, 0.90, 0.76), Triple(0.90, 0.94, 0.80),
+                    Triple(0.96, 0.96, 0.84), Triple(0.99, 0.97, 0.90),
+                ),
+                ground = Triple(0.940, 0.960, 0.900),
+                accent = Triple(0.18, 0.36, 0.24), light = true,
+            ),
+            GamepadPalette(
+                // Grass green into a warm yellow.
+                "meadow", "Meadow",
+                listOf(
+                    Triple(0.30, 0.80, 0.40), Triple(0.55, 0.90, 0.40), Triple(0.80, 0.95, 0.45),
+                    Triple(0.95, 0.95, 0.55), Triple(1.00, 0.90, 0.65),
+                ),
+                ground = Triple(0.850, 0.950, 0.600),
+                accent = Triple(0.10, 0.35, 0.12), light = true,
+            ),
+            GamepadPalette(
+                // Turquoise water into a pale green shore.
+                "lagoon", "Lagoon",
+                listOf(
+                    Triple(0.20, 0.75, 0.80), Triple(0.35, 0.85, 0.85), Triple(0.55, 0.92, 0.80),
+                    Triple(0.70, 0.95, 0.70), Triple(0.92, 0.98, 0.75),
+                ),
+                ground = Triple(0.750, 0.950, 0.900),
+                accent = Triple(0.02, 0.30, 0.35), light = true,
             ),
         )
 

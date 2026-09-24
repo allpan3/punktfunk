@@ -3,11 +3,11 @@
 use crate::anim::{approach, springs};
 use crate::glyphs::{hint_bar, Hint, HintKey};
 use crate::library::{card_matrix, PERSPECTIVE};
-use crate::theme::{fg, fill, Fonts, PanelStroke, W};
+use crate::theme::{edge, fg, fill, Fonts, PanelStroke, W};
 use skia_safe::{gradient, Canvas, Color4f, Image, PathBuilder, Point, RRect, Rect, TileMode, M44};
 
 use super::{Launching, Shell, ToastMark, BOTTOM_BAND};
-use crate::model::SpeedPhase;
+use crate::model::{SpeedPhase, SpeedStatus};
 
 /// Kind mark in a 13 dp box.
 fn draw_toast_mark(canvas: &Canvas, mark: ToastMark, cx: f64, cy: f64, k: f64, ink: Color4f) {
@@ -135,11 +135,11 @@ impl Shell {
                         "Connecting.".to_string(),
                         vec![Hint::new(HintKey::Back, "Cancel")],
                     ),
-                    SpeedPhase::Measuring => (
+                    SpeedPhase::Measuring | SpeedPhase::Progress { .. } => (
                         1.0,
-                        true,
+                        false,
                         format!("Testing {}\u{2026}", sp.name),
-                        "Measuring the link \u{2014} this takes two seconds.".to_string(),
+                        "Measuring the link \u{2014} this takes a few seconds.".to_string(),
                         vec![Hint::new(HintKey::Back, "Cancel")],
                     ),
                     SpeedPhase::Failed(why) => (
@@ -154,10 +154,8 @@ impl Shell {
                         loss_pct,
                         recommended_kbps,
                     } => {
-                        let measured = format!(
-                            "{} Mb/s \u{b7} {loss_pct:.1} % loss",
-                            throughput_kbps / 1_000
-                        );
+                        let measured =
+                            format!("{} \u{b7} {loss_pct:.1} % loss", mbps(*throughput_kbps));
                         match &pinned_by {
                             // Read-only: the default is not the layer this host streams at.
                             Some(name) => (
@@ -175,8 +173,8 @@ impl Shell {
                                 false,
                                 measured,
                                 format!(
-                                    "{} Mb/s recommended, leaving headroom for FEC and loss.",
-                                    recommended_kbps / 1_000
+                                    "{} recommended, leaving headroom for FEC and loss.",
+                                    mbps(*recommended_kbps)
                                 ),
                                 vec![Hint::new(HintKey::Confirm, "Set as the default"), close],
                             ),
@@ -186,10 +184,23 @@ impl Shell {
             } else {
                 None
             };
-        if let Some((appear, spinner, title, body, hints)) = takeover {
-            self.draw_takeover(
-                canvas, w, h, k, appear, t, fonts, spinner, &title, &body, &hints,
-            );
+        // A burst under way or measured draws its graph, when the speed test is the takeover
+        // showing; connecting and failing are words.
+        let charted = self
+            .speed
+            .as_ref()
+            .filter(|_| self.connecting.is_none() && self.wake.is_none())
+            .filter(|sp| !matches!(sp.phase, SpeedPhase::Connecting | SpeedPhase::Failed(_)));
+        match (takeover, charted) {
+            (Some((_, _, title, body, hints)), Some(sp)) => {
+                self.draw_speed(canvas, (w, h), k, t, fonts, sp, (&title, &body), &hints);
+            }
+            (Some((appear, spinner, title, body, hints)), _) => {
+                self.draw_takeover(
+                    canvas, w, h, k, appear, t, fonts, spinner, &title, &body, &hints,
+                );
+            }
+            (None, _) => {}
         }
         if let Some(l) = &mut self.launching {
             l.appear = approach(l.appear, 1.0, dt, 0.09);
@@ -198,10 +209,9 @@ impl Shell {
         }
         if let Some(l) = &self.launching {
             // The shelf that launched it still holds its decoded poster underneath.
-            let poster = match self.stack.last() {
-                Some(crate::screens::Screen::Library(lib)) => lib.poster(&l.host.id),
-                _ => None,
-            };
+            let poster = (self.stack.last())
+                .and_then(crate::screens::Screen::shelf)
+                .and_then(|lib| lib.poster(&l.host.id));
             self.draw_launch_hold(canvas, w, h, k, t, fonts, l, poster);
         }
 
@@ -213,7 +223,7 @@ impl Shell {
             if crate::theme::reduce_motion() {
                 toast.seat = crate::anim::Spring::rest(1.0);
             } else {
-                toast.seat.step_spec(1.0, springs::INDICATOR, dt);
+                toast.seat.step_spec(1.0, springs::MODAL, dt);
                 toast.seat.settle(1.0, 0.001, 0.01);
             }
             // Seat springs the slide. Fade stays linear: dismissal is a 4 s deadline, not a gesture.
@@ -239,7 +249,7 @@ impl Shell {
             // Bound the fade layer to the pill. Unbounded `save_layer` is a full-surface
             // offscreen every frame. 12 k outset is stroke slack (no blur to reach further).
             let bounds = rect.with_outset((12.0 * k as f32, 12.0 * k as f32));
-            canvas.save_layer_alpha_f(Some(bounds), alpha);
+            crate::theme::save_layer_alpha(canvas, Some(bounds), alpha);
             canvas.draw_rrect(
                 skia_safe::RRect::new_rect_xy(rect, (bh / 2.0) as f32, (bh / 2.0) as f32),
                 &fill(crate::theme::shade(0.6)),
@@ -288,7 +298,7 @@ impl Shell {
         // Only while it is arriving: an unbounded layer is a full-screen offscreen per frame,
         // and `appear` is at 1.0 within half a second of a hold that runs for many.
         if appear < 0.999 {
-            canvas.save_layer_alpha_f(None, appear as f32);
+            crate::theme::save_layer_alpha(canvas, None, appear as f32);
         } else {
             canvas.save();
         }
@@ -320,6 +330,76 @@ impl Shell {
                 w * 0.66,
             );
         }
+        self.draw_takeover_hints(canvas, w, h, k, fonts, hints);
+        canvas.restore();
+    }
+
+    /// The speed test while it measures and once it has: the live figure, the burst's
+    /// throughput over time, and the words under it. After the Apple client's speed page.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_speed(
+        &self,
+        canvas: &Canvas,
+        (w, h): (f64, f64),
+        k: f64,
+        t: f64,
+        fonts: &Fonts,
+        sp: &SpeedStatus,
+        (title, body): (&str, &str),
+        hints: &[Hint],
+    ) {
+        canvas.save();
+        self.draw_takeover_field(canvas, w, h, t);
+        let (done, rec) = match sp.phase {
+            SpeedPhase::Done {
+                throughput_kbps,
+                recommended_kbps,
+                ..
+            } => (Some(throughput_kbps), Some(recommended_kbps)),
+            _ => (None, None),
+        };
+        // Measured, the figure is the headline: the caption names the host and the loss.
+        let caption = match sp.phase {
+            SpeedPhase::Done { loss_pct, .. } => format!("{} \u{b7} {loss_pct:.1} % loss", sp.name),
+            _ => title.to_string(),
+        };
+        let title = caption.as_str();
+        let (cx, cw) = (w / 2.0, (620.0 * k).min(w - 2.0 * edge(k)));
+        let ch = (180.0 * k).min(h * 0.34);
+        // Caption, figure, chart and body, centred as one block.
+        let top = (h - (96.0 * k + ch + 64.0 * k)) / 2.0;
+        fonts.centered(canvas, title, W::SemiBold, 15.0 * k, fg(0.62), cx, top, cw);
+        let figure = done
+            .or(sp.trace.last().map(|p| p.1))
+            .map_or("\u{2014}".into(), mbps);
+        fonts.centered(
+            canvas,
+            &figure,
+            W::Bold,
+            44.0 * k,
+            fg(1.0),
+            cx,
+            top + 22.0 * k,
+            cw,
+        );
+        let chart = Rect::from_xywh(
+            (cx - cw / 2.0) as f32,
+            (top + 96.0 * k) as f32,
+            cw as f32,
+            ch as f32,
+        );
+        speed_chart(canvas, fonts, chart, &sp.trace, rec, k, t);
+        let body_top = f64::from(chart.bottom) + 34.0 * k;
+        fonts.centered(
+            canvas,
+            body,
+            W::Regular,
+            14.0 * k,
+            fg(0.55),
+            cx,
+            body_top,
+            cw,
+        );
         self.draw_takeover_hints(canvas, w, h, k, fonts, hints);
         canvas.restore();
     }
@@ -398,7 +478,7 @@ impl Shell {
         // Fades in rather than replacing the shelf outright: the cover has to be seen
         // LEAVING its tile, which means the tile has to still be there when it does.
         if l.appear < 0.999 {
-            canvas.save_layer_alpha_f(None, l.appear as f32);
+            crate::theme::save_layer_alpha(canvas, None, l.appear as f32);
         } else {
             canvas.save();
         }
@@ -509,16 +589,18 @@ impl Shell {
         match l.failed.as_deref() {
             // Where the spinner was, because the wait is what ended. Brighter than the status
             // line it replaces: this is the one thing on screen the player has to read.
-            Some(why) => fonts.leading(
-                canvas,
-                why,
-                W::Regular,
-                12.5 * k,
-                fg(0.85 * a),
-                dx,
-                y + 26.0 * k,
-                dw,
-            ),
+            Some(why) => {
+                fonts.leading(
+                    canvas,
+                    why,
+                    W::Regular,
+                    12.5 * k,
+                    fg(0.85 * a),
+                    dx,
+                    y + 26.0 * k,
+                    dw,
+                );
+            }
             None => {
                 crate::theme::spinner(canvas, dx + 8.0 * k, y + 30.0 * k, 8.0 * k, t);
                 fonts.leading(
@@ -616,9 +698,179 @@ fn launch_layout(w: f64, h: f64, k: f64, rest: f64, title_h: impl Fn(f64) -> f64
     }
 }
 
+/// A rate as people read it: tenths under 10 Mb/s, whole megabits above, gigabits past 1000.
+fn mbps(kbps: u32) -> String {
+    match kbps {
+        0..10_000 => format!("{:.1} Mb/s", f64::from(kbps) / 1_000.0),
+        10_000..1_000_000 => format!("{} Mb/s", kbps / 1_000),
+        _ => format!("{:.1} Gb/s", f64::from(kbps) / 1_000_000.0),
+    }
+}
+
+/// The chart's reach: whole seconds, at least two, and a round rate over the peak with room
+/// above it, so the gridline labels read as round numbers.
+fn chart_scale(trace: &[(f32, u32)], peak: u32) -> (f32, u32) {
+    let x_max = trace.last().map_or(2.0, |p| p.0).max(2.0).ceil();
+    let want = f64::from(peak.max(1_000)) * 1.05;
+    let mag = 10f64.powf(want.log10().floor());
+    let step = [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0]
+        .into_iter()
+        .map(|m| m * mag)
+        .find(|v| *v >= want)
+        .unwrap_or(10.0 * mag);
+    (x_max, step as u32)
+}
+
+/// Trace points in `r`, from the origin: measuring starts at nothing.
+fn chart_points(trace: &[(f32, u32)], r: Rect, x_max: f32, y_max: u32) -> Vec<Point> {
+    let at = |(s, kbps): (f32, u32)| {
+        let y = r.bottom - r.height() * (kbps as f32 / y_max as f32).min(1.0);
+        Point::new(r.left + r.width() * (s / x_max).min(1.0), y)
+    };
+    std::iter::once((0.0, 0))
+        .chain(trace.iter().copied())
+        .map(at)
+        .collect()
+}
+
+/// The burst's throughput over time in `r`: a smoothed line over a fading fill, a faint grid
+/// with its scale, and once measured the recommendation as a dashed green rule. While it
+/// measures, the newest point pulses.
+fn speed_chart(
+    canvas: &Canvas,
+    fonts: &Fonts,
+    r: Rect,
+    trace: &[(f32, u32)],
+    rec: Option<u32>,
+    k: f64,
+    t: f64,
+) {
+    let kf = k as f32;
+    let peak = trace.iter().map(|p| p.1).chain(rec).max().unwrap_or(0);
+    let (x_max, y_max) = chart_scale(trace, peak);
+    let grid = crate::theme::stroke(fg(0.16), kf);
+    for i in 0..=2u32 {
+        let y = r.bottom - r.height() * i as f32 / 2.0;
+        canvas.draw_line((r.left, y), (r.right, y), &grid);
+        if i > 0 {
+            let label = mbps(y_max / 2 * i);
+            let base = f64::from(y) - 6.0 * k;
+            fonts.draw(
+                canvas,
+                &label,
+                f64::from(r.left),
+                base,
+                W::Medium,
+                11.0 * k,
+                fg(0.45),
+            );
+        }
+    }
+    let axis = f64::from(r.bottom) + 18.0 * k;
+    fonts.draw(
+        canvas,
+        "0 s",
+        f64::from(r.left),
+        axis,
+        W::Medium,
+        11.0 * k,
+        fg(0.45),
+    );
+    let end = format!("{x_max:.0} s");
+    let end_w = f64::from(fonts.measure(&end, W::Medium, 11.0 * k));
+    let end_x = f64::from(r.right) - end_w;
+    fonts.draw(canvas, &end, end_x, axis, W::Medium, 11.0 * k, fg(0.45));
+    if trace.is_empty() {
+        if rec.is_none() {
+            crate::theme::spinner(
+                canvas,
+                f64::from(r.center_x()),
+                f64::from(r.center_y()),
+                18.0 * k,
+                t,
+            );
+        }
+        return;
+    }
+    let pts = chart_points(trace, r, x_max, y_max);
+    // Through the midpoints, so the line bends where the samples turn and never overshoots.
+    let curve = |path: &mut PathBuilder| {
+        path.move_to(pts[0]);
+        for pair in pts.windows(2).skip(1) {
+            let mid = Point::new((pair[0].x + pair[1].x) / 2.0, (pair[0].y + pair[1].y) / 2.0);
+            path.quad_to(pair[0], mid);
+        }
+        path.line_to(*pts.last().expect("the origin at least"));
+    };
+    let last = *pts.last().expect("the origin at least");
+    let mut area = PathBuilder::new();
+    curve(&mut area);
+    area.line_to((last.x, r.bottom));
+    area.line_to((pts[0].x, r.bottom));
+    area.close();
+    let mut fade = fill(fg(1.0));
+    fade.set_shader(gradient::shaders::linear_gradient(
+        (Point::new(0.0, r.top), Point::new(0.0, r.bottom)),
+        &gradient::Gradient::new(
+            gradient::Colors::new_evenly_spaced(&[fg(0.30), fg(0.0)], TileMode::Clamp, None),
+            gradient::Interpolation::default(),
+        ),
+        None,
+    ));
+    canvas.draw_path(&area.detach(), &fade);
+    let mut line = PathBuilder::new();
+    curve(&mut line);
+    let mut ink = crate::theme::stroke(fg(0.95), 2.5 * kf);
+    ink.set_stroke_cap(skia_safe::paint::Cap::Round);
+    ink.set_stroke_join(skia_safe::paint::Join::Round);
+    canvas.draw_path(&line.detach(), &ink);
+    match rec {
+        Some(rec) => {
+            let y = r.bottom - r.height() * (rec as f32 / y_max as f32).min(1.0);
+            let mut rule = crate::theme::stroke(crate::theme::ONLINE_GREEN, 1.5 * kf);
+            rule.set_path_effect(skia_safe::PathEffect::dash(&[6.0 * kf, 4.0 * kf], 0.0));
+            canvas.draw_line((r.left, y), (r.right, y), &rule);
+            let label = format!("Recommended {}", mbps(rec));
+            let lw = f64::from(fonts.measure(&label, W::SemiBold, 12.0 * k));
+            let (x, base) = (f64::from(r.right) - lw, f64::from(y) - 6.0 * k);
+            let green = crate::theme::ONLINE_GREEN;
+            fonts.draw(canvas, &label, x, base, W::SemiBold, 12.0 * k, green);
+        }
+        None => {
+            // The newest sample breathes while more are coming.
+            let pulse = (t * 1.4).fract() as f32;
+            let halo = fg(0.5 * (1.0 - pulse));
+            canvas.draw_circle(last, (4.0 + 10.0 * pulse) * kf, &fill(halo));
+            canvas.draw_circle(last, 4.0 * kf, &fill(fg(1.0)));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Rates read as people say them, and the chart's scale lands on round numbers over the
+    /// peak, starting from the origin.
+    #[test]
+    fn the_speed_chart_scales_to_round_numbers() {
+        assert_eq!(mbps(8_500), "8.5 Mb/s");
+        assert_eq!(mbps(876_000), "876 Mb/s");
+        assert_eq!(mbps(1_250_000), "1.2 Gb/s");
+        let trace = [(0.5, 300_000), (1.0, 850_000), (2.4, 870_000)];
+        let (x_max, y_max) = chart_scale(&trace, 870_000);
+        assert_eq!((x_max, y_max), (3.0, 1_000_000));
+        assert_eq!(chart_scale(&[], 0), (2.0, 1_500));
+        let r = Rect::from_xywh(0.0, 0.0, 300.0, 100.0);
+        let pts = chart_points(&trace, r, x_max, y_max);
+        assert_eq!(pts.len(), 4);
+        assert_eq!(pts[0], Point::new(0.0, 100.0));
+        assert!(
+            (pts[2].y - 15.0).abs() < 0.01,
+            "850 of 1000 Mb/s: {}",
+            pts[2].y
+        );
+    }
 
     /// Two title lines at 34 k, the paragraph's line height.
     fn two_lines(k: f64) -> impl Fn(f64) -> f64 {

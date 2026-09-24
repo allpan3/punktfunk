@@ -92,6 +92,9 @@ struct Shell {
     cost: FrameCost,
     /// When the last frame was drawn, and at what size.
     drawn: Option<(Instant, u32, u32)>,
+    /// The colour type the layer's texture last wrapped as. Swift owns the format; Skia
+    /// refuses a mismatch, so a refused wrap flips to the other once and sticks.
+    color_type: ColorType,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -200,6 +203,7 @@ pub unsafe extern "C" fn punktfunk_console_new(
                 published,
                 cost: FrameCost::default(),
                 drawn: None,
+                color_type: ColorType::BGRA1010102,
             }),
             handles,
             store,
@@ -230,7 +234,7 @@ pub unsafe extern "C" fn punktfunk_console_free(c: *mut PunktfunkConsole) {
     })
 }
 
-/// Draw one frame into `mtl_texture` (BGRA8, `width`×`height`) and submit it to the queue.
+/// Draw one frame into `mtl_texture` (BGR10A2 or BGRA8, `width`×`height`) and submit it to the queue.
 /// `scale` is design units per pixel; `0` takes the shell's own formula. `false` = nothing
 /// drawn (idle, or the texture could not be wrapped): present nothing.
 ///
@@ -270,14 +274,26 @@ pub unsafe extern "C" fn punktfunk_console_frame(
         // the render target lives.
         let info = unsafe { mtl::TextureInfo::new(mtl_texture as _) };
         let target = gpu::backend_render_targets::make_mtl((width as i32, height as i32), &info);
-        let Some(mut surface) = gpu::surfaces::wrap_backend_render_target(
-            &mut shell.context,
-            &target,
-            SurfaceOrigin::TopLeft,
-            ColorType::BGRA8888,
-            None,
-            None,
-        ) else {
+        let other = |ct| match ct {
+            ColorType::BGRA1010102 => ColorType::BGRA8888,
+            _ => ColorType::BGRA1010102,
+        };
+        let mut wrapped = None;
+        for ct in [shell.color_type, other(shell.color_type)] {
+            wrapped = gpu::surfaces::wrap_backend_render_target(
+                &mut shell.context,
+                &target,
+                SurfaceOrigin::TopLeft,
+                ct,
+                None,
+                None,
+            );
+            if wrapped.is_some() {
+                shell.color_type = ct;
+                break;
+            }
+        }
+        let Some(mut surface) = wrapped else {
             tracing::error!("console: Skia could not wrap the {width}×{height} texture");
             return false;
         };
@@ -327,8 +343,9 @@ pub unsafe extern "C" fn punktfunk_console_frame(
 }
 
 /// A discrete menu event: 0..3 move up/down/left/right, 4 confirm, 5 back, 6 secondary (Y),
-/// 7 tertiary (X), 8 jump back (L1), 9 jump forward (R1). `source` 1 = a pad (its glyphs),
-/// 0 = a remote or keyboard. `false` = Back at the root: the press is the system's.
+/// 7 tertiary (X), 8 jump back (L1), 9 jump forward (R1), 10/11 a remote's OK down/up (acts
+/// on release, held it is the card's menu). `source` 1 = a pad (its glyphs), 0 = a remote or
+/// keyboard. `false` = Back at the root: the press is the system's.
 ///
 /// # Safety
 /// `c` is live.
@@ -350,6 +367,7 @@ pub unsafe extern "C" fn punktfunk_console_menu(
             7 => MenuEvent::Tertiary,
             8 => MenuEvent::JumpBack,
             9 => MenuEvent::JumpForward,
+            10 | 11 => MenuEvent::Confirm,
             _ => return true,
         };
         let source = if source == 1 {
@@ -364,7 +382,11 @@ pub unsafe extern "C" fn punktfunk_console_menu(
         let Some(mut shell) = c.shell() else {
             return true;
         };
-        if let Some(p) = shell.console.menu(ev, source) {
+        let pulse = match event {
+            10 | 11 => shell.console.ok(event == 10, source),
+            _ => shell.console.menu(ev, source),
+        };
+        if let Some(p) = pulse {
             lock(&c.events).push_back(Event::Pulse(p));
         }
         !c.publish(&mut shell)

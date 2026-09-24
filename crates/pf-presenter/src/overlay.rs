@@ -40,6 +40,8 @@ pub struct FrameCtx<'a> {
     /// Swapchain size in pixels. Overlay renders 1:1.
     pub width: u32,
     pub height: u32,
+    /// The swapchain is 10-bit; the overlay draws in 10 too, or its gradients band.
+    pub ten_bit: bool,
     /// Window display scale (`1.0` at 96 dpi / 100 %) × `PUNKTFUNK_OSD_SCALE`.
     /// Overlay chrome is physical pixels; multiply every metric by this. The
     /// run loop (`overlay_scale`) clamps it finite and > 0.

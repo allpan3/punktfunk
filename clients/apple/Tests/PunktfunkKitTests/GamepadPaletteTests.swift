@@ -46,12 +46,16 @@ final class GamepadPaletteTests: XCTestCase {
     func testTableMatchesTheOtherClients() {
         XCTAssertEqual(
             GamepadPalette.all.map(\.id),
-            ["violet", "oled", "nebula", "abyss", "ember", "moss", "graphite",
-             "holo", "sunset", "bloom", "dawn", "mint", "opal"])
+            ["violet", "oled", "void", "graphite", "slate", "midnight", "electric",
+             "ocean", "aurora", "jade", "emerald", "crimson", "ruby", "lava",
+             "copper", "amber", "dusk", "grape", "neon", "tropic", "paper",
+             "sky", "glacier", "lilac", "iris", "bubblegum", "coral", "flamingo",
+             "peach", "candy", "lemon", "sunflower", "sherbet", "sage", "meadow",
+             "lagoon"])
         // Dark fields lead, pale ones follow, so stepping the row walks one direction.
         let firstLight = GamepadPalette.all.firstIndex { $0.light }
-        XCTAssertEqual(firstLight, 7)
-        XCTAssertTrue(GamepadPalette.all.dropFirst(7).allSatisfy(\.light))
+        XCTAssertEqual(firstLight, 20)
+        XCTAssertTrue(GamepadPalette.all.dropFirst(20).allSatisfy(\.light))
     }
 
     /// OLED is the one palette whose selling point is measurable: it has to be genuinely black,
@@ -65,7 +69,7 @@ final class GamepadPaletteTests: XCTestCase {
             "the shaded corner has to be switched off, not dimmed")
         let mean = cells.map(luma).reduce(0, +) / Double(cells.count)
         let darkestOther = GamepadPalette.all
-            .filter { $0.id != "oled" }
+            .filter { $0.id != "oled" && $0.id != "void" }
             .map { p in p.meshColors.map(luma).reduce(0, +) / Double(p.meshColors.count) }
             .min() ?? 0
         XCTAssertLessThan(mean, darkestOther / 2, "oled is barely darker than \(darkestOther)")
@@ -74,7 +78,7 @@ final class GamepadPaletteTests: XCTestCase {
     /// A palette must read as SEVERAL hues, not one hue at several brightnesses — that was
     /// exactly the complaint about the hue-rotation model this replaced.
     func testEveryPaletteIsMultiTone() {
-        for p in GamepadPalette.all {
+        for p in GamepadPalette.all where p.id != "void" {
             let hues = p.meshColors.compactMap(hue)
             XCTAssertGreaterThanOrEqual(hues.count, 8, "\(p.id): too few coloured cells")
             var spread = 0.0
@@ -84,8 +88,8 @@ final class GamepadPaletteTests: XCTestCase {
                     spread = max(spread, min(d, 360 - d))
                 }
             }
-            // Graphite and Opal are deliberately near-neutral; the rest must travel.
-            let floor = (p.id == "graphite" || p.id == "opal") ? 20.0 : 45.0
+            // Graphite, Paper and Slate are near-neutral; Void has no hue; the rest must travel.
+            let floor = (p.id == "graphite" || p.id == "paper" || p.id == "slate") ? 20.0 : 45.0
             XCTAssertGreaterThanOrEqual(spread, floor, "\(p.id) spans only \(spread)° of hue")
         }
     }
@@ -106,7 +110,7 @@ final class GamepadPaletteTests: XCTestCase {
                 XCTAssertLessThan(luma(p.accent), 0.45, "\(p.id)'s accent is too pale")
             } else {
                 XCTAssertLessThan(mean, 0.45, "\(p.id) is flagged dark")
-                XCTAssertLessThan(luma(p.ground), 0.2, "\(p.id)'s ground is light")
+                XCTAssertLessThan(luma(p.ground), 0.55, "white ink fades on \(p.id)'s ground")
                 XCTAssertGreaterThan(luma(p.accent), 0.25, "\(p.id)'s accent is too dark")
             }
         }

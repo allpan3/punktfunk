@@ -913,8 +913,9 @@ fn pick_device(
     bail!("no Vulkan device with a graphics+present queue family")
 }
 
-/// SDR: BGRA8 UNORM, then RGBA8, then any sRGB-space UNORM, else the first format. UNORM not SRGB —
-/// decoded RGBA is already display-referred; an SRGB blit would re-encode it.
+/// SDR: a 10-bit UNORM, then BGRA8, then RGBA8, then any sRGB-space UNORM, else the first
+/// format. 10-bit first: the console's gradients band in 8. UNORM not SRGB — decoded RGBA is
+/// already display-referred; an SRGB blit would re-encode it.
 /// HDR: a 10-bit UNORM + HDR10/ST.2084 colorspace when the instance ext and surface
 /// offer one; otherwise the shader tonemaps.
 pub(super) fn pick_formats(
@@ -931,7 +932,12 @@ pub(super) fn pick_formats(
     // SAFETY: read-only query; `pdev` and `surface` are live on this instance.
     let formats = unsafe { surface_i.get_physical_device_surface_formats(pdev, surface) }?;
     let mut sdr = None;
-    for want in [vk::Format::B8G8R8A8_UNORM, vk::Format::R8G8B8A8_UNORM] {
+    for want in [
+        vk::Format::A2B10G10R10_UNORM_PACK32,
+        vk::Format::A2R10G10B10_UNORM_PACK32,
+        vk::Format::B8G8R8A8_UNORM,
+        vk::Format::R8G8B8A8_UNORM,
+    ] {
         if let Some(f) = formats
             .iter()
             .find(|f| f.format == want && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR)

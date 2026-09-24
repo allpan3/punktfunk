@@ -158,6 +158,14 @@ impl Presenter {
         self.hdr_active
     }
 
+    /// The swapchain holds 10 bits a channel (SDR or HDR10): an overlay drawn in 8 would band.
+    pub fn ten_bit(&self) -> bool {
+        matches!(
+            self.format.format,
+            vk::Format::A2B10G10R10_UNORM_PACK32 | vk::Format::A2R10G10B10_UNORM_PACK32
+        )
+    }
+
     /// Drop back to the SDR swapchain. No-op unless HDR10 is live.
     ///
     /// Console UI is SDR and composites into whatever swapchain the last

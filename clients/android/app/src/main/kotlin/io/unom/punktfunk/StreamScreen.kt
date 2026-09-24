@@ -764,24 +764,26 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
             // Same corner, stacked: the mute sentence stands whatever the stats tier, because a
             // player who cannot hear is owed the reason even with chrome off.
             if (accessChip != null || ui.audioMuteLabel != null) {
-                Column(
-                    Modifier.align(Alignment.TopEnd).padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                    horizontalAlignment = Alignment.End,
-                ) {
-                    ui.audioMuteLabel?.let { AccessChip(it) }
-                    accessChip?.let { AccessChip(it) }
+                OsdScaled {
+                    Column(
+                        Modifier.align(Alignment.TopEnd).padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalAlignment = Alignment.End,
+                    ) {
+                        ui.audioMuteLabel?.let { AccessChip(it) }
+                        accessChip?.let { AccessChip(it) }
+                    }
                 }
             }
             // "Hold to quit" hint while the gamepad exit chord is armed — the exit debounces on a ~1 s
             // hold, so without this cue a couch user reads the (deliberately no-longer-instant) chord as
             // broken. Purely visual; it sits above the video and below the gesture layer.
             if (ui.exitArming) {
-                ExitChordHint(Modifier.align(Alignment.TopCenter).padding(top = 16.dp))
+                OsdScaled { ExitChordHint(Modifier.align(Alignment.TopCenter).padding(top = 16.dp)) }
             }
             // Remote-pointer mode hint — the remote's keys are remapped while it's on, so say so.
             if (ui.remotePointerOn) {
-                RemotePointerHint(Modifier.align(Alignment.TopCenter).padding(top = 16.dp))
+                OsdScaled { RemotePointerHint(Modifier.align(Alignment.TopCenter).padding(top = 16.dp)) }
             }
             // The start banner (desktop parity), naming ONLY the shortcuts this session actually has:
             // pad chords when a controller is here, the Back gesture and the three-finger tap when it
@@ -796,7 +798,7 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
             // and names the setting that fixes it, while the banner repeats shortcuts that will be
             // there next stream too. Two pills sharing an edge for six seconds would cost the reader
             // both.
-            if (bannerUp && !ui.motionHint && !touchHint) {
+            if (bannerUp && !ui.motionHint && !touchHint) OsdScaled {
                 StreamStartBanner(
                     text = buildList {
                         if (ui.padPresent) {
@@ -978,13 +980,17 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
                     haptics = haptics,
                 )
             }
-            ui.micHint?.let { MicChordHint(it, Modifier.align(Alignment.TopCenter).padding(top = 16.dp)) }
+            ui.micHint?.let {
+                OsdScaled { MicChordHint(it, Modifier.align(Alignment.TopCenter).padding(top = 16.dp)) }
+            }
             // Bottom, not top: this can coincide with a mic-chord confirmation or the exit cue, and a
             // notice landing on top of one of those would cost the user both.
-            if (ui.motionHint) {
-                MotionUnreachableHint(Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp))
-            } else if (touchHint) {
-                TouchFallbackHint(Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp))
+            OsdScaled {
+                if (ui.motionHint) {
+                    MotionUnreachableHint(Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp))
+                } else if (touchHint) {
+                    TouchFallbackHint(Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp))
+                }
             }
         }
         if (split != null) {

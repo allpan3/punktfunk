@@ -1,5 +1,5 @@
-// The console as this app mounts it: one Metal view over the shared shell, in the place
-// `GamepadHomeView` held. Everything inside — home, library, settings, pairing, the host menu —
+// The console as this app mounts it: one Metal view over the shared shell, where the controller
+// home goes. Everything inside — home, library, settings, pairing, the host menu —
 // is drawn by the console; this view only owns its lifetime and the wiring to the app.
 
 import PunktfunkKit

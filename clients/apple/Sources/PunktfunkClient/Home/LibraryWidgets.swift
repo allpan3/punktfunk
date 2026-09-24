@@ -1,5 +1,5 @@
-// Reusable library widgets, shared by the touch grid (LibraryView's `GameCard`) and the gamepad
-// coverflow (LibraryCoverflowView's cover cell).
+// Reusable library widgets for the touch grid (LibraryView's `GameCard`), the Library tab and the
+// launch hold.
 
 import ImageIO
 import PunktfunkKit
@@ -183,8 +183,7 @@ private struct TileFramePreference: PreferenceKey {
 /// regardless of its own aspect ratio: a portrait capsule fills it as intended, and a fallback
 /// banner (wide hero/header art, used when a title has no portrait capsule) is cropped to the same
 /// tile rather than allowed to size it — see the `Color.clear` in `body` for why that takes more
-/// than a `.frame(maxWidth:)` and a `.clipped()`. Not `private` —
-/// the gamepad coverflow (`LibraryCoverflowView`) reuses it directly rather than re-fetching art.
+/// than a `.frame(maxWidth:)` and a `.clipped()`.
 struct PosterImage: View {
     let candidates: [URL]
     let title: String

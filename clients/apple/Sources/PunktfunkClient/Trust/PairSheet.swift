@@ -7,8 +7,8 @@
 // client's identity in return.
 //
 // This is the TOUCH/desktop presentation (and tvOS's, where the focus engine drives the same
-// fields). A controller can't reach a `Form`'s text fields on iOS/macOS, so the console UI
-// presents `GamepadPairView` instead — same ceremony, via the shared `PairCeremony`.
+// fields). A controller can't reach a `Form`'s text fields on iOS/macOS, so the console pairs on
+// its own screen instead — same ceremony, via the shared `PairCeremony`.
 
 import Foundation
 import PunktfunkKit

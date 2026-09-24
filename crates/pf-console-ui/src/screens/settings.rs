@@ -1,20 +1,22 @@
 //! Console settings: the couch-facing subset of the shared Settings store.
 //!
-//! One row per setting, grouped by [`TABS`]. Left/right steps the focused value
-//! (clamped); A cycles wrapping; L1/R1 change section; B closes. Every change
+//! One row per setting, in the sections of [`TABS`], named in a strip of tabs over the
+//! list. Up from the first row reaches the sections; Left/Right there switch them, Down
+//! returns. Left/right steps the focused
+//! value (clamped); A cycles wrapping; L1/R1 change section; B closes. Every change
 //! writes the store immediately so desktop shells round-trip the same file.
-//! Each tab remembers its cursor. Presets is built from the catalog at render
+//! Each section remembers its cursor. Presets is built from the catalog at render
 //! time — the console never creates or edits presets.
 //!
-//! Tab names match `clients/shared/console-vectors.json`. Platform split:
-//! [`row_on`]. Availability this frame: [`row_applies`].
+//! Section names match `settings_sections` in `clients/shared/console-vectors.json`.
+//! Platform split: [`row_on`]. Availability this frame: [`row_applies`].
 
 use crate::glyphs::{Hint, HintKey};
 use crate::pointer::Pointer;
 use crate::screens::{Ctx, Outbox, Screen};
-use crate::theme::{fg, Fonts, W};
+use crate::theme::Fonts;
 use crate::widgets::{
-    permits, Charset, KeyMsg, Keyboard, ListMsg, MenuList, RowSpec, TabStrip, TAB_STRIP_H,
+    column, permits, Charset, KeyMsg, Keyboard, ListMsg, MenuList, RowSpec, TabStrip, TAB_STRIP_H,
 };
 use pf_client_core::audio_format::{AUDIO_FORMATS, AUDIO_FORMAT_OPUS};
 use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuPulse};
@@ -112,10 +114,14 @@ pub enum RowId {
     /// Long-press the remote's OK to send a right click. webOS only — it exists because a
     /// Magic Remote has no second button.
     CursorGestures,
-    /// Action row: opens the in-process controllers screen.
+    /// Action row: jumps to the Controllers tab.
     Controllers,
     /// Action row: asks the host to open the platform licences screen.
     Licenses,
+    /// Action row: the Games tab's sections, in [`super::library::CustomizeScreen`].
+    LibrarySections,
+    /// This build's version. Nothing to change.
+    Version,
 }
 
 /// `Settings::extra` keys for the rows about the device in your hand, not the host. The
@@ -222,53 +228,57 @@ pub(crate) fn reduce_ui_res(
     )
 }
 
-// Tab names match Apple/Android (`console-vectors.json`). Presets is empty here:
-// its rows come from the catalog. Device pickers stay on the desktop dialogs.
-const TABS: [(&str, &[RowId]); 7] = [
+/// The explainer band under the rows, design units.
+const DETAIL_H: f64 = crate::widgets::FOOT_DETAIL_H;
+
+// The sections, the rows a player touches most first. A child row sits right under the
+// switch it dims or drops with. Presets is empty here: its rows come from the catalog.
+const TABS: [(&str, &[RowId]); 8] = [
     (
         "Stream",
         &[
             RowId::Aspect,
             RowId::Resolution,
             RowId::Refresh,
-            RowId::RenderScale,
-            RowId::VideoFit,
             RowId::Bitrate,
+            RowId::VideoFit,
+            RowId::RenderScale,
             RowId::Compositor,
         ],
     ),
     (
-        "Video",
+        "Picture",
         &[
             RowId::Codec,
-            RowId::Decoder,
-            RowId::LowLatency,
             RowId::Hdr,
-            RowId::Chroma444,
-            RowId::TenBitSdr,
             RowId::PresentPriority,
             RowId::SmoothBuffer,
+            RowId::Decoder,
+            RowId::Chroma444,
+            RowId::TenBitSdr,
+            RowId::LowLatency,
             RowId::Vsync,
             RowId::AllowVrr,
         ],
     ),
     (
-        "Audio",
+        "Sound",
         &[
             RowId::Audio,
-            RowId::AudioRoute,
             RowId::AudioFormat,
-            RowId::KeepHostAudio,
             RowId::Mic,
             RowId::EchoCancel,
+            RowId::KeepHostAudio,
+            RowId::AudioRoute,
         ],
     ),
     (
-        "Controller",
+        "Controllers",
         &[
             RowId::PadForward,
             RowId::Pad,
             RowId::PadType,
+            RowId::Controllers,
             RowId::SystemButtons,
             RowId::GuideGesture,
             RowId::PadHaptics,
@@ -277,7 +287,6 @@ const TABS: [(&str, &[RowId]); 7] = [
             RowId::PhoneGyro,
             RowId::Sc2Passthrough,
             RowId::DsCapture,
-            RowId::Controllers,
         ],
     ),
     (
@@ -285,10 +294,10 @@ const TABS: [(&str, &[RowId]); 7] = [
         &[
             RowId::Touch,
             RowId::Mouse,
-            RowId::CursorGestures,
+            RowId::QuickActions,
             RowId::InvertScroll,
             RowId::Shortcuts,
-            RowId::QuickActions,
+            RowId::CursorGestures,
         ],
     ),
     (
@@ -296,25 +305,26 @@ const TABS: [(&str, &[RowId]); 7] = [
         &[
             RowId::FollowOsTheme,
             RowId::Palette,
-            RowId::ReduceMotion,
-            RowId::ReduceUiResolution,
+            RowId::LibrarySections,
             RowId::LibraryView,
             RowId::LibraryCollections,
             RowId::StartIn,
-            RowId::Stats,
-            RowId::AdvancedStats,
-            RowId::Fullscreen,
-            RowId::AutoWake,
+            RowId::ReduceUiResolution,
             RowId::GamepadUi,
             RowId::GamepadUiMode,
-            RowId::Licenses,
+            RowId::Stats,
+            RowId::AdvancedStats,
+            RowId::ReduceMotion,
+            RowId::Fullscreen,
+            RowId::AutoWake,
         ],
     ),
     ("Presets", &[]),
+    ("About", &[RowId::Version, RowId::Licenses]),
 ];
 
-/// Trailing Presets tab — catalog-built, not [`TABS`] rows.
-const PRESETS_TAB: usize = TABS.len() - 1;
+/// The Presets section — catalog-built, not [`TABS`] rows.
+const PRESETS_TAB: usize = 6;
 
 /// Strip length for the shell's raster walk. `cfg(test)`: a shipping build
 /// would warn it dead, and this crate treats warnings as errors.
@@ -488,12 +498,14 @@ pub(crate) struct SettingsScreen {
     /// Each preset's overrides by id, loaded with `presets`: the rows say when a
     /// host's bound preset outranks the global value they show.
     overrides: std::collections::HashMap<String, SettingsOverlay>,
-    /// D-pad focus on the strip. TV remotes have no shoulders and no Tab key.
+    /// D-pad focus on the section strip. TV remotes have no shoulders and no Tab key.
     strip_focus: bool,
     /// Typed Mbps while Y has the bitrate field open. Y, not A, so A still cycles.
     custom_bitrate: Option<String>,
     /// Tray keyboard. Unused on Deck: Steam's keyboard types (same as add-host).
     keyboard: Keyboard,
+    /// How far the keyboard tray is up, 0..1, as the last frame left it.
+    seat: f64,
 }
 
 impl SettingsScreen {
@@ -514,6 +526,7 @@ impl SettingsScreen {
             strip_focus: false,
             custom_bitrate: None,
             keyboard: Keyboard::new(),
+            seat: 0.0,
         }
     }
 
@@ -641,6 +654,51 @@ impl SettingsScreen {
     }
 
     #[cfg(test)]
+    pub(crate) fn strip_focus_for_test(&self) -> bool {
+        self.strip_focus
+    }
+
+    /// The section strip above the rows and the explainer band under them: the shell's
+    /// trays run in this far so the rows bleed under both on one ramp. The keyboard
+    /// lifts the bottom reach away, or the tray would slab the keys.
+    pub(crate) fn pinned(&self, k: f64) -> (f32, f32) {
+        let bottom = DETAIL_H * k * (1.0 - self.seat.min(1.0));
+        ((TAB_STRIP_H * k) as f32, bottom as f32)
+    }
+
+    fn tray_h(&self, k: f64) -> f64 {
+        if self.seat > 0.0 {
+            (Keyboard::tray_height() + 12.0) * k * self.seat
+        } else {
+            0.0
+        }
+    }
+
+    /// The rows' band: under the section strip, above the explainer and the keyboard.
+    fn list_rect(&self, rect: Rect, k: f64) -> Rect {
+        Rect::from_ltrb(
+            rect.left,
+            rect.top + (TAB_STRIP_H * k) as f32,
+            rect.right,
+            rect.bottom - (DETAIL_H * k + self.tray_h(k)) as f32,
+        )
+    }
+
+    /// Down from the shell's tabs lands on the section strip, not the rows under it.
+    pub(crate) fn enter_from_top(&mut self) {
+        self.strip_focus = true;
+    }
+
+    /// OK went down on the focused row: it dips before the release acts.
+    pub(crate) fn press(&mut self) {
+        if self.strip_focus {
+            self.strip.press();
+        } else if self.custom_bitrate.is_none() {
+            self.list.dip();
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn tab_for_test(&self) -> usize {
         self.tab
     }
@@ -694,7 +752,9 @@ impl SettingsScreen {
             return true;
         }
         if let Some(tab) = self.strip.pointer(p) {
-            self.show_tab(tab, ctx);
+            if p.press() {
+                self.show_tab(tab, ctx);
+            }
             return true;
         }
         // A press on the rows takes D-pad focus back from the strip.
@@ -721,21 +781,7 @@ impl SettingsScreen {
             return self.custom_menu(ev, ctx);
         }
         if self.strip_focus {
-            // D-pad tab path for remotes with no shoulders and no Tab key.
-            return match ev {
-                MenuEvent::Back => {
-                    fx.pop();
-                    None
-                }
-                MenuEvent::Move(MenuDir::Left) | MenuEvent::JumpBack => self.switch_tab(-1, ctx),
-                MenuEvent::Move(MenuDir::Right) | MenuEvent::JumpForward => self.switch_tab(1, ctx),
-                MenuEvent::Move(MenuDir::Down) | MenuEvent::Confirm => {
-                    self.strip_focus = false;
-                    Some(MenuPulse::Move)
-                }
-                MenuEvent::Move(MenuDir::Up) => Some(MenuPulse::Boundary),
-                _ => None,
-            };
+            return self.sections_menu(ev, ctx, fx);
         }
         match ev {
             MenuEvent::Back => {
@@ -744,7 +790,7 @@ impl SettingsScreen {
             }
             MenuEvent::JumpBack => return self.switch_tab(-1, ctx),
             MenuEvent::JumpForward => return self.switch_tab(1, ctx),
-            // Up from row 0 focuses the strip, not a boundary.
+            // Up from row 0 focuses the sections, not a boundary.
             MenuEvent::Move(MenuDir::Up) if self.list.cursor == 0 => {
                 self.strip_focus = true;
                 return Some(MenuPulse::Move);
@@ -766,6 +812,31 @@ impl SettingsScreen {
         }
         let (msg, pulse) = self.list.menu(ev, ids.len());
         self.apply_row(msg, pulse, &ids, ctx, fx)
+    }
+
+    /// The D-pad on the section strip: Left/Right walk it, wrapping; Down returns to the
+    /// rows; Up is the shell's tab strip.
+    fn sections_menu(&mut self, ev: MenuEvent, ctx: &Ctx, fx: &mut Outbox) -> Option<MenuPulse> {
+        match ev {
+            MenuEvent::Back => {
+                fx.pop();
+                None
+            }
+            MenuEvent::JumpBack => self.switch_tab(-1, ctx),
+            MenuEvent::JumpForward => self.switch_tab(1, ctx),
+            MenuEvent::Confirm => {
+                self.strip_focus = false;
+                Some(MenuPulse::Move)
+            }
+            MenuEvent::Move(MenuDir::Down) => {
+                self.strip_focus = false;
+                Some(MenuPulse::Move)
+            }
+            MenuEvent::Move(MenuDir::Left) => self.switch_tab(-1, ctx),
+            MenuEvent::Move(MenuDir::Right) => self.switch_tab(1, ctx),
+            MenuEvent::Move(_) => Some(MenuPulse::Boundary),
+            _ => None,
+        }
     }
 
     /// Shared by pad and pointer so a click and an A press cannot drift apart.
@@ -796,9 +867,31 @@ impl SettingsScreen {
                     ListMsg::None => pulse,
                 };
             }
-            RowId::NoPresets => {
+            RowId::NoPresets | RowId::Version => {
                 return match msg {
                     ListMsg::Adjust(_) | ListMsg::Activate => Some(MenuPulse::Boundary),
+                    ListMsg::None => pulse,
+                };
+            }
+            RowId::LibrarySections => {
+                return match msg {
+                    ListMsg::Activate => {
+                        fx.push(Screen::Customize(super::library::CustomizeScreen::new()));
+                        pulse
+                    }
+                    ListMsg::Adjust(_) => Some(MenuPulse::Boundary),
+                    ListMsg::None => pulse,
+                };
+            }
+            RowId::Palette => {
+                return match msg {
+                    ListMsg::Activate => {
+                        fx.push(Screen::Palette(super::palette::PaletteScreen::new(
+                            &ctx.settings.ui_palette,
+                        )));
+                        pulse
+                    }
+                    ListMsg::Adjust(_) => Some(MenuPulse::Boundary),
                     ListMsg::None => pulse,
                 };
             }
@@ -815,13 +908,10 @@ impl SettingsScreen {
                     ListMsg::None => pulse,
                 };
             }
-            // In-process Skia screen; grant dialogs still go to the host.
             RowId::Controllers => {
                 return match msg {
                     ListMsg::Activate => {
-                        fx.push(Screen::Controllers(
-                            super::controllers::ControllersScreen::new(),
-                        ));
+                        fx.tab = Some(crate::shell::Tab::Players);
                         pulse
                     }
                     ListMsg::Adjust(_) => Some(MenuPulse::Boundary),
@@ -916,8 +1006,12 @@ impl SettingsScreen {
                 Hint::new(HintKey::Confirm, "Pin to hosts…"),
                 Hint::new(HintKey::Back, "Done"),
             ],
-            Some(RowId::NoPresets) | None => vec![Hint::new(HintKey::Back, "Done")],
-            Some(RowId::Controllers | RowId::Licenses) => vec![
+            Some(RowId::NoPresets | RowId::Version) | None => {
+                vec![Hint::new(HintKey::Back, "Done")]
+            }
+            Some(
+                RowId::Controllers | RowId::Licenses | RowId::LibrarySections | RowId::Palette,
+            ) => vec![
                 Hint::new(HintKey::Confirm, "Open"),
                 Hint::new(HintKey::Back, "Done"),
             ],
@@ -948,34 +1042,10 @@ impl SettingsScreen {
         fonts: &Fonts,
         ctx: &mut Ctx,
     ) {
-        // Strip on top, explainer under the list; rows get the band between.
-        let detail_h = 34.0 * k;
-        let strip_h = TAB_STRIP_H * k;
-        let labels: Vec<&str> = TABS.iter().map(|(name, _)| *name).collect();
-        self.strip.render(
-            canvas,
-            Rect::from_ltrb(rect.left, rect.top, rect.right, rect.top + strip_h as f32),
-            &labels,
-            self.tab,
-            self.strip_focus,
-            fonts,
-            k,
-            dt,
-        );
-        let seat = self
+        self.seat = self
             .keyboard
             .seat(self.custom_bitrate.is_some() && !ctx.deck, dt);
-        let tray_h = if seat > 0.0 {
-            (Keyboard::tray_height() + 12.0) * k * seat
-        } else {
-            0.0
-        };
-        let list_rect = Rect::from_ltrb(
-            rect.left,
-            rect.top + strip_h as f32,
-            rect.right,
-            rect.bottom - detail_h as f32 - tray_h as f32,
-        );
+        let list_rect = self.list_rect(rect, k);
         let ids = self.row_ids(ctx);
         self.clamp_cursor(ids.len());
         let mut rows: Vec<RowSpec> = ids
@@ -995,6 +1065,9 @@ impl SettingsScreen {
             rows[i].value_dim = text.is_empty();
             rows[i].caret = true;
         }
+        // Rows run on under the section strip and the explainer, on the shell's trays;
+        // with the keyboard up they stay in their band, or a tray would slab the keys.
+        self.list.bleed = self.seat == 0.0;
         self.list.render(
             canvas,
             list_rect,
@@ -1005,30 +1078,59 @@ impl SettingsScreen {
             // No row focus ring while the tray or the strip holds it.
             self.custom_bitrate.is_none() && !self.strip_focus,
         );
-        let detail = ids
-            .get(self.list.cursor)
-            .copied()
-            .map_or("", |id| detail(id, ctx));
-        fonts.centered(
-            canvas,
-            detail,
-            W::Regular,
-            13.0 * k,
-            fg(0.55),
-            f64::from(rect.left) + f64::from(rect.width()) / 2.0,
-            f64::from(rect.bottom) - detail_h - tray_h + 6.0 * k,
-            f64::from(rect.width()) * 0.8,
-        );
-        if seat > 0.0 {
+        if self.seat > 0.0 {
             self.keyboard.render(
                 canvas,
                 fonts,
                 f64::from(rect.width()),
                 f64::from(rect.bottom),
-                seat,
+                self.seat,
                 k,
             );
         }
+    }
+
+    /// The section tabs on the margin, under the shell's tabs, and the explainer on the
+    /// rows' inner column. The shell draws these over its trays, after [`Self::render`].
+    pub(crate) fn render_pinned(
+        &mut self,
+        canvas: &Canvas,
+        rect: Rect,
+        k: f64,
+        dt: f64,
+        fonts: &Fonts,
+        ctx: &Ctx,
+    ) {
+        let list_rect = self.list_rect(rect, k);
+        let col = column(list_rect, k);
+        let inner = f64::from(col.left) + 16.0 * k;
+        let labels: Vec<&str> = TABS.iter().map(|(name, _)| *name).collect();
+        self.strip.render(
+            canvas,
+            Rect::from_ltrb(rect.left, rect.top, rect.right, list_rect.top),
+            &labels,
+            self.tab,
+            self.strip_focus,
+            fonts,
+            k,
+            dt,
+        );
+        let ids = self.row_ids(ctx);
+        let focused = ids.get(self.list.cursor).copied();
+        let detail = focused.map_or("", |id| detail(id, ctx));
+        // The explainer under the list, led by the row's mark; above the keyboard when up.
+        crate::widgets::Foot {
+            detail: Some(detail),
+            mark: focused.map(row_icon),
+            ..Default::default()
+        }
+        .paint(
+            canvas,
+            fonts,
+            Rect::from_ltrb(rect.left, list_rect.bottom, rect.right, rect.bottom),
+            (inner, f64::from(col.right)),
+            k,
+        );
     }
 }
 
@@ -1136,6 +1238,7 @@ pub fn row_spec(
     overrides: &std::collections::HashMap<String, SettingsOverlay>,
 ) -> RowSpec {
     let mut spec = row_spec_base(id, ctx, presets);
+    spec.icon = Some(row_icon(id));
     if let Some((host, preset, overlay)) = preset_override(id, ctx, presets, overrides) {
         let mut resolved = overlay.apply(ctx.settings);
         let under = Ctx {
@@ -1160,6 +1263,50 @@ pub fn row_spec(
         ));
     }
     spec
+}
+
+/// The row's Lucide mark.
+fn row_icon(id: RowId) -> &'static str {
+    match id {
+        RowId::Aspect | RowId::RenderScale | RowId::Fullscreen => "maximize",
+        RowId::Resolution | RowId::ReduceUiResolution => "monitor",
+        RowId::Refresh | RowId::Vsync | RowId::AllowVrr => "refresh-cw",
+        RowId::Bitrate | RowId::PadHaptics | RowId::PhoneRumble => "activity",
+        RowId::VideoFit => "square",
+        RowId::Compositor => "panel-right",
+        RowId::Codec => "film",
+        RowId::Hdr => "sun",
+        RowId::PresentPriority | RowId::SmoothBuffer | RowId::LowLatency => "clock",
+        RowId::Decoder | RowId::AudioRoute => "cpu",
+        RowId::Chroma444 | RowId::TenBitSdr => "eye",
+        RowId::Audio | RowId::AudioFormat | RowId::KeepHostAudio | RowId::PadSpeaker => "volume-2",
+        RowId::Mic => "mic",
+        RowId::EchoCancel => "mic-off",
+        RowId::PadForward
+        | RowId::Pad
+        | RowId::PadType
+        | RowId::Sc2Passthrough
+        | RowId::DsCapture
+        | RowId::Controllers => "gamepad-2",
+        RowId::SystemButtons | RowId::GuideGesture => "house",
+        RowId::PhoneGyro => "rotate-cw",
+        RowId::Touch | RowId::CursorGestures => "pointer",
+        RowId::Mouse => "mouse",
+        RowId::QuickActions => "ellipsis",
+        RowId::InvertScroll => "undo-2",
+        RowId::Shortcuts => "keyboard",
+        RowId::FollowOsTheme => "moon",
+        RowId::Palette => "palette",
+        RowId::LibrarySections => "grip-vertical",
+        RowId::LibraryView | RowId::LibraryCollections => "menu",
+        RowId::StartIn => "play",
+        RowId::GamepadUi | RowId::GamepadUiMode => "tv",
+        RowId::Stats | RowId::AdvancedStats => "chart-column",
+        RowId::ReduceMotion => "eye",
+        RowId::AutoWake => "power",
+        RowId::Version | RowId::Licenses => "info",
+        RowId::Preset(_) | RowId::NoPresets => "settings",
+    }
 }
 
 /// The first known host whose bound preset, or one bound to a title, overrides `id`:
@@ -1250,12 +1397,42 @@ fn row_spec_base(id: RowId, ctx: &Ctx, presets: &[(String, String)]) -> RowSpec 
         RowId::NoPresets => {
             return RowSpec::action("No presets yet", false);
         }
-        RowId::Controllers => return RowSpec::action("Connected controllers", true),
+        RowId::Controllers => return RowSpec::action("Controllers", true),
         RowId::Licenses => return RowSpec::action("Open-source licences", true),
-        RowId::QuickActions => {
-            let mut r = RowSpec::action("Quick actions", true);
-            r.header = Some("Quick actions");
-            return r;
+        RowId::QuickActions => return RowSpec::action("Quick actions", true),
+        // Opens the cards: the value names the pick, no ‹ › to step it.
+        RowId::Palette => {
+            return RowSpec {
+                label: "Background".into(),
+                value: Some(
+                    crate::library::palette(&ctx.settings.ui_palette)
+                        .name
+                        .into(),
+                ),
+                ..RowSpec::default()
+            };
+        }
+        RowId::LibrarySections => {
+            let on = crate::library::sections(&ctx.settings.library_sections)
+                .iter()
+                .filter(|(_, on)| *on)
+                .count();
+            let all = crate::library::Section::ALL.len();
+            return RowSpec {
+                label: "Library sections".into(),
+                value: Some(match on {
+                    n if n == all => "All shown".into(),
+                    n => format!("{n} of {all} shown"),
+                }),
+                ..RowSpec::default()
+            };
+        }
+        RowId::Version => {
+            return RowSpec {
+                label: "Version".into(),
+                value: Some(env!("CARGO_PKG_VERSION").into()),
+                ..RowSpec::default()
+            };
         }
         _ => {}
     }
@@ -1451,11 +1628,6 @@ fn row_spec_base(id: RowId, ctx: &Ctx, presets: &[(String, String)]) -> RowSpec 
             "Follow system theme",
             on_off(s.follow_os_theme).into(),
         ),
-        RowId::Palette => (
-            None,
-            "Background",
-            crate::library::palette(&s.ui_palette).name.into(),
-        ),
         // Label is the reduction, so On means it is in effect.
         RowId::ReduceMotion => (None, "Reduce motion", on_off(s.reduce_motion).into()),
         RowId::ReduceUiResolution => (
@@ -1546,7 +1718,10 @@ fn row_spec_base(id: RowId, ctx: &Ctx, presets: &[(String, String)]) -> RowSpec 
         | RowId::NoPresets
         | RowId::Controllers
         | RowId::Licenses
-        | RowId::QuickActions => {
+        | RowId::QuickActions
+        | RowId::LibrarySections
+        | RowId::Palette
+        | RowId::Version => {
             unreachable!("returned above")
         }
     };
@@ -1711,8 +1886,8 @@ pub fn detail(id: RowId, ctx: &Ctx) -> &'static str {
              follows a theme switch live. Off, the Background row below picks the look."
         }
         RowId::Palette => {
-            "The colour family this backdrop drifts through — it changes as you step, so \
-             pick by looking. Appearance only; nothing about a stream depends on it."
+            "The colour family this backdrop drifts through. Appearance only; nothing \
+             about a stream depends on it."
         }
         RowId::ReduceMotion => {
             "Freezes the backdrop and replaces the console's slides and pops with plain \
@@ -1821,8 +1996,10 @@ pub fn detail(id: RowId, ctx: &Ctx) -> &'static str {
                  The switch above turns it off altogether."
             }
         },
-        RowId::Controllers => "Connected controllers, their grants and a rumble/haptics test.",
+        RowId::Controllers => "The controllers connected here, their grants and a rumble test.",
         RowId::Licenses => "The open-source licences this app ships under.",
+        RowId::LibrarySections => "Which sections the Games tab shows, and in what order.",
+        RowId::Version => "This console's build.",
         RowId::Preset(_) => {
             "Pin this preset to a host and it appears as its own card — one press \
              connects with these settings. Presets are created and edited in the \
@@ -2083,11 +2260,6 @@ pub fn adjust(id: RowId, delta: i32, wrap: bool, ctx: &mut Ctx) -> bool {
         }
         RowId::AdvancedStats => toggle(&mut s.advanced_stats, delta, wrap),
         RowId::FollowOsTheme => toggle(&mut s.follow_os_theme, delta, wrap),
-        RowId::Palette => {
-            let all = &crate::library::PALETTES;
-            let cur = all.iter().position(|p| p.id == s.ui_palette);
-            step_option(cur, all.len(), delta, wrap).map(|i| s.ui_palette = all[i].id.to_string())
-        }
         RowId::ReduceMotion => toggle(&mut s.reduce_motion, delta, wrap),
         RowId::ReduceUiResolution => toggle_extra(
             s,
@@ -2142,7 +2314,10 @@ pub fn adjust(id: RowId, delta: i32, wrap: bool, ctx: &mut Ctx) -> bool {
         | RowId::NoPresets
         | RowId::Controllers
         | RowId::Licenses
-        | RowId::QuickActions => None,
+        | RowId::QuickActions
+        | RowId::LibrarySections
+        | RowId::Palette
+        | RowId::Version => None,
     }
     .is_some()
 }
@@ -2266,21 +2441,31 @@ pub(crate) mod tests {
         );
     }
 
-    /// Tab names vs `console-vectors.json`. Input is `desktop_only` in the vectors:
-    /// omitting it would fail this test; a seven-name list would fail the mobile clients.
+    /// Section names vs `settings_sections` in `console-vectors.json`.
     #[test]
-    fn tab_names_match_the_shared_vectors() {
+    fn sections_match_the_shared_vectors() {
         let raw = include_str!("../../../../clients/shared/console-vectors.json");
         let file: serde_json::Value =
             serde_json::from_str(raw).expect("console-vectors.json must parse");
-        let want: Vec<&str> = file["tabs"]
+        let want: Vec<&str> = file["settings_sections"]
             .as_array()
-            .expect("tabs")
+            .expect("settings_sections")
             .iter()
-            .map(|t| t["name"].as_str().expect("tab name"))
+            .map(|t| t["name"].as_str().unwrap())
             .collect();
         let got: Vec<&str> = TABS.iter().map(|(name, _)| *name).collect();
-        assert_eq!(got, want, "the desktop console's tab names and order");
+        assert_eq!(got, want, "the sections' names and order");
+    }
+
+    /// Every row's mark is one this build ships.
+    #[test]
+    fn every_row_icon_ships() {
+        let rows = (TABS.iter().flat_map(|(_, rows)| rows.iter().copied()))
+            .chain([RowId::Preset(0), RowId::NoPresets]);
+        for id in rows {
+            let icon = row_icon(id);
+            assert!(crate::icons::by_name(icon).is_some(), "{id:?}: {icon}");
+        }
     }
 
     /// Every refresh rate the desktop shells can persist must have an index here.
@@ -2327,10 +2512,15 @@ pub(crate) mod tests {
         });
     }
 
-    /// Draw once so hit-testing reads real strip/list geometry.
+    /// Draw once so hit-testing reads real strip/list geometry: 1000 wide, the strip.
     fn rendered(screen: &mut SettingsScreen) -> f64 {
+        rendered_w(screen, 1000)
+    }
+
+    /// Draw once at `w` × 800.
+    fn rendered_w(screen: &mut SettingsScreen, w: i32) -> f64 {
         let fonts = crate::theme::build_fonts().unwrap();
-        let (w, h) = (1280i32, 800i32);
+        let h = 800i32;
         let mut surface = skia_safe::surfaces::raster_n32_premul((w, h)).unwrap();
         let (mut settings, pads) = ctx_parts();
         let library = crate::library::LibraryShared::default();
@@ -2350,14 +2540,10 @@ pub(crate) mod tests {
             t: 0.0,
         };
         let k = f64::from(h) / 800.0;
-        screen.render(
-            surface.canvas(),
-            Rect::from_ltrb(0.0, 64.0, w as f32, h as f32 - 86.0),
-            k,
-            1.0 / 60.0,
-            &fonts,
-            &mut ctx,
-        );
+        let rect = Rect::from_ltrb(0.0, 64.0, w as f32, h as f32 - 86.0);
+        let dt = 1.0 / 60.0;
+        screen.render(surface.canvas(), rect, k, dt, &fonts, &mut ctx);
+        screen.render_pinned(surface.canvas(), rect, k, dt, &fonts, &ctx);
         k
     }
 
@@ -2999,8 +3185,8 @@ pub(crate) mod tests {
         let mut s = SettingsScreen::with_presets(Vec::new());
         s.tab = TABS
             .iter()
-            .position(|(name, _)| *name == "Video")
-            .expect("the Video tab");
+            .position(|(name, _)| *name == "Picture")
+            .expect("the Picture section");
 
         let video = s.row_ids(&ctx);
         assert!(
@@ -3071,8 +3257,8 @@ pub(crate) mod tests {
         let mut s = SettingsScreen::with_presets(Vec::new());
         s.tab = TABS
             .iter()
-            .position(|(name, _)| *name == "Video")
-            .expect("the Video tab");
+            .position(|(name, _)| *name == "Picture")
+            .expect("the Picture section");
         s.list.cursor = s.row_ids(&ctx).len() - 1;
         let parked = s.list.cursor;
         ctx.settings.present_priority = "latency".into();
@@ -3407,11 +3593,11 @@ pub(crate) mod tests {
             vec![
                 RowId::LowLatency,
                 RowId::AudioRoute,
+                RowId::Controllers,
                 RowId::PhoneRumble,
                 RowId::PhoneGyro,
                 RowId::Sc2Passthrough,
                 RowId::DsCapture,
-                RowId::Controllers,
                 RowId::CursorGestures,
                 RowId::ReduceUiResolution,
                 RowId::GamepadUi,
@@ -3436,8 +3622,8 @@ pub(crate) mod tests {
                 RowId::AudioRoute,
                 // Every controller already gets its own wire slot, so player 1 is not a choice.
                 RowId::Pad,
-                RowId::CursorGestures,
                 RowId::Shortcuts,
+                RowId::CursorGestures,
                 RowId::Fullscreen,
             ]
         );
@@ -3564,7 +3750,7 @@ pub(crate) mod tests {
                 seen.push(*id);
             }
         }
-        assert_eq!(seen.len(), 55, "{seen:?}");
+        assert_eq!(seen.len(), 57, "{seen:?}");
         assert!(seen.contains(&RowId::StartIn));
         assert!(seen.contains(&RowId::AdvancedStats));
         assert!(seen.contains(&RowId::FollowOsTheme));
@@ -3699,11 +3885,11 @@ pub(crate) mod tests {
         s.menu(MenuEvent::JumpForward, &mut ctx, &mut fx);
         assert_eq!(s.tab, 1);
         assert_eq!(s.list.cursor, 0, "a fresh tab starts at its first row");
-        s.list.cursor = 2; // Video / 10-bit HDR
+        s.list.cursor = 2; // Picture's third row
         s.menu(MenuEvent::JumpBack, &mut ctx, &mut fx);
         assert_eq!((s.tab, s.list.cursor), (0, 3), "Stream kept its place");
         s.menu(MenuEvent::JumpBack, &mut ctx, &mut fx);
-        assert_eq!(s.tab, PRESETS_TAB);
+        assert_eq!(s.tab, TABS.len() - 1, "About, the last");
         assert_eq!(s.list.cursor, 0);
         s.menu(MenuEvent::JumpForward, &mut ctx, &mut fx);
         assert_eq!(s.tab, 0);
@@ -3740,7 +3926,11 @@ pub(crate) mod tests {
         assert!(s.strip_focus, "switching keeps the strip focused");
         s.menu(MenuEvent::Move(MenuDir::Left), &mut ctx, &mut fx);
         s.menu(MenuEvent::Move(MenuDir::Left), &mut ctx, &mut fx);
-        assert_eq!(s.tab, PRESETS_TAB, "the strip wraps like the shoulders do");
+        assert_eq!(
+            s.tab,
+            TABS.len() - 1,
+            "the strip wraps like the shoulders do"
+        );
         s.menu(MenuEvent::Move(MenuDir::Down), &mut ctx, &mut fx);
         assert!(!s.strip_focus, "Down drops back into the list");
         s.menu(MenuEvent::Move(MenuDir::Down), &mut ctx, &mut fx);
@@ -3775,8 +3965,8 @@ pub(crate) mod tests {
         let mut s = SettingsScreen::with_presets(Vec::new());
         s.tab = TABS
             .iter()
-            .position(|(name, _)| *name == "Audio")
-            .expect("the Audio tab");
+            .position(|(name, _)| *name == "Sound")
+            .expect("the Sound section");
         let audio = s.row_ids(&ctx);
         let channels = audio
             .iter()
@@ -3830,7 +4020,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn palette_row_steps_the_shared_key() {
+    fn palette_row_names_the_pick_and_opens_the_cards() {
         let (mut settings, pads) = ctx_parts();
         let library = crate::library::LibraryShared::default();
         let mut ctx = Ctx {
@@ -3856,17 +4046,9 @@ pub(crate) mod tests {
             Some("Violet")
         );
         assert!(
-            !adjust(RowId::Palette, -1, false, &mut ctx),
-            "already the first = thud"
+            !adjust(RowId::Palette, 1, true, &mut ctx),
+            "a button, not a stepper"
         );
-        assert!(adjust(RowId::Palette, 1, false, &mut ctx));
-        assert_eq!(ctx.settings.ui_palette, crate::library::PALETTES[1].id);
-        ctx.settings.ui_palette = crate::library::PALETTES
-            .last()
-            .expect("non-empty")
-            .id
-            .to_string();
-        assert!(adjust(RowId::Palette, 1, true, &mut ctx));
         assert_eq!(ctx.settings.ui_palette, "violet");
         ctx.settings.ui_palette = "chartreuse".into();
         assert_eq!(
@@ -3876,6 +4058,21 @@ pub(crate) mod tests {
             Some("Violet"),
             "an unknown palette reads as the default it actually draws"
         );
+        // Confirm on the row pushes the picker, opened on the palette in force.
+        let mut s = SettingsScreen::with_presets(Vec::new());
+        s.tab = TABS
+            .iter()
+            .position(|(name, _)| *name == "Interface")
+            .expect("the Interface section");
+        let ids = s.row_ids(&ctx);
+        s.list.cursor = ids
+            .iter()
+            .position(|r| *r == RowId::Palette)
+            .expect("the Interface section lists Background");
+        let mut fx = Outbox::default();
+        s.apply_row(ListMsg::Activate, None, &ids, &mut ctx, &mut fx);
+        assert!(matches!(fx.nav, Some(crate::screens::Nav::Push(ref b))
+            if matches!(**b, Screen::Palette(_))));
     }
 
     /// The value names where a launch will land, not what the key holds: with no

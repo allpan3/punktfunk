@@ -48,7 +48,9 @@ public final class ConsoleMetalView: ConsolePlatformView {
         #endif
         let metal = metalLayer
         metal.device = device
-        metal.pixelFormat = .bgra8Unorm
+        // 10-bit like the video's SDR drawable: the backdrop's gradients band in 8. Skia wraps
+        // the texture as BGRA1010102, or BGRA8888 under the `PUNKTFUNK_SDR10_DRAWABLE=8` lever.
+        metal.pixelFormat = sdr10Drawable
         // Skia reads back while blending, so the drawable cannot be write-only.
         metal.framebufferOnly = false
         metal.isOpaque = true
@@ -195,7 +197,10 @@ public final class ConsoleMetalView: ConsolePlatformView {
     }
 
     public override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        // Claimed on the way down, so the matching release is ours to swallow.
+        // Claimed on the way down, so the matching release is ours; Select's release acts.
+        if presses.contains(where: { $0.key == nil && $0.type == .select }) {
+            bridge.menu(.okUp, from: .keys)
+        }
         let unclaimed = presses.filter { !claims($0) }
         if !unclaimed.isEmpty || presses.isEmpty { super.pressesEnded(unclaimed, with: event) }
     }
@@ -227,7 +232,7 @@ public final class ConsoleMetalView: ConsolePlatformView {
         }
         let event: ConsoleBridge.Menu
         switch press.type {
-        case .select: event = .confirm
+        case .select: event = .okDown
         case .upArrow: event = .up
         case .downArrow: event = .down
         case .leftArrow: event = .left

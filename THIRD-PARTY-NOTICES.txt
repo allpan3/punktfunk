@@ -13,6 +13,7 @@ Total third-party crates: 605
 VENDORED THIRD-PARTY SOURCE (inside first-party crates)
 ----------------------------------------------------------------------------
   Lucide 0.462.0 (icon path data, crates/pf-console-ui) — https://lucide.dev
+  Kenney Input Prompts 1.5 (controller outlines, crates/pf-console-ui) — https://kenney.nl/assets/input-prompts
   pyrowave (vendored, crates/pyrowave-sys) — https://github.com/Themaister/pyrowave
   Granite subset (vendored, crates/pyrowave-sys) — https://github.com/Themaister/Granite
   volk (vendored, crates/pyrowave-sys) — https://github.com/zeux/volk
@@ -8617,6 +8618,22 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+
+----------------------------------------------------------------------------
+The following license (KENNEY-LICENSE) applies to: Kenney Input Prompts 1.5 (controller outlines, crates/pf-console-ui)
+----------------------------------------------------------------------------
+Kenney Input Prompts 1.5 — the controller outlines of the console's device marks
+(`PAD_*` in crates/pf-console-ui/src/icons.rs) are refit from the pack's
+`Vector/controller_*.svg` files. Created and distributed by Kenney (www.kenney.nl),
+https://kenney.nl/assets/input-prompts.
+
+License: Creative Commons Zero, CC0 1.0 Universal
+https://creativecommons.org/publicdomain/zero/1.0/ — no attribution required; this
+notice is provided for provenance.
+
+Controller names are trademarks of their respective owners. The marks are device
+silhouettes that identify the connected controller; they carry no manufacturer logo.
 
 
 ----------------------------------------------------------------------------

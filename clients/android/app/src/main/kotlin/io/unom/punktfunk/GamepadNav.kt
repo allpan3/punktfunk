@@ -16,14 +16,11 @@ import kotlin.math.abs
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 
-// Controller navigation for the console carousels (host launcher + library coverflow). It taps the
-// SAME MainActivity input probes the Controllers debug screen uses (padMotionProbe / padKeyProbe) so
-// it sees the raw analog stick and consumes it BEFORE MainActivity's stick→D-pad focus synthesis —
-// which is what made carousel scrolling feel wrong: that path is edge-only (no hold-to-repeat, so a
-// held stick did nothing) and a flick could cross the threshold twice (double-move). Here the left
-// stick drives discrete moves with hysteresis (fire once when it crosses HIGH; re-arm only after it
-// falls back under LOW → a flick is exactly one move) and auto-repeat while held. The caller coalesces
-// the moves against a target index so a fast repeat walks smoothly instead of overshooting.
+// Controller navigation for the Compose screens still in console style (the licences screen). It
+// taps the MainActivity input probes (padMotionProbe / padKeyProbe) so it sees the raw analog stick
+// before MainActivity's stick→D-pad focus synthesis, which is edge-only. The left stick drives
+// discrete moves with hysteresis (fire once past HIGH; re-arm only under LOW, so a flick is one
+// move) and auto-repeat while held.
 
 private const val STICK_HIGH = 0.6f   // cross this to commit a move
 private const val STICK_LOW = 0.3f    // fall back under this to re-arm (hysteresis)
@@ -56,69 +53,11 @@ private sealed interface Resolved<out D> {
 }
 
 /**
- * Installs controller navigation for a console screen while [active]. [onMove] gets -1 (left) / +1
- * (right) for each committed step; [onActivate] is A / D-pad-center / Enter, [onTertiary] is X,
- * [onSecondary] is Y. B and the shoulders fall through to MainActivity (B → its BACK remap → the
- * screen's BackHandler). [active] is set false while a sheet/dialog is on top so the carousel stops
- * consuming the pad and the overlay can be navigated.
- */
-@Composable
-fun GamepadNavEffect(
-    active: Boolean,
-    onMove: (Int) -> Unit,
-    onActivate: () -> Unit,
-    onSecondary: () -> Unit = {},
-    onTertiary: () -> Unit = {},
-    // D-pad Up (the carousel is horizontal) → e.g. Settings, since a TV remote has no X face button.
-    onUp: () -> Unit = {},
-    onDown: () -> Unit = {},
-    // Context/options menu — fired by the gamepad Select/View button OR a long-press of the select/OK
-    // button (the Android-TV context-menu convention). A short OK press is [onActivate].
-    onOptions: () -> Unit = {},
-) {
-    val currentOnUp by rememberUpdatedState(onUp)
-    val currentOnDown by rememberUpdatedState(onDown)
-    val currentOnOptions by rememberUpdatedState(onOptions)
-    PadNavCore(
-        active = active,
-        onStep = onMove,
-        onActivate = onActivate,
-        onSecondary = onSecondary,
-        onTertiary = onTertiary,
-        extraKeys = { code, _, edge ->
-            when (code) {
-                // TV remote (no face buttons): Up → Settings, Down → a saved host's Options.
-                KeyEvent.KEYCODE_DPAD_UP -> { if (edge) currentOnUp(); true }
-                KeyEvent.KEYCODE_DPAD_DOWN -> { if (edge) currentOnDown(); true }
-                // The gamepad Select / View / Share button → context options (a remote uses Down).
-                KeyEvent.KEYCODE_BUTTON_SELECT -> { if (edge) currentOnOptions(); true }
-                else -> false
-            }
-        },
-        resolve = { s, committed ->
-            val hat = if (s.hatX <= -0.5f) -1 else if (s.hatX >= 0.5f) 1 else 0
-            val x = s.stickX
-            when {
-                s.dpadX != 0 -> Resolved.Dir(s.dpadX)
-                hat != 0 -> Resolved.Dir(hat)
-                x >= STICK_HIGH -> Resolved.Dir(1)
-                x <= -STICK_HIGH -> Resolved.Dir(-1)
-                abs(x) < STICK_LOW -> Resolved.Centre
-                committed != null -> Resolved.Dir(committed) // in the band → hold the committed value
-                else -> Resolved.Band
-            }
-        },
-    )
-}
-
-/**
- * 2-D controller navigation for the console form screens (settings focus list, add-host, on-screen
- * keyboard). Same hysteresis + hold-to-repeat as [GamepadNavEffect] but on both axes — the dominant
- * stick axis (or the pressed D-pad/HAT) commits a [NavDir], and it re-arms only after the stick
- * returns near centre (so a flick is one step). [onActivate] is A / center, [onTertiary] is X,
- * [onSecondary] is Y, and [onShoulder] is L1 (-1) / R1 (+1) — a step SIDEWAYS out of the list, which
- * the settings screen uses for its section tabs. B is left to MainActivity's BACK remap → the
- * screen's BackHandler (so B "peels one layer": close the keyboard, then the screen).
+ * 2-D controller navigation with hysteresis and hold-to-repeat: the dominant stick axis (or the
+ * pressed D-pad/HAT) commits a [NavDir], and it re-arms only after the stick returns near centre, so
+ * a flick is one step. [onActivate] is A / center, [onTertiary] is X, [onSecondary] is Y, and
+ * [onShoulder] is L1 (-1) / R1 (+1). B is left to MainActivity's BACK remap → the screen's
+ * BackHandler.
  */
 @Composable
 fun GamepadNavEffect2D(

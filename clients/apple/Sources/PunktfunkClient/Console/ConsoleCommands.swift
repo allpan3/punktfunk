@@ -2,6 +2,7 @@
 // library fetches and host actions ride this bus; what the shell wants SHOWN goes back as a
 // model push or a notice toast.
 
+import CoreHaptics
 import Foundation
 import PunktfunkKit
 import PunktfunkShared
@@ -73,16 +74,89 @@ extension ConsoleModel {
                 label: a["label"] as? String ?? "")
         case "OpenPlatformScreen":
             platformScreen = a["id"] as? String
-        // Owed: the link speed test (a second connect through `startSpeedTest`) and the pad
-        // grants, neither of which this client has a service for yet.
-        case "SpeedTest", "PadAction":
-            notice("That isn't here yet on this device.")
+        case "PadAction":
+            padAction(a["action"] as? String ?? "", key: a["pad_key"] as? String ?? "")
+        case "SpeedTest":
+            speedTest(
+                key: a["key"] as? String ?? "", addr: a["addr"] as? String ?? "",
+                port: port(a["port"]), fp: a["fp_hex"] as? String ?? "")
         default:
             break
         }
     }
 
     private func port(_ value: Any?) -> UInt16 { UInt16(value as? Int ?? 0) }
+
+    /// The console's link test: one probe burst over a second connect, each phase pushed back
+    /// as `SpeedPhase`. The console raised the takeover itself and owns clearing it. 720p60, as
+    /// `pf_client_core::speed` connects: nothing presents a frame, and a 4K encode for a burst
+    /// would be slower for nothing. The recommendation is that module's integer rule.
+    private func speedTest(key: String, addr: String, port: UInt16, fp: String) {
+        guard let identity = (try? ClientIdentityStore.shared.load())?.identity else {
+            pushSpeed(key, ["Failed": "This device has no client certificate yet."])
+            return
+        }
+        let pin = host(fp: fp, addr: addr, port: port)?.pinnedSHA256
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let conn: PunktfunkConnection
+            do {
+                conn = try PunktfunkConnection(
+                    host: addr, port: port, width: 1280, height: 720, refreshHz: 60,
+                    pinSHA256: pin, identity: identity)
+            } catch {
+                await self?.pushSpeed(key, ["Failed": "Couldn't reach \(addr) — it may be asleep."])
+                return
+            }
+            defer { conn.close() }
+            conn.startSpeedTest(targetKbps: 3_000_000, durationMs: 5_000)
+            await self?.pushSpeed(key, "Measuring")
+            // The host clamps the burst to five seconds; its report lands just after.
+            let deadline = Date().addingTimeInterval(13)
+            while Date() < deadline {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                guard let r = conn.probeResult() else { break }
+                guard r.done else {
+                    // The live figure, for the console's graph.
+                    await self?.pushSpeed(key, ["Progress": ["kbps": r.throughputKbps]])
+                    continue
+                }
+                let done: [String: Any] = [
+                    "throughput_kbps": r.throughputKbps, "loss_pct": r.lossPct,
+                    "recommended_kbps": r.throughputKbps / 10 * 7,
+                ]
+                await self?.pushSpeed(key, ["Done": done])
+                return
+            }
+            await self?.pushSpeed(
+                key, ["Failed": "The measurement never finished — the connection may have dropped."])
+        }
+    }
+
+    private func pushSpeed(_ key: String, _ phase: Any) {
+        bridge.push(.speed, ConsoleJSON.string(["key": key, "phase": phase]))
+    }
+
+    /// The Players card's rumble test: one firm pulse on the pad it names. The grants are
+    /// Android's and never reach here.
+    private func padAction(_ action: String, key: String) {
+        guard action == "rumble",
+            let pad = GamepadManager.shared.controllers.first(where: { $0.id == key }),
+            let engine = pad.controller.haptics?.createEngine(withLocality: .default)
+        else { return }
+        do {
+            try engine.start()
+            let pulse = CHHapticEvent(
+                eventType: .hapticContinuous,
+                parameters: [CHHapticEventParameter(parameterID: .hapticIntensity, value: 1)],
+                relativeTime: 0, duration: 0.35)
+            try engine.makePlayer(with: CHHapticPattern(events: [pulse], parameters: []))
+                .start(atTime: CHHapticTimeImmediate)
+            // The closure holds the engine until the pulse has played.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { engine.stop() }
+        } catch {
+            notice("Couldn't run the rumble test — \(error.localizedDescription)")
+        }
+    }
 
     // MARK: - library
 
@@ -98,11 +172,17 @@ extension ConsoleModel {
                     canRetry: false))
             return
         }
-        fetching?.cancel()
-        if !refreshOnly { bridge.push(.libraryBegin, "{}") }
-        fetching = Task { [weak self] in
+        // A running-titles refresh must not cut a list fetch short; only a new fetch does.
+        if !refreshOnly {
+            fetching?.cancel()
+            artTask?.cancel()
+            bridge.push(.libraryBegin, "{}")
+        }
+        let task = Task { [weak self] in
             guard let self else { return }
-            if !refreshOnly, let cached = await LibraryCache.shared?.load(hostID: host.id.uuidString) {
+            var cached: CachedLibrary?
+            if !refreshOnly { cached = await LibraryCache.shared?.load(hostID: host.id.uuidString) }
+            if let cached {
                 bridge.push(.libraryCached, ConsoleJSON.libraryGames(cached.games))
             }
             let running = await LibraryClient.running(
@@ -120,12 +200,17 @@ extension ConsoleModel {
                 await LibraryCache.shared?.store(games, hostID: host.id.uuidString)
                 loadArt(games, host: host, identity: identity, mgmt: mgmt)
             } catch {
+                // The cached shelf stays up; its covers still come from the host's store.
+                if let cached {
+                    loadArt(cached.games, host: host, identity: identity, mgmt: mgmt)
+                }
                 bridge.push(
                     .libraryPhase,
                     ConsoleJSON.libraryError(
                         title: "Couldn't read the library", body: "\(error)", canRetry: true))
             }
         }
+        if !refreshOnly { fetching = task }
     }
 
     /// Posters, as they arrive. The shell decodes each at the size it draws.
@@ -136,7 +221,8 @@ extension ConsoleModel {
             address: host.address, port: mgmt, certPEM: identity.certPEM,
             keyPEM: identity.keyPEM, hostFingerprint: host.pinnedSHA256)
         else { return }
-        Task { [weak self] in
+        artTask?.cancel()
+        artTask = Task { [weak self] in
             for game in games {
                 if Task.isCancelled { return }
                 // The capsule first, then the header: the same order the touch grid takes.

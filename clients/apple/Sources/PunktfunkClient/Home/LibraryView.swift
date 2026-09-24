@@ -77,16 +77,6 @@ struct LibraryView: View {
     /// Stream this shelf's host without launching anything — "Resume <title>" while it has a
     /// game up. nil ⇒ browse-only, the same gate `onLaunch` uses.
     var onConnect: (() -> Void)? = nil
-    /// How the gamepad shell (GamepadLibraryScreen) closes this screen; nil — every sheet/cover
-    /// presentation — falls back to the environment dismiss.
-    var onClose: (() -> Void)? = nil
-    /// Whether the gamepad coverflow owns the controller — the shell gates it during a push/pop
-    /// and while the connect takeover is up. Presentations that cover the launcher keep the
-    /// default (their being up IS the launcher's gate).
-    var controllerActive = true
-    /// The collection the gamepad shelf is drilled into (its label), or nil — reported so a host
-    /// screen (GamepadLibraryScreen's pinned title) can read `host · preset · collection`.
-    var onCollectionChanged: ((String?) -> Void)?
     /// The Library tab's presentation (design §2.5): sections, search and Customize, no Close.
     var inTab = false
     /// Stream a saved host's desktop, launching nothing: the tab's Desktops section.
@@ -103,8 +93,6 @@ struct LibraryView: View {
     /// Shot harness: opens Customize.
     var shotCustomize = false
     #endif
-    /// The same, for this view's own navigation title (the sheet/cover presentations).
-    @State private var collectionLabel: String?
     /// The touch grid's sort (the shared `library_sort` key, the same one the console's bar
     /// writes) and its grouping (touch-only — sections are the touch analogue of the console's
     /// Collections place).
@@ -158,26 +146,6 @@ struct LibraryView: View {
     @State private var keyCursor: String?
     @State private var gridWidth: CGFloat = 0
     #endif
-    #if os(iOS) || os(macOS) || os(tvOS)
-    // Gamepad-driven browsing — see ContentView's identical gate. With no controller (or the
-    // setting off) every platform keeps the plain-grid presentation of this same view.
-    @ObservedObject private var gamepadManager = GamepadManager.shared
-    @AppStorage(DefaultsKey.gamepadUIEnabled) private var gamepadUIEnabled = true
-    @AppStorage(DefaultsKey.gamepadUIMode) private var gamepadUIMode =
-        GamepadUIEnvironment.modeWhenConnected
-    private var gamepadUIActive: Bool {
-        #if DEBUG
-        // A shot phase is a touch-UI scene, whatever controller or stored mode the device has.
-        if shotPhase != nil { return false }
-        #endif
-        return GamepadUIEnvironment.isActive(
-            gamepadConnected: gamepadManager.uiPadConnected, enabledSetting: gamepadUIEnabled,
-            mode: gamepadUIMode)
-    }
-    /// True when the iOS shell already draws one persistent field behind its layers — mounting a
-    /// second would double the mesh (the same rule the coverflow and the settings screen follow).
-    @Environment(\.gamepadHostedInShell) private var hostedInShell
-    #endif
 
     /// The TV's Library tab: its tab bar names the place and holds the shelf's actions.
     private var tvTab: Bool {
@@ -199,18 +167,14 @@ struct LibraryView: View {
             .toolbar {
                 #if os(macOS)
                 ToolbarItemGroup {
-                    if !gamepadUIActive { sortMenu }
+                    sortMenu
                     if inTab { customizeButton }
                     reloadButton
                 }
                 #else
                 if !tvTab {
                     ToolbarItem(placement: .primaryAction) { reloadButton }
-                    // The console presentation carries its own sort/view bar; the plain grid
-                    // gets a menu in the bar it already has.
-                    if !gamepadUIActive {
-                        ToolbarItem(placement: .primaryAction) { sortMenu }
-                    }
+                    ToolbarItem(placement: .primaryAction) { sortMenu }
                 }
                 #if os(iOS)
                 if inTab {
@@ -259,35 +223,7 @@ struct LibraryView: View {
                 artLoader = nil
                 Task { await leaving?.close() }
             }
-            #if os(iOS) || os(macOS)
-            // B closes the library even before the coverflow exists (loading / error / empty):
-            // the coverflow's carousel owns B once games render; until then this zero-size
-            // listener does — without it a controller-only user is trapped on an error screen
-            // (the gamepad screens carry no close chrome).
-            .background {
-                if gamepadUIActive && games.isEmpty {
-                    LibraryBackCatcher(
-                        active: controllerActive,
-                        // A = the on-screen Retry button, only while there is an error to retry
-                        // (a press during the load itself would start a second fetch).
-                        onConfirm: errorText != nil && !loading ? { Task { await load() } } : nil,
-                        onBack: { (onClose ?? { dismiss() })() })
-                }
-            }
-            #endif
-            #if os(iOS) || os(macOS) || os(tvOS)
-            // Published HERE, not just inside the coverflow, because the coverflow is only one of
-            // four things this view renders: the loading spinner, the error state and the empty
-            // state sit above it, as do the navigation title and toolbar. On iOS those are wrapped
-            // by GamepadLibraryScreen, which inks the whole thing; tvOS and macOS present this view
-            // directly in a NavigationStack, so under a pale palette every one of them kept the
-            // system's own (dark, on an Apple TV) chrome over a light field. Off when the gamepad
-            // UI isn't drawing — the plain grid belongs to the system background.
-            .gamepadPaletteInk(gamepadUIActive)
-            #endif
             #if os(tvOS)
-            // Above the palette ink, which pins a colour scheme: pinned above a List, it kept a
-            // focused row's text white on the row's white platter.
             .sheet(isPresented: $showCustomize) { LibrarySectionsPanel() }
             #endif
             #if DEBUG && os(tvOS)
@@ -316,92 +252,19 @@ struct LibraryView: View {
         if inTab {
             tabBody
         } else if loading && games.isEmpty {
-            consoleField(
-                ProgressView("Loading library…")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity))
+            ProgressView("Loading library…")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let errorText, games.isEmpty {
-            consoleField(errorState(errorText))
+            errorState(errorText)
         } else if games.isEmpty {
-            consoleField(emptyState)
+            emptyState
         } else {
-            if gamepadUIActive {
-                LibraryConsoleView(
-                    games: ordered, artLoader: artLoader, onLaunch: launchAndRemember,
-                    running: running,
-                    staleness: staleness,
-                    // The title last opened from this shelf — the coverflow assembles around it,
-                    // the way the plain grid scrolls back to it, so the round trip browse → play →
-                    // quit → browse lands where the player left rather than at the first cover.
-                    initialSelection: LibraryScrollMemory.last(forHost: host.id.uuidString),
-                    onDismiss: { (onClose ?? { dismiss() })() },
-                    // Nil where there is nothing to copy into (tvOS): the menu simply drops that
-                    // row there, and the Connect row below is what keeps it worth opening.
-                    onCopyLink: LinkClipboard.isAvailable ? { copyLink($0) } : nil,
-                    hostName: host.displayName,
-                    nowPlaying: nowPlayingStore.title(for: host),
-                    onConnect: onConnect,
-                    controllerActive: controllerActive,
-                    onCollectionChanged: { label in
-                        collectionLabel = label
-                        onCollectionChanged?(label)
-                    })
-            } else {
-                // Above the grid rather than over it: the coverflow owns its whole surface and has
-                // its own legend row, so the note rides the plain-grid presentation only.
-                VStack(spacing: 0) {
-                    staleNote
-                    grid
-                }
+            VStack(spacing: 0) {
+                staleNote
+                grid
             }
         }
     }
-
-    /// The console field behind the three states that are NOT the coverflow — loading, error,
-    /// empty. The coverflow mounts its own backdrop; these mounted nothing, so wherever this view
-    /// is a COVER over the launcher (tvOS, macOS) they drew straight onto it: the spinner and its
-    /// label sat on the launcher's own aurora with the host tiles still showing through. The same
-    /// field as the coverflow's (not the calmed form one), so nothing shifts under the content when
-    /// the titles land and the coverflow takes over.
-    ///
-    /// Only in gamepad mode: the plain grid's states belong on the system background, as before.
-    ///
-    /// In gamepad mode these states also carry the legend the coverflow carries — `A Retry` on an
-    /// error, `B Back` always — because a controller-only user on an error screen otherwise had
-    /// no visible way out (the desktop console shows the same two hints there).
-    @ViewBuilder private func consoleField(_ view: some View) -> some View {
-        #if os(iOS) || os(macOS) || os(tvOS)
-        view
-            .background {
-                if gamepadUIActive, !hostedInShell { GamepadScreenBackground() }
-            }
-            .safeAreaInset(edge: .bottom, alignment: .leading, spacing: 0) {
-                if gamepadUIActive {
-                    GamepadHintBar(hints: stateHints)
-                        .padding(.leading, 22)
-                        .padding(.vertical, 10)
-                }
-            }
-        #else
-        view
-        #endif
-    }
-
-    #if os(iOS) || os(macOS) || os(tvOS)
-    /// The legend under the loading / error / empty states: A retries a failed fetch (the same
-    /// action as the on-screen Retry button), B backs out. Read at press time, like every hint.
-    private var stateHints: [GamepadHint] {
-        var hints: [GamepadHint] = []
-        if errorText != nil, !loading {
-            hints.append(.init(
-                glyph: buttonGlyph(\.buttonA, fallback: "a.circle"), text: "Retry",
-                action: { Task { await load() } }))
-        }
-        hints.append(.init(
-            glyph: buttonGlyph(\.buttonB, fallback: "b.circle"), text: "Back",
-            action: { (onClose ?? { dismiss() })() }))
-        return hints
-    }
-    #endif
 
     /// A catalog collated by the shared rules: launchers lead (design D4), then one section per
     /// group under the chosen grouping (none = one section of games), each in the chosen sort.
@@ -701,7 +564,7 @@ struct LibraryView: View {
     /// from the tab bar lands here.
     private var tvActions: some View {
         HStack(spacing: 24) {
-            if !gamepadUIActive { sortMenu }
+            sortMenu
             customizeButton
             reloadButton
         }
@@ -1156,12 +1019,9 @@ struct LibraryView: View {
         onLaunch(id)
     }
 
-    /// `host` → `host · preset` (a pinned card's shelf) → `host · preset · collection` (drilled
-    /// into one group), joined with `·` — the desktop's title shape.
+    /// `host`, or `host · preset` for a pinned card's shelf — the desktop's title shape.
     private var shelfTitle: String {
-        let base = target.title(in: presets)
-        guard let collectionLabel else { return base }
-        return "\(base) \u{b7} \(collectionLabel)"
+        target.title(in: presets)
     }
 
     /// The catalog in display order — `LibraryOrder.display`, the desktop's `order()`: launcher
@@ -1228,37 +1088,6 @@ enum LibraryStaleness: Equatable {
         self == .waking ? "arrow.clockwise" : "wifi.slash"
     }
 }
-
-#if os(iOS) || os(macOS)
-/// Zero-size controller listener for the library's pre-coverflow states — B backs out, A retries
-/// a failed fetch. The same shape as ConnectOverlay's `ConnectControllerInput`;
-/// `GamepadMenuInput.needsSnapshot` swallows the held press that opened the screen. Unmounts the
-/// moment the coverflow (and its own A/B) is up.
-private struct LibraryBackCatcher: View {
-    let active: Bool
-    /// nil while there is nothing to retry — the press then does nothing, exactly like the
-    /// legend, which shows no A cell in that state.
-    var onConfirm: (() -> Void)?
-    let onBack: () -> Void
-    @State private var input = GamepadMenuInput(manager: .shared)
-
-    var body: some View {
-        Color.clear
-            .frame(width: 0, height: 0)
-            .onAppear {
-                input.onBack = onBack
-                input.onConfirm = onConfirm
-                if active { input.start() }
-            }
-            // The retry closure comes and goes with the error; keep the poller's copy current.
-            .onChange(of: onConfirm != nil) { _, _ in input.onConfirm = onConfirm }
-            .onChange(of: active) { _, nowActive in
-                if nowActive { input.start() } else { input.stop() }
-            }
-            .onDisappear { input.stop() }
-    }
-}
-#endif
 
 /// One poster tile. Steam vs custom is marked with a badge; the art walks the candidate URLs
 /// (portrait → header → hero) and finally a text placeholder.

@@ -12,9 +12,8 @@
 // tvOS keeps the system alerts: the focus engine drives them natively there, which is the whole
 // reason this gap was tvOS-invisible.
 //
-// Deliberately NOT built on GamepadMenuList: that is a ScrollView (right for a settings screen of
-// unknown length, wrong for two buttons in a card, where it would need an invented height and
-// could clip). A prompt has two or three actions, so it owns a plain VStack and a cursor.
+// A prompt has two or three actions, so it owns a plain VStack and a cursor rather than a
+// ScrollView, which would need an invented height and could clip.
 
 import PunktfunkKit
 import SwiftUI

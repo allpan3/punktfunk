@@ -47,6 +47,18 @@ pub fn run_speed_probe(
     fp_hex: Option<&str>,
     identity: (String, String),
 ) -> Result<ProbeOutcome, String> {
+    run_speed_probe_with(addr, port, fp_hex, identity, |_| {})
+}
+
+/// [`run_speed_probe`], reporting the burst's live throughput (kbps) at every poll, for
+/// a shell that draws the measurement as it happens.
+pub fn run_speed_probe_with(
+    addr: &str,
+    port: u16,
+    fp_hex: Option<&str>,
+    identity: (String, String),
+    mut progress: impl FnMut(u32),
+) -> Result<ProbeOutcome, String> {
     // Pin the saved/advertised fingerprint when we have one; a manual host measures over TOFU.
     let pin = fp_hex.and_then(crate::trust::parse_hex32);
     let c = NativeClient::connect(
@@ -88,10 +100,12 @@ pub fn run_speed_probe(
     let deadline = Instant::now() + POLL_BUDGET;
     loop {
         std::thread::sleep(POLL_INTERVAL);
-        if c.probe_result().done {
+        let now = c.probe_result();
+        if now.done {
             std::thread::sleep(SETTLE);
             return Ok(c.probe_result());
         }
+        progress(now.throughput_kbps);
         if Instant::now() > deadline {
             return Err("The speed test didn't finish in time".to_string());
         }

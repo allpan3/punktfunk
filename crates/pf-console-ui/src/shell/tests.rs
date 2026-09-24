@@ -28,6 +28,31 @@ use punktfunk_core::config::GamepadPref;
 /// Pins `motion_spring` (vectors v2). v1 `motion` still exists for other clients; this
 /// transition is a spring, not that ease-out, so sampling v1 would pass a curve we do not run.
 ///
+/// The redesign's motion table vs `motion_springs` in `console-vectors.json`.
+#[test]
+fn the_motion_table_matches_the_shared_vectors() {
+    use crate::anim::springs;
+    let raw = include_str!("../../../../clients/shared/console-vectors.json");
+    let file: serde_json::Value = serde_json::from_str(raw).unwrap();
+    let m = &file["motion_springs"];
+    let num = |a: &str, b: &str| m[a][b].as_f64().unwrap_or_else(|| panic!("{a}.{b}"));
+    for (name, spec) in [
+        ("focus", springs::FOCUS),
+        ("press", springs::PRESS),
+        ("nav", springs::NAV),
+        ("modal", springs::MODAL),
+    ] {
+        assert_eq!(spec.response, num(name, "response"), "{name}");
+        assert_eq!(spec.damping, num(name, "damping"), "{name}");
+    }
+    assert_eq!(crate::anim::PRESS_SCALE, num("press", "scale"));
+    assert_eq!(TAB_SLIDE, num("tab", "slide_fraction"));
+    let e = crate::anim::entrances::CARDS;
+    assert_eq!(e.stagger, num("entrance", "stagger_s"));
+    assert_eq!(crate::library::ENTER_SCALE, num("entrance", "scale"));
+    assert_eq!(crate::library::ENTER_RISE, num("entrance", "rise_dp"));
+}
+
 /// Springs are integrator-dependent: two runtimes that honour `response`/`damping` agree
 /// to the eye and disagree in the third decimal. Pin the parameters, not sampled positions.
 #[test]
@@ -35,13 +60,12 @@ fn motion_matches_the_shared_vectors() {
     let raw = include_str!("../../../../clients/shared/console-vectors.json");
     let file: serde_json::Value =
         serde_json::from_str(raw).expect("console-vectors.json must parse");
-    assert_eq!(
-        file["version"].as_u64(),
-        Some(2),
-        "the spring block arrived with version 2"
+    assert!(
+        file["version"].as_u64() >= Some(3),
+        "the motion table arrived with version 3"
     );
 
-    let m = &file["motion_spring"];
+    let m = &file["motion_springs"]["nav"];
     let num = |key: &str| m[key].as_f64().unwrap_or_else(|| panic!("{key} missing"));
     let close = |what: &str, got: f64, want: f64| {
         assert!(
@@ -64,12 +88,21 @@ fn motion_matches_the_shared_vectors() {
         Some(true),
         "this client's transitions accept Back mid-flight; the block must say so"
     );
+}
 
-    // v1 stays until the last client migrates. Deleting it here reds Android's test.
-    assert!(
-        file["motion"]["$deprecated"].is_string(),
-        "the v1 motion block must carry its deprecation note while other clients read it"
-    );
+/// Pins `shell_tabs` (vectors v3): the strip's ids, names and order.
+#[test]
+fn tabs_match_the_shared_vectors() {
+    let raw = include_str!("../../../../clients/shared/console-vectors.json");
+    let file: serde_json::Value = serde_json::from_str(raw).expect("vectors parse");
+    let want: Vec<(&str, &str)> = file["shell_tabs"]
+        .as_array()
+        .expect("shell_tabs")
+        .iter()
+        .map(|t| (t["id"].as_str().unwrap(), t["name"].as_str().unwrap()))
+        .collect();
+    let have: Vec<(&str, &str)> = TABS.iter().map(|t| (t.id(), t.name())).collect();
+    assert_eq!(have, want);
 }
 
 /// Shared throwaway config dir. Settings SAVE on adjust; a second `OnceLock` here
@@ -153,26 +186,161 @@ fn shell(stack: Vec<Screen>) -> (Shell, ConsoleShared, LibraryShared) {
     (shell, console, library)
 }
 
+/// A tab switch slides the content only: mid-flight the strip's pixels match the settled
+/// frame's. Hosts and Players share the aurora, so the backdrop does not change under it.
+#[test]
+fn the_strip_holds_still_across_a_tab_switch() {
+    let fonts = crate::theme::build_fonts().unwrap();
+    let (w, h) = (1280, 800);
+    let mut surface = skia_safe::surfaces::raster_n32_premul((w, h)).unwrap();
+    let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    s.fake_clock = Some((100.0, 1.0 / 60.0));
+    // The strip's line (k = 1 at 800 tall), left half: the tabs, not the chip.
+    let (bw, bh) = (w / 2, 36);
+    let mut band = |s: &mut Shell, frames: usize| {
+        for _ in 0..frames {
+            s.render(
+                surface.canvas(),
+                w as u32,
+                h as u32,
+                &fonts,
+                None,
+                None,
+                &[],
+            );
+        }
+        let info = skia_safe::ImageInfo::new_n32_premul((bw, bh), None);
+        let mut px = vec![0u8; (bw * bh * 4) as usize];
+        assert!(surface.read_pixels(&info, &mut px, (bw * 4) as usize, (0, 32)));
+        px
+    };
+    band(&mut s, 30);
+    assert!(s.switch_tab(Tab::Players));
+    let mid = band(&mut s, 5);
+    assert!(
+        matches!(s.motion, Motion::Tab { .. }),
+        "still mid-switch after five frames"
+    );
+    // Settle, then read the strip at the mid frame's field time: the field moves under it,
+    // and only the strip is on trial.
+    let clock = s.fake_clock;
+    band(&mut s, 90);
+    s.fake_clock = clock.map(|(t, step)| (t - step, step));
+    let settled = band(&mut s, 1);
+    let worst = mid
+        .iter()
+        .zip(&settled)
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap();
+    assert!(
+        worst <= 12,
+        "the strip moved mid-switch (max channel diff {worst})"
+    );
+}
+
+/// A remote's whole lap: Up from the host row lands on the strip, Left and Right walk the
+/// tabs, Down returns to the screen, L1/R1 jump from content, and Back at a root leaves.
 #[test]
 fn navigation_lap() {
     let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
     s.sync();
-    s.handle_menu(MenuEvent::Tertiary);
-    assert_eq!(s.stack.len(), 2);
-    finish_motion(&mut s);
-    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    assert_eq!(
+        s.handle_menu(MenuEvent::Move(MenuDir::Up))
+            .map(|p| format!("{p:?}")),
+        Some("Move".into())
+    );
+    assert!(s.strip_focus, "up from the host row lands on its tab");
     s.handle_menu(MenuEvent::Move(MenuDir::Right));
-    s.handle_menu(MenuEvent::Back);
+    assert_eq!(s.tab, Tab::Games);
+    assert!(matches!(s.stack.as_slice(), [Screen::Library(_)]));
     finish_motion(&mut s);
-    assert_eq!(s.stack.len(), 1);
-    s.handle_menu(MenuEvent::Secondary);
-    assert_eq!(s.stack.len(), 2);
+    s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    assert_eq!(s.tab, Tab::Players);
     finish_motion(&mut s);
-    s.handle_menu(MenuEvent::Back);
+    s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    assert_eq!(s.tab, Tab::Settings);
     finish_motion(&mut s);
-    assert_eq!(s.stack.len(), 1);
+    assert!(matches!(
+        s.handle_menu(MenuEvent::Move(MenuDir::Right)),
+        Some(MenuPulse::Boundary)
+    ));
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    assert!(!s.strip_focus, "down returns to the screen");
+    assert!(
+        matches!(s.stack.as_slice(), [Screen::Settings(st)] if st.strip_focus_for_test()),
+        "on Settings, to its sections first"
+    );
+    for _ in 0..3 {
+        s.handle_menu(MenuEvent::JumpBack);
+        finish_motion(&mut s);
+    }
+    assert!(matches!(s.stack.as_slice(), [Screen::Home(_)]));
     s.handle_menu(MenuEvent::Back);
     assert!(matches!(s.take_action(), Some(OverlayAction::Quit)));
+}
+
+/// A tab root that places nothing to focus parks focus on its tab, where Down stays;
+/// once the root places targets, the parked focus goes back in by itself.
+#[test]
+fn a_root_with_nothing_to_focus_parks_focus_on_the_strip() {
+    let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    frame(&mut s);
+    s.root_targets = Some(0);
+    s.sync();
+    assert!(s.strip_focus, "focus parks on the tab");
+    assert!(matches!(
+        s.handle_menu(MenuEvent::Move(MenuDir::Down)),
+        Some(MenuPulse::Boundary)
+    ));
+    assert!(s.strip_focus, "nothing below takes it");
+
+    s.strip_parked = true;
+    s.root_targets = Some(3);
+    s.sync();
+    assert!(!s.strip_focus, "the root's targets take it back");
+}
+
+/// Up that a root screen bumps reaches its tab.
+#[test]
+fn a_bumped_up_at_a_root_reaches_the_strip() {
+    let (mut s, _console, _library) = shell(vec![Screen::Players(
+        crate::screens::players::PlayersScreen::new(),
+    )]);
+    frame(&mut s);
+    s.sync();
+    assert!(!s.strip_focus);
+    assert!(matches!(
+        s.handle_menu(MenuEvent::Move(MenuDir::Up)),
+        Some(MenuPulse::Move)
+    ));
+    assert!(s.strip_focus);
+}
+
+/// OK on a remote acts on release; held, it is the card's menu and the release does
+/// nothing more.
+#[test]
+fn a_held_ok_opens_the_card_menu() {
+    let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    s.sync();
+    s.fake_clock = Some((10.0, 0.0));
+    s.ok(true);
+    s.fake_clock = Some((10.2, 0.0));
+    s.ok(false);
+    assert!(
+        matches!(s.take_action(), Some(OverlayAction::Launch { .. })),
+        "a click connects"
+    );
+    s.connecting = None;
+    s.ok(true);
+    s.fake_clock = Some((10.8, 0.0));
+    s.tick_ok();
+    assert!(matches!(s.stack.last(), Some(Screen::CardMenu(_))));
+    s.ok(false);
+    assert!(
+        s.take_action().is_none(),
+        "the release after a hold does nothing"
+    );
 }
 
 #[test]
@@ -220,6 +388,62 @@ fn run_motion(s: &mut Shell) -> Vec<f64> {
     panic!("transition never settled");
 }
 
+/// The combined home: the games of the host the row rests on sit under it. Down past the
+/// card's verbs lands on them without the desktop tile (the card above is the desk), OK
+/// launches from there, and Up from their top row returns to the verbs.
+#[test]
+fn down_from_a_card_lands_on_its_games_and_launches_there() {
+    fake_home();
+    let console = ConsoleShared::default();
+    console.set_hosts(hosts());
+    let library = LibraryShared::default();
+    let bus = ConsoleBus::default();
+    let home = vec![Screen::Home(HomeScreen::new())];
+    let mut s = Shell::new(console, library.clone(), bus.clone(), test_options(), home).unwrap();
+    let fetched = |bus: &ConsoleBus| -> Vec<String> {
+        (bus.drain().into_iter())
+            .filter_map(|c| match c {
+                ConsoleCmd::FetchLibrary { fp_hex, .. } => Some(fp_hex),
+                _ => None,
+            })
+            .collect()
+    };
+    s.sync();
+    assert_eq!(fetched(&bus), vec![hosts()[0].fp_hex.clone()]);
+    s.sync();
+    assert!(fetched(&bus).is_empty(), "asked once");
+
+    library.set_games(vec![crate::library::LibraryGame {
+        id: "steam:570".into(),
+        title: "Dota 2".into(),
+        store: "steam".into(),
+        launcher: false,
+        icon: String::new(),
+        platform: None,
+        developer: None,
+        year: None,
+        genres: Vec::new(),
+        stats: None,
+        running: false,
+    }]);
+    frame(&mut s);
+    let below = |s: &Shell| matches!(s.stack.last(), Some(Screen::Home(h)) if h.shelf().is_some());
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    assert!(!below(&s), "the first Down lands on the card's verbs");
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    assert!(below(&s), "the second lands on the games");
+    s.handle_menu(MenuEvent::Move(MenuDir::Up));
+    assert!(!below(&s), "Up from the top row returns to the verbs");
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    s.handle_menu(MenuEvent::Confirm);
+    match s.take_action() {
+        Some(OverlayAction::Launch { launch, .. }) => {
+            assert_eq!(launch.as_deref(), Some("steam:570"));
+        }
+        _ => panic!("OK on the games launches the title"),
+    }
+}
+
 /// Y on a pinned card must carry that preset into the library. Falling back to the
 /// host default would ignore the pin, which is why the card exists.
 #[test]
@@ -242,7 +466,7 @@ fn a_pinned_cards_library_launches_with_its_preset() {
 
     // Pinned card sits immediately after its host's primary tile.
     s.handle_menu(MenuEvent::Move(MenuDir::Right));
-    s.handle_menu(MenuEvent::Secondary);
+    s.handle_menu(MenuEvent::JumpForward);
     finish_motion(&mut s);
     match s.stack.last() {
         Some(Screen::Library(l)) => assert_eq!(
@@ -250,7 +474,7 @@ fn a_pinned_cards_library_launches_with_its_preset() {
             "Living Room PC \u{b7} HDR",
             "the shelf names the preset it will launch with"
         ),
-        _ => panic!("Y on a pinned card opens its library"),
+        _ => panic!("Games on a pinned card opens its shelf"),
     }
 
     library.set_games(vec![crate::library::LibraryGame {
@@ -266,8 +490,8 @@ fn a_pinned_cards_library_launches_with_its_preset() {
         stats: None,
         running: false,
     }]);
-    // Past the desktop tile, which leads every shelf and launches nothing.
-    s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    // Down past the Desktops band, which arrives focused and launches nothing.
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
     s.handle_menu(MenuEvent::Confirm);
     match s.take_action() {
         Some(OverlayAction::Launch { launch, preset, .. }) => {
@@ -287,7 +511,7 @@ fn a_pinned_cards_library_launches_with_its_preset() {
 fn a_primary_tiles_library_leaves_the_preset_to_the_binding() {
     let (mut s, _console, library) = shell(vec![Screen::Home(HomeScreen::new())]);
     s.sync();
-    s.handle_menu(MenuEvent::Secondary); // paired+online host focused first
+    s.handle_menu(MenuEvent::JumpForward); // Games, on the focused host's shelf
     finish_motion(&mut s);
     library.set_games(vec![crate::library::LibraryGame {
         id: "steam:570".into(),
@@ -334,35 +558,31 @@ fn wake_gates_input_in_the_same_press() {
     assert!(s.handle_menu(MenuEvent::Move(MenuDir::Left)).is_some());
 }
 
-/// Tab / Shift+Tab change section even with a pad attached. The legend names
-/// PgUp/PgDn only when no pad is present, so keyboard users otherwise have no way in.
+/// Tab / Shift+Tab walk the console's tabs, the keyboard's L1/R1.
 #[test]
-fn tab_and_shift_tab_change_section() {
+fn tab_and_shift_tab_change_tabs() {
     use crate::input::Key as Scancode;
     let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
-    s.handle_menu(MenuEvent::Tertiary); // X → Settings
-    s.motion = Motion::None; // skip the push transition, which drops input
-    let tab = |s: &Shell| match s.stack.last() {
-        Some(Screen::Settings(st)) => st.tab_for_test(),
-        _ => panic!("the settings screen is on top"),
-    };
-    assert_eq!(tab(&s), 0);
+    s.sync();
     assert!(s.key(Scancode::Tab, false, false), "Tab is consumed");
-    assert_eq!(tab(&s), 1, "Tab goes forward");
+    assert_eq!(s.tab, Tab::Games, "Tab goes forward");
+    s.motion = Motion::None;
+    s.key(Scancode::Tab, false, false);
+    assert_eq!(s.tab, Tab::Players);
+    s.motion = Motion::None;
     assert!(s.key(Scancode::Tab, true, false));
-    assert_eq!(tab(&s), 0, "Shift+Tab goes back");
-    s.key(Scancode::Tab, true, false);
-    assert_eq!(tab(&s), crate::screens::settings::TAB_COUNT - 1);
-    let before = tab(&s);
+    assert_eq!(s.tab, Tab::Games, "Shift+Tab goes back");
+    s.motion = Motion::None;
     s.key(Scancode::Tab, false, true);
-    assert_eq!(tab(&s), before, "held Tab doesn't skip sections");
+    assert_eq!(s.tab, Tab::Games, "held Tab doesn't skip tabs");
 }
 
 /// A right-click is Back on every screen, so a pointer always has a way out.
 #[test]
 fn a_secondary_press_goes_back() {
     let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
-    s.handle_menu(MenuEvent::Tertiary); // X → Settings
+    s.sync();
+    s.handle_menu(MenuEvent::Secondary); // Y → the host's menu
     s.motion = Motion::None;
     assert_eq!(s.stack.len(), 2);
     assert!(s.pointer(crate::pointer::Pointer {
@@ -387,20 +607,20 @@ fn a_secondary_press_goes_back() {
 #[test]
 fn a_replace_carries_the_screen_it_replaced() {
     let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
-    s.handle_menu(MenuEvent::Move(MenuDir::Up));
-    assert!(matches!(s.stack.last(), Some(Screen::HostOptions(_))));
+    s.sync();
+    s.handle_menu(MenuEvent::Secondary);
+    assert!(matches!(s.stack.last(), Some(Screen::CardMenu(_))));
     finish_motion(&mut s);
 
-    // First host's menu is [Send logs, Library, Test network speed…, Copy link, Edit…, …]
-    // — four Downs. Pressed exactly so a menu reorder fails here, not on something destructive.
-    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    // The first host's menu is [Connect with…, Browse games, Copy link, Host details…] —
+    // three Downs. Pressed exactly so a reorder fails here, not on something destructive.
     s.handle_menu(MenuEvent::Move(MenuDir::Down));
     s.handle_menu(MenuEvent::Move(MenuDir::Down));
     s.handle_menu(MenuEvent::Move(MenuDir::Down));
     s.handle_menu(MenuEvent::Confirm);
     assert!(
-        matches!(s.stack.last(), Some(Screen::AddHost(_))),
-        "Edit… opens the host editor"
+        matches!(s.stack.last(), Some(Screen::CardMenu(m)) if m.title().ends_with("Details")),
+        "Host details… opens the details"
     );
     assert_eq!(s.stack.len(), 2, "the menu was swapped out, not stacked on");
     match &s.motion {
@@ -409,7 +629,7 @@ fn a_replace_carries_the_screen_it_replaced() {
             leaving: Some(carried),
             ..
         } => assert!(
-            matches!(carried.as_ref(), Screen::HostOptions(_)),
+            matches!(carried.as_ref(), Screen::CardMenu(_)),
             "the receding layer must be the MENU; carrying nothing leaves the renderer to \
              recede the menu's parent, which is the reported flash"
         ),
@@ -419,30 +639,43 @@ fn a_replace_carries_the_screen_it_replaced() {
     s.handle_menu(MenuEvent::Back);
     finish_motion(&mut s);
     assert!(
-        matches!(s.stack.last(), Some(Screen::HostOptions(_))),
+        matches!(s.stack.last(), Some(Screen::CardMenu(_))),
         "a reversed replace lands where the user actually was"
     );
 }
 
 #[test]
-fn up_opens_host_options_for_saved_tiles_only() {
+fn y_opens_a_menu_on_every_host_card_and_none_on_the_action_tiles() {
     let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
-    s.handle_menu(MenuEvent::Move(MenuDir::Up));
-    assert!(
-        matches!(s.stack.last(), Some(Screen::HostOptions(_))),
-        "the first tile is a saved host"
-    );
+    s.sync();
+    s.handle_menu(MenuEvent::Secondary);
+    assert!(matches!(s.stack.last(), Some(Screen::CardMenu(_))));
     s.motion = Motion::None;
     s.handle_menu(MenuEvent::Back);
     s.motion = Motion::None;
-    // The third fixture host is discovered-only (`saved: false`).
+    // The third fixture host is discovered-only (`saved: false`): Pair… and Add host.
     s.handle_menu(MenuEvent::Move(MenuDir::Right));
     s.handle_menu(MenuEvent::Move(MenuDir::Right));
-    s.handle_menu(MenuEvent::Move(MenuDir::Up));
+    s.handle_menu(MenuEvent::Secondary);
+    assert!(matches!(s.stack.last(), Some(Screen::CardMenu(_))));
+    s.motion = Motion::None;
+    s.handle_menu(MenuEvent::Back);
+    s.motion = Motion::None;
+    s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    s.handle_menu(MenuEvent::Secondary);
     assert!(
         matches!(s.stack.last(), Some(Screen::Home(_))),
-        "an unsaved host has nothing to edit or forget"
+        "Add Host is a tile, not a host"
     );
+}
+
+/// The next Settings section the remote's way: up onto the section strip, right, down.
+fn next_section(s: &mut Shell) {
+    while !matches!(s.stack.last(), Some(Screen::Settings(st)) if st.strip_focus_for_test()) {
+        s.handle_menu(MenuEvent::Move(MenuDir::Up));
+    }
+    s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
 }
 
 #[test]
@@ -453,6 +686,7 @@ fn every_settings_tab_rasters() {
     let mut surface = skia_safe::surfaces::raster_n32_premul((w as i32, h as i32)).unwrap();
     let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
     s.handle_menu(MenuEvent::Tertiary); // X → Settings
+    finish_motion(&mut s);
 
     let mut frame = |s: &mut Shell| {
         s.render(
@@ -473,7 +707,7 @@ fn every_settings_tab_rasters() {
             s.handle_menu(MenuEvent::Move(MenuDir::Down));
         }
         frame(&mut s);
-        s.handle_menu(MenuEvent::JumpForward);
+        next_section(&mut s);
     }
     // 640×400: pills are measured text, so a too-small width must clamp, not overflow.
     s.render(surface.canvas(), 640, 400, &fonts, None, None, &pads);
@@ -492,6 +726,18 @@ fn rendered_settings() -> (Shell, skia_safe::Rect) {
         _ => panic!("settings is not on top"),
     };
     (s, row)
+}
+
+/// On a wide screen the Settings rows are a centred column at their full width.
+#[test]
+fn settings_rows_sit_centred() {
+    let (_s, row) = rendered_settings();
+    assert!(
+        (row.center_x() - 640.0).abs() < 1.0,
+        "row centre {}",
+        row.center_x()
+    );
+    assert!((row.width() - crate::widgets::ROW_MAX_W as f32).abs() < 1.0);
 }
 
 /// A finger swipe across the list is a scroll and must not flip the landed-on value.
@@ -554,7 +800,7 @@ fn a_finger_pans_and_flings_the_settings_list() {
     use pf_client_core::console::{PointerButton, PointerInput};
     let (mut s, _) = rendered_settings();
     for _ in 0..5 {
-        s.handle_menu(MenuEvent::JumpForward);
+        next_section(&mut s);
     }
     // A short window, so the nine rows overflow the list by a few rows.
     let fonts = crate::theme::build_fonts().unwrap();
@@ -623,7 +869,7 @@ fn a_long_press_is_secondary_on_the_row_under_the_finger() {
     use pf_client_core::console::{PointerButton, PointerInput};
     let (mut s, _) = rendered_settings();
     let bitrate = match s.stack.last() {
-        Some(Screen::Settings(scr)) => scr.row_rect_for_test(5).expect("Bitrate drew"),
+        Some(Screen::Settings(scr)) => scr.row_rect_for_test(3).expect("Bitrate drew"),
         _ => panic!("settings is not on top"),
     };
     let (x, y) = (bitrate.center_x(), bitrate.center_y());
@@ -734,7 +980,7 @@ fn a_canceled_touch_never_acts() {
 fn back_mid_push_turns_the_screen_around() {
     let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
     s.sync();
-    s.handle_menu(MenuEvent::Tertiary); // X → Settings
+    s.handle_menu(MenuEvent::Secondary); // Y → the host's menu
     assert_eq!(s.stack.len(), 2);
 
     let mut before = 0.0;
@@ -788,7 +1034,7 @@ fn back_mid_push_at_the_root_is_left_to_the_normal_path() {
 fn mid_pop_refuses_confirm_but_honours_another_back() {
     let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
     s.sync();
-    s.handle_menu(MenuEvent::Tertiary); // → Settings
+    s.handle_menu(MenuEvent::Secondary); // → the host's menu
     finish_motion(&mut s);
     s.handle_menu(MenuEvent::Move(MenuDir::Down)); // a row that would push if activated
     s.handle_menu(MenuEvent::Back); // start the pop
@@ -818,7 +1064,7 @@ fn a_completed_pop_frees_its_screen_and_republishes_hints() {
     let mut surface = skia_safe::surfaces::raster_n32_premul((w as i32, h as i32)).unwrap();
     let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
     s.sync();
-    s.handle_menu(MenuEvent::Tertiary);
+    s.handle_menu(MenuEvent::Secondary);
     finish_motion(&mut s);
     s.handle_menu(MenuEvent::Back);
 
@@ -956,15 +1202,15 @@ fn collections_drill_in_reaches_one_platform_and_backs_out() {
     let (mut s, _console, library) = shell(vec![Screen::Home(HomeScreen::new())]);
     s.sync();
     mixed_library(&library);
-    s.handle_menu(MenuEvent::Secondary); // Y at home → this host's library
+    s.handle_menu(MenuEvent::JumpForward); // R1 → Games, this host's shelf
     finish_motion(&mut s);
     assert!(matches!(s.stack.last(), Some(Screen::Library(_))));
 
-    s.handle_menu(MenuEvent::Secondary);
+    s.handle_menu(MenuEvent::Tertiary);
     finish_motion(&mut s);
     assert!(
         matches!(s.stack.last(), Some(Screen::Collections(_))),
-        "Y on a multi-group library opens the collections"
+        "X on a multi-group library opens the collections"
     );
 
     // Groups sort A–Z with launchers first: Launchers, PS3, SNES, Steam.
@@ -994,8 +1240,8 @@ fn collections_drill_in_reaches_one_platform_and_backs_out() {
     };
     assert_eq!(
         shelf.len_for_test(),
-        7,
-        "the whole library again, led by the desktop tile"
+        5,
+        "the whole library again; the desktop and the launcher sit in their bands"
     );
 }
 
@@ -1033,18 +1279,18 @@ fn collections_is_offered_only_when_there_is_something_to_browse() {
             running: false,
         },
     ]);
-    s.handle_menu(MenuEvent::Secondary);
+    s.handle_menu(MenuEvent::JumpForward);
     finish_motion(&mut s);
     assert!(matches!(s.stack.last(), Some(Screen::Library(_))));
     let depth = s.stack.len();
     assert!(matches!(
-        s.handle_menu(MenuEvent::Secondary),
+        s.handle_menu(MenuEvent::Tertiary),
         Some(MenuPulse::Boundary)
     ));
     assert_eq!(s.stack.len(), depth, "and pushed nothing");
 
     mixed_library(&library);
-    s.handle_menu(MenuEvent::Secondary);
+    s.handle_menu(MenuEvent::Tertiary);
     finish_motion(&mut s);
     assert!(matches!(s.stack.last(), Some(Screen::Collections(_))));
 }
@@ -1083,7 +1329,7 @@ fn the_rescan_tile_probes_and_never_connects() {
     );
 }
 
-/// Error tint is fixed, not palette-derived. `moss` accent is green; reporting
+/// Error tint is fixed, not palette-derived. `jade` accent is green; reporting
 /// a failure in the colour the rest of the UI uses for "this is fine" is the bug.
 #[test]
 fn toast_kinds_are_visually_distinct() {
@@ -1099,16 +1345,16 @@ fn toast_kinds_are_visually_distinct() {
     assert_ne!(rgb(ok_c), rgb(err_c));
 
     // Green-accented palette: Success follows it, Error must not.
-    crate::theme::set_ink(crate::theme::Ink::of(crate::library::palette("moss")));
-    let (ok_moss, _) = ToastKind::Success.look();
-    let (err_moss, _) = ToastKind::Error.look();
+    crate::theme::set_ink(crate::theme::Ink::of(crate::library::palette("jade")));
+    let (ok_jade, _) = ToastKind::Success.look();
+    let (err_jade, _) = ToastKind::Error.look();
     assert_ne!(
-        rgb(ok_moss),
+        rgb(ok_jade),
         rgb(ok_c),
         "Success takes the palette's accent, so it moved"
     );
     assert_eq!(
-        rgb(err_moss),
+        rgb(err_jade),
         rgb(err_c),
         "Error is fixed and must NOT follow the palette"
     );
@@ -1150,11 +1396,11 @@ fn reduce_motion_freezes_the_field_and_shortens_the_transition() {
     assert!(!s.store.load().reduce_motion, "and back off again");
 }
 
-/// The reduced backdrop keeps its offscreen and re-renders only when an input moves:
-/// a frame inside `FIELD_STEP` blits the cached field, a bigger clock move or a new
-/// size re-renders, and switching the flag off hands the surface back.
+/// The backdrop keeps its offscreen and re-renders only when an input moves: a frame
+/// inside `FIELD_STEP` blits the cached field, a bigger clock move or a new size
+/// re-renders, and the reduced flag only picks the buffer's size.
 #[test]
-fn the_reduced_backdrop_caches_its_field() {
+fn the_backdrop_caches_its_field() {
     let fonts = crate::theme::build_fonts().unwrap();
     let pads: Vec<PadInfo> = Vec::new();
     let mut surface = skia_safe::surfaces::raster_n32_premul((1280, 800)).unwrap();
@@ -1172,27 +1418,28 @@ fn the_reduced_backdrop_caches_its_field() {
         s.field.borrow().as_ref().map(|c| (c.size, c.t))
     };
 
-    assert_eq!(frame(&mut s, 0.0), Some(((512, 320), 0.0)));
+    assert_eq!(frame(&mut s, 0.0), Some(((384, 240), 0.0)));
     // Inside FIELD_STEP the cached field is blitted, not re-rendered.
-    assert_eq!(frame(&mut s, FIELD_STEP / 2.0), Some(((512, 320), 0.0)));
+    assert_eq!(frame(&mut s, FIELD_STEP / 2.0), Some(((384, 240), 0.0)));
     // Past it the field re-renders at the new clock.
     assert_eq!(
         frame(&mut s, FIELD_STEP + 0.01),
-        Some(((512, 320), FIELD_STEP + 0.01))
+        Some(((384, 240), FIELD_STEP + 0.01))
     );
 
-    // A new target size invalidates the offscreen.
+    // A new target size invalidates the offscreen; 480 wide still scales to the edge.
     let mut small = skia_safe::surfaces::raster_n32_premul((480, 300)).unwrap();
     s.fake_clock = Some((2.0, 0.0));
     s.render(small.canvas(), 480, 300, &fonts, None, None, &pads);
-    assert_eq!(s.field.borrow().as_ref().map(|c| c.size), Some((480, 300)));
+    assert_eq!(s.field.borrow().as_ref().map(|c| c.size), Some((384, 240)));
 
-    // Flag off: the retained pass is dropped and the full-rate draw returns.
+    // Flag off: still the offscreen, now at the full edge — 1280 wide is 512.
     s.settings
         .extra
         .insert("android.reduce_ui_resolution".into(), false.into());
-    s.render(small.canvas(), 480, 300, &fonts, None, None, &pads);
-    assert!(s.field.borrow().is_none());
+    s.fake_clock = Some((3.0, 0.0));
+    s.render(surface.canvas(), 1280, 800, &fonts, None, None, &pads);
+    assert_eq!(s.field.borrow().as_ref().map(|c| c.size), Some((512, 320)));
 }
 
 /// Ignored eyeball dump. `PF_CONSOLE_DUMP=<dir> cargo test -p pf-console-ui --release -- --ignored dump`.
@@ -1230,12 +1477,28 @@ fn dump_console_screens() {
 
     let (mut s, console, library) = shell(vec![Screen::Home(HomeScreen::new())]);
     dump(&mut s, 40, 8, "01-home", true);
+    // The focus plate between two tiles, then landed with the sweep on its rim.
+    s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    dump(&mut s, 6, 8, "01c-home-plate-travel", true);
+    dump(&mut s, 44, 8, "01d-home-plate-sweep", true);
+    s.handle_menu(MenuEvent::Move(MenuDir::Left));
+    dump(&mut s, 40, 8, "_settle-plate", true);
 
-    // Up on the focused saved tile. Eyeball with 01-home: that frame carries the Options hint.
-    s.handle_menu(MenuEvent::Move(MenuDir::Up));
+    // Y on the focused saved tile. Eyeball with 01-home: that frame carries the Options hint.
+    s.handle_menu(MenuEvent::Secondary);
     dump(&mut s, 40, 8, "01b-host-options", true);
+    for _ in 0..3 {
+        s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    }
+    s.handle_menu(MenuEvent::Confirm);
+    dump(&mut s, 40, 8, "01f-host-details", true);
     s.handle_menu(MenuEvent::Back);
     dump(&mut s, 20, 8, "_settle0", true);
+    // Up from the row: the plate on the Hosts pill.
+    s.handle_menu(MenuEvent::Move(MenuDir::Up));
+    dump(&mut s, 40, 8, "01e-strip", true);
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    dump(&mut s, 20, 8, "_settle-strip", true);
 
     // A few fast frames land around p ≈ 0.4 — both layers visible.
     s.handle_menu(MenuEvent::Tertiary);
@@ -1246,19 +1509,63 @@ fn dump_console_screens() {
     // so reordering the table cannot shoot the wrong one. Accent, ink and scrim move
     // together: pale palettes need dark text on them.
     for _ in 0..5 {
-        s.handle_menu(MenuEvent::JumpForward);
+        next_section(&mut s);
     }
-    for id in ["violet", "oled", "ember", "abyss", "holo", "sunset", "mint"] {
+    // Confirm on Background: the cards. A pick recolours the field behind them.
+    s.handle_menu(MenuEvent::Confirm);
+    dump(&mut s, 40, 8, "03d-background", true);
+    for _ in 0..2 {
+        s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    }
+    s.handle_menu(MenuEvent::Confirm);
+    dump(&mut s, 40, 8, "03e-background-pick", true);
+    // Five rows down at four across lands on a pale card: ink and scrims flip live.
+    for _ in 0..5 {
+        s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    }
+    s.handle_menu(MenuEvent::Confirm);
+    dump(&mut s, 40, 8, "03f-background-pale", true);
+    s.handle_menu(MenuEvent::Back);
+    dump(&mut s, 20, 8, "_settle-background", true);
+    for id in [
+        "violet", "oled", "crimson", "midnight", "paper", "coral", "sky",
+    ] {
         s.settings.ui_palette = id.to_string();
         dump(&mut s, 40, 8, &format!("03-settings-{id}"), true);
     }
-    for _ in 0..5 {
-        s.handle_menu(MenuEvent::JumpBack);
+    // Deep in the longest section: the rows run on under the strips, blurring as they go.
+    s.settings.ui_palette = "violet".to_string();
+    for _ in 0..12 {
+        s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    }
+    // A short window, so the rows overflow into both bands.
+    let mut short = skia_safe::surfaces::raster_n32_premul((w, 480)).unwrap();
+    for _ in 0..60 {
+        s.render(short.canvas(), w as u32, 480, &fonts, None, None, &pads);
+    }
+    let png = short
+        .image_snapshot()
+        .encode(None, skia_safe::EncodedImageFormat::PNG, 100)
+        .unwrap();
+    std::fs::write(format!("{dir}/03b-settings-blur.png"), png.as_bytes()).unwrap();
+    for _ in 0..6 {
+        s.handle_menu(MenuEvent::Move(MenuDir::Up));
+    }
+    for _ in 0..60 {
+        s.render(short.canvas(), w as u32, 480, &fonts, None, None, &pads);
+    }
+    let png = short
+        .image_snapshot()
+        .encode(None, skia_safe::EncodedImageFormat::PNG, 100)
+        .unwrap();
+    std::fs::write(format!("{dir}/03c-settings-blur-mid.png"), png.as_bytes()).unwrap();
+    for _ in 5..crate::screens::settings::TAB_COUNT {
+        next_section(&mut s);
     }
     // Home at full contrast under a few palettes: the backdrop's loudest form.
-    s.handle_menu(MenuEvent::Back);
+    s.switch_tab(Tab::Hosts);
     dump(&mut s, 20, 8, "_settle", true);
-    for id in ["nebula", "sunset", "holo"] {
+    for id in ["dusk", "coral", "paper"] {
         s.settings.ui_palette = id.to_string();
         dump(&mut s, 40, 8, &format!("01-home-{id}"), true);
     }
@@ -1268,7 +1575,7 @@ fn dump_console_screens() {
     dump(&mut s, 20, 8, "_settle3", true);
 
     // Add Host with the keyboard tray; no pad so the glyphs are keyboard-style.
-    s.handle_menu(MenuEvent::Back);
+    s.switch_tab(Tab::Hosts);
     dump(&mut s, 40, 8, "_back", true);
     for _ in 0..3 {
         s.handle_menu(MenuEvent::Move(MenuDir::Right));
@@ -1319,11 +1626,24 @@ fn dump_console_screens() {
         })
         .collect(),
     );
+    // The combined home: the resting card's games under the row, then focus on them.
+    {
+        let console7 = ConsoleShared::default();
+        console7.set_hosts(hosts());
+        let home = vec![Screen::Home(HomeScreen::new())];
+        let bus7 = ConsoleBus::default();
+        let mut s7 = Shell::new(console7, library.clone(), bus7, test_options(), home).unwrap();
+        dump(&mut s7, 80, 8, "01g-home-games", true);
+        s7.handle_menu(MenuEvent::Move(MenuDir::Down));
+        dump(&mut s7, 40, 8, "01h-home-games-focus", true);
+    }
+
     // Fresh shell per scene: entrance and bar focus are per-shell and cannot be rewound.
+    // The coverflow, which these scenes were drawn against; the Games tab has its own.
     let shelf_shell = || {
         let console2 = ConsoleShared::default();
         console2.set_hosts(hosts());
-        Shell::new(
+        let mut shell = Shell::new(
             console2,
             library.clone(),
             ConsoleBus::default(),
@@ -1333,7 +1653,9 @@ fn dump_console_screens() {
                 Screen::Library(LibraryScreen::new(&hosts()[0], 0)),
             ],
         )
-        .unwrap()
+        .unwrap();
+        shell.settings.library_view = "shelf".into();
+        shell
     };
     let mut s2 = shelf_shell();
     s2.handle_menu(MenuEvent::Move(MenuDir::Right));
@@ -1361,7 +1683,7 @@ fn dump_console_screens() {
     // poles — `accent(0.14)` reads differently over dark than pale.
     for (name, palette) in [
         ("07c-library-bar", "violet"),
-        ("07c-library-bar-mint", "mint"),
+        ("07c-library-bar-sky", "sky"),
     ] {
         let mut s4 = shelf_shell();
         s4.settings.ui_palette = palette.to_string();
@@ -1371,13 +1693,86 @@ fn dump_console_screens() {
         dump(&mut s4, 20, 8, name, true);
     }
 
+    // The Games tab with every section full: two played titles, a favorite, a launcher.
+    // Then Customize, a row picked up.
+    {
+        let games_lib = LibraryShared::default();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let played = |ago: u64| {
+            Some(pf_client_core::library::GameStats {
+                last_played_unix_ms: now - ago,
+                ..Default::default()
+            })
+        };
+        let titles = [
+            "Steam",
+            "Hades II",
+            "Elden Ring",
+            "Hollow Knight",
+            "Celeste",
+            "Tunic",
+        ];
+        let mut list: Vec<crate::library::LibraryGame> = (titles.iter().enumerate())
+            .map(|(i, t)| crate::library::LibraryGame {
+                id: format!("steam:{i}"),
+                title: (*t).to_string(),
+                store: "steam".into(),
+                launcher: i == 0,
+                icon: if i == 0 {
+                    "steam".into()
+                } else {
+                    String::new()
+                },
+                platform: None,
+                developer: None,
+                year: None,
+                genres: Vec::new(),
+                stats: None,
+                running: false,
+            })
+            .collect();
+        list[2].stats = played(2 * 3_600_000);
+        list[3].stats = played(3 * 86_400_000);
+        games_lib.set_games(list);
+        let console6 = ConsoleShared::default();
+        console6.set_hosts(hosts());
+        let mut s6 = Shell::new(
+            console6,
+            games_lib,
+            ConsoleBus::default(),
+            test_options(),
+            vec![
+                Screen::Home(HomeScreen::new()),
+                Screen::Library(LibraryScreen::new(&hosts()[0], 0)),
+            ],
+        )
+        .unwrap();
+        crate::library::toggle_favorite(&mut s6.settings, &hosts()[0].fp_hex, "steam:4");
+        dump(&mut s6, 80, 8, "_07g-settle", true);
+        s6.handle_menu(MenuEvent::Move(MenuDir::Down)); // Recently played
+        dump(&mut s6, 40, 8, "07g-games-tab", true);
+        s6.handle_menu(MenuEvent::Move(MenuDir::Up));
+        s6.handle_menu(MenuEvent::Move(MenuDir::Up)); // the chips
+        for _ in 0..3 {
+            s6.handle_menu(MenuEvent::Move(MenuDir::Right)); // to Customize
+        }
+        s6.handle_menu(MenuEvent::Confirm);
+        finish_motion(&mut s6);
+        s6.handle_menu(MenuEvent::Move(MenuDir::Down));
+        s6.handle_menu(MenuEvent::Confirm); // pick up Recently played
+        dump(&mut s6, 40, 8, "07h-customize", true);
+    }
+
     // `adopt_art` is a one-shot at the Y press: push art and give the shelf frames to
     // decode it first, or every tile is a monogram. Art-before-list is also what the
     // fake-library hook does, which masks the entrance defect — these scenes are about
     // the collection tile, not the entrance.
     for (name, palette) in [
         ("07b-collections", "violet"),
-        ("07b-collections-mint", "mint"),
+        ("07b-collections-sky", "sky"),
     ] {
         let (mut s3, _c3, _l3) = collections_shell();
         s3.settings.ui_palette = palette.to_string();
@@ -1389,7 +1784,7 @@ fn dump_console_screens() {
     // art-less ROM entries. Pale, where a hardcoded face strands its initials.
     {
         let (mut s3, _c3, _l3) = collections_shell_no_art();
-        s3.settings.ui_palette = "mint".to_string();
+        s3.settings.ui_palette = "sky".to_string();
         dump(&mut s3, 12, 8, "_noart-settle", true);
         s3.handle_menu(MenuEvent::Secondary);
         dump(&mut s3, 40, 8, "07b-collections-noart", true);
@@ -1617,7 +2012,7 @@ fn store_shots() {
     let mut s = store_shell(
         vec![
             Screen::Home(HomeScreen::new()),
-            Screen::Controllers(crate::screens::controllers::ControllersScreen::new()),
+            Screen::Players(crate::screens::players::PlayersScreen::new()),
         ],
         LibraryShared::default(),
     );
@@ -2534,14 +2929,48 @@ fn apply_is_offered_only_when_the_default_is_the_layer_that_wins() {
         rows[0].bound_preset = bound;
         let (mut s, console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
         console.set_hosts(rows);
-        console.set_speed(Some(SpeedStatus {
-            key: "aa11".into(),
-            name: "Living Room PC".into(),
-            phase: done.clone(),
-        }));
+        console.set_speed(Some(SpeedStatus::new(
+            "aa11".into(),
+            "Living Room PC".into(),
+        )));
+        console.advance_speed("aa11", done.clone());
         s.sync();
         assert_eq!(s.speed_recommendation(), want);
     }
+}
+
+/// Mid-burst reports build the graph's trace and keep the test measuring; one that lands
+/// after the answer changes nothing.
+#[test]
+fn progress_reports_trace_the_burst() {
+    let (mut s, console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    console.set_speed(Some(SpeedStatus::new(
+        "aa11".into(),
+        "Living Room PC".into(),
+    )));
+    for kbps in [200_000, 600_000, 850_000] {
+        console.advance_speed("aa11", SpeedPhase::Progress { kbps });
+    }
+    s.sync();
+    let sp = s.speed.clone().expect("measuring");
+    assert_eq!(sp.phase, SpeedPhase::Measuring);
+    let kbps: Vec<u32> = sp.trace.iter().map(|p| p.1).collect();
+    assert_eq!(kbps, [200_000, 600_000, 850_000]);
+    assert!(
+        sp.trace.windows(2).all(|w| w[0].0 <= w[1].0),
+        "stamped in order"
+    );
+
+    let done = SpeedPhase::Done {
+        throughput_kbps: 840_000,
+        loss_pct: 0.1,
+        recommended_kbps: 588_000,
+    };
+    console.advance_speed("aa11", done.clone());
+    console.advance_speed("aa11", SpeedPhase::Progress { kbps: 1 });
+    s.sync();
+    let sp = s.speed.clone().expect("done");
+    assert_eq!((sp.phase, sp.trace.len()), (done, 3));
 }
 
 /// The burst outlives a dismiss: the host finishes it either way. Its report must not reopen
@@ -2549,11 +2978,10 @@ fn apply_is_offered_only_when_the_default_is_the_layer_that_wins() {
 #[test]
 fn a_dismissed_speed_test_drops_its_late_result() {
     let (mut s, console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
-    console.set_speed(Some(SpeedStatus {
-        key: "aa11".into(),
-        name: "Living Room PC".into(),
-        phase: SpeedPhase::Connecting,
-    }));
+    console.set_speed(Some(SpeedStatus::new(
+        "aa11".into(),
+        "Living Room PC".into(),
+    )));
     s.sync();
     assert!(s.speed.is_some());
 
@@ -2577,11 +3005,7 @@ fn a_dismissed_speed_test_drops_its_late_result() {
 #[test]
 fn a_superseded_speed_test_cannot_report_under_the_new_host() {
     let (mut s, console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
-    console.set_speed(Some(SpeedStatus {
-        key: "bb22".into(),
-        name: "Bedroom".into(),
-        phase: SpeedPhase::Connecting,
-    }));
+    console.set_speed(Some(SpeedStatus::new("bb22".into(), "Bedroom".into())));
     s.sync();
 
     console.advance_speed(
@@ -2735,4 +3159,240 @@ fn the_takeover_field_reaches_past_a_side_cutout() {
          than the biggest step anywhere else ({elsewhere:.3}) — the field is stopping at the \
          safe rect again"
     );
+}
+
+/// Ignored phone dump at an iPhone Pro Max's landscape geometry, for the mockup check.
+/// `PF_CONSOLE_DUMP=<dir> cargo test -p pf-console-ui --release -- --ignored phone`.
+#[test]
+#[ignore]
+fn dump_phone_home() {
+    let dir = std::env::var("PF_CONSOLE_DUMP").expect("set PF_CONSOLE_DUMP to an output dir");
+    let fonts = crate::theme::build_fonts().unwrap();
+    let (w, h) = (2868_i32, 1320_i32);
+    let viewport = crate::console::Viewport {
+        width: w as u32,
+        height: h as u32,
+        insets: crate::console::Insets {
+            left: 186.0,
+            top: 0.0,
+            right: 186.0,
+            bottom: 63.0,
+        },
+        scale: Some(2.25),
+    };
+    let (mut s, console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    s.fake_clock = Some((0.0, 1.0 / 60.0));
+    s.platform = crate::platform::Platform::Apple;
+    let dump = |s: &mut Shell, frames: usize, name: &str| {
+        let mut surface = skia_safe::surfaces::raster_n32_premul((w, h)).unwrap();
+        for _ in 0..frames {
+            s.render_in(surface.canvas(), &viewport, &fonts, None, None, &[]);
+        }
+        let png = surface
+            .image_snapshot()
+            .encode(None, skia_safe::EncodedImageFormat::PNG, 100)
+            .unwrap();
+        std::fs::write(format!("{dir}/{name}.png"), png.as_bytes()).unwrap();
+    };
+    console.set_hosts(Vec::new());
+    dump(&mut s, 60, "p0-no-hosts");
+    let (mut s, console, library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    s.fake_clock = Some((0.0, 1.0 / 60.0));
+    s.platform = crate::platform::Platform::Apple;
+    dump(&mut s, 60, "p1-home-empty");
+    let games = (0..8)
+        .map(|i| crate::library::LibraryGame {
+            id: format!("steam:{i}"),
+            title: [
+                "Doom",
+                "Hades",
+                "Celeste",
+                "Portal 2",
+                "Tunic",
+                "Inside",
+                "Limbo",
+                "Hollow Knight",
+            ][i]
+                .into(),
+            store: "steam".into(),
+            launcher: false,
+            icon: String::new(),
+            platform: None,
+            developer: None,
+            year: None,
+            genres: Vec::new(),
+            stats: None,
+            running: false,
+        })
+        .collect();
+    library.set_games(games);
+    dump(&mut s, 60, "p2-home-games");
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    dump(&mut s, 60, "p3-home-down");
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    dump(&mut s, 60, "p4-home-down2");
+    let styles = |s: &mut Shell, name: &str| {
+        use crate::blur::{set_style_override, Style};
+        for (style, tag) in [
+            (Style::Pixel, "pixel"),
+            (Style::PixelFlat, "flat"),
+            (Style::Off, "off"),
+        ] {
+            set_style_override(Some(style));
+            dump(s, 2, &format!("{name}-{tag}"));
+        }
+        set_style_override(None);
+    };
+    styles(&mut s, "p4-home-down2");
+    s.handle_menu(MenuEvent::Move(MenuDir::Up));
+    s.handle_menu(MenuEvent::Move(MenuDir::Up));
+    s.handle_menu(MenuEvent::Move(MenuDir::Up));
+    dump(&mut s, 60, "p5-home-strip");
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    dump(&mut s, 60, "p6-home-offline");
+    // The card's menu and details, from the first card's verbs.
+    s.handle_menu(MenuEvent::Move(MenuDir::Left));
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    for _ in 0..3 {
+        s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    }
+    s.handle_menu(MenuEvent::Confirm);
+    dump(&mut s, 60, "p7-card-menu");
+    s.handle_menu(MenuEvent::Back);
+    // Input waits for the pop to land.
+    dump(&mut s, 30, "_popped");
+    s.handle_menu(MenuEvent::Move(MenuDir::Left));
+    s.handle_menu(MenuEvent::Confirm);
+    dump(&mut s, 60, "p8-host-details");
+    s.handle_menu(MenuEvent::Back);
+    dump(&mut s, 30, "_back");
+    // The speed test mid-burst, then measured.
+    console.set_speed(Some(SpeedStatus::new(
+        "aa11".into(),
+        "Living Room PC".into(),
+    )));
+    console.advance_speed("aa11", SpeedPhase::Measuring);
+    s.sync();
+    for kbps in [120_000, 410_000, 690_000, 810_000, 780_000, 860_000] {
+        console.advance_speed("aa11", SpeedPhase::Progress { kbps });
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    dump(&mut s, 30, "pe-speed-measuring");
+    console.advance_speed(
+        "aa11",
+        SpeedPhase::Done {
+            throughput_kbps: 842_000,
+            loss_pct: 0.3,
+            recommended_kbps: 589_400,
+        },
+    );
+    dump(&mut s, 30, "pf-speed-done");
+    s.handle_menu(MenuEvent::Back);
+    dump(&mut s, 30, "_speed-closed");
+    for (tab, name) in [
+        (Tab::Games, "p9-games"),
+        (Tab::Players, "pa-players"),
+        (Tab::Settings, "pb-settings"),
+    ] {
+        s.switch_tab(tab);
+        dump(&mut s, 60, name);
+    }
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    dump(&mut s, 60, "pc-settings-rows");
+    styles(&mut s, "pc-settings-rows");
+    // The typed bitrate: the keyboard over the rows, nothing between.
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    s.handle_menu(MenuEvent::Secondary);
+    dump(&mut s, 60, "pd-settings-keyboard");
+}
+
+/// Every device mark at the chip's 15 dp and the card's 44 dp, at k = 1 and 2, then the
+/// Controllers tab with the chip naming each of three pads.
+/// `PF_CONSOLE_DUMP=<dir> cargo test -p pf-console-ui -- --ignored dump_device_marks`.
+#[test]
+#[ignore]
+fn dump_device_marks() {
+    use crate::theme::W;
+    let dir = std::env::var("PF_CONSOLE_DUMP").expect("set PF_CONSOLE_DUMP to an output dir");
+    let fonts = crate::theme::build_fonts().unwrap();
+    let save = |surface: &mut skia_safe::Surface, name: &str| {
+        let png = surface
+            .image_snapshot()
+            .encode(None, skia_safe::EncodedImageFormat::PNG, 100)
+            .unwrap();
+        std::fs::write(format!("{dir}/{name}.png"), png.as_bytes()).unwrap();
+    };
+    let marks = crate::icons::DEVICE_MARKS;
+    // (box dp, k, row height px)
+    let rows = [
+        (15.0, 1.0, 34.0),
+        (44.0, 1.0, 64.0),
+        (15.0, 2.0, 50.0),
+        (44.0, 2.0, 110.0),
+    ];
+    let col = 132.0;
+    let height = 40.0 + rows.iter().map(|r| r.2).sum::<f64>();
+    let mut sheet =
+        skia_safe::surfaces::raster_n32_premul(((col * marks.len() as f64) as i32, height as i32))
+            .unwrap();
+    let c = sheet.canvas();
+    c.clear(skia_safe::Color4f::new(0.07, 0.08, 0.1, 1.0));
+    let ink = skia_safe::Color4f::new(0.92, 0.93, 0.95, 1.0);
+    for (i, (name, icon)) in marks.iter().enumerate() {
+        let cx = col * (i as f64 + 0.5);
+        let tw = f64::from(fonts.measure(name, W::Medium, 12.0));
+        fonts.draw(c, name, cx - tw / 2.0, 24.0, W::Medium, 12.0, ink);
+        let mut top = 40.0;
+        for (size, k, row_h) in rows {
+            let w = size * k;
+            crate::glyphs::pad_mark(c, *icon, cx - w / 2.0, top + row_h / 2.0, w, k, ink);
+            top += row_h;
+        }
+    }
+    save(&mut sheet, "device-marks");
+
+    let pad = |name: &str, id: &str, pref: GamepadPref| PadInfo {
+        name: name.into(),
+        key: format!("{}:{name}", id.to_lowercase()),
+        pref,
+        steam_virtual: false,
+        battery: None,
+        detail: format!("{id} · gamepad · dpad"),
+        forwarded: true,
+        rumble: true,
+    };
+    let pads = vec![
+        pad(
+            "DualSense Wireless Controller",
+            "054C:0CE6",
+            GamepadPref::DualSense,
+        ),
+        pad(
+            "Xbox Wireless Controller",
+            "045E:0B13",
+            GamepadPref::XboxOne,
+        ),
+        pad("Pro Controller", "057E:2009", GamepadPref::SwitchPro),
+    ];
+    for (i, chip) in pads.iter().enumerate() {
+        let (mut s, _console, _library) = shell(vec![Screen::Players(
+            crate::screens::players::PlayersScreen::new(),
+        )]);
+        s.fake_clock = Some((0.0, 1.0 / 60.0));
+        let mut surface = skia_safe::surfaces::raster_n32_premul((1920, 1080)).unwrap();
+        for _ in 0..60 {
+            s.render(
+                surface.canvas(),
+                1920,
+                1080,
+                &fonts,
+                Some(&chip.name),
+                Some(chip.pref),
+                &pads,
+            );
+        }
+        save(&mut surface, &format!("players-chip-{i}"));
+    }
 }
