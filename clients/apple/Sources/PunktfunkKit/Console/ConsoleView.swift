@@ -147,6 +147,9 @@ public final class ConsoleMetalView: ConsolePlatformView {
     // MARK: - pointer
 
     #if canImport(UIKit)
+    // Touches are a finger on the glass, so iOS only. A Siri Remote's clickpad sends indirect
+    // touches that start at the screen's centre, which the shell would take as a tap there.
+    #if os(iOS)
     public override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard tracked == nil, let touch = touches.first else { return }
         tracked = ObjectIdentifier(touch)
@@ -175,6 +178,7 @@ public final class ConsoleMetalView: ConsolePlatformView {
         let p = touch.location(in: self)
         bridge.pointer(kind, x: Float(p.x * scale), y: Float(p.y * scale))
     }
+    #endif
 
     // MARK: - presses
 
