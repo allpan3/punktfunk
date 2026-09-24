@@ -96,9 +96,10 @@ impl PluginManifest {
             .collect()
     }
 
-    /// Is `candidate` inside one of the declared roots or grants? Lexical: a `..` segment is
-    /// refused outright rather than resolved, so this needs no filesystem. Windows compares the
-    /// way grants are stored (`\\?\`, either slash, any case).
+    /// Is `candidate` inside one of the declared roots or grants? A `..` segment is refused
+    /// outright. Lexical first; a path that resolves then matches through its canonical form,
+    /// because `/home` may be a link (`/var/home` on Fedora Atomic) and grants are stored
+    /// canonical. Windows compares the way grants are stored (`\\?\`, either slash, any case).
     pub fn confines(&self, candidate: &Path) -> bool {
         if !candidate.is_absolute()
             || candidate
@@ -107,9 +108,20 @@ impl PluginManifest {
         {
             return false;
         }
-        self.roots()
+        let roots = self.roots();
+        if roots
             .iter()
             .any(|root| super::access::within(candidate, root))
+        {
+            return true;
+        }
+        let Ok(real) = candidate.canonicalize() else {
+            return false;
+        };
+        roots
+            .iter()
+            .filter_map(|root| root.canonicalize().ok())
+            .any(|root| super::access::within(&real, &root))
     }
 }
 
@@ -416,6 +428,25 @@ mod manifest_tests {
         assert!(!m.confines(Path::new("/etc/shadow")));
         assert!(!m.confines(Path::new("/games/../etc/shadow")));
         assert!(!m.confines(Path::new("relative/path")));
+    }
+
+    /// Fedora Atomic: a root spelled under the `/home` link confines the canonical `/var/home`
+    /// path a plugin reports, and a canonical grant confines the linked spelling.
+    #[cfg(unix)]
+    #[test]
+    fn confinement_sees_through_a_linked_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let roms = root.join("var/home/u/roms");
+        std::fs::create_dir_all(&roms).unwrap();
+        std::fs::write(roms.join("x.sfc"), "rom").unwrap();
+        std::os::unix::fs::symlink(root.join("var/home"), root.join("home")).unwrap();
+        let linked = root.join("home/u/roms");
+        let m = manifest(&[linked.to_str().unwrap()]);
+        assert!(m.confines(&roms.join("x.sfc")));
+        let m = manifest(&[roms.to_str().unwrap()]);
+        assert!(m.confines(&linked.join("x.sfc")));
+        assert!(!m.confines(&root.join("var/home/u/other")));
     }
 
     #[test]

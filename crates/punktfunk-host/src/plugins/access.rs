@@ -133,6 +133,23 @@ struct PathPolicy {
     runtime_dir: Option<PathBuf>,
 }
 
+impl PathPolicy {
+    /// The rules compare canonical paths, so the roots they protect are canonical too: on Fedora
+    /// Atomic `/home` is a link to `/var/home`, and `~/.ssh` is only ever seen as the latter.
+    fn resolved(home: PathBuf, config_dir: PathBuf, runtime_dir: Option<PathBuf>) -> Self {
+        let real = |p: PathBuf| p.canonicalize().unwrap_or(p);
+        Self {
+            home: if home.as_os_str().is_empty() {
+                home
+            } else {
+                real(home)
+            },
+            config_dir: real(config_dir),
+            runtime_dir: runtime_dir.map(real),
+        }
+    }
+}
+
 /// Filesystem facts gathered once so the rule itself is pure.
 #[derive(Clone, Copy)]
 struct PathFacts {
@@ -459,11 +476,7 @@ impl AccessStore {
             config_dir.clone(),
             // The policy checks containment against the dir this store actually serves: the
             // management API passes a dedicated access dir, and its contents must refuse.
-            PathPolicy {
-                home,
-                config_dir,
-                runtime_dir,
-            },
+            PathPolicy::resolved(home, config_dir, runtime_dir),
         )
     }
 
@@ -1049,6 +1062,33 @@ mod tests {
         let file = f._tmp.path().join("a-file");
         std::fs::write(&file, "x").unwrap();
         assert_eq!(f.request(file.to_str().unwrap()), "refused:not_directory");
+    }
+
+    /// Fedora Atomic spells `$HOME` under `/home`, a link to `/var/home`, while a request only
+    /// ever arrives canonical. The rules must still see the home and its `.ssh`.
+    #[cfg(unix)]
+    #[test]
+    fn a_home_behind_a_link_keeps_its_refusals() {
+        let f = fixture();
+        let root = f.policy.home.parent().unwrap().to_path_buf();
+        let real = root.join("var/home/u");
+        std::fs::create_dir_all(real.join(".ssh")).unwrap();
+        std::fs::create_dir_all(real.join("Games")).unwrap();
+        std::os::unix::fs::symlink(root.join("var/home"), root.join("linkhome")).unwrap();
+        let policy =
+            PathPolicy::resolved(root.join("linkhome/u"), f.policy.config_dir.clone(), None);
+        let store = AccessStore::open_with(f.store_dir.clone(), policy);
+        let ask = |p: &Path| {
+            store
+                .request("demo", &[(p.to_string_lossy().into_owned(), false)], None)
+                .unwrap()
+                .value
+                .remove(0)
+                .outcome
+        };
+        assert_eq!(ask(&real), "refused:broad_root");
+        assert_eq!(ask(&real.join(".ssh")), "refused:protected_path");
+        assert_eq!(ask(&real.join("Games")), "pending");
     }
 
     #[test]
