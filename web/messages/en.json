@@ -453,6 +453,7 @@
 	"diag_server_conflict_title": "Competing streaming server",
 	"diag_vdisplay_driver_title": "Virtual display driver",
 	"diag_pad_audio_title": "Controller speaker",
+	"diag_pad_driver_title": "Virtual controller driver",
 	"logs_title": "Logs",
 	"logs_sources_label": "Sources",
 	"logs_sources_none": "No sources selected — pick at least one above.",

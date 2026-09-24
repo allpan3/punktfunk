@@ -31,6 +31,7 @@ pub(crate) fn register_all(reg: &Diagnostics) {
     reg.register(omarchy_updates);
     reg.register(vdisplay_driver);
     reg.register(pad_audio);
+    reg.register(pad_driver);
     reg.register(plugin_sandbox);
     reg.register(restart_pending);
 }
@@ -272,6 +273,84 @@ fn pad_audio() -> HostCheck {
     HostCheck::inapplicable(
         ids::PAD_AUDIO,
         "The controller speaker endpoint is a Windows component.",
+    )
+}
+
+/// What the last virtual pad saw of the Windows gamepad driver. A stale package still attaches,
+/// so nothing but this row and a log line says the pads run old behaviour.
+#[cfg(windows)]
+fn pad_driver() -> HostCheck {
+    use crate::inject::PadDriverVerdict as V;
+    let id = ids::PAD_DRIVER;
+    let reinstall = || Remedy {
+        text: "Reinstall the host (the installer bundles the matching controller drivers), then \
+               reconnect the controller."
+            .to_string(),
+        command: None,
+        relogin_required: false,
+    };
+    match crate::inject::pad_driver_probe() {
+        V::Unseen => HostCheck::ok(id, "No controller has connected since the host started."),
+        V::Current => HostCheck::ok(id, "The virtual controller driver matches this host."),
+        V::Stale {
+            driver_rev,
+            host_rev,
+        } => HostCheck::problem(
+            id,
+            CheckStatus::Warn,
+            Severity::Warning,
+            format!("The virtual controller driver is revision {driver_rev}; this host needs {host_rev}"),
+            "Controllers work, but with the old driver's bugs.",
+        )
+        .with_remedy(reinstall())
+        .with_param("driver_rev", driver_rev.to_string())
+        .with_param("host_rev", host_rev.to_string()),
+        V::ProtocolMismatch {
+            driver_proto,
+            host_proto,
+        } => HostCheck::problem(
+            id,
+            CheckStatus::Fail,
+            Severity::Critical,
+            format!(
+                "The virtual controller driver speaks protocol {driver_proto}; this host needs \
+                 {host_proto}"
+            ),
+            "Games see the controller, but it never moves: the driver refuses the host.",
+        )
+        .with_remedy(reinstall())
+        .with_param("driver_protocol", driver_proto.to_string())
+        .with_param("host_protocol", host_proto.to_string()),
+        V::WrongIdentity { want, got } => {
+            let hex = |(v, p): (u16, u16)| format!("{v:04X}:{p:04X}");
+            HostCheck::problem(
+                id,
+                CheckStatus::Fail,
+                Severity::Warning,
+                format!("A virtual controller showed up as {}, not {}", hex(got), hex(want)),
+                "Games see a different controller than the player picked, so buttons and \
+                 prompts can be wrong.",
+            )
+            .with_remedy(reinstall())
+            .with_param("want", hex(want))
+            .with_param("got", hex(got))
+        }
+        V::NotAttached => HostCheck::problem(
+            id,
+            CheckStatus::Fail,
+            Severity::Warning,
+            "No driver picked up the last virtual controller",
+            "Games get no input from that controller.",
+        )
+        .with_remedy(reinstall()),
+    }
+}
+
+#[cfg(not(windows))]
+fn pad_driver() -> HostCheck {
+    HostCheck::inapplicable(
+        ids::PAD_DRIVER,
+        "The virtual controller driver is a Windows component.",
     )
 }
 
