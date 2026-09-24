@@ -128,6 +128,9 @@ pub(super) struct StreamState {
     pub(super) interval: std::time::Duration,
     pub(super) cur_node_id: u32,
     pub(super) cur_display_gen: Option<u64>,
+    /// The live output's metadata for a capture-only rebuild (`on_capture_lost`).
+    #[cfg(target_os = "linux")]
+    pub(super) lease: Option<super::pipeline::OutputLease>,
     /// Source can change format/size with no client Reconfigure; in-place encoder reset cannot follow.
     pub(super) enc_src: (pf_frame::PixelFormat, u32, u32),
     /// The mode a rebuild reopens at: the client's latest ask, or the source's delivered size.
@@ -253,6 +256,10 @@ impl StreamState {
         self.interval = p.interval;
         self.cur_node_id = p.node_id;
         self.cur_display_gen = p.display_gen;
+        #[cfg(target_os = "linux")]
+        {
+            self.lease = p.lease;
+        }
         self.inflight.clear();
         self.last_au_at = std::time::Instant::now();
         self.encoder_resets = 0;
@@ -549,6 +556,8 @@ impl StreamState {
             display_gen: cur_display_gen,
             bitrate_kbps: built_bitrate,
             reframe,
+            #[cfg(target_os = "linux")]
+            lease,
         } = pipe;
         *frame_map.lock().unwrap_or_else(|e| e.into_inner()) = reframe;
         let enc_src = (frame.format, frame.width, frame.height);
@@ -1028,6 +1037,8 @@ impl StreamState {
             interval,
             cur_node_id,
             cur_display_gen,
+            #[cfg(target_os = "linux")]
+            lease,
             enc_src,
             cur_mode: mode,
             bitrate_kbps,

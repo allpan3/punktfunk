@@ -5,6 +5,8 @@
 use super::cursor::composite_plan;
 #[cfg(target_os = "linux")]
 use super::cursor::settle_portal_cursor;
+#[cfg(target_os = "linux")]
+use super::pipeline::reattach_pipeline;
 use super::pipeline::{
     build_pipeline, build_pipeline_with_retry, is_permanent_build_error, open_session_encoder,
     Pipeline,
@@ -339,46 +341,82 @@ impl StreamState {
                 );
             }
         }
-        let pipe = loop {
-            if pf_host_config::config().compositor.is_none() {
-                self.retarget_to_live_session();
-            }
-            let _probe =
-                (loss_at.elapsed() < PROBE_HOLDOFF).then(crate::vdisplay::rebuild_probe_scope);
-            let enc_of = self.enc_now();
-            match build_pipeline_with_retry(
-                &mut self.vd,
-                self.cur_mode,
-                self.bitrate_kbps,
-                self.bitrate_auto,
-                self.bit_depth,
-                enc_of,
-                self.plan,
-                &self.quit,
-                &self.stop,
-                self.cur_display_gen,
-                1,
-                None,
-                self.client_hdr,
-                self.au_seq,
-            ) {
-                Ok(p) => break p,
-                Err(e2) => {
-                    let budget = if self.compositor == crate::vdisplay::Compositor::Gamescope {
-                        GAMESCOPE_REBUILD_BUDGET
-                    } else {
-                        REBUILD_BUDGET
-                    };
-                    if self.stop.load(Ordering::SeqCst)
-                        || std::time::Instant::now() >= loss_at + budget
-                    {
-                        return Err(e2).context(
-                            "capture lost — no compositor came up within the rebuild budget",
-                        );
+        let pipe = 'built: {
+            // The import side broke under a display that is still up: re-attach to it
+            // before creating another. On KWin a create is a new virtual output, and #1443
+            // shows a burst of them wedging the compositor into placeholder screens.
+            #[cfg(target_os = "linux")]
+            if e.downcast_ref::<pf_capture::DisplayStillAlive>().is_some() {
+                if let (Some(lease), Some(keepalive)) =
+                    (self.lease.clone(), self.capturer.take_keepalive())
+                {
+                    let enc_of = self.enc_now();
+                    match reattach_pipeline(
+                        &mut self.vd,
+                        lease,
+                        keepalive,
+                        self.cur_mode,
+                        self.bitrate_kbps,
+                        self.bitrate_auto,
+                        self.bit_depth,
+                        enc_of,
+                        self.plan,
+                        self.client_hdr,
+                        self.au_seq,
+                    ) {
+                        Ok(p) => {
+                            tracing::info!(
+                                node_id = p.node_id,
+                                "capture loss: re-attached to the live output — no new display"
+                            );
+                            break 'built p;
+                        }
+                        Err(e2) => tracing::warn!(error = %format!("{e2:#}"),
+                            "capture loss: re-attach to the live output failed — creating another"),
                     }
-                    tracing::warn!(error = %format!("{e2:#}"),
+                }
+            }
+            loop {
+                if pf_host_config::config().compositor.is_none() {
+                    self.retarget_to_live_session();
+                }
+                let _probe =
+                    (loss_at.elapsed() < PROBE_HOLDOFF).then(crate::vdisplay::rebuild_probe_scope);
+                let enc_of = self.enc_now();
+                match build_pipeline_with_retry(
+                    &mut self.vd,
+                    self.cur_mode,
+                    self.bitrate_kbps,
+                    self.bitrate_auto,
+                    self.bit_depth,
+                    enc_of,
+                    self.plan,
+                    &self.quit,
+                    &self.stop,
+                    self.cur_display_gen,
+                    1,
+                    None,
+                    self.client_hdr,
+                    self.au_seq,
+                ) {
+                    Ok(p) => break p,
+                    Err(e2) => {
+                        let budget = if self.compositor == crate::vdisplay::Compositor::Gamescope {
+                            GAMESCOPE_REBUILD_BUDGET
+                        } else {
+                            REBUILD_BUDGET
+                        };
+                        if self.stop.load(Ordering::SeqCst)
+                            || std::time::Instant::now() >= loss_at + budget
+                        {
+                            return Err(e2).context(
+                                "capture lost — no compositor came up within the rebuild budget",
+                            );
+                        }
+                        tracing::warn!(error = %format!("{e2:#}"),
                         "capture lost — new session not up yet, retrying");
-                    std::thread::sleep(std::time::Duration::from_millis(500));
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    }
                 }
             }
         };

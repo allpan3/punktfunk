@@ -189,8 +189,9 @@ pub struct PortalCapturer {
     /// the next pipeline builds.
     join: Option<thread::JoinHandle<()>>,
     /// Virtual output; its `Drop` releases the compositor output. `None` on
-    /// the portal path (the portal thread closes its session).
-    _keepalive: Option<Box<dyn Send>>,
+    /// the portal path (the portal thread closes its session), or once a
+    /// capture-only rebuild took it back (`take_keepalive`).
+    keepalive: Option<Box<dyn Send>>,
     /// Portal-thread teardown. `None` on the virtual-output path. Its `Drop`
     /// ends the compositor's screencast.
     _portal: Option<PortalSession>,
@@ -413,7 +414,7 @@ impl PwHandles {
             node_id,
             quit: Some(self.quit),
             join: Some(self.join),
-            _keepalive: keepalive,
+            keepalive,
             _portal: portal,
             _gs_cursor: None,
         }
@@ -581,13 +582,19 @@ impl Capturer for PortalCapturer {
         }
     }
 
+    /// Only the virtual-output path holds one; the portal thread owns its own session.
+    fn take_keepalive(&mut self) -> Option<Box<dyn Send>> {
+        self.keepalive.take()
+    }
+
     fn try_latest(&mut self) -> Result<Option<CapturedFrame>> {
         if self.signals.broken.load(Ordering::Relaxed) {
             return Err(anyhow!(
                 "zero-copy GPU import lost (node {}): the import worker died or tiled imports \
                  failed repeatedly — rebuilding capture",
                 self.node_id
-            ));
+            )
+            .context(super::DisplayStillAlive));
         }
         // Drain wakeup edges first — stale ones must not make the next
         // `wait_arrival` return early. `Disconnected` is a dead thread;

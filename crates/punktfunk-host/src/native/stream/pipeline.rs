@@ -15,6 +15,61 @@ pub(in crate::native) struct Pipeline {
     pub(super) bitrate_kbps: u32,
     /// What the encoder takes of each captured picture.
     pub(super) reframe: punktfunk_core::video_fit::Reframe,
+    /// The output this capture attached to, for a capture-only rebuild. `None` where the
+    /// capture cannot re-attach (a portal remote fd is spent on the first connect).
+    #[cfg(target_os = "linux")]
+    pub(super) lease: Option<OutputLease>,
+}
+
+/// A live output's metadata without its keepalive: what [`capture_virtual_output`] needs to
+/// attach a second time, once the old capturer hands the keepalive back.
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+pub(in crate::native) struct OutputLease {
+    node_id: u32,
+    preferred_mode: Option<(u32, u32, u32)>,
+    ownership: pf_vdisplay::DisplayOwnership,
+    pool_gen: Option<u64>,
+    output_name: Option<String>,
+    input_output: Option<String>,
+    seat: Option<String>,
+    pid: Option<u32>,
+}
+
+#[cfg(target_os = "linux")]
+impl OutputLease {
+    /// `None` on the portal path: its remote fd cannot be re-derived from the metadata.
+    fn of(vout: &crate::vdisplay::VirtualOutput) -> Option<OutputLease> {
+        vout.remote_fd.is_none().then(|| OutputLease {
+            node_id: vout.node_id,
+            preferred_mode: vout.preferred_mode,
+            ownership: vout.ownership,
+            pool_gen: vout.pool_gen,
+            output_name: vout.output_name.clone(),
+            input_output: vout.input_output.clone(),
+            seat: vout.seat.clone(),
+            pid: vout.pid,
+        })
+    }
+
+    /// The output as a fresh capture sees it. Never a birth-size gate: the output already
+    /// sits at its mode.
+    fn into_output(self, keepalive: Box<dyn Send>) -> crate::vdisplay::VirtualOutput {
+        crate::vdisplay::VirtualOutput {
+            node_id: self.node_id,
+            remote_fd: None,
+            preferred_mode: self.preferred_mode,
+            keepalive,
+            ownership: self.ownership,
+            reused_gen: None,
+            pool_gen: self.pool_gen,
+            expect_exact_dims: false,
+            output_name: self.output_name,
+            input_output: self.input_output,
+            seat: self.seat,
+            pid: self.pid,
+        }
+    }
 }
 
 /// Display + pipeline built on the prep thread while Start RTT and hole-punch are in flight.
@@ -98,6 +153,9 @@ pub(in crate::native) fn prepare_display(
     Ok(PreparedDisplay { vd, pipeline })
 }
 
+/// A first attempt's first-frame budget; later attempts wait the capturer's own default.
+const FIRST_ATTEMPT_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(2500);
+
 /// Retry transient first-frame races. Permanent errors short-circuit, except a driver with no
 /// render device, which gets one adapter reload first ([`cycled_driver_for`]). Each failed
 /// attempt drops its capturer so the next create is clean. `supersedes` is the lease this
@@ -129,7 +187,6 @@ pub(super) fn build_pipeline_with_retry(
     } else {
         None
     };
-    const FIRST_ATTEMPT_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(2500);
     let mut backoff = std::time::Duration::from_millis(500);
     for attempt in 1..=max_attempts {
         if attempt > 1 && stop.load(Ordering::SeqCst) {
@@ -356,8 +413,79 @@ pub(super) fn build_pipeline(
     if let Some(t) = trace {
         t.mark("display_acquired");
     }
+    attach_pipeline(
+        vd,
+        vout,
+        mode,
+        display_mode,
+        bitrate_kbps,
+        bitrate_auto,
+        bit_depth,
+        enc_of,
+        plan,
+        first_frame_budget,
+        trace,
+        client_hdr,
+        wire_seq_base,
+    )
+}
+
+/// A capture-only rebuild: the output the session already holds, a new capture and encoder
+/// on it. `keepalive` is what the old capturer handed back; it moves into the new one, or
+/// drops with the error and releases the output like any failed build.
+#[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn reattach_pipeline(
+    vd: &mut Box<dyn crate::vdisplay::VirtualDisplay>,
+    lease: OutputLease,
+    keepalive: Box<dyn Send>,
+    mode: punktfunk_core::Mode,
+    bitrate_kbps: u32,
+    bitrate_auto: bool,
+    bit_depth: u8,
+    enc_of: super::EncDerive,
+    plan: crate::session_plan::SessionPlan,
+    client_hdr: Option<pf_frame::HdrMeta>,
+    wire_seq_base: u32,
+) -> Result<Pipeline> {
+    attach_pipeline(
+        vd,
+        lease.into_output(keepalive),
+        mode,
+        display_mode_for(mode),
+        bitrate_kbps,
+        bitrate_auto,
+        bit_depth,
+        enc_of,
+        plan,
+        Some(FIRST_ATTEMPT_FRAME_BUDGET),
+        None,
+        client_hdr,
+        wire_seq_base,
+    )
+}
+
+/// Capture + encoder on an acquired output. Consumes `vout`: the capturer owns its keepalive.
+#[allow(clippy::too_many_arguments)]
+fn attach_pipeline(
+    vd: &mut Box<dyn crate::vdisplay::VirtualDisplay>,
+    vout: crate::vdisplay::VirtualOutput,
+    mode: punktfunk_core::Mode,
+    display_mode: punktfunk_core::Mode,
+    bitrate_kbps: u32,
+    bitrate_auto: bool,
+    bit_depth: u8,
+    enc_of: super::EncDerive,
+    plan: crate::session_plan::SessionPlan,
+    first_frame_budget: Option<std::time::Duration>,
+    trace: Option<&crate::bringup::Trace>,
+    client_hdr: Option<pf_frame::HdrMeta>,
+    wire_seq_base: u32,
+) -> Result<Pipeline> {
     #[cfg(target_os = "linux")]
     let reused_gen = vout.reused_gen;
+    #[cfg(target_os = "linux")]
+    let lease = OutputLease::of(&vout);
     #[cfg(target_os = "linux")]
     let pool_gen = vout.pool_gen;
     #[cfg(not(target_os = "linux"))]
@@ -488,6 +616,8 @@ pub(super) fn build_pipeline(
         display_gen: pool_gen,
         bitrate_kbps,
         reframe,
+        #[cfg(target_os = "linux")]
+        lease,
     })
 }
 
