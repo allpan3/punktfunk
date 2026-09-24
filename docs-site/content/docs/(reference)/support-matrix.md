@@ -123,8 +123,8 @@ Each session gets its own display at the client's resolution and refresh rate �
    as the fallback when a native encoder won't open on an 8-bit 4:2:0 H.264 or HEVC session.
    Windows on ARM64 has only this backend.
 6. Windows has no software encoder: a box with no usable GPU encoder can't stream.
-7. HEVC and AV1 where the device opens that profile; anything else goes to VAAPI. 10-bit SDR is
-   AV1 only here — 10-bit SDR HEVC runs on VAAPI. **Vulkan encoding** in
+7. HEVC and AV1 where the device opens that profile, 10-bit SDR included; anything else goes to
+   VAAPI. **Vulkan encoding** in
    [Host → Settings](/docs/configuration#settings-in-the-web-console) turns this backend off.
 8. [PyroWave](/docs/pyrowave) runs only when the client picks it. Full chroma on any vendor; modes
    around 8K fall back to 4:2:0. 10-bit SDR on Linux only. Not in Windows ARM64 builds.

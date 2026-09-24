@@ -744,7 +744,7 @@ pub fn linux_hdr_cuda_ok() -> bool {
 /// `cuda_planned` is the caller's CUDA-payload prediction; `ten_bit` the
 /// negotiated depth and `hdr` the colour verdict. A CPU payload is uploaded, and
 /// never blended. The AMD/Intel arm asks [`amd_intel_opens_vulkan`], the rule the
-/// open takes, so a 10-bit SDR HEVC session predicts the VAAPI encoder it gets.
+/// open takes, so the prediction names the encoder the session gets.
 #[cfg(target_os = "linux")]
 pub fn cursor_blend_capable(codec: Codec, cuda_planned: bool, ten_bit: bool, hdr: bool) -> bool {
     // Negotiated PyroWave is selected before the pref; its CSC composites the cursor.
@@ -780,12 +780,12 @@ pub fn cursor_blend_capable(codec: Codec, cuda_planned: bool, ten_bit: bool, hdr
 }
 
 /// The depth the AMD/Intel arm asks Vulkan Video for, or `None` when it goes straight to VAAPI.
-/// HEVC 10-bit SDR stays on VAAPI (Main10 under BT.709), which has no cursor blend. AV1 has no
-/// VAAPI path, so its 10-bit SDR takes Vulkan (`rgb2yuv10_709.comp`).
+/// HEVC and AV1 take Vulkan at the negotiated depth, HDR or SDR alike: 10-bit SDR is HEVC Main10
+/// or AV1 10-bit under BT.709 through `rgb2yuv10_709.comp`. H.264 has no Vulkan path. The
+/// colour verdict rides along for the callers that already carry it; the depth is the rule.
 #[cfg(all(target_os = "linux", feature = "vulkan-encode"))]
-fn amd_intel_vulkan_depth(codec: Codec, ten_bit: bool, hdr: bool) -> Option<bool> {
+fn amd_intel_vulkan_depth(codec: Codec, ten_bit: bool, _hdr: bool) -> Option<bool> {
     match codec {
-        Codec::H265 if ten_bit && !hdr => None,
         Codec::H265 | Codec::Av1 => Some(ten_bit),
         _ => None,
     }
@@ -986,17 +986,13 @@ pub fn linux_capture_modifiers(codec: Codec, fourcc: u32, bit_depth: u8, hdr: bo
     if codec == Codec::PyroWave {
         return Vec::new();
     }
-    // Same Vulkan arm as `open_amd_intel`, depth included: 10-bit SDR HEVC stays
-    // on VAAPI, so its capture answers come from the libva probe below.
+    // The rule `open_amd_intel` takes, so the capture answers come from the encoder that opens.
     #[cfg(not(feature = "vulkan-encode"))]
     let _ = (bit_depth, hdr);
     #[cfg(feature = "vulkan-encode")]
     let ten_bit = bit_depth >= 10;
     #[cfg(feature = "vulkan-encode")]
-    let vulkan_lane = !(ten_bit && !hdr && codec == Codec::H265)
-        && matches!(codec, Codec::H265 | Codec::Av1)
-        && vulkan_encode_enabled()
-        && vulkan_encode_available_at(codec, ten_bit);
+    let vulkan_lane = amd_intel_opens_vulkan(codec, ten_bit, hdr);
     #[cfg(not(feature = "vulkan-encode"))]
     let vulkan_lane = false;
     if vulkan_lane {
@@ -1535,10 +1531,10 @@ pub fn backend_carries_sdr10(codec: Codec) -> bool {
     if codec == Codec::PyroWave {
         return cfg!(feature = "pyrowave");
     }
-    // Direct NVENC (HEVC + AV1) widens 8→10 from packed RGB. On AMD/Intel, VAAPI carries HEVC
-    // Main10 under BT.709, and Vulkan Video carries AV1 10-bit SDR (`rgb2yuv10_709.comp`) where the
-    // device offers a 10-bit AV1 profile. The encoder degrades a planar surface to 8-bit if some
-    // path delivers one.
+    // Direct NVENC (HEVC + AV1) widens 8→10 from packed RGB. On AMD/Intel, Vulkan Video carries
+    // HEVC Main10 and AV1 10-bit SDR (`rgb2yuv10_709.comp`) where the device offers the 10-bit
+    // profile, and VAAPI carries HEVC Main10 under BT.709 as the fallback. The encoder degrades a
+    // planar surface to 8-bit if some path delivers one.
     match linux_resolved_backend() {
         LinuxBackend::Nvenc => cfg!(feature = "nvenc"),
         LinuxBackend::AmdIntel => {
@@ -1954,11 +1950,11 @@ mod tests {
 
     #[cfg(all(target_os = "linux", feature = "vulkan-encode"))]
     #[test]
-    fn amd_intel_hevc_sdr10_never_predicts_the_vulkan_blend() {
+    fn amd_intel_hevc_takes_vulkan_at_either_depth() {
         assert_eq!(
             amd_intel_vulkan_depth(Codec::H265, true, false),
-            None,
-            "HEVC 10-bit SDR opens VAAPI, which cannot blend"
+            Some(true),
+            "HEVC 10-bit SDR opens Vulkan Main10 like AV1 — and predicts the blend it gets"
         );
         assert_eq!(amd_intel_vulkan_depth(Codec::H265, true, true), Some(true));
         assert_eq!(
