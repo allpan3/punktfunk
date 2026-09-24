@@ -321,7 +321,7 @@ extension SettingsView {
                     options: SettingsOptions.codecs(current: scoped(SettingsFields.codec).wrappedValue),
                     selection: scoped(SettingsFields.codec))
             }
-            described("HDR10 when the host sends it and this display supports it. HEVC only.",
+            described("HDR10 when the host sends it and this display supports it. Not with H.264.",
                 field: "hdr_enabled") {
                 Toggle("10-bit HDR", isOn: scoped(SettingsFields.hdrEnabled))
             }
