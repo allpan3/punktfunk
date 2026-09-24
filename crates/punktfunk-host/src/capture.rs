@@ -209,7 +209,7 @@ pub fn capture_virtual_output(
                 // the session is known good.
                 return Ok(Box::new(KeptAlive {
                     inner: c,
-                    _keepalive: vout.keepalive,
+                    keepalive: Some(vout.keepalive),
                 }));
             }
             Err(e) => tracing::info!(
@@ -259,14 +259,18 @@ pub fn capture_virtual_output(
 #[cfg(target_os = "linux")]
 struct KeptAlive {
     inner: Box<dyn Capturer>,
-    /// Dropped after `inner`, releasing the output only once capture has stopped.
-    _keepalive: Box<dyn Send>,
+    /// Dropped after `inner`, releasing the output only once capture has stopped — unless a
+    /// capture-only rebuild took it back first.
+    keepalive: Option<Box<dyn Send>>,
 }
 
 #[cfg(target_os = "linux")]
 impl Capturer for KeptAlive {
     fn next_frame(&mut self) -> Result<CapturedFrame> {
         self.inner.next_frame()
+    }
+    fn take_keepalive(&mut self) -> Option<Box<dyn Send>> {
+        self.keepalive.take()
     }
     fn next_frame_within(&mut self, b: std::time::Duration) -> Result<CapturedFrame> {
         self.inner.next_frame_within(b)
