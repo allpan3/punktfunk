@@ -4,6 +4,7 @@
 // link callback on the main thread — the thread that built the bridge. Skia submits to our queue;
 // we present after it returns, on the same queue, so the present cannot outrun the drawing.
 
+import GameController
 import Metal
 import PunktfunkCore
 import QuartzCore
@@ -178,8 +179,8 @@ public final class ConsoleMetalView: ConsolePlatformView {
     // MARK: - presses
 
     // A Siri Remote's clicks and a hardware keyboard's keys arrive here, not through
-    // GameController: the remote is a `GCMicroGamepad`, which the pad poller does not read, and
-    // the focus engine hands presses to whoever is in the responder chain. So the view takes it.
+    // GameController: the pad poller reads only the active extended pad. That pad arrives here
+    // too, its stick as diagonal arrow pairs, and the poller already acted on it.
 
     public override var canBecomeFirstResponder: Bool { true }
     #if os(tvOS)
@@ -198,7 +199,7 @@ public final class ConsoleMetalView: ConsolePlatformView {
 
     public override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         // Claimed on the way down, so the matching release is ours; Select's release acts.
-        if presses.contains(where: { $0.key == nil && $0.type == .select }) {
+        if presses.contains(where: { $0.key == nil && $0.type == .select && !fromPad($0) }) {
             bridge.menu(.okUp, from: .keys)
         }
         let unclaimed = presses.filter { !claims($0) }
@@ -223,8 +224,17 @@ public final class ConsoleMetalView: ConsolePlatformView {
         }
     }
 
-    /// Hand the press to the console. `false` = not ours, let the system have it.
+    /// A press from the pad the poller reads. GameController makes a controller current before
+    /// UIKit delivers its press, so this tells the pad's presses from the remote's.
+    private func fromPad(_ press: UIPress) -> Bool {
+        guard press.key == nil, let pad = GamepadManager.shared.active?.controller else { return false }
+        return GCController.current === pad
+    }
+
+    /// Hand the press to the console. `false` = not ours, let the system have it. The pad's
+    /// own presses are claimed like the remote's but do nothing.
     private func claim(_ press: UIPress, repeated: Bool) -> Bool {
+        if fromPad(press) { return claims(press) }
         if let key = key(for: press) {
             let shift = press.key?.modifierFlags.contains(.shift) ?? false
             bridge.key(key, shift: shift, repeated: repeated)
