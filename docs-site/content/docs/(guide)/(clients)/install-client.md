@@ -70,7 +70,8 @@ flatpak install --user https://flatpak.unom.io/io.unom.Punktfunk.flatpakref
 2. Run it. No admin prompt: it installs to `%LOCALAPPDATA%\Programs\Punktfunk`, registers
    `punktfunk://` links, puts `punktfunk` on your PATH and fetches the Windows App Runtime if it's
    missing.
-3. Open **Punktfunk** from the Start menu, or **Punktfunk Console** for the controller interface.
+3. Open **Punktfunk** from the Start menu, or **Punktfunk Console** for the controller interface
+   (x64 only: the Arm64 build has no console yet).
 
 **Steam overlay and Big Picture.** In Steam, **Add a Non-Steam Game** and browse to
 `%LOCALAPPDATA%\Programs\Punktfunk\punktfunk-client.exe` (or `punktfunk-console.exe`).
