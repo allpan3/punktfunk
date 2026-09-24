@@ -1678,7 +1678,9 @@ public final class Stage2Pipeline {
             // Compiles the two compute kernels on the session's first frames' thread — ~tens of
             // ms, once per session. Failure = this device can't run the negotiated codec (the
             // advertisement probe should have prevented this); end the session cleanly.
-            guard let decoder = MetalWaveletDecoder(device: device, queue: queue) else {
+            guard let decoder = MetalWaveletDecoder(
+                device: device, queue: queue, tenBit: connection.bitDepth >= 10)
+            else {
                 if !token.isStopped { onSessionEnd?() }
                 return
             }

@@ -532,13 +532,8 @@ impl Presenter {
                     width: v.width,
                     height: v.height,
                 };
-                // PQ pyrowave is 10-bit MSB-packed (`design/pyrowave-444-hdr.md`);
-                // SDR is 8-bit. This codec couples 10-bit ⇔ PQ.
-                let (depth, msb_packed) = if f.color.is_pq() {
-                    (10, true)
-                } else {
-                    (8, false)
-                };
+                // 10-bit planes hold MSB-packed codes, PQ or SDR.
+                let (depth, msb_packed) = if f.ten_bit { (10, true) } else { (8, false) };
                 self.record_csc_planar(v.framebuffer, extent, f.color, depth, msb_packed);
             }
 
