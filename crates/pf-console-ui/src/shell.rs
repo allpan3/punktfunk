@@ -27,7 +27,7 @@ use pf_client_core::console::OverlayAction;
 use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuPulse, PadInfo};
 use pf_client_core::start;
 use pf_client_core::trust;
-use skia_safe::{Canvas, Color4f, Data, Paint, Rect, RuntimeEffect, Surface};
+use skia_safe::{Canvas, Color4f, Data, Image, Paint, Rect, RuntimeEffect, Surface};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -1277,6 +1277,62 @@ impl Shell {
         }
     }
 
+    /// Tour the tabs once into `canvas`, off the glass, so the GPU programs they use compile
+    /// now, behind the host's splash, instead of on the first visit to each. It switches tabs
+    /// the way a player does, from a Hosts home through Games, Players and Settings, on a
+    /// stand-in library with covers and a bus nobody reads, then puts every part of the shell
+    /// back: nothing reaches the host, and the first real visits build and fetch as before.
+    pub(crate) fn warm_up(
+        &mut self,
+        canvas: &Canvas,
+        viewport: &crate::console::Viewport,
+        fonts: &crate::theme::Fonts,
+    ) {
+        let tab = std::mem::replace(&mut self.tab, Tab::Hosts);
+        let stack = std::mem::replace(&mut self.stack, vec![Screen::Home(HomeScreen::new())]);
+        let parked = std::mem::take(&mut self.parked);
+        let motion = std::mem::replace(&mut self.motion, Motion::None);
+        let strip_focus = std::mem::replace(&mut self.strip_focus, false);
+        let keys = (self.games_key.take(), self.library_fp.take());
+        let bus = std::mem::take(&mut self.bus);
+        let library = std::mem::take(&mut self.library);
+        self.library.set_games(stand_in_games());
+        let poster = stand_in_poster();
+        let draw = |s: &mut Shell, frames: usize| {
+            for _ in 0..frames {
+                s.render_in(canvas, viewport, fonts, None, None, &[]);
+                if let Some(p) = &poster {
+                    s.warm_shelves(p);
+                }
+            }
+        };
+        draw(self, 3);
+        for t in [Tab::Games, Tab::Players, Tab::Settings, Tab::Hosts] {
+            if self.switch_tab(t) {
+                draw(self, 12);
+            }
+        }
+        (self.tab, self.stack, self.parked, self.motion) = (tab, stack, parked, motion);
+        (self.strip_focus, self.bus, self.library) = (strip_focus, bus, library);
+        (self.games_key, self.library_fp) = keys;
+        crate::el::forget_handoff();
+    }
+
+    /// Warm-up only: every shelf drawn or parked shows the stand-in cover, entrance over.
+    fn warm_shelves(&mut self, poster: &Image) {
+        for screen in self
+            .stack
+            .iter_mut()
+            .chain(self.parked.iter_mut().flatten())
+        {
+            match screen {
+                Screen::Library(l) => l.warm(poster),
+                Screen::Home(h) => h.shelf_mut().into_iter().for_each(|l| l.warm(poster)),
+                _ => {}
+            }
+        }
+    }
+
     /// The host Games shows: the one focused on Hosts when it is paired, else the first
     /// paired one.
     fn games_host(&self) -> Option<HostRow> {
@@ -2104,6 +2160,39 @@ impl Shell {
             }
         }
     }
+}
+
+/// The warm-up's library: a title of each shape a shelf draws, store badges, a running one and
+/// launchers, so the programs a loaded shelf needs are all asked for.
+fn stand_in_games() -> Vec<crate::library::LibraryGame> {
+    let game = |i: usize, store: &str, launcher: bool, icon: &str| crate::library::LibraryGame {
+        id: format!("warm:{i}"),
+        title: format!("Title {i}"),
+        store: store.into(),
+        launcher,
+        icon: icon.into(),
+        platform: Some("PC".into()),
+        developer: None,
+        year: None,
+        genres: Vec::new(),
+        stats: None,
+        running: i == 1,
+    };
+    let stores = ["steam", "lutris", "gog", "epic", "custom", "heroic"];
+    let mut out: Vec<_> = (0..12)
+        .map(|i| game(i, stores[i % stores.len()], false, ""))
+        .collect();
+    out.push(game(12, "steam", true, "steam"));
+    out.push(game(13, "desktop", true, "desktop"));
+    out
+}
+
+/// A cover the warm-up draws: a raster with mips, as a decoded poster is.
+fn stand_in_poster() -> Option<Image> {
+    let mut surface = skia_safe::surfaces::raster_n32_premul((300, 450))?;
+    surface.canvas().clear(Color4f::new(0.4, 0.3, 0.6, 1.0));
+    let image = surface.image_snapshot();
+    image.with_default_mipmaps().or(Some(image))
 }
 
 /// The reduced backdrop's retained pass: the offscreen and the inputs it was rendered

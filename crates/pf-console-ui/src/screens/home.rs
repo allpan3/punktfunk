@@ -200,6 +200,11 @@ impl HomeScreen {
         self.below = false;
     }
 
+    /// The embedded games, focused or not: the warm-up fills them.
+    pub(crate) fn shelf_mut(&mut self) -> Option<&mut LibraryScreen> {
+        self.shelf.as_deref_mut()
+    }
+
     /// The games the focus is in, for the launch hold and the running refresh.
     pub(crate) fn shelf(&self) -> Option<&LibraryScreen> {
         self.shelf.as_deref().filter(|_| self.below)

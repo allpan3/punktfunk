@@ -148,6 +148,11 @@ pub(crate) fn take(taker: u64) -> Option<(Rect, f32)> {
     })
 }
 
+/// Drop any rect a plate left: nothing drawn since should glide from it.
+pub(crate) fn forget_handoff() {
+    HANDOFF.with(|h| h.set(None));
+}
+
 /// Another plate took up where `owner`'s left off.
 pub(crate) fn taken_from(owner: u64) -> bool {
     HANDOFF.with(|h| h.get().is_some_and(|o| o.owner == owner && o.taken))

@@ -17,6 +17,7 @@
 mod focus;
 mod layout;
 
+pub(crate) use focus::forget_handoff;
 pub use focus::{begin_frame, Group, Plate};
 pub use layout::{Frame, Tree};
 

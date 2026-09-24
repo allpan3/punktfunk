@@ -944,6 +944,16 @@ impl LibraryScreen {
         }
     }
 
+    /// Warm-up only: every title's cover set to `art` and the entrance over, so a frame draws
+    /// what a loaded shelf draws.
+    pub(crate) fn warm(&mut self, art: &Image) {
+        for g in &self.games {
+            self.art.insert(g.id.clone(), art.clone());
+        }
+        self.entrance = None;
+        self.entrance_armed = true;
+    }
+
     /// Titles to decode next: on screen last frame first, then the view from its first drawn
     /// title on, so a scroll decodes ahead. Capped well under [`ART_BUDGET`], or eviction and
     /// decode would chase each other round a long library.

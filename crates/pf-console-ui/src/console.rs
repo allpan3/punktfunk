@@ -180,6 +180,13 @@ impl Console {
             .render_in(canvas, viewport, &self.fonts, pad, pad_pref, pads);
     }
 
+    /// Draw every tab once into `canvas` before the first [`Self::frame`], so their GPU
+    /// programs compile behind the host's splash rather than on first visit. A TV's GL driver
+    /// takes 50–170 ms a program; the next frame overwrites what this draws.
+    pub fn warm_up(&mut self, canvas: &Canvas, viewport: &Viewport) {
+        self.shell.warm_up(canvas, viewport, &self.fonts);
+    }
+
     pub fn menu(&mut self, event: MenuEvent, source: InputSource) -> Option<MenuPulse> {
         self.shell.note_input_source(source);
         self.shell.handle_menu(event)

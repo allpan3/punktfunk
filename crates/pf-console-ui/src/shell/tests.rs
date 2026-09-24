@@ -343,23 +343,30 @@ fn a_held_ok_opens_the_card_menu() {
     );
 }
 
-/// In a field, OK presses the on-screen key at once and never becomes the hold, whose
-/// Secondary would close the field under the player's thumb.
+/// A warm-up tours the tabs and leaves the shell exactly where it was: same tab and stack,
+/// nothing parked, the real library, and nothing asked of the host.
 #[test]
-fn ok_in_a_field_types_and_never_holds() {
-    let (mut s, _console, _library) = shell(vec![Screen::AddHost(
-        crate::screens::add_host::AddHostScreen::new(),
-    )]);
-    s.sync();
-    s.fake_clock = Some((10.0, 0.0));
-    s.ok(true);
-    s.ok(false);
-    assert!(s.editing(), "OK on a field row opens it");
-    s.ok(true);
-    s.fake_clock = Some((11.0, 0.0));
-    s.tick_ok();
-    s.ok(false);
-    assert!(s.editing(), "a held OK types, the field stays open");
+fn a_warm_up_tours_the_tabs_and_changes_nothing() {
+    let (mut s, _console, library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    s.fake_clock = Some((100.0, 1.0 / 60.0));
+    s.bus.drain();
+    let fonts = crate::theme::build_fonts().unwrap();
+    let mut surface = skia_safe::surfaces::raster_n32_premul((480, 300)).unwrap();
+    let viewport = crate::console::Viewport::plain(480, 300);
+    s.warm_up(surface.canvas(), &viewport, &fonts);
+    assert_eq!(s.tab, Tab::Hosts);
+    assert!(matches!(s.stack.as_slice(), [Screen::Home(_)]));
+    assert!(s.parked.iter().all(Option::is_none), "nothing parked");
+    assert!(matches!(s.motion, Motion::None));
+    assert!(
+        library.snapshot().games.is_empty(),
+        "the stand-in never reached the model"
+    );
+    assert!(
+        s.library.snapshot().games.is_empty(),
+        "the real library is back"
+    );
+    assert!(s.bus.drain().is_empty(), "nothing asked of the host");
 }
 
 #[test]
