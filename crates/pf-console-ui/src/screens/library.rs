@@ -243,8 +243,9 @@ pub(super) fn decode_poster(bytes: &[u8], k: f64) -> Option<Image> {
         let info = skia_safe::ImageInfo::new_n32_premul(want, None);
         img.make_scaled(&info, art_sampling())
     };
-    // A refused scale keeps the full-size image rather than dropping the cover.
-    let out = scaled.unwrap_or_else(|| img.clone());
+    // A refused scale keeps the full-size image rather than dropping the cover. Raster either
+    // way: a lazy image takes no mips and decodes at first draw, on the render thread.
+    let out = scaled.or_else(|| img.make_raster_image(None, None))?;
     let mipped = out.with_default_mipmaps();
     crate::art_stats::record(started.elapsed(), native_scaled);
     Some(mipped.unwrap_or(out))
@@ -2111,6 +2112,22 @@ struct ShelfCard {
 mod tests {
     use super::*;
     use crate::library::POSTER_W;
+
+    #[test]
+    fn a_cover_already_at_cache_size_decodes_here_with_mips() {
+        let mut surface = skia_safe::surfaces::raster_n32_premul((60, 90)).unwrap();
+        surface
+            .canvas()
+            .clear(skia_safe::Color::from_rgb(200, 40, 40));
+        let png = surface
+            .image_snapshot()
+            .encode(None, skia_safe::EncodedImageFormat::PNG, 100)
+            .unwrap();
+        let img = decode_poster(png.as_bytes(), 1.0).expect("decodes");
+        assert_eq!((img.width(), img.height()), (60, 90));
+        assert!(!img.is_lazy_generated());
+        assert!(img.has_mipmaps());
+    }
 
     fn host() -> HostRow {
         HostRow {
