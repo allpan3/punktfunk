@@ -193,8 +193,10 @@ impl PlayersScreen {
         let cards = &all;
         let row_w = cards.len() as f64 * (cw + gap) - gap;
         let w = f64::from(rect.width());
-        // The viewport reaches past the cards so the plate's lift is not clipped.
+        // The viewport reaches past the cards so the plate's lift is not clipped: its shadow
+        // sits 10 down with a 12 blur, so the foot needs the plate's reach, not the air.
         let air = 28.0 * k;
+        let reach = 64.0 * k;
         // On the margin; past the screen's width the row scrolls to keep focus in view.
         let x0 = air + edge(k);
         let strip = Id::new("cards", 0);
@@ -227,7 +229,7 @@ impl PlayersScreen {
                 -air as f32,
                 (top - air) as f32,
                 (w + air) as f32,
-                (ch + 2.0 * air) as f32,
+                (ch + air + reach) as f32,
             ));
         let root = El::column().child(row);
         let frame = self.tree.layout(root, rect);
