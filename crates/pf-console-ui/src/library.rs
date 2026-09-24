@@ -894,7 +894,9 @@ pub fn field_camera(aspect: f64) -> (f64, f64) {
     (base_f * zoom, scale)
 }
 
-/// The field as SkSL: the Figma "Moving gradient" shader's maths, per pixel. Its vertex
+/// The field as SkSL: the Figma Community "Moving gradient" shader's maths, per pixel
+/// (figma.com/community/shader/1676361123401176242; its author and licence belong in the
+/// clients' third-party notices). Its vertex
 /// stage displaced a sphere by a Perlin height field and coloured each point by that
 /// height through an OKLab gradient; here a pixel's view ray meets the sphere, the hit's
 /// direction gives the height, the sphere is re-sized by it and hit once more, and the

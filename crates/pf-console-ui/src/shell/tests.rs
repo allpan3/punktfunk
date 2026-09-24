@@ -1392,11 +1392,11 @@ fn reduce_motion_freezes_the_field_and_shortens_the_transition() {
     assert!(!s.store.load().reduce_motion, "and back off again");
 }
 
-/// The reduced backdrop keeps its offscreen and re-renders only when an input moves:
-/// a frame inside `FIELD_STEP` blits the cached field, a bigger clock move or a new
-/// size re-renders, and switching the flag off hands the surface back.
+/// The backdrop keeps its offscreen and re-renders only when an input moves: a frame
+/// inside `FIELD_STEP` blits the cached field, a bigger clock move or a new size
+/// re-renders, and the reduced flag only picks the buffer's size.
 #[test]
-fn the_reduced_backdrop_caches_its_field() {
+fn the_backdrop_caches_its_field() {
     let fonts = crate::theme::build_fonts().unwrap();
     let pads: Vec<PadInfo> = Vec::new();
     let mut surface = skia_safe::surfaces::raster_n32_premul((1280, 800)).unwrap();
@@ -1414,27 +1414,28 @@ fn the_reduced_backdrop_caches_its_field() {
         s.field.borrow().as_ref().map(|c| (c.size, c.t))
     };
 
-    assert_eq!(frame(&mut s, 0.0), Some(((512, 320), 0.0)));
+    assert_eq!(frame(&mut s, 0.0), Some(((384, 240), 0.0)));
     // Inside FIELD_STEP the cached field is blitted, not re-rendered.
-    assert_eq!(frame(&mut s, FIELD_STEP / 2.0), Some(((512, 320), 0.0)));
+    assert_eq!(frame(&mut s, FIELD_STEP / 2.0), Some(((384, 240), 0.0)));
     // Past it the field re-renders at the new clock.
     assert_eq!(
         frame(&mut s, FIELD_STEP + 0.01),
-        Some(((512, 320), FIELD_STEP + 0.01))
+        Some(((384, 240), FIELD_STEP + 0.01))
     );
 
-    // A new target size invalidates the offscreen.
+    // A new target size invalidates the offscreen; 480 wide still scales to the edge.
     let mut small = skia_safe::surfaces::raster_n32_premul((480, 300)).unwrap();
     s.fake_clock = Some((2.0, 0.0));
     s.render(small.canvas(), 480, 300, &fonts, None, None, &pads);
-    assert_eq!(s.field.borrow().as_ref().map(|c| c.size), Some((480, 300)));
+    assert_eq!(s.field.borrow().as_ref().map(|c| c.size), Some((384, 240)));
 
-    // Flag off: the retained pass is dropped and the full-rate draw returns.
+    // Flag off: still the offscreen, now at the full edge — 1280 wide is 512.
     s.settings
         .extra
         .insert("android.reduce_ui_resolution".into(), false.into());
-    s.render(small.canvas(), 480, 300, &fonts, None, None, &pads);
-    assert!(s.field.borrow().is_none());
+    s.fake_clock = Some((3.0, 0.0));
+    s.render(surface.canvas(), 1280, 800, &fonts, None, None, &pads);
+    assert_eq!(s.field.borrow().as_ref().map(|c| c.size), Some((512, 320)));
 }
 
 /// Ignored eyeball dump. `PF_CONSOLE_DUMP=<dir> cargo test -p pf-console-ui --release -- --ignored dump`.

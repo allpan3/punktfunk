@@ -106,12 +106,13 @@ impl Tab {
     }
 }
 
-/// Long edge of the reduced backdrop's offscreen, px. The field is a pure function of
-/// `xy/u_res`, so a small buffer holds the same picture — the per-pixel exp/sin/Bézier
-/// work is exactly what a TV GPU cannot afford.
+/// Long edge of the backdrop's offscreen, px. The field is a pure function of `xy/u_res`
+/// and soft, so a small buffer blitted up holds the same picture at any glass size — its
+/// per-pixel noise never scales with a 4K surface. The reduced interface takes less.
 const FIELD_EDGE: f64 = 512.0;
-/// Seconds between reduced-backdrop re-renders (~25 Hz). The field drifts on ~90–130 s
-/// periods, so the step is invisible; a frozen (reduce-motion) field renders once.
+const FIELD_EDGE_REDUCED: f64 = 384.0;
+/// Seconds between backdrop re-renders (~25 Hz). The field morphs slowly, so the step is
+/// invisible; a frozen (reduce-motion) field renders once.
 const FIELD_STEP: f64 = 0.04;
 
 /// Paint recipe for a transition. Distinct from spring direction: a reversed
@@ -1996,29 +1997,21 @@ impl Shell {
             self.fallback_ui,
         );
         let mut cache = self.field.borrow_mut();
-        if !reduced {
-            // Hand the offscreen back while the full-rate path runs — it is dead weight
-            // under the resource cache until the switch comes back on.
-            cache.take();
-            match self.aurora_paint(w, h, t, calm, 2.0) {
-                Some(paint) => {
-                    canvas.draw_rect(Rect::from_wh(w as f32, h as f32), &paint);
-                }
-                None => {
-                    canvas.clear(Color4f::new(0.0, 0.0, 0.0, 1.0));
-                }
-            }
-            return;
-        }
-        self.draw_field_reduced(canvas, &mut cache, w, h, t, calm);
+        // The reduced interface takes a smaller buffer and one pass over the sphere.
+        let (edge, passes) = if reduced {
+            (FIELD_EDGE_REDUCED, 1.0)
+        } else {
+            (FIELD_EDGE, 2.0)
+        };
+        self.draw_field(canvas, &mut cache, w, h, t, calm, edge, passes);
     }
 
-    /// The reduced-interface pass: the field into a ≤[`FIELD_EDGE`]-px offscreen, blitted
-    /// up with bilinear sampling. Re-rendered only when an input moved — size, palette,
-    /// calm, or the clock past [`FIELD_STEP`]. The takeover's `calm = 0` and the base
-    /// field's share one slot: when both differ each gets a small re-render a frame,
-    /// still a fraction of the full-surface cost.
-    fn draw_field_reduced(
+    /// The field into a ≤`edge`-px offscreen, blitted up with bilinear sampling.
+    /// Re-rendered only when an input moved — size, palette, calm, or the clock past
+    /// [`FIELD_STEP`]. The takeover's `calm = 0` and the base field's share one slot: when
+    /// both differ each gets a small re-render a frame, still a fraction of a surface pass.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_field(
         &self,
         canvas: &Canvas,
         cache: &mut Option<FieldCache>,
@@ -2026,8 +2019,10 @@ impl Shell {
         h: f64,
         t: f64,
         calm: f64,
+        edge: f64,
+        passes: f32,
     ) {
-        let scale = (FIELD_EDGE / w.max(h)).min(1.0);
+        let scale = (edge / w.max(h)).min(1.0);
         let size = ((w * scale).ceil() as i32, (h * scale).ceil() as i32);
         // `t < c.t` is the test clock rewinding, not a direction the field moves.
         let stale = cache.as_ref().is_none_or(|c| {
@@ -2041,7 +2036,9 @@ impl Shell {
         if stale {
             if let Some(mut surface) = field_surface(canvas, size) {
                 // u_res is the offscreen's own pixels — `aurora_paint` is resolution-free.
-                if let Some(paint) = self.aurora_paint(size.0 as f64, size.1 as f64, t, calm, 1.0) {
+                if let Some(paint) =
+                    self.aurora_paint(size.0 as f64, size.1 as f64, t, calm, passes)
+                {
                     surface
                         .canvas()
                         .draw_rect(Rect::from_wh(size.0 as f32, size.1 as f32), &paint);
@@ -2055,9 +2052,9 @@ impl Shell {
                 }
                 // A rejected shader keeps whatever the cache held: a stale field beats black.
             } else {
-                // No offscreen (context teardown): the full-rate draw is the fallback,
-                // never a black frame — the same stance the unreduced path takes.
-                match self.aurora_paint(w, h, t, calm, 1.0) {
+                // No offscreen (context teardown): a full-surface draw is the fallback,
+                // never a black frame.
+                match self.aurora_paint(w, h, t, calm, passes) {
                     Some(paint) => {
                         canvas.draw_rect(Rect::from_wh(w as f32, h as f32), &paint);
                     }
