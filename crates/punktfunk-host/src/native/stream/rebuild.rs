@@ -399,7 +399,7 @@ impl StreamState {
                     self.client_hdr,
                     self.au_seq,
                 ) {
-                    Ok(p) => break p,
+                    Ok(p) => break 'built p,
                     Err(e2) => {
                         let budget = if self.compositor == crate::vdisplay::Compositor::Gamescope {
                             GAMESCOPE_REBUILD_BUDGET
