@@ -242,6 +242,7 @@ pub(super) fn cursor_forward(
     compositor: Option<crate::vdisplay::Compositor>,
     codec: crate::encode::Codec,
     bit_depth: u8,
+    hdr: bool,
 ) -> bool {
     if client_caps & punktfunk_core::quic::CLIENT_CAP_CURSOR == 0 {
         return false;
@@ -251,14 +252,14 @@ pub(super) fn cursor_forward(
         // Same CUDA prediction `SessionPlan` makes: NVENC blends a CUDA payload only.
         let cuda_planned = !crate::encode::linux_zero_copy_is_vaapi() && crate::zerocopy::enabled();
         compositor.is_some_and(|c| c != crate::vdisplay::Compositor::Gamescope)
-            && crate::encode::cursor_blend_capable(codec, cuda_planned, bit_depth == 10)
+            && crate::encode::cursor_blend_capable(codec, cuda_planned, bit_depth == 10, hdr)
     }
     #[cfg(not(target_os = "linux"))]
     {
         // Windows: the v5 IddCx hardware-cursor channel. Without it DWM paints the pointer
         // into the IDD frame and a second copy doubles it. The encoder is not consulted: the
         // IDD capturer composites on the capture-mouse flip; no Windows encode backend blends.
-        let _ = (compositor, codec, bit_depth);
+        let _ = (compositor, codec, bit_depth, hdr);
         crate::windows::idd::hw_cursor_capable()
     }
 }
@@ -638,7 +639,7 @@ pub(super) async fn negotiate(
             }
             // Client turns its local renderer on only when it sees this bit; serve_session
             // wires forwarding by reading the bit back.
-            | if cursor_forward(hello.client_caps, compositor, codec, bit_depth) {
+            | if cursor_forward(hello.client_caps, compositor, codec, bit_depth, session_hdr) {
                 punktfunk_core::quic::HOST_CAP_CURSOR
             } else {
                 0

@@ -221,6 +221,7 @@ pub(crate) fn cursor_blend_for(
     compositor: pf_vdisplay::Compositor,
     codec: crate::encode::Codec,
     bit_depth: u8,
+    hdr: bool,
     gamescope_route: Option<&pf_vdisplay::GamescopeRoute>,
 ) -> bool {
     #[cfg(not(target_os = "linux"))]
@@ -230,6 +231,7 @@ pub(crate) fn cursor_blend_for(
             compositor,
             codec,
             bit_depth,
+            hdr,
             gamescope_route,
         );
         false
@@ -251,7 +253,7 @@ pub(crate) fn cursor_blend_for(
         // Same CUDA-payload prediction as `handshake::cursor_forward`: NVIDIA plus
         // the zero-copy switch. Only a CUDA payload reaches the blend.
         let cuda_planned = !crate::encode::linux_zero_copy_is_vaapi() && crate::zerocopy::enabled();
-        crate::encode::cursor_blend_capable(codec, cuda_planned, bit_depth == 10)
+        crate::encode::cursor_blend_capable(codec, cuda_planned, bit_depth == 10, hdr)
     }
 }
 
@@ -423,6 +425,7 @@ mod tests {
             Compositor::Kwin,
             Codec::H264,
             8,
+            false,
             None
         ));
         assert!(cursor_blend_for(
@@ -430,6 +433,7 @@ mod tests {
             Compositor::Mutter,
             Codec::H264,
             8,
+            false,
             None
         ));
     }
@@ -441,8 +445,8 @@ mod tests {
     fn embedding_compositor_skips_the_blend_without_a_channel() {
         for c in [Compositor::Kwin, Compositor::Wlroots, Compositor::Hyprland] {
             assert!(compositor_embeds_pointer(c));
-            assert!(!cursor_blend_for(false, c, Codec::Av1, 8, None));
-            assert!(!cursor_blend_for(false, c, Codec::H265, 10, None));
+            assert!(!cursor_blend_for(false, c, Codec::Av1, 8, false, None));
+            assert!(!cursor_blend_for(false, c, Codec::H265, 10, false, None));
         }
         assert!(!compositor_embeds_pointer(Compositor::Mutter));
         assert!(!compositor_embeds_pointer(Compositor::Gamescope));
@@ -451,7 +455,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn gamescope_cursor_reader_matches_blend_rule() {
-        let cursor_blend = cursor_blend_for(false, Compositor::Gamescope, Codec::H265, 10, None);
+        let cursor_blend =
+            cursor_blend_for(false, Compositor::Gamescope, Codec::H265, 10, true, None);
         let gamescope_cursor = gamescope_cursor_for(true, None);
 
         assert_eq!(cursor_blend, gamescope_cursor);
@@ -469,6 +474,7 @@ mod tests {
                     compositor,
                     Codec::H265,
                     10,
+                    true,
                     None
                 ));
                 assert!(!gamescope_cursor_for(

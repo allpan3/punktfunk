@@ -352,8 +352,8 @@ extension Notification.Name {
     /// menus) — it exists so the menu item is honest whenever it CAN fire, and as the shortcut's
     /// discoverable menu-bar surface.
     public static let punktfunkReleaseCapture = Notification.Name("io.unom.punktfunk.release-capture")
-    /// The quick-action ring's Keyboard slot: summon the stream view's soft keyboard (iOS).
-    public static let punktfunkShowSoftKeyboard = Notification.Name("io.unom.punktfunk.show-soft-keyboard")
+    /// The quick-action ring's Keyboard slot: show the stream view's soft keyboard, or hide it (iOS).
+    public static let punktfunkToggleSoftKeyboard = Notification.Name("io.unom.punktfunk.toggle-soft-keyboard")
     /// Asks a session to advance its stats tier; `object` is its connection, nil for every session.
     /// Posted by `StatsVerbosity.requestCycle`. The stored default does not move.
     public static let punktfunkStatsCycled = Notification.Name("io.unom.punktfunk.stats-cycled")
