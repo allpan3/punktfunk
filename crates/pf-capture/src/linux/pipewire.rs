@@ -97,9 +97,10 @@ impl UserData {
     }
 
     /// Withhold this buffer from the producer until the returned hold drops.
-    /// `None` (pool too shallow, or `PUNKTFUNK_ZEROCOPY_HOLD=0`) requeues at `.process` return —
-    /// the producer may then rewrite the dmabuf while encode still reads it, so the raw
-    /// passthrough publishes only under `Some` and treats `None` as a CPU fallback.
+    /// `None` requeues at `.process` return — the producer may then rewrite the dmabuf while
+    /// encode still reads it, so no lane publishes a raw frame under `None`: a transient
+    /// shortage drops the arrival, a pool that can never hold (`holds_possible` false) takes
+    /// the lane's own fallback.
     /// Every hold out with an untaken frame in the slot: that frame gives its hold to this one.
     /// A buffer the book already lists was re-sent by the producer: no hold, and the capture is
     /// flagged for a rebuild.
@@ -139,10 +140,11 @@ impl UserData {
                 tracing::warn!(
                     pool_depth = pool_live,
                     reserve = HOLD_POOL_RESERVE,
+                    holds_possible = holds_possible(true, pool_live),
                     "zero-copy: the producer's buffer pool cannot spare a buffer to hold across \
-                     the encode — falling back to the immediate requeue, which the producer may \
-                     rewrite mid-encode (torn/discolored frames under load); PUNKTFUNK_FORCE_SHM=1 \
-                     trades CPU for a race-free capture if artifacts appear"
+                     the encode — while holds are possible at all this arrival is dropped and \
+                     the slot keeps its frame (held_drops= on the provenance line); a pool that \
+                     can never hold takes the CPU copy instead"
                 );
             }
             return None;
@@ -465,7 +467,9 @@ pub(super) enum PassthroughFallback {
     DupFailed,
     /// A linear pitch off 64 bytes: iHD imports it at a rounded pitch and the picture shears.
     UnalignedPitch,
-    /// The pool could not spare a deferred-requeue hold, so the raw frame is unsafe to publish.
+    /// This pool can never spare a deferred-requeue hold (depth ≤ reserve, or
+    /// `PUNKTFUNK_ZEROCOPY_HOLD=0`), so no raw frame is safe to publish. A transient shortage
+    /// on a pool that can hold never gets here: `.process` drops that arrival (`held_drops`).
     NoHold,
 }
 
@@ -491,7 +495,7 @@ impl PassthroughFallback {
                 "the dmabuf's pitch is not a multiple of 64 bytes"
             }
             PassthroughFallback::NoHold => {
-                "the producer pool could not spare a deferred-requeue hold"
+                "this producer pool can never spare a deferred-requeue hold"
             }
         }
     }
@@ -520,7 +524,9 @@ impl PassthroughFallback {
                  rounded — this width streams through the CPU copy instead of the raw import"
             }
             PassthroughFallback::NoHold => {
-                "the frame stays on the CPU copy path rather than letting the producer rewrite a DMA-BUF the encoder still reads"
+                "the pool is at or below the reserve, or PUNKTFUNK_ZEROCOPY_HOLD=0 — every frame \
+                 takes the CPU copy rather than letting the producer rewrite a DMA-BUF the \
+                 encoder still reads"
             }
         }
     }
@@ -1387,6 +1393,15 @@ fn consume_frame(
             let Some(hold) = ud.try_defer(pw_buf, stream) else {
                 // SAFETY: `dup` is ours and was not published.
                 unsafe { libc::close(dup) };
+                // A shortage, not a broken frame: drop it as the import lane does — the slot
+                // keeps its frame, the next arrival takes the hold that comes back. The CPU
+                // copy on this thread starves the requeues that would end the shortage; a
+                // tiled rebuild asks KWin for a new output each time (#1443 never settled).
+                // Only a pool that can never hold falls through, or nothing would stream.
+                if holds_possible(zerocopy_hold_enabled(), ud.pool.live) {
+                    ud.held_drops += 1;
+                    return;
+                }
                 break 'passthrough PassthroughFallback::NoHold;
             };
             ud.publish(CapturedFrame {
