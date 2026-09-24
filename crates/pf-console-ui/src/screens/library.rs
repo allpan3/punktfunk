@@ -333,16 +333,27 @@ fn placeholder_face(launcher: bool) -> Color4f {
 }
 
 /// Coverless cell. Brand mark, else UI mark, else a monogram (launcher: its name). `None`: stale index.
+/// `alpha` fades each piece on its own, so an entrance needs no layer per card: on a tiled GPU
+/// each layer stores and reloads the whole framebuffer.
 pub(crate) fn draw_poster_placeholder(
     canvas: &Canvas,
     fonts: &Fonts,
     game: Option<&LibraryGame>,
     rect: Rect,
     k: f64,
+    alpha: f32,
 ) {
+    let ink = |a: f32| {
+        let c = fg(a);
+        Color4f::new(c.r, c.g, c.b, c.a * alpha)
+    };
     // Side cards overlap; glass shows the neighbour. `card_face` tints without alpha.
     let launcher = matches!(game, Some(g) if g.launcher);
-    canvas.draw_rect(rect, &fill(placeholder_face(launcher)));
+    let face = placeholder_face(launcher);
+    canvas.draw_rect(
+        rect,
+        &fill(Color4f::new(face.r, face.g, face.b, face.a * alpha)),
+    );
     let Some(game) = game else { return };
     // ~44 % so the mark reads as a glyph, not a cropped cover; `launcher_mark` letterboxes.
     let mark = (!game.icon.is_empty())
@@ -360,7 +371,7 @@ pub(crate) fn draw_poster_placeholder(
         })
         .flatten();
     if let Some(path) = mark {
-        canvas.draw_path(&path, &fill(fg(0.85)));
+        canvas.draw_path(&path, &fill(ink(0.85)));
         return;
     }
     // Not a brand: the desktop tile names a Lucide mark. Stroked, not filled — Lucide's paths
@@ -373,7 +384,7 @@ pub(crate) fn draw_poster_placeholder(
             rect.center_x(),
             rect.center_y(),
             side,
-            fg(0.85),
+            ink(0.85),
         );
         return;
     }
@@ -395,7 +406,7 @@ pub(crate) fn draw_poster_placeholder(
             rect.center_y() + (size * 0.36) as f32,
         ),
         &font,
-        &fill(fg(0.85)),
+        &fill(ink(0.85)),
     );
 }
 
@@ -1612,12 +1623,6 @@ impl LibraryScreen {
                 canvas.scale((arrive, arrive));
                 canvas.translate((-cx, -cy));
                 let art = this.art.get(&game.id);
-                // Layer only for multi-piece fades (the placeholder). Paint alpha otherwise.
-                let layered = ent.fade < 1.0 && art.is_none();
-                if layered {
-                    crate::theme::save_layer_alpha(canvas, slot, ent.fade as f32);
-                }
-                let alpha = if layered { 1.0 } else { ent.fade as f32 };
                 let desk = (game.id == crate::library::DESKTOP_ID).then(|| this.desktop_caption());
                 let caption = this.sort_caption(game);
                 let card = card::Card {
@@ -1628,10 +1633,7 @@ impl LibraryScreen {
                     caption: caption.as_deref(),
                     focused: focused && !this.quiet,
                 };
-                card.paint(canvas, fonts, slot, ch, k, alpha);
-                if layered {
-                    canvas.restore();
-                }
+                card.paint(canvas, fonts, slot, ch, k, ent.fade as f32);
                 canvas.restore();
             })
             .id(grid_cell(i))
@@ -1969,43 +1971,48 @@ impl LibraryScreen {
         let corner = (SHELF_CORNER * k) as f32;
         let rr = RRect::new_rect_xy(crect, corner, corner);
         canvas.clip_rrect(rr, None, true);
-        // After the clip so `None` bounds are the cover, not the screen.
-        let layered = c.fade < 0.999 || c.prox > 0.001;
+        // Fade and recede ride each piece's paint: a layer per cover is a framebuffer round
+        // trip on a tiled GPU, every frame for every neighbour. A placeholder is flat pieces
+        // that must recede as one, so it alone keeps a layer.
+        let recede = (c.prox > 0.001).then(|| {
+            skia_safe::color_filters::matrix_row_major(&crate::theme::recede_matrix(c.prox), None)
+        });
+        let art = self.art.get(&game.id);
+        let layered = art.is_none() && (c.fade < 0.999 || recede.is_some());
         if layered {
             let mut lp = crate::theme::layer();
             lp.set_alpha_f(c.fade as f32);
-            if c.prox > 0.001 {
-                lp.set_color_filter(skia_safe::color_filters::matrix_row_major(
-                    &crate::theme::recede_matrix(c.prox),
-                    None,
-                ));
-            }
+            lp.set_color_filter(recede.clone());
+            // After the clip so `None` bounds are the cover, not the screen.
             canvas.save_layer(
                 &skia_safe::canvas::SaveLayerRec::default()
                     .paint(&lp)
                     .flags(crate::theme::layer_flags(canvas)),
             );
         }
-        match self.art.get(&game.id) {
+        let alpha = if layered { 1.0 } else { c.fade as f32 };
+        match art {
             Some(img) => {
                 let src = card::crop(img, crect);
+                let mut p = fill(fg(1.0));
+                p.set_alpha_f(alpha);
+                p.set_color_filter(recede);
                 canvas.draw_image_rect_with_sampling_options(
                     img,
                     Some((&src, skia_safe::canvas::SrcRectConstraint::Fast)),
                     crect,
                     art_sampling(),
-                    &fill(fg(1.0)),
+                    &p,
                 );
             }
-            None => draw_poster_placeholder(canvas, fonts, Some(game), crect, k),
+            None => draw_poster_placeholder(canvas, fonts, Some(game), crect, k, 1.0),
         }
-        // Inside the recede layer so a neighbour's badges fade with its cover.
-        // Inside the card's entrance layer, which does the fading.
-        card::store_badge(canvas, fonts, game, crect, k, true, 1.0);
+        // The cover's alpha, so a neighbour's badges fade with it.
+        card::store_badge(canvas, fonts, game, crect, k, true, alpha);
         if game.running {
-            card::running_badge(canvas, fonts, crect, k, 1.0);
+            card::running_badge(canvas, fonts, crect, k, alpha);
         }
-        canvas.draw_rrect(rr.with_inset((0.5, 0.5)), &stroke(fg(0.12), 1.0));
+        canvas.draw_rrect(rr.with_inset((0.5, 0.5)), &stroke(fg(0.12 * alpha), 1.0));
         if layered {
             canvas.restore();
         }

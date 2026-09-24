@@ -38,7 +38,7 @@ pub(super) struct Card<'a> {
 
 impl Card<'_> {
     /// The card in `r`: the poster `ch` px tall, the text under it. `alpha` is the entrance
-    /// fade; a coverless poster fades only inside the caller's layer.
+    /// fade, carried by every piece's paint.
     pub(super) fn paint(
         &self,
         canvas: &Canvas,
@@ -141,7 +141,7 @@ pub(super) fn paint_cover(
     let Some(img) = art else {
         canvas.save();
         canvas.clip_rrect(rr, None, true);
-        draw_poster_placeholder(canvas, fonts, Some(game), cell, k);
+        draw_poster_placeholder(canvas, fonts, Some(game), cell, k, alpha);
         canvas.restore();
         return;
     };

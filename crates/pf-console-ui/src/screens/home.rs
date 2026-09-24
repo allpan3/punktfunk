@@ -739,9 +739,15 @@ impl HomeScreen {
             );
             under = under.child(
                 El::paint(move |canvas, r| {
-                    crate::theme::save_layer_alpha(canvas, r.with_outset((8.0, 8.0)), fade);
+                    // A layer only mid-scroll: each is a framebuffer round trip on a tiled GPU.
+                    let layered = fade < 0.999;
+                    if layered {
+                        crate::theme::save_layer_alpha(canvas, r.with_outset((8.0, 8.0)), fade);
+                    }
                     button(canvas, fonts, label, r, k);
-                    canvas.restore();
+                    if layered {
+                        canvas.restore();
+                    }
                 })
                 .id(verb_id(i))
                 .focusable((BUTTON_H * k / 2.0) as f32)
