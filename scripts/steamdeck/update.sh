@@ -257,6 +257,19 @@ if [ ! -s "$GRANT_DST" ] && [ -s "$GRANT_SRC" ]; then
     ok "seeded KDE RemoteDesktop grant (Desktop-mode input)"
 fi
 
+# GameStream is the console's setting; a unit flag locks its toggle. An older install's
+# --gamestream moves into the store and stays on.
+HOST_UNIT="$HOME/.config/systemd/user/punktfunk-host.service"
+if grep -qs -- '^ExecStart=.* --gamestream' "$HOST_UNIT"; then
+    if "$BIN" settings set gamestream true >/dev/null; then
+        sed -i '/^ExecStart=/s/ --gamestream//' "$HOST_UNIT"
+        systemctl --user daemon-reload
+        ok "GameStream moved to the console's Host settings (still on)"
+    else
+        warn "GameStream stays pinned in $HOST_UNIT, so the console can't change it"
+    fi
+fi
+
 log "Restarting services"
 # --no-block: when this script runs INSIDE punktfunk-rebuild-check.service (ordered
 # Before=punktfunk-host), a blocking restart would deadlock — the restart job waits for the

@@ -82,7 +82,7 @@ Keys: `1`–`5` or `h` / `l` switch tabs, `j` / `k` move, Enter activates, Esc c
 
 `setup` opens `punktfunk-native` and `punktfunk-web` to `192.168.0.0/16`, `10.0.0.0/8`,
 `172.16.0.0/12` and `tailscale0`. The Tailscale rule waits dormant until the interface exists.
-`punktfunk-gamestream` opens only when `host.env` has `PUNKTFUNK_GAMESTREAM=1`, which
+`punktfunk-gamestream` opens only while GameStream is on, which
 [**GameStream** in the menu](#moonlight-gamestream) sets. A management port moved off 47990 opens
 too. Video needs no rule; see [Ports](/docs/ports).
 
@@ -109,8 +109,8 @@ To switch for good, run `omarchy remove service sunshine`. See
 ## Moonlight (GameStream)
 
 Punktfunk's own clients don't need it. For stock [Moonlight](/docs/moonlight) on a trusted LAN,
-choose **Punktfunk Host** → **GameStream** in Apps: it sets `PUNKTFUNK_GAMESTREAM=1`, restarts the
-host and opens the ufw profile. Enter the PIN a Moonlight client shows with **Punktfunk Host** →
+choose **Punktfunk Host** → **GameStream** in Apps: it turns on the console's **GameStream**
+setting, restarts the host and opens the ufw profile. Enter the PIN a Moonlight client shows with **Punktfunk Host** →
 **Moonlight PIN**.
 
 ## This box as a client

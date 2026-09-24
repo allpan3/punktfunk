@@ -118,6 +118,16 @@ and `ctl pending`; `{"kind":"ctl.disconnected"}` means a reconnect is under way.
 `ctl` reads the host's `mgmt-token` and pins its `native-cert.pem` before sending the token. It
 never creates a token and takes none on the command line or from the environment.
 
+## `settings`
+
+```sh
+punktfunk-host settings set gamestream true
+```
+
+Writes one **Host → Settings** value to `host-settings.json`, as the console does, without a
+running host. Installers use it, so the console can still change what they chose. The value is
+JSON (`true`, `30`, `null` to clear) or a bare string. Restart the host to apply it.
+
 ## `plugins`
 
 `punktfunk-host plugins add|remove|list|enable|disable|status|grant|access|revoke` does what
