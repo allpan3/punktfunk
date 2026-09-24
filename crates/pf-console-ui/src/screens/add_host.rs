@@ -388,6 +388,38 @@ mod tests {
         }
     }
 
+    /// The field's plate carries on into the keyboard: it starts row-wide, then lands on a key.
+    #[test]
+    fn the_plate_glides_from_the_field_into_the_keyboard() {
+        let mut settings = Settings::default();
+        let library = crate::library::LibraryShared::default();
+        let mut c = ctx(&mut settings, &[], &library, false);
+        let mut s = AddHostScreen::new();
+        let mut fx = Outbox::default();
+        let fonts = crate::theme::build_fonts().unwrap();
+        let mut surface = skia_safe::surfaces::raster_n32_premul((1280, 800)).unwrap();
+        let rect = Rect::from_wh(1280.0, 800.0);
+        let mut frame = |s: &mut AddHostScreen, c: &mut Ctx| {
+            crate::el::begin_frame();
+            s.render(surface.canvas(), rect, 1.0, 1.0 / 60.0, &fonts, c);
+        };
+        for _ in 0..30 {
+            frame(&mut s, &mut c);
+        }
+        s.menu(MenuEvent::Confirm, &mut c, &mut fx);
+        assert!(s.editing.is_some());
+        for _ in 0..2 {
+            frame(&mut s, &mut c);
+        }
+        let first = s.keyboard.plate().expect("the plate came along");
+        assert!(first.width() > 300.0, "row-wide at first: {first:?}");
+        for _ in 0..90 {
+            frame(&mut s, &mut c);
+        }
+        let landed = s.keyboard.plate().expect("on a key");
+        assert!(landed.width() < 100.0, "a key wide: {landed:?}");
+    }
+
     #[test]
     fn end_to_end_add_flow() {
         let mut settings = Settings::default();

@@ -193,6 +193,8 @@ impl Shell {
             .filter(|sp| !matches!(sp.phase, SpeedPhase::Connecting | SpeedPhase::Failed(_)));
         match (takeover, charted) {
             (Some((_, _, title, body, hints)), Some(sp)) => {
+                let (done, rec) = measured(&sp.phase);
+                self.speed_view.step(sp, done, rec, dt);
                 self.draw_speed(canvas, (w, h), k, t, fonts, sp, (&title, &body), &hints);
             }
             (Some((appear, spinner, title, body, hints)), _) => {
@@ -350,14 +352,7 @@ impl Shell {
     ) {
         canvas.save();
         self.draw_takeover_field(canvas, w, h, t);
-        let (done, rec) = match sp.phase {
-            SpeedPhase::Done {
-                throughput_kbps,
-                recommended_kbps,
-                ..
-            } => (Some(throughput_kbps), Some(recommended_kbps)),
-            _ => (None, None),
-        };
+        let (done, rec) = measured(&sp.phase);
         // Measured, the figure is the headline: the caption names the host and the loss.
         let caption = match sp.phase {
             SpeedPhase::Done { loss_pct, .. } => format!("{} \u{b7} {loss_pct:.1} % loss", sp.name),
@@ -369,9 +364,10 @@ impl Shell {
         // Caption, figure, chart and body, centred as one block.
         let top = (h - (96.0 * k + ch + 64.0 * k)) / 2.0;
         fonts.centered(canvas, title, W::SemiBold, 15.0 * k, fg(0.62), cx, top, cw);
-        let figure = done
-            .or(sp.trace.last().map(|p| p.1))
-            .map_or("\u{2014}".into(), mbps);
+        let figure = match (done, sp.trace.is_empty()) {
+            (None, true) => "\u{2014}".into(),
+            _ => mbps(self.speed_view.figure.round() as u32),
+        };
         fonts.centered(
             canvas,
             &figure,
@@ -388,7 +384,7 @@ impl Shell {
             cw as f32,
             ch as f32,
         );
-        speed_chart(canvas, fonts, chart, &sp.trace, rec, k, t);
+        speed_chart(canvas, fonts, chart, &sp.trace, rec, &self.speed_view, k, t);
         let body_top = f64::from(chart.bottom) + 34.0 * k;
         fonts.centered(
             canvas,
@@ -560,7 +556,9 @@ impl Shell {
                 );
                 canvas.restore();
             }
-            None => crate::screens::library::draw_poster_placeholder(canvas, fonts, None, card, k),
+            None => {
+                crate::screens::library::draw_poster_placeholder(canvas, fonts, None, card, k, 1.0)
+            }
         }
         canvas.draw_rrect(
             RRect::new_rect_xy(card, corner, corner),
@@ -698,12 +696,98 @@ fn launch_layout(w: f64, h: f64, k: f64, rest: f64, title_h: impl Fn(f64) -> f64
     }
 }
 
+/// The measured rate and its recommendation, once there is an answer.
+fn measured(phase: &SpeedPhase) -> (Option<u32>, Option<u32>) {
+    match *phase {
+        SpeedPhase::Done {
+            throughput_kbps,
+            recommended_kbps,
+            ..
+        } => (Some(throughput_kbps), Some(recommended_kbps)),
+        _ => (None, None),
+    }
+}
+
 /// A rate as people read it: tenths under 10 Mb/s, whole megabits above, gigabits past 1000.
 fn mbps(kbps: u32) -> String {
     match kbps {
         0..10_000 => format!("{:.1} Mb/s", f64::from(kbps) / 1_000.0),
         10_000..1_000_000 => format!("{} Mb/s", kbps / 1_000),
         _ => format!("{:.1} Gb/s", f64::from(kbps) / 1_000_000.0),
+    }
+}
+
+/// Past its last sample, a live line runs on at most this long: a late poll holds it, it does
+/// not run away.
+const RUN_ON_S: f64 = 0.4;
+
+/// The speed chart as drawn this frame. Samples land a few times a second, so the line runs
+/// on to now, its head glides onto each new sample, and the scales and figure ease.
+#[derive(Default)]
+pub(in crate::shell) struct SpeedView {
+    /// The test this view follows; another starts it over.
+    key: Option<String>,
+    samples: usize,
+    /// Seconds since measuring began that the line reaches.
+    now: f64,
+    /// The rate at the head of the line, and the headline figure, kbps.
+    head: f64,
+    figure: f64,
+    x_max: f64,
+    y_max: f64,
+    /// The round scale the gridlines are labelled with.
+    y_round: u32,
+}
+
+impl SpeedView {
+    /// Chase `sp` by `dt`; `done` is the measured rate, `rec` the recommendation.
+    pub(in crate::shell) fn step(
+        &mut self,
+        sp: &SpeedStatus,
+        done: Option<u32>,
+        rec: Option<u32>,
+        dt: f64,
+    ) {
+        if self.key.as_deref() != Some(sp.key.as_str()) || sp.trace.len() < self.samples {
+            let (x, y) = chart_scale(&[], 0);
+            *self = SpeedView {
+                key: Some(sp.key.clone()),
+                x_max: f64::from(x),
+                y_max: f64::from(y),
+                y_round: y,
+                ..SpeedView::default()
+            };
+        }
+        self.samples = sp.trace.len();
+        let (last_s, last) = sp
+            .trace
+            .last()
+            .map_or((0.0, 0), |&(s, v)| (f64::from(s), v));
+        let to = match (done, sp.trace_start) {
+            (None, Some(t0)) => t0.elapsed().as_secs_f64().clamp(last_s, last_s + RUN_ON_S),
+            _ => last_s,
+        };
+        self.now = approach(self.now, to, dt, 0.05);
+        self.head = approach(self.head, f64::from(last), dt, 0.08);
+        self.figure = approach(self.figure, f64::from(done.unwrap_or(last)), dt, 0.1);
+        let peak = sp.trace.iter().map(|p| p.1).chain(rec).max().unwrap_or(0);
+        let (_, y) = chart_scale(&sp.trace, peak);
+        self.y_round = y;
+        self.x_max = approach(self.x_max, self.now.max(2.0).ceil(), dt, 0.15);
+        self.y_max = approach(self.y_max, f64::from(y), dt, 0.15);
+    }
+
+    /// The samples as drawn: the last one at the head's rate, the line run on to now.
+    fn points(&self, trace: &[(f32, u32)]) -> Vec<(f32, u32)> {
+        let mut out = trace.to_vec();
+        let head = self.head.round() as u32;
+        if let Some(last) = out.last_mut() {
+            last.1 = head;
+            if self.now > f64::from(last.0) {
+                out.push((self.now as f32, head));
+            }
+        }
+        out
     }
 }
 
@@ -722,9 +806,9 @@ fn chart_scale(trace: &[(f32, u32)], peak: u32) -> (f32, u32) {
 }
 
 /// Trace points in `r`, from the origin: measuring starts at nothing.
-fn chart_points(trace: &[(f32, u32)], r: Rect, x_max: f32, y_max: u32) -> Vec<Point> {
+fn chart_points(trace: &[(f32, u32)], r: Rect, x_max: f32, y_max: f32) -> Vec<Point> {
     let at = |(s, kbps): (f32, u32)| {
-        let y = r.bottom - r.height() * (kbps as f32 / y_max as f32).min(1.0);
+        let y = r.bottom - r.height() * (kbps as f32 / y_max).min(1.0);
         Point::new(r.left + r.width() * (s / x_max).min(1.0), y)
     };
     std::iter::once((0.0, 0))
@@ -733,27 +817,32 @@ fn chart_points(trace: &[(f32, u32)], r: Rect, x_max: f32, y_max: u32) -> Vec<Po
         .collect()
 }
 
-/// The burst's throughput over time in `r`: a smoothed line over a fading fill, a faint grid
-/// with its scale, and once measured the recommendation as a dashed green rule. While it
-/// measures, the newest point pulses.
+/// The burst's throughput over time in `r`, as `view` has it this frame: a smoothed line
+/// over a fading fill, a faint grid at round rates that slides as the scale eases, and once
+/// measured the recommendation as a dashed green rule. While it measures, the head pulses.
+#[allow(clippy::too_many_arguments)]
 fn speed_chart(
     canvas: &Canvas,
     fonts: &Fonts,
     r: Rect,
     trace: &[(f32, u32)],
     rec: Option<u32>,
+    view: &SpeedView,
     k: f64,
     t: f64,
 ) {
     let kf = k as f32;
-    let peak = trace.iter().map(|p| p.1).chain(rec).max().unwrap_or(0);
-    let (x_max, y_max) = chart_scale(trace, peak);
+    let (x_max, y_max) = (view.x_max as f32, view.y_max as f32);
     let grid = crate::theme::stroke(fg(0.16), kf);
     for i in 0..=2u32 {
-        let y = r.bottom - r.height() * i as f32 / 2.0;
+        let value = view.y_round / 2 * i;
+        let y = r.bottom - r.height() * value as f32 / y_max;
+        if y < r.top - 1.0 {
+            continue;
+        }
         canvas.draw_line((r.left, y), (r.right, y), &grid);
         if i > 0 {
-            let label = mbps(y_max / 2 * i);
+            let label = mbps(value);
             let base = f64::from(y) - 6.0 * k;
             fonts.draw(
                 canvas,
@@ -776,7 +865,7 @@ fn speed_chart(
         11.0 * k,
         fg(0.45),
     );
-    let end = format!("{x_max:.0} s");
+    let end = format!("{:.0} s", view.x_max.round());
     let end_w = f64::from(fonts.measure(&end, W::Medium, 11.0 * k));
     let end_x = f64::from(r.right) - end_w;
     fonts.draw(canvas, &end, end_x, axis, W::Medium, 11.0 * k, fg(0.45));
@@ -792,7 +881,7 @@ fn speed_chart(
         }
         return;
     }
-    let pts = chart_points(trace, r, x_max, y_max);
+    let pts = chart_points(&view.points(trace), r, x_max, y_max);
     // Through the midpoints, so the line bends where the samples turn and never overshoots.
     let curve = |path: &mut PathBuilder| {
         path.move_to(pts[0]);
@@ -826,7 +915,7 @@ fn speed_chart(
     canvas.draw_path(&line.detach(), &ink);
     match rec {
         Some(rec) => {
-            let y = r.bottom - r.height() * (rec as f32 / y_max as f32).min(1.0);
+            let y = r.bottom - r.height() * (rec as f32 / y_max).min(1.0);
             let mut rule = crate::theme::stroke(crate::theme::ONLINE_GREEN, 1.5 * kf);
             rule.set_path_effect(skia_safe::PathEffect::dash(&[6.0 * kf, 4.0 * kf], 0.0));
             canvas.draw_line((r.left, y), (r.right, y), &rule);
@@ -850,6 +939,37 @@ fn speed_chart(
 mod tests {
     use super::*;
 
+    /// A new sample glides the head up rather than jumping to it, the scale eases toward its
+    /// round step, and once measured the view rests exactly on the samples.
+    #[test]
+    fn the_speed_chart_eases_onto_each_sample() {
+        let mut sp = SpeedStatus::new("aa11".into(), "Box".into());
+        sp.trace = vec![(0.25, 100_000)];
+        let mut view = SpeedView::default();
+        for _ in 0..60 {
+            view.step(&sp, None, None, 1.0 / 60.0);
+        }
+        sp.trace.push((0.5, 400_000));
+        view.step(&sp, None, None, 1.0 / 60.0);
+        assert!(
+            view.head > 100_000.0 && view.head < 400_000.0,
+            "glides: {}",
+            view.head
+        );
+        assert!(view.y_max < 450_000.0, "the scale eases: {}", view.y_max);
+        let (done, rec) = (Some(400_000), Some(280_000));
+        for _ in 0..240 {
+            view.step(&sp, done, rec, 1.0 / 60.0);
+        }
+        assert!((view.head - 400_000.0).abs() < 1.0);
+        assert!((view.figure - 400_000.0).abs() < 1.0);
+        assert_eq!(
+            view.points(&sp.trace),
+            sp.trace,
+            "measured, the line is the samples"
+        );
+    }
+
     /// Rates read as people say them, and the chart's scale lands on round numbers over the
     /// peak, starting from the origin.
     #[test]
@@ -862,7 +982,7 @@ mod tests {
         assert_eq!((x_max, y_max), (3.0, 1_000_000));
         assert_eq!(chart_scale(&[], 0), (2.0, 1_500));
         let r = Rect::from_xywh(0.0, 0.0, 300.0, 100.0);
-        let pts = chart_points(&trace, r, x_max, y_max);
+        let pts = chart_points(&trace, r, x_max, y_max as f32);
         assert_eq!(pts.len(), 4);
         assert_eq!(pts[0], Point::new(0.0, 100.0));
         assert!(

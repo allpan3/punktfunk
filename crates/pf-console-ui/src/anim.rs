@@ -168,6 +168,13 @@ pub mod entrances {
         stagger: 0.04,
         cap: 0.24,
     };
+    /// A poster grid: the [`CARDS`] ripple along a row, with room for rows to follow one
+    /// another. The grid counts a row as several steps, so a screenful cascades downward.
+    pub const GRID: EntranceSpec = EntranceSpec {
+        window: 0.5,
+        stagger: 0.04,
+        cap: 0.6,
+    };
     /// Menu rows. Shorter than [`CARDS`], not zero: under about three frames
     /// apart the rows read as one arrival rather than a ripple.
     pub const ROWS: EntranceSpec = EntranceSpec {
@@ -341,6 +348,7 @@ mod tests {
 
         for (name, spec, budget) in [
             ("CARDS", entrances::CARDS, 1.25),
+            ("GRID", entrances::GRID, 1.25),
             ("ROWS", entrances::ROWS, 0.8),
         ] {
             // `cap / stagger` is how many steps ever fan. Drop this and a wider

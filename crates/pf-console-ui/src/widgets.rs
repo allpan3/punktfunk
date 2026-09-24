@@ -1598,13 +1598,21 @@ fn key_rows() -> &'static [Vec<Key>] {
 }
 
 /// Controller keyboard: fixed grid in a bottom tray. D-pad moves, A types, X
-/// backspaces, B/Y/Done confirms. Edits apply live; closing is done.
+/// backspaces, B/Y/Done confirms. Edits apply live; closing is done. Focus is the console's
+/// plate: it glides in from the field's row, key to key, and back out on close.
 pub struct Keyboard {
     row: usize,
     col: usize,
     /// Tray slide-in, 0 hidden → 1 seated. Swift `.spring(0.32, 0.86)`.
     tray: Spring,
-    key_flash: f64,
+    /// Asked to show, and the frame's `dt`, both from [`Self::seat`].
+    shown: bool,
+    dt: f64,
+    /// The keys as focus targets. Boxed: a keyboard sits inside screens that are variants
+    /// of one enum.
+    tree: Box<Tree>,
+    /// Last-drawn tray. A press in its padding or between keys is still on the keyboard.
+    tray_rect: Rect,
     /// Last-drawn key rects. The tray slides, so hit-test what was drawn, not a seated layout.
     keys: Vec<(Rect, Key)>,
 }
@@ -1621,7 +1629,10 @@ impl Keyboard {
             row: 1, // letter row, not digits
             col: 0,
             tray: Spring::rest(0.0),
-            key_flash: 0.0,
+            shown: false,
+            dt: 0.0,
+            tree: Box::new(Tree::new()),
+            tray_rect: Rect::new_empty(),
             keys: Vec::new(),
         }
     }
@@ -1645,7 +1656,7 @@ impl Keyboard {
             self.row = r;
             self.col = c;
         }
-        self.key_flash = 1.0;
+        self.tree.press();
         match key {
             Key::Char(c) => (KeyMsg::Type(c), None),
             Key::Space => (KeyMsg::Type(' '), None),
@@ -1654,10 +1665,16 @@ impl Keyboard {
         }
     }
 
-    /// Whether `p` hits the tray. The screen asks first so a press outside a
-    /// raised keyboard dismisses it instead of falling through to the list.
+    /// The plate on screen, before its outset; tests follow it in from the field's row.
+    #[cfg(test)]
+    pub(crate) fn plate(&self) -> Option<Rect> {
+        self.tree.plate_rect().map(|(r, _)| r)
+    }
+
+    /// Whether `p` hits the tray, gaps and padding included. The screen asks first so only a
+    /// press outside the raised keyboard dismisses it; a wobbly pointer between keys stays.
     pub fn covers(&self, p: Pointer) -> bool {
-        self.keys.iter().any(|(r, _)| p.hits(*r))
+        p.hits(self.tray_rect)
     }
 
     /// The screen applies `Type`/`Backspace` (charset included); a refusal
@@ -1695,7 +1712,7 @@ impl Keyboard {
                 (KeyMsg::None, Some(MenuPulse::Move))
             }
             MenuEvent::Confirm => {
-                self.key_flash = 1.0;
+                self.tree.press();
                 match rows[self.row][self.col] {
                     Key::Char(c) => (KeyMsg::Type(c), None),
                     Key::Space => (KeyMsg::Type(' '), None),
@@ -1714,7 +1731,8 @@ impl Keyboard {
         self.tray
             .step(if shown { 1.0 } else { 0.0 }, TRAY_K, TRAY_C, dt);
         self.tray.settle(if shown { 1.0 } else { 0.0 }, 0.001, 0.01);
-        self.key_flash = approach(self.key_flash, 0.0, dt, 0.10);
+        self.shown = shown;
+        self.dt = dt;
         self.tray.pos.clamp(0.0, 1.2)
     }
 
@@ -1724,7 +1742,8 @@ impl Keyboard {
     }
 
     /// Draw the tray with its bottom at `bottom`, centred, slid by `seat` (0..1).
-    /// The caller clips nothing: the tray rises from below the screen.
+    /// The caller clips nothing: the tray rises from below the screen. The keys lay out
+    /// seated and the slide is a translate, so the plate rides the tray instead of chasing it.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -1740,91 +1759,99 @@ impl Keyboard {
         let tray_w = (560.0 * k).min(w - 32.0 * k);
         let tray_h = Self::tray_height() * k;
         let x0 = (w - tray_w) / 2.0;
-        let y0 = bottom - tray_h * seat;
-        let rect = Rect::from_xywh(x0 as f32, y0 as f32, tray_w as f32, tray_h as f32);
+        let seated = Rect::from_xywh(
+            x0 as f32,
+            (bottom - tray_h) as f32,
+            tray_w as f32,
+            tray_h as f32,
+        );
+        let slide = (tray_h * (1.0 - seat)) as f32;
+        self.tray_rect = seated.with_offset((0.0, slide));
+
+        let pad = 14.0 * k;
+        let gap = 7.0 * k;
+        let key_h = 42.0 * k;
+        let corner = (9.0 * k) as f32;
+        let mut root = El::column();
+        for (r, row) in rows.iter().enumerate() {
+            let n = row.len() as f64;
+            let key_w = (tray_w - 2.0 * pad - (n - 1.0) * gap) / n;
+            let y = pad + r as f64 * (key_h + gap);
+            for (c, &key) in row.iter().enumerate() {
+                let x = pad + c as f64 * (key_w + gap);
+                let kr = Rect::from_xywh(x as f32, y as f32, key_w as f32, key_h as f32);
+                self.keys
+                    .push((kr.with_offset((seated.left, seated.top + slide)), key));
+                root = root.child(
+                    El::paint(move |canvas, r| draw_key(canvas, fonts, key, r, corner, k))
+                        .id(key_id(r, c))
+                        .focusable(corner)
+                        .place(kr),
+                );
+            }
+        }
+        canvas.save();
+        canvas.translate((0.0, slide));
         crate::theme::panel(
             canvas,
-            rect,
+            seated,
             22.0,
             Some(skia_safe::Color4f::new(0.05, 0.045, 0.09, 0.55)),
             PanelStroke::Plain(0.12),
             k as f32,
         );
+        let frame = self.tree.layout(root, seated);
+        // Closing hands the plate back to the field's row.
+        self.tree
+            .set_focus(self.shown.then(|| key_id(self.row, self.col)));
+        self.tree
+            .paint_focus(canvas, frame, k as f32, self.dt, false);
+        canvas.restore();
+    }
+}
 
-        let pad = 14.0 * k;
-        let gap = 7.0 * k;
-        let key_h = 42.0 * k;
-        for (r, row) in rows.iter().enumerate() {
-            let n = row.len() as f64;
-            let key_w = (tray_w - 2.0 * pad - (n - 1.0) * gap) / n;
-            let y = y0 + pad + r as f64 * (key_h + gap);
-            for (c, key) in row.iter().enumerate() {
-                let x = x0 + pad + c as f64 * (key_w + gap);
-                let focused = r == self.row && c == self.col;
-                let kr = Rect::from_xywh(x as f32, y as f32, key_w as f32, key_h as f32);
-                self.keys.push((kr, *key));
-                let face = if focused {
-                    let mut b = accent(1.0);
-                    if self.key_flash > 0.02 {
-                        let f = self.key_flash as f32;
-                        b = skia_safe::Color4f::new(
-                            b.r + (1.0 - b.r) * 0.5 * f,
-                            b.g + (1.0 - b.g) * 0.5 * f,
-                            b.b,
-                            1.0,
-                        );
-                    }
-                    b
-                } else {
-                    fg(0.08)
-                };
-                canvas.draw_rrect(
-                    RRect::new_rect_xy(kr, (9.0 * k) as f32, (9.0 * k) as f32),
-                    &fill(face),
-                );
-                // Focused fill is accent; letter ink must read on that, not on the field.
-                let ink = if focused {
-                    crate::theme::on_accent()
-                } else {
-                    fg(1.0)
-                };
-                let (cx, cy) = (x + key_w / 2.0, y + key_h / 2.0);
-                match key {
-                    Key::Char(ch) => {
-                        let s = ch.to_string();
-                        let size = 18.0 * k;
-                        let tw = fonts.measure(&s, W::Medium, size) as f64;
-                        fonts.draw(
-                            canvas,
-                            &s,
-                            cx - tw / 2.0,
-                            cy + size * 0.36,
-                            W::Medium,
-                            size,
-                            ink,
-                        );
-                    }
-                    Key::Space => draw_space_icon(canvas, cx, cy, k, ink),
-                    Key::Backspace => draw_backspace_icon(canvas, cx, cy, k, ink),
-                    Key::Done => {
-                        let size = 15.0 * k;
-                        let label = "Done";
-                        let tw = fonts.measure(label, W::SemiBold, size) as f64;
-                        let check_w = 14.0 * k;
-                        let total = check_w + 6.0 * k + tw;
-                        draw_check(canvas, cx - total / 2.0 + check_w / 2.0, cy, k, ink);
-                        fonts.draw(
-                            canvas,
-                            label,
-                            cx - total / 2.0 + check_w + 6.0 * k,
-                            cy + size * 0.36,
-                            W::SemiBold,
-                            size,
-                            ink,
-                        );
-                    }
-                }
-            }
+fn key_id(row: usize, col: usize) -> Id {
+    Id::new("keyboard", row * 16 + col)
+}
+
+/// One key's face and legend in `r`. Focus is the plate behind it.
+fn draw_key(canvas: &Canvas, fonts: &Fonts, key: Key, r: Rect, corner: f32, k: f64) {
+    canvas.draw_rrect(RRect::new_rect_xy(r, corner, corner), &fill(fg(0.08)));
+    let ink = fg(1.0);
+    let (cx, cy) = (f64::from(r.center_x()), f64::from(r.center_y()));
+    match key {
+        Key::Char(ch) => {
+            let s = ch.to_string();
+            let size = 18.0 * k;
+            let tw = fonts.measure(&s, W::Medium, size) as f64;
+            fonts.draw(
+                canvas,
+                &s,
+                cx - tw / 2.0,
+                cy + size * 0.36,
+                W::Medium,
+                size,
+                ink,
+            );
+        }
+        Key::Space => draw_space_icon(canvas, cx, cy, k, ink),
+        Key::Backspace => draw_backspace_icon(canvas, cx, cy, k, ink),
+        Key::Done => {
+            let size = 15.0 * k;
+            let label = "Done";
+            let tw = fonts.measure(label, W::SemiBold, size) as f64;
+            let check_w = 14.0 * k;
+            let total = check_w + 6.0 * k + tw;
+            draw_check(canvas, cx - total / 2.0 + check_w / 2.0, cy, k, ink);
+            fonts.draw(
+                canvas,
+                label,
+                cx - total / 2.0 + check_w + 6.0 * k,
+                cy + size * 0.36,
+                W::SemiBold,
+                size,
+                ink,
+            );
         }
     }
 }
@@ -1916,6 +1943,58 @@ mod tests {
         assert_eq!(k.col, 2, "rightmost column maps onto Done");
         let (msg, _) = k.menu(MenuEvent::Confirm);
         assert_eq!(msg, KeyMsg::Done);
+    }
+
+    /// A press between two keys is still on the keyboard: it types nothing and must not
+    /// read as outside, which is what closes the field.
+    #[test]
+    fn keyboard_covers_its_gaps() {
+        let mut k = kb();
+        let mut surface = skia_safe::surfaces::raster_n32_premul((800, 600)).unwrap();
+        let fonts = crate::theme::build_fonts().unwrap();
+        k.render(surface.canvas(), &fonts, 800.0, 600.0, 1.0, 1.0);
+        let (a, b) = (k.keys[10].0, k.keys[11].0);
+        let at = |x: f32, y: f32| Pointer {
+            x: f64::from(x),
+            y: f64::from(y),
+            kind: PointerKind::Press,
+        };
+        let gap = at((a.right + b.left) / 2.0, a.center_y());
+        assert!(!gap.hits(a) && !gap.hits(b), "the press lands in no key");
+        assert!(k.covers(gap), "between keys is on the tray");
+        assert_eq!(k.pointer(gap).0, KeyMsg::None, "and types nothing");
+        assert!(
+            !k.covers(at(a.center_x(), k.tray_rect.top - 4.0)),
+            "above it is not"
+        );
+    }
+
+    /// Focus on the keyboard is the plate: it rests on the focused key, travels to the next,
+    /// and fades out with the tray.
+    #[test]
+    fn keyboard_focus_is_the_plate() {
+        let mut k = kb();
+        let mut surface = skia_safe::surfaces::raster_n32_premul((800, 600)).unwrap();
+        let fonts = crate::theme::build_fonts().unwrap();
+        let mut frames = |k: &mut Keyboard, shown: bool| {
+            for _ in 0..90 {
+                let seat = k.seat(shown, 1.0 / 60.0);
+                k.render(surface.canvas(), &fonts, 800.0, 600.0, seat, 1.0);
+            }
+        };
+        let on = |k: &Keyboard, i: usize| {
+            let (plate, _) = k.tree.plate_rect().expect("the plate is up");
+            let key = k.keys[i].0;
+            (plate.center_x() - key.center_x()).abs() < 1.0
+                && (plate.center_y() - key.center_y()).abs() < 1.0
+        };
+        frames(&mut k, true);
+        assert!(on(&k, 10), "on q");
+        k.menu(MenuEvent::Move(MenuDir::Right));
+        frames(&mut k, true);
+        assert!(on(&k, 11), "on w");
+        frames(&mut k, false);
+        assert!(k.tree.plate_rect().is_none(), "gone with the tray");
     }
 
     #[test]

@@ -373,6 +373,18 @@ struct Chrome {
     pinned_pic: Option<Picture>,
 }
 
+/// How far the top and bottom trays reach into the content: the furthest any screen asks,
+/// scaled by how far that screen has faded in, so a tray recedes with the screen it serves.
+fn tray_reach(layers: &[Chrome]) -> (f32, f32) {
+    let reach = |pick: fn(&Chrome) -> f32| {
+        layers
+            .iter()
+            .map(|c| pick(c) * c.alpha.clamp(0.0, 1.0) as f32)
+            .fold(0.0, f32::max)
+    };
+    (reach(|c| c.pinned.0), reach(|c| c.pinned.1))
+}
+
 pub(super) fn pill_id(tab: Tab) -> Id {
     Id::new(tab.id(), 0)
 }
@@ -552,8 +564,7 @@ impl LayerEnv<'_> {
         // reaching in as far as the screens' own pinned chrome: one ramp, never two stacked.
         let (k, content) = (self.k, self.content);
         let edges = canvas.local_clip_bounds().unwrap_or(content);
-        let reach = |pick: fn(&Chrome) -> f32| layers.iter().map(pick).fold(0.0, f32::max);
-        let (into_top, into_bottom) = (reach(|c| c.pinned.0), reach(|c| c.pinned.1));
+        let (into_top, into_bottom) = tray_reach(layers);
         let top = Rect::from_ltrb(edges.left, edges.top, edges.right, content.top + into_top);
         tray(canvas, top, Toward::Top, k);
         let foot = content.bottom - into_bottom;
@@ -713,5 +724,28 @@ mod glyph_style_tests {
             glyph_style(Some(InputSource::Pad), None, Platform::Android),
             GlyphStyle::Remote
         );
+    }
+}
+
+#[cfg(test)]
+mod tray_tests {
+    use super::*;
+
+    /// Leaving a screen with a tall footer, the bottom tray shrinks with its fade instead of
+    /// holding at full height and snapping back when the slide ends.
+    #[test]
+    fn a_tray_recedes_with_the_screen_it_serves() {
+        let chrome = |alpha: f64, bottom: f32| Chrome {
+            alpha,
+            band: Band::Strip,
+            title: None,
+            hints: Vec::new(),
+            pinned: (0.0, bottom),
+            pinned_pic: None,
+        };
+        let at = |p: f64| tray_reach(&[chrome(1.0 - p, 80.0), chrome(p, 0.0)]).1;
+        assert_eq!(at(0.0), 80.0);
+        assert!((at(0.5) - 40.0).abs() < 1e-3);
+        assert_eq!(at(1.0), 0.0);
     }
 }

@@ -200,6 +200,11 @@ impl HomeScreen {
         self.below = false;
     }
 
+    /// The embedded games, focused or not: the warm-up fills them.
+    pub(crate) fn shelf_mut(&mut self) -> Option<&mut LibraryScreen> {
+        self.shelf.as_deref_mut()
+    }
+
     /// The games the focus is in, for the launch hold and the running refresh.
     pub(crate) fn shelf(&self) -> Option<&LibraryScreen> {
         self.shelf.as_deref().filter(|_| self.below)
@@ -734,9 +739,15 @@ impl HomeScreen {
             );
             under = under.child(
                 El::paint(move |canvas, r| {
-                    crate::theme::save_layer_alpha(canvas, r.with_outset((8.0, 8.0)), fade);
+                    // A layer only mid-scroll: each is a framebuffer round trip on a tiled GPU.
+                    let layered = fade < 0.999;
+                    if layered {
+                        crate::theme::save_layer_alpha(canvas, r.with_outset((8.0, 8.0)), fade);
+                    }
                     button(canvas, fonts, label, r, k);
-                    canvas.restore();
+                    if layered {
+                        canvas.restore();
+                    }
                 })
                 .id(verb_id(i))
                 .focusable((BUTTON_H * k / 2.0) as f32)

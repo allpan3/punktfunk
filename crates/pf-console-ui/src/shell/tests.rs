@@ -343,6 +343,32 @@ fn a_held_ok_opens_the_card_menu() {
     );
 }
 
+/// A warm-up tours the tabs and leaves the shell exactly where it was: same tab and stack,
+/// nothing parked, the real library, and nothing asked of the host.
+#[test]
+fn a_warm_up_tours_the_tabs_and_changes_nothing() {
+    let (mut s, _console, library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    s.fake_clock = Some((100.0, 1.0 / 60.0));
+    s.bus.drain();
+    let fonts = crate::theme::build_fonts().unwrap();
+    let mut surface = skia_safe::surfaces::raster_n32_premul((480, 300)).unwrap();
+    let viewport = crate::console::Viewport::plain(480, 300);
+    s.warm_up(surface.canvas(), &viewport, &fonts);
+    assert_eq!(s.tab, Tab::Hosts);
+    assert!(matches!(s.stack.as_slice(), [Screen::Home(_)]));
+    assert!(s.parked.iter().all(Option::is_none), "nothing parked");
+    assert!(matches!(s.motion, Motion::None));
+    assert!(
+        library.snapshot().games.is_empty(),
+        "the stand-in never reached the model"
+    );
+    assert!(
+        s.library.snapshot().games.is_empty(),
+        "the real library is back"
+    );
+    assert!(s.bus.drain().is_empty(), "nothing asked of the host");
+}
+
 #[test]
 fn connect_flow_raises_launch_and_cancel() {
     let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
@@ -1418,20 +1444,20 @@ fn the_backdrop_caches_its_field() {
         s.field.borrow().as_ref().map(|c| (c.size, c.t))
     };
 
-    assert_eq!(frame(&mut s, 0.0), Some(((384, 240), 0.0)));
+    assert_eq!(frame(&mut s, 0.0), Some(((192, 120), 0.0)));
     // Inside FIELD_STEP the cached field is blitted, not re-rendered.
-    assert_eq!(frame(&mut s, FIELD_STEP / 2.0), Some(((384, 240), 0.0)));
+    assert_eq!(frame(&mut s, FIELD_STEP / 2.0), Some(((192, 120), 0.0)));
     // Past it the field re-renders at the new clock.
     assert_eq!(
         frame(&mut s, FIELD_STEP + 0.01),
-        Some(((384, 240), FIELD_STEP + 0.01))
+        Some(((192, 120), FIELD_STEP + 0.01))
     );
 
     // A new target size invalidates the offscreen; 480 wide still scales to the edge.
     let mut small = skia_safe::surfaces::raster_n32_premul((480, 300)).unwrap();
     s.fake_clock = Some((2.0, 0.0));
     s.render(small.canvas(), 480, 300, &fonts, None, None, &pads);
-    assert_eq!(s.field.borrow().as_ref().map(|c| c.size), Some((384, 240)));
+    assert_eq!(s.field.borrow().as_ref().map(|c| c.size), Some((192, 120)));
 
     // Flag off: still the offscreen, now at the full edge — 1280 wide is 512.
     s.settings
@@ -3394,5 +3420,56 @@ fn dump_device_marks() {
             );
         }
         save(&mut surface, &format!("players-chip-{i}"));
+    }
+}
+
+/// Ignored eyeball dump: the plate leaving the tab strip, one PNG a frame, on each tab.
+/// `PF_CONSOLE_DUMP=<dir> cargo test -p pf-console-ui --release -- --ignored dump_plate_flight`.
+#[test]
+#[ignore]
+fn dump_plate_flight() {
+    let dir = std::env::var("PF_CONSOLE_DUMP").expect("set PF_CONSOLE_DUMP to an output dir");
+    let fonts = crate::theme::build_fonts().unwrap();
+    let (w, h) = (960_i32, 540_i32);
+    let pads: Vec<PadInfo> = Vec::new();
+    let mut surface = skia_safe::surfaces::raster_n32_premul((w, h)).unwrap();
+    let mut run = |s: &mut Shell, frames: usize, name: Option<&str>| {
+        for i in 0..frames {
+            s.render(
+                surface.canvas(),
+                w as u32,
+                h as u32,
+                &fonts,
+                None,
+                None,
+                &pads,
+            );
+            if let Some(name) = name {
+                let png = surface
+                    .image_snapshot()
+                    .encode(None, skia_safe::EncodedImageFormat::PNG, 100)
+                    .unwrap();
+                std::fs::write(format!("{dir}/{name}-{i:02}.png"), png.as_bytes()).unwrap();
+            }
+        }
+    };
+    for (tab, name) in [
+        (Tab::Hosts, "hosts"),
+        (Tab::Players, "players"),
+        (Tab::Settings, "settings"),
+    ] {
+        let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
+        s.fake_clock = Some((100.0, 1.0 / 60.0));
+        run(&mut s, 30, None);
+        s.switch_tab(tab);
+        run(&mut s, 60, None);
+        while !s.strip_focus {
+            s.handle_menu(MenuEvent::Move(MenuDir::Up));
+        }
+        run(&mut s, 60, None);
+        s.handle_menu(MenuEvent::Move(MenuDir::Down));
+        run(&mut s, 24, Some(name));
+        s.handle_menu(MenuEvent::Move(MenuDir::Right));
+        run(&mut s, 16, Some(&format!("{name}-right")));
     }
 }

@@ -877,6 +877,111 @@ const VIOLET_BLOBS: [(f64, f64, f64); 5] = [
 pub const VIOLET_FIELD: [(f64, f64, f64); 3] =
     [(0.80, 0.60, 0.98), (0.47, 0.44, 1.00), (0.98, 0.12, 0.62)];
 
+/// An sRGB colour in OKLab, as the field's gradient mixes it.
+fn oklab((r, g, b): (f64, f64, f64)) -> (f64, f64, f64) {
+    let lin = |c: f64| {
+        let v = c.max(0.0);
+        if v < 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let (r, g, b) = (lin(r), lin(g), lin(b));
+    let l = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b)
+        .max(0.0)
+        .cbrt();
+    let m = (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b)
+        .max(0.0)
+        .cbrt();
+    let s = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b)
+        .max(0.0)
+        .cbrt();
+    (
+        0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+        1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+        0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+    )
+}
+
+/// The field's clock rates: the sphere turns at `t · ROT`, its surface morphs at `t · MORPH`.
+const ROT: f64 = 0.03;
+const MORPH: f64 = 0.9;
+
+/// What the field's time alone decides, for its uniform block: the three rows of the
+/// world-to-sphere rotation, then the primary and warp drift, each a `float4` with `w` unused.
+/// Once a render on the CPU instead of once a pixel on the GPU.
+pub fn field_motion(t: f64) -> [f32; 20] {
+    type V = [f64; 3];
+    let norm = |v: V| {
+        let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        [v[0] / l, v[1] / l, v[2] / l]
+    };
+    let wrap = |ph: f64| ph - (ph / std::f64::consts::TAU).floor() * std::f64::consts::TAU;
+    let rotate = |p: V, a: V, angle: f64| {
+        let (c, s) = (angle.cos(), angle.sin());
+        let d = a[0] * p[0] + a[1] * p[1] + a[2] * p[2];
+        let x = [
+            a[1] * p[2] - a[2] * p[1],
+            a[2] * p[0] - a[0] * p[2],
+            a[0] * p[1] - a[1] * p[0],
+        ];
+        [0, 1, 2].map(|i| p[i] * c + x[i] * s + a[i] * d * (1.0 - c))
+    };
+    let rt = t * ROT;
+    let unorient = |p: V| {
+        let (c, s) = (0.24f64.cos(), 0.24f64.sin());
+        let o = [p[0], c * p[1] - s * p[2], s * p[1] + c * p[2]];
+        let o = rotate(o, norm([0.58, -0.69, 0.43]), -wrap(rt * 0.1732051));
+        let o = rotate(o, norm([-0.71, 0.29, 0.64]), -wrap(rt * 0.2236068));
+        rotate(o, norm([0.36, 0.81, 0.46]), -wrap(rt * 0.287))
+    };
+    let cols = [
+        unorient([1.0, 0.0, 0.0]),
+        unorient([0.0, 1.0, 0.0]),
+        unorient([0.0, 0.0, 1.0]),
+    ];
+    let mt = t * MORPH;
+    let curved = |rates: V, phases: V| {
+        [
+            wrap(mt * rates[0] + phases[0]).sin(),
+            wrap(mt * rates[1] + phases[1]).sin(),
+            wrap(mt * rates[2] + phases[2]).cos(),
+        ]
+    };
+    let drift = |a: V, ka: f64, b: V, kb: f64, c: V, kc: f64| {
+        let (a, b) = (norm(a), norm(b));
+        [0, 1, 2].map(|i| a[i] * mt * ka + b[i] * mt * kb + c[i] * kc)
+    };
+    let primary = drift(
+        [0.73, -0.41, 0.55],
+        0.105,
+        [-0.28, 0.91, 0.31],
+        0.023,
+        curved([0.071, 0.043, 0.029], [0.0, 1.73, 4.11]),
+        0.16,
+    );
+    let warp = drift(
+        [-0.46, 0.38, 0.80],
+        0.137,
+        [0.84, 0.51, -0.18],
+        0.031,
+        curved([0.089, 0.053, 0.034], [2.21, 5.07, 0.83]),
+        0.12,
+    );
+    let mut out = [0.0f32; 20];
+    for row in 0..3 {
+        for (col, c) in cols.iter().enumerate() {
+            out[row * 4 + col] = c[row] as f32;
+        }
+    }
+    for i in 0..3 {
+        out[12 + i] = primary[i] as f32;
+        out[16 + i] = warp[i] as f32;
+    }
+    out
+}
+
 /// The camera the field is seen through, from the surface's aspect: `(focal length,
 /// sphere scale)`. The Figma shader's cover-zoom rule at its 72 % zoom, so the noise
 /// sphere fills any glass the same way it fills the mockup's frame.
@@ -907,7 +1012,10 @@ pub fn field_camera(aspect: f64) -> (f64, f64) {
 /// `u_tc.y` is the calm mix (0 launcher, 1 form): flatten toward `u_lift` so a screen
 /// crossfade never jumps the field. `u_cam` is [`field_camera`].
 pub fn field_sksl(ground: (f64, f64, f64), stops: &[(f64, f64, f64)]) -> String {
-    let rgb = |(r, g, b): (f64, f64, f64)| format!("float3({r}, {g}, {b})");
+    let rgb = |c: (f64, f64, f64)| {
+        let (l, a, b) = oklab(c);
+        format!("float3({l}, {a}, {b})")
+    };
     let n = stops.len().max(2);
     let stops: Vec<(f64, f64, f64)> = if stops.len() < 2 {
         vec![ground, ground]
@@ -944,14 +1052,18 @@ pub fn field_sksl(ground: (f64, f64, f64), stops: &[(f64, f64, f64)]) -> String 
          // x = focal length, y = sphere scale (`field_camera`), z = passes over the sphere\n\
          // (1 = the plain sphere's height, 2 = re-hit at that height: the displaced surface).\n\
          uniform float4 u_cam;\n\
+         // The sphere's turn (rows of the world-to-sphere rotation) and its drift at this\n\
+         // instant: xyz of each, from `field_motion`, so no pixel pays for time alone.\n\
+         uniform float4 u_rot0;\n\
+         uniform float4 u_rot1;\n\
+         uniform float4 u_rot2;\n\
+         uniform float4 u_mot;\n\
+         uniform float4 u_wmot;\n\
          \n\
-         const float TAU = 6.28318530718;\n\
          const float DETAIL = 3.33;\n\
          const float INTENSITY = 4.29;\n\
          const float TWIST = 0.04;\n\
          const float WARP = 0.26;\n\
-         const float MORPH = 0.9;\n\
-         const float ROT = 0.03;\n\
          \n\
          float3 hash33(float3 p) {{\n\
          \x20   float3 q = float3(dot(p, float3(127.1, 311.7, 74.7)),\n\
@@ -995,26 +1107,10 @@ pub fn field_sksl(ground: (f64, f64, f64), stops: &[(f64, f64, f64)]) -> String 
          \x20   return float3(perlin3(p), perlin3(p + float3(5.2, 1.3, 2.8)),\n\
          \x20                 perlin3(p + float3(1.7, 9.2, 4.4)));\n\
          }}\n\
-         float wrapPhase(float ph) {{ return ph - floor(ph / TAU) * TAU; }}\n\
-         float3 curved(float mt, float3 rates, float3 phases) {{\n\
-         \x20   return float3(sin(wrapPhase(mt * rates.x + phases.x)),\n\
-         \x20                 sin(wrapPhase(mt * rates.y + phases.y)),\n\
-         \x20                 cos(wrapPhase(mt * rates.z + phases.z)));\n\
-         }}\n\
-         float3 primaryMotion(float mt) {{\n\
-         \x20   return normalize(float3(0.73, -0.41, 0.55)) * mt * 0.105\n\
-         \x20        + normalize(float3(-0.28, 0.91, 0.31)) * mt * 0.023\n\
-         \x20        + curved(mt, float3(0.071, 0.043, 0.029), float3(0.0, 1.73, 4.11)) * 0.16;\n\
-         }}\n\
-         float3 warpMotion(float mt) {{\n\
-         \x20   return normalize(float3(-0.46, 0.38, 0.80)) * mt * 0.137\n\
-         \x20        + normalize(float3(0.84, 0.51, -0.18)) * mt * 0.031\n\
-         \x20        + curved(mt, float3(0.089, 0.053, 0.034), float3(2.21, 5.07, 0.83)) * 0.12;\n\
-         }}\n\
-         float heightField(float3 dir, float mt) {{\n\
+         float heightField(float3 dir) {{\n\
          \x20   float frequency = mix(1.05, 3.4, clamp(DETAIL / 5.0, 0.0, 1.0));\n\
-         \x20   float3 p = dir * frequency + float3(1.7, 3.1, 5.3) + primaryMotion(mt);\n\
-         \x20   float3 warp = warpVector(p * 0.55 + warpMotion(mt) * 0.42 + float3(0.7, -1.1, 0.4)) * WARP;\n\
+         \x20   float3 p = dir * frequency + float3(1.7, 3.1, 5.3) + u_mot.xyz;\n\
+         \x20   float3 warp = warpVector(p * 0.55 + u_wmot.xyz * 0.42 + float3(0.7, -1.1, 0.4)) * WARP;\n\
          \x20   return fbm(p + warp);\n\
          }}\n\
          float3 rotateAxis(float3 p, float3 axis, float angle) {{\n\
@@ -1025,34 +1121,9 @@ pub fn field_sksl(ground: (f64, f64, f64), stops: &[(f64, f64, f64)]) -> String 
          \x20   float axial = clamp(dot(dir, normalize(float3(-0.68, 0.54, 0.49))), -1.0, 1.0);\n\
          \x20   return axial * (1.5 - 0.5 * axial * axial) * TWIST;\n\
          }}\n\
-         float3 rotateX(float3 p, float angle) {{\n\
-         \x20   float c = cos(angle); float s = sin(angle);\n\
-         \x20   return float3(p.x, c * p.y - s * p.z, s * p.y + c * p.z);\n\
-         }}\n\
-         // The mesh's orientation, undone: world back to the sphere's own frame.\n\
-         float3 unorient(float3 p, float rt) {{\n\
-         \x20   float3 o = rotateX(p, 0.24);\n\
-         \x20   o = rotateAxis(o, normalize(float3(0.58, -0.69, 0.43)), -wrapPhase(rt * 0.1732051));\n\
-         \x20   o = rotateAxis(o, normalize(float3(-0.71, 0.29, 0.64)), -wrapPhase(rt * 0.2236068));\n\
-         \x20   return rotateAxis(o, normalize(float3(0.36, 0.81, 0.46)), -wrapPhase(rt * 0.287));\n\
-         }}\n\
-         float3 srgbToLinear(float3 c) {{\n\
-         \x20   float3 v = max(c, float3(0.0));\n\
-         \x20   return mix(v / 12.92, pow((v + 0.055) / 1.055, float3(2.4)), step(float3(0.04045), v));\n\
-         }}\n\
          float3 linearToSrgb(float3 c) {{\n\
          \x20   float3 v = max(c, float3(0.0));\n\
          \x20   return mix(v * 12.92, 1.055 * pow(v, float3(1.0 / 2.4)) - 0.055, step(float3(0.0031308), v));\n\
-         }}\n\
-         float3 linearToOklab(float3 c) {{\n\
-         \x20   float l = 0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b;\n\
-         \x20   float m = 0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b;\n\
-         \x20   float s = 0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b;\n\
-         \x20   float lc = pow(max(l, 0.0), 1.0 / 3.0); float mc = pow(max(m, 0.0), 1.0 / 3.0);\n\
-         \x20   float sc = pow(max(s, 0.0), 1.0 / 3.0);\n\
-         \x20   return float3(0.2104542553 * lc + 0.7936177850 * mc - 0.0040720468 * sc,\n\
-         \x20                 1.9779984951 * lc - 2.4285922050 * mc + 0.4505937099 * sc,\n\
-         \x20                 0.0259040371 * lc + 0.7827717662 * mc - 0.8086757660 * sc);\n\
          }}\n\
          float3 oklabToLinear(float3 c) {{\n\
          \x20   float lc = c.x + 0.3963377774 * c.y + 0.2158037573 * c.z;\n\
@@ -1063,27 +1134,20 @@ pub fn field_sksl(ground: (f64, f64, f64), stops: &[(f64, f64, f64)]) -> String 
          \x20                 -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,\n\
          \x20                 -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s);\n\
          }}\n\
-         // The gradient's stops, even spaced, blended in OKLab with a smoothstep between.\n\
+         // The gradient's stops, even spaced and already in OKLab, blended with a smoothstep.\n\
          float3 gradientAt(float t) {{\n\
          \x20   float x = clamp(t, 0.0, 1.0) * {last}.0;\n\
          \x20   float3 a; float3 b; float f;\n\
          {segs}\
          \x20   f = f * f * (3.0 - 2.0 * f);\n\
-         \x20   float3 la = linearToOklab(srgbToLinear(a)); float3 lb = linearToOklab(srgbToLinear(b));\n\
-         \x20   return linearToSrgb(oklabToLinear(mix(la, lb, f)));\n\
+         \x20   return linearToSrgb(oklabToLinear(mix(a, b, f)));\n\
          }}\n\
          float spread(float raw) {{ return clamp((raw - 0.5) * 3.0 + 0.5, 0.0, 1.0); }}\n\
          \n\
          half4 main(float2 xy) {{\n\
-         \x20   float tt = u_tc.x; float calm = u_tc.y;\n\
+         \x20   float calm = u_tc.y;\n\
          \x20   float aspect = u_res.x / u_res.y;\n\
          \x20   float2 uv = xy / u_res;\n\
-         \x20   float rt = tt * ROT; float mt = tt * MORPH;\n\
-         \x20   // The backdrop behind the sphere: the same gradient along a fixed diagonal.\n\
-         \x20   float2 axis = normalize(float2(0.62 * aspect, 0.78));\n\
-         \x20   float2 centered = float2((uv.x - 0.5) * aspect, uv.y - 0.5);\n\
-         \x20   float extent = abs(axis.x) * aspect * 0.5 + abs(axis.y) * 0.5;\n\
-         \x20   float3 col = gradientAt(dot(centered, axis) / max(extent * 2.0, 0.0001) + 0.5);\n\
          \x20   // The pixel's ray, in the camera's frame: origin, looking down -z at a sphere\n\
          \x20   // three units away. Focal length and scale are the cover-zoom's.\n\
          \x20   float2 ndc = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);\n\
@@ -1102,14 +1166,23 @@ pub fn field_sksl(ground: (f64, f64, f64), stops: &[(f64, f64, f64)]) -> String 
          \x20       float disc = mid * mid - dot(sc, sc) + radius * radius;\n\
          \x20       if (disc < 0.0) {{ break; }}\n\
          \x20       float3 obj = (rd * (mid - sqrt(disc)) - sc) / scale;\n\
-         \x20       float3 base = unorient(obj, rt);\n\
+         \x20       float3 base = float3(dot(u_rot0.xyz, obj), dot(u_rot1.xyz, obj), dot(u_rot2.xyz, obj));\n\
          \x20       float3 dir = normalize(base);\n\
          \x20       dir = normalize(rotateAxis(base, twistAxis, -torsion(dir)));\n\
-         \x20       h = heightField(dir, mt);\n\
+         \x20       h = heightField(dir);\n\
          \x20       seen = true;\n\
          \x20       radius = scale * max(1.0 + h * disp, 0.72);\n\
          \x20   }}\n\
-         \x20   if (seen) {{ col = gradientAt(spread(h * 0.5 + 0.5)); }}\n\
+         \x20   float3 col;\n\
+         \x20   if (seen) {{\n\
+         \x20       col = gradientAt(spread(h * 0.5 + 0.5));\n\
+         \x20   }} else {{\n\
+         \x20       // Past the sphere: the same gradient along a fixed diagonal.\n\
+         \x20       float2 axis = normalize(float2(0.62 * aspect, 0.78));\n\
+         \x20       float2 centered = float2((uv.x - 0.5) * aspect, uv.y - 0.5);\n\
+         \x20       float extent = abs(axis.x) * aspect * 0.5 + abs(axis.y) * 0.5;\n\
+         \x20       col = gradientAt(dot(centered, axis) / max(extent * 2.0, 0.0001) + 0.5);\n\
+         \x20   }}\n\
          \n\
          \x20   // Calm: flatten the field toward its own ground — the pools dim and the\n\
          \x20   // corners lift, so a form screen keeps real colour under its glass rows while\n\
@@ -2492,7 +2565,28 @@ mod tests {
         assert_eq!(initials("half-life"), "H");
     }
 
-    /// Generated SkSL compiles for every palette (and a two-stop ramp), with the 64-byte
+    /// The field's turn at t = 0 is its fixed tilt alone, and at any t a rotation: rows
+    /// orthonormal, so the sphere is turned, never squashed.
+    #[test]
+    fn field_motion_is_a_rotation() {
+        let m = field_motion(0.0);
+        let (c, s) = (0.24f32.cos(), 0.24f32.sin());
+        let tilt = [1.0, 0.0, 0.0, 0.0, 0.0, c, -s, 0.0, 0.0, s, c, 0.0];
+        for (got, want) in m[..12].iter().zip(tilt) {
+            assert!((got - want).abs() < 1e-5, "{m:?}");
+        }
+        let m = field_motion(1234.5);
+        let row = |i: usize| [m[i * 4], m[i * 4 + 1], m[i * 4 + 2]];
+        let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        for i in 0..3 {
+            for j in 0..3 {
+                let want = if i == j { 1.0 } else { 0.0 };
+                assert!((dot(row(i), row(j)) - want).abs() < 1e-5);
+            }
+        }
+    }
+
+    /// Generated SkSL compiles for every palette (and a two-stop ramp), with the 144-byte
     /// block the shell packs.
     #[test]
     fn field_sksl_compiles_for_every_palette() {
@@ -2501,7 +2595,7 @@ mod tests {
             assert_eq!(src.matches('{').count(), src.matches('}').count());
             let effect = skia_safe::RuntimeEffect::make_for_shader(&src, None)
                 .unwrap_or_else(|e| panic!("{}: {e}", p.id));
-            assert_eq!(effect.uniform_size(), 64, "{}", p.id);
+            assert_eq!(effect.uniform_size(), 144, "{}", p.id);
         }
         let two = field_sksl((0.0, 0.0, 0.0), &[(0.0, 0.0, 0.0), (1.0, 1.0, 1.0)]);
         assert!(skia_safe::RuntimeEffect::make_for_shader(&two, None).is_ok());

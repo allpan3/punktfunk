@@ -29,6 +29,7 @@ use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuPulse};
 use skia_safe::{Canvas, Color4f, Data, Image, Point, RRect, Rect, M44};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 pub(crate) mod bar;
 mod card;
@@ -53,6 +54,12 @@ const ROW_GAP: f64 = 22.0;
 const GRID_HEADING: f64 = 34.0;
 /// Row 0's air under the Hosts row: the plate's outset and a breath.
 const EMBED_AIR: f64 = 14.0;
+/// New covers a screen adopts a frame. Each is a texture upload on its first draw, and a
+/// shelf's worth landing together stalls the GPU for a frame.
+const ADOPT_PER_FRAME: usize = 4;
+/// A grid row down counts as this many entrance steps, 120 ms at [`entrances::GRID`], so
+/// rows follow one another instead of each rippling at once.
+const ROW_STEPS: usize = 3;
 /// Room for the plate's outset past the first column.
 const PLATE_AIR: f64 = 32.0;
 /// Air under the sort/view row before the next line.
@@ -69,17 +76,6 @@ const ART_BUDGET: usize = 160;
 /// Twice the grid cell: mip levels both arrangements sample. Smaller magnifies the shelf.
 const ART_CACHE_W: f64 = GRID_W * 2.0;
 const ART_CACHE_H: f64 = GRID_H * 2.0;
-/// How much of a frame poster decoding may spend before it yields to the next one.
-///
-/// A COUNT cannot be right for two machines an order of magnitude apart: two per frame is
-/// nothing on a desktop and a dropped frame on a 2020 TV, where one 600×900 JPEG costs more
-/// than the whole 16 ms budget. A time budget self-tunes — fast hardware fills the shelf in
-/// the same few frames it always did, slow hardware decodes one and gets on with drawing.
-///
-/// Always at least one per frame regardless: a budget already spent must still make progress,
-/// or a slow panel would never finish loading at all.
-pub(super) const ART_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(6);
-
 /// Fit `src` into [`ART_CACHE_W`]×[`ART_CACHE_H`] at `k`. Source aspect; never enlarge.
 ///
 /// A 460×215 header squeezed to 2:3 stretches what the draw already centre-crops.
@@ -109,6 +105,123 @@ pub fn decode_poster_off_thread(bytes: &[u8], k: f64) -> Option<crate::library::
     crate::library::DecodedPoster::new(decode_poster(bytes, k)?)
 }
 
+thread_local! {
+    /// Covers every screen on the drawing thread shares, by host fingerprint and title. One
+    /// decode and one upload serve the Hosts shelf, the Games tab and Collections alike.
+    static SHARED_ART: RefCell<SharedArt> = RefCell::new(SharedArt::default());
+}
+
+/// [`SHARED_ART`]: at most [`ART_BUDGET`] covers, the oldest shared first out, all at one scale.
+#[derive(Default)]
+struct SharedArt {
+    k: f64,
+    covers: HashMap<(String, String), Image>,
+    order: std::collections::VecDeque<(String, String)>,
+}
+
+/// The cover another screen already holds for `id` on the host `fp`, at scale `k`.
+pub(super) fn shared_cover(fp: &str, id: &str, k: f64) -> Option<Image> {
+    SHARED_ART.with(|a| {
+        let a = a.borrow();
+        (a.k == k)
+            .then(|| a.covers.get(&(fp.to_string(), id.to_string())).cloned())
+            .flatten()
+    })
+}
+
+/// Offer a cover to every screen. A new scale starts the cache over.
+pub(super) fn share_cover(fp: &str, id: &str, k: f64, img: &Image) {
+    SHARED_ART.with(|a| {
+        let mut a = a.borrow_mut();
+        if a.k != k {
+            *a = SharedArt {
+                k,
+                ..SharedArt::default()
+            };
+        }
+        let key = (fp.to_string(), id.to_string());
+        if a.covers.insert(key.clone(), img.clone()).is_none() {
+            a.order.push_back(key);
+        }
+        while a.order.len() > ART_BUDGET {
+            if let Some(old) = a.order.pop_front() {
+                a.covers.remove(&old);
+            }
+        }
+    });
+}
+
+/// A cover to decode: its id, its bytes, the scale; and what came of it.
+type ArtJob = (String, Arc<[u8]>, f64);
+type ArtDone = (String, Option<crate::library::DecodedPoster>);
+
+/// A screen's covers decoded off the thread that draws: one worker, started on first use and
+/// stopped with the screen. A TV spends 15–90 ms on one cover, a dropped frame each on the
+/// render thread, and a screen that only has a cover's bytes must decode it itself.
+#[derive(Default)]
+pub(super) struct ArtDecoder {
+    #[cfg_attr(test, allow(dead_code))]
+    jobs: Option<std::sync::mpsc::Sender<ArtJob>>,
+    #[cfg_attr(test, allow(dead_code))]
+    done: Option<std::sync::mpsc::Receiver<ArtDone>>,
+    pending: std::collections::HashSet<String>,
+    /// Tests decode inline so a frame count stays deterministic.
+    #[cfg(test)]
+    ready: Vec<(String, Option<Image>)>,
+}
+
+impl ArtDecoder {
+    /// Decode `bytes` at `k` for `id`, unless it is already on its way.
+    pub(super) fn want(&mut self, id: String, bytes: Arc<[u8]>, k: f64) {
+        if !self.pending.insert(id.clone()) {
+            return;
+        }
+        #[cfg(test)]
+        {
+            self.ready.push((id, decode_poster(&bytes, k)));
+        }
+        #[cfg(not(test))]
+        {
+            let jobs = self.jobs.get_or_insert_with(|| {
+                let (jobs, rx) = std::sync::mpsc::channel::<ArtJob>();
+                let (tx, done) = std::sync::mpsc::channel();
+                self.done = Some(done);
+                let _ = std::thread::Builder::new()
+                    .name("pf-console-art".into())
+                    .spawn(move || {
+                        for (id, bytes, k) in rx {
+                            if tx.send((id, decode_poster_off_thread(&bytes, k))).is_err() {
+                                return;
+                            }
+                        }
+                    });
+                jobs
+            });
+            let _ = jobs.send((id, bytes, k));
+        }
+    }
+
+    pub(super) fn pending(&self, id: &str) -> bool {
+        self.pending.contains(id)
+    }
+
+    /// Decodes finished since the last call; `None` for a cover that would not decode.
+    pub(super) fn finished(&mut self) -> Vec<(String, Option<Image>)> {
+        #[cfg(test)]
+        let out: Vec<_> = std::mem::take(&mut self.ready);
+        #[cfg(not(test))]
+        let out: Vec<_> = self.done.as_ref().map_or_else(Vec::new, |rx| {
+            rx.try_iter()
+                .map(|(id, p)| (id, p.map(crate::library::DecodedPoster::into_image)))
+                .collect()
+        });
+        for (id, _) in &out {
+            self.pending.remove(id);
+        }
+        out
+    }
+}
+
 /// Decode here (not at first draw) and bake mips at [`art_cache_size`].
 ///
 /// `Image::from_encoded` defers decode until use; a GPU purge then re-decodes JPEG on
@@ -130,8 +243,9 @@ pub(super) fn decode_poster(bytes: &[u8], k: f64) -> Option<Image> {
         let info = skia_safe::ImageInfo::new_n32_premul(want, None);
         img.make_scaled(&info, art_sampling())
     };
-    // A refused scale keeps the full-size image rather than dropping the cover.
-    let out = scaled.unwrap_or_else(|| img.clone());
+    // A refused scale keeps the full-size image rather than dropping the cover. Raster either
+    // way: a lazy image takes no mips and decodes at first draw, on the render thread.
+    let out = scaled.or_else(|| img.make_raster_image(None, None))?;
     let mipped = out.with_default_mipmaps();
     crate::art_stats::record(started.elapsed(), native_scaled);
     Some(mipped.unwrap_or(out))
@@ -219,16 +333,27 @@ fn placeholder_face(launcher: bool) -> Color4f {
 }
 
 /// Coverless cell. Brand mark, else UI mark, else a monogram (launcher: its name). `None`: stale index.
+/// `alpha` fades each piece on its own, so an entrance needs no layer per card: on a tiled GPU
+/// each layer stores and reloads the whole framebuffer.
 pub(crate) fn draw_poster_placeholder(
     canvas: &Canvas,
     fonts: &Fonts,
     game: Option<&LibraryGame>,
     rect: Rect,
     k: f64,
+    alpha: f32,
 ) {
+    let ink = |a: f32| {
+        let c = fg(a);
+        Color4f::new(c.r, c.g, c.b, c.a * alpha)
+    };
     // Side cards overlap; glass shows the neighbour. `card_face` tints without alpha.
     let launcher = matches!(game, Some(g) if g.launcher);
-    canvas.draw_rect(rect, &fill(placeholder_face(launcher)));
+    let face = placeholder_face(launcher);
+    canvas.draw_rect(
+        rect,
+        &fill(Color4f::new(face.r, face.g, face.b, face.a * alpha)),
+    );
     let Some(game) = game else { return };
     // ~44 % so the mark reads as a glyph, not a cropped cover; `launcher_mark` letterboxes.
     let mark = (!game.icon.is_empty())
@@ -246,7 +371,7 @@ pub(crate) fn draw_poster_placeholder(
         })
         .flatten();
     if let Some(path) = mark {
-        canvas.draw_path(&path, &fill(fg(0.85)));
+        canvas.draw_path(&path, &fill(ink(0.85)));
         return;
     }
     // Not a brand: the desktop tile names a Lucide mark. Stroked, not filled — Lucide's paths
@@ -259,7 +384,7 @@ pub(crate) fn draw_poster_placeholder(
             rect.center_x(),
             rect.center_y(),
             side,
-            fg(0.85),
+            ink(0.85),
         );
         return;
     }
@@ -281,7 +406,7 @@ pub(crate) fn draw_poster_placeholder(
             rect.center_y() + (size * 0.36) as f32,
         ),
         &font,
-        &fill(fg(0.85)),
+        &fill(ink(0.85)),
     );
 }
 
@@ -374,6 +499,10 @@ pub(crate) struct LibraryScreen {
     art: HashMap<String, Image>,
     /// Posters Skia could not decode; asked once, not every frame.
     art_failed: std::collections::HashSet<String>,
+    /// Covers this screen has only the bytes of, decoding off the render thread.
+    decoder: ArtDecoder,
+    /// Covers decoded and waiting to join `art`, [`ADOPT_PER_FRAME`] at a time.
+    arriving: std::collections::VecDeque<(String, Image)>,
     /// Decode scale. This screen does not republish `k`; a grow cannot re-decode.
     art_k: f64,
     /// Last-draw frame per id. Grid pages the whole library; unstamped covers stay forever.
@@ -434,6 +563,8 @@ impl LibraryScreen {
             bump_vertical: false,
             art: HashMap::new(),
             art_failed: std::collections::HashSet::new(),
+            decoder: ArtDecoder::default(),
+            arriving: std::collections::VecDeque::new(),
             // Design scale. Decode runs at this `k` for the life of the screen.
             art_k: 1.0,
             art_seen: HashMap::new(),
@@ -500,7 +631,13 @@ impl LibraryScreen {
         if have_art || self.len() == 0 || t - since >= 0.4 {
             self.entrance_armed = true;
             self.entrance_anchor = cursor;
-            self.entrance = Some(Entrance::new(entrances::CARDS, cursor, t));
+            let shelf = self.view_mode == LibraryView::Shelf && !self.embedded;
+            let spec = if shelf {
+                entrances::CARDS
+            } else {
+                entrances::GRID
+            };
+            self.entrance = Some(Entrance::new(spec, cursor, t));
         }
     }
 
@@ -775,28 +912,57 @@ impl LibraryScreen {
         // Publish the size a host should decode at, so one that can decode off-thread produces
         // exactly what this screen would have cached.
         shared.set_art_scale(k);
-        // Already-decoded posters cost a move, so there is no budget to spend on them.
-        for (id, poster) in shared.drain_decoded() {
-            self.art.insert(id, poster.into_image());
+        // Already-decoded posters cost a move; they queue with the decoder's for adoption.
+        let decoded = shared.drain_decoded().into_iter();
+        self.arriving
+            .extend(decoded.map(|(id, poster)| (id, poster.into_image())));
+        self.adopt_decoded();
+        // What this screen lacks goes to its decoder. The bytes stay in the model, so a cover
+        // another screen took, or one this screen evicted, comes back here.
+        // Another screen's cover is a clone, no decode and no upload; the rest decode here.
+        let mut wanted = self.art_wanted();
+        wanted.retain(|id| match shared_cover(&self.host.fp_hex, id, k) {
+            Some(img) => {
+                self.art.insert(id.clone(), img);
+                false
+            }
+            None => true,
+        });
+        let ask = wanted.iter().filter(|id| !self.decoder.pending(id));
+        for (id, bytes) in shared.art_for(ask.map(String::as_str), 8) {
+            self.decoder.want(id, bytes, k);
         }
-        // What this screen lacks, against the clock rather than a fixed count — see
-        // [`ART_FRAME_BUDGET`]. The deadline is checked AFTER a decode so every frame lands at
-        // least one. The bytes stay in the model, so a cover another screen took, or one this
-        // screen evicted, comes back here.
-        let wanted = self.art_wanted();
-        let started = std::time::Instant::now();
-        for (id, bytes) in shared.art_for(wanted.iter().map(String::as_str), 8) {
-            match decode_poster(&bytes, k) {
-                Some(img) => {
-                    self.art.insert(id, img);
-                }
+    }
+
+    /// Covers the host or the decoder finished join `art` a few a frame, and one this screen
+    /// holds stays: a new copy would only upload the same cover again. Undecodable ones are
+    /// marked so they are asked once.
+    fn adopt_decoded(&mut self) {
+        for (id, img) in self.decoder.finished() {
+            match img {
+                Some(img) => self.arriving.push_back((id, img)),
                 None => {
                     tracing::info!(%id, "undecodable poster");
                     self.art_failed.insert(id);
                 }
             }
-            if started.elapsed() >= ART_FRAME_BUDGET {
+        }
+        for _ in 0..ADOPT_PER_FRAME {
+            let Some((id, img)) = self.arriving.pop_front() else {
                 break;
+            };
+            share_cover(&self.host.fp_hex, &id, self.art_k, &img);
+            self.art.entry(id).or_insert(img);
+        }
+    }
+
+    /// Warm-up only: `art` for the titles, bare leading tiles and every third title, so the
+    /// warm-up draws each placeholder beside covers. The entrance runs as on a first visit;
+    /// both are programs the GPU would otherwise compile then.
+    pub(crate) fn warm(&mut self, art: &Image) {
+        for (i, g) in self.games.iter().enumerate() {
+            if !g.leads() && i % 3 != 2 {
+                self.art.insert(g.id.clone(), art.clone());
             }
         }
     }
@@ -807,7 +973,11 @@ impl LibraryScreen {
     fn art_wanted(&self) -> Vec<String> {
         const AHEAD: usize = 48;
         let recent = self.frame.saturating_sub(2);
-        let lacking = |id: &String| !self.art.contains_key(id) && !self.art_failed.contains(id);
+        let lacking = |id: &String| {
+            !self.art.contains_key(id)
+                && !self.art_failed.contains(id)
+                && !self.arriving.iter().any(|(a, _)| a == id)
+        };
         let mut out: Vec<String> = Vec::new();
         let mut first_seen = None;
         for (i, &g) in self.view.iter().enumerate() {
@@ -1442,7 +1612,8 @@ impl LibraryScreen {
             El::paint(move |canvas, slot| {
                 painted.borrow_mut().push(i);
                 let Some(game) = this.game(i) else { return };
-                let ent = this.entrance_at(anchor_row.abs_diff(row) + anchor_col.abs_diff(col), t);
+                let steps = ROW_STEPS * anchor_row.abs_diff(row) + anchor_col.abs_diff(col);
+                let ent = this.entrance_at(steps, t);
                 let focused = i == this.cursor.max(0) as usize && this.zone == Zone::Grid;
                 let arrive = (ENTER_SCALE + (1.0 - ENTER_SCALE) * ent.travel) as f32;
                 let (cx, cy) = (slot.center_x(), slot.center_y());
@@ -1452,12 +1623,6 @@ impl LibraryScreen {
                 canvas.scale((arrive, arrive));
                 canvas.translate((-cx, -cy));
                 let art = this.art.get(&game.id);
-                // Layer only for multi-piece fades (the placeholder). Paint alpha otherwise.
-                let layered = ent.fade < 1.0 && art.is_none();
-                if layered {
-                    crate::theme::save_layer_alpha(canvas, slot, ent.fade as f32);
-                }
-                let alpha = if layered { 1.0 } else { ent.fade as f32 };
                 let desk = (game.id == crate::library::DESKTOP_ID).then(|| this.desktop_caption());
                 let caption = this.sort_caption(game);
                 let card = card::Card {
@@ -1468,10 +1633,7 @@ impl LibraryScreen {
                     caption: caption.as_deref(),
                     focused: focused && !this.quiet,
                 };
-                card.paint(canvas, fonts, slot, ch, k, alpha);
-                if layered {
-                    canvas.restore();
-                }
+                card.paint(canvas, fonts, slot, ch, k, ent.fade as f32);
                 canvas.restore();
             })
             .id(grid_cell(i))
@@ -1809,42 +1971,48 @@ impl LibraryScreen {
         let corner = (SHELF_CORNER * k) as f32;
         let rr = RRect::new_rect_xy(crect, corner, corner);
         canvas.clip_rrect(rr, None, true);
-        // After the clip so `None` bounds are the cover, not the screen.
-        let layered = c.fade < 0.999 || c.prox > 0.001;
+        // Fade and recede ride each piece's paint: a layer per cover is a framebuffer round
+        // trip on a tiled GPU, every frame for every neighbour. A placeholder is flat pieces
+        // that must recede as one, so it alone keeps a layer.
+        let recede = (c.prox > 0.001).then(|| {
+            skia_safe::color_filters::matrix_row_major(&crate::theme::recede_matrix(c.prox), None)
+        });
+        let art = self.art.get(&game.id);
+        let layered = art.is_none() && (c.fade < 0.999 || recede.is_some());
         if layered {
             let mut lp = crate::theme::layer();
             lp.set_alpha_f(c.fade as f32);
-            if c.prox > 0.001 {
-                lp.set_color_filter(skia_safe::color_filters::matrix_row_major(
-                    &crate::theme::recede_matrix(c.prox),
-                    None,
-                ));
-            }
+            lp.set_color_filter(recede.clone());
+            // After the clip so `None` bounds are the cover, not the screen.
             canvas.save_layer(
                 &skia_safe::canvas::SaveLayerRec::default()
                     .paint(&lp)
                     .flags(crate::theme::layer_flags(canvas)),
             );
         }
-        match self.art.get(&game.id) {
+        let alpha = if layered { 1.0 } else { c.fade as f32 };
+        match art {
             Some(img) => {
                 let src = card::crop(img, crect);
+                let mut p = fill(fg(1.0));
+                p.set_alpha_f(alpha);
+                p.set_color_filter(recede);
                 canvas.draw_image_rect_with_sampling_options(
                     img,
                     Some((&src, skia_safe::canvas::SrcRectConstraint::Fast)),
                     crect,
                     art_sampling(),
-                    &fill(fg(1.0)),
+                    &p,
                 );
             }
-            None => draw_poster_placeholder(canvas, fonts, Some(game), crect, k),
+            None => draw_poster_placeholder(canvas, fonts, Some(game), crect, k, 1.0),
         }
-        // Inside the recede layer so a neighbour's badges fade with its cover.
-        card::store_badge(canvas, fonts, game, crect, k, true);
+        // The cover's alpha, so a neighbour's badges fade with it.
+        card::store_badge(canvas, fonts, game, crect, k, true, alpha);
         if game.running {
-            card::running_badge(canvas, fonts, crect, k);
+            card::running_badge(canvas, fonts, crect, k, alpha);
         }
-        canvas.draw_rrect(rr.with_inset((0.5, 0.5)), &stroke(fg(0.12), 1.0));
+        canvas.draw_rrect(rr.with_inset((0.5, 0.5)), &stroke(fg(0.12 * alpha), 1.0));
         if layered {
             canvas.restore();
         }
@@ -1952,6 +2120,22 @@ struct ShelfCard {
 mod tests {
     use super::*;
     use crate::library::POSTER_W;
+
+    #[test]
+    fn a_cover_already_at_cache_size_decodes_here_with_mips() {
+        let mut surface = skia_safe::surfaces::raster_n32_premul((60, 90)).unwrap();
+        surface
+            .canvas()
+            .clear(skia_safe::Color::from_rgb(200, 40, 40));
+        let png = surface
+            .image_snapshot()
+            .encode(None, skia_safe::EncodedImageFormat::PNG, 100)
+            .unwrap();
+        let img = decode_poster(png.as_bytes(), 1.0).expect("decodes");
+        assert_eq!((img.width(), img.height()), (60, 90));
+        assert!(!img.is_lazy_generated());
+        assert!(img.has_mipmaps());
+    }
 
     fn host() -> HostRow {
         HostRow {
@@ -3050,6 +3234,46 @@ mod tests {
         let idle = LibraryScreen::new(&host(), 0);
         assert_eq!(idle.desktop_caption(), "Desktop");
         assert_eq!(idle.desktop_intent().title, "Desk");
+    }
+
+    /// A cover one screen took off the decoded queue still reaches a second screen: its bytes
+    /// stay in the model, and the second screen decodes them for itself.
+    #[test]
+    fn a_cover_one_screen_took_reaches_another() {
+        let library = LibraryShared::default();
+        library.set_games(games(&[("Alpha", None)]));
+        let bytes = poster_png(1);
+        library.push_art("g0".into(), bytes.clone());
+        library.push_decoded("g0".into(), decode_poster_off_thread(&bytes, 1.0).unwrap());
+        let mut first = LibraryScreen::new(&host(), 0);
+        let mut second = LibraryScreen::new(&host(), 0);
+        first.sync(&library);
+        assert!(
+            first.art.contains_key("g0"),
+            "the first takes the decoded cover"
+        );
+        second.sync(&library);
+        second.sync(&library);
+        assert!(
+            second.art.contains_key("g0"),
+            "the second decodes the bytes"
+        );
+    }
+
+    /// Two screens on one host share a cover: the second takes the first's image, with no
+    /// bytes to decode from and nothing sent to its decoder.
+    #[test]
+    fn screens_on_one_host_share_a_cover() {
+        let library = LibraryShared::default();
+        library.set_games(games(&[("Alpha", None)]));
+        let poster = decode_poster_off_thread(&poster_png(2), 1.0).unwrap();
+        library.push_decoded("g0".into(), poster);
+        let mut first = LibraryScreen::new(&host(), 0);
+        let mut second = LibraryScreen::new(&host(), 0);
+        first.sync(&library);
+        second.sync(&library);
+        assert!(second.art.contains_key("g0"), "shared, not decoded");
+        assert!(!second.decoder.pending("g0"));
     }
 
     /// A 2:3 poster, PNG-encoded: a two-hue gradient with a pale disc, colour from `seed`.

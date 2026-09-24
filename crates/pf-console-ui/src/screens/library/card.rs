@@ -38,7 +38,7 @@ pub(super) struct Card<'a> {
 
 impl Card<'_> {
     /// The card in `r`: the poster `ch` px tall, the text under it. `alpha` is the entrance
-    /// fade; a coverless poster fades only inside the caller's layer.
+    /// fade, carried by every piece's paint.
     pub(super) fn paint(
         &self,
         canvas: &Canvas,
@@ -50,9 +50,9 @@ impl Card<'_> {
     ) {
         let cover = Rect::from_xywh(r.left, r.top, r.width(), ch as f32);
         paint_cover(canvas, fonts, self.game, self.art, cover, k, alpha);
-        store_badge(canvas, fonts, self.game, cover, k, false);
+        store_badge(canvas, fonts, self.game, cover, k, false, alpha);
         if self.game.running {
-            running_badge(canvas, fonts, cover, k);
+            running_badge(canvas, fonts, cover, k, alpha);
         }
         let ink = |a: f32| {
             let c = fg(a);
@@ -141,7 +141,7 @@ pub(super) fn paint_cover(
     let Some(img) = art else {
         canvas.save();
         canvas.clip_rrect(rr, None, true);
-        draw_poster_placeholder(canvas, fonts, Some(game), cell, k);
+        draw_poster_placeholder(canvas, fonts, Some(game), cell, k, alpha);
         canvas.restore();
         return;
     };
@@ -178,7 +178,7 @@ pub(super) fn crop(img: &Image, cell: Rect) -> Rect {
 
 /// The store's name in `cover`'s top-left. A launcher's is the accent; any other is a dark
 /// wash with white ink, since it sits on cover art the palette has no say over. `big` is
-/// the shelf's size.
+/// the shelf's size; `alpha` is the cover's, so the badge never arrives ahead of it.
 pub(super) fn store_badge(
     canvas: &Canvas,
     fonts: &Fonts,
@@ -186,6 +186,7 @@ pub(super) fn store_badge(
     cover: Rect,
     k: f64,
     big: bool,
+    alpha: f32,
 ) {
     if game.id == DESKTOP_ID {
         return;
@@ -204,6 +205,7 @@ pub(super) fn store_badge(
             Color4f::new(1.0, 1.0, 1.0, 1.0),
         )
     };
+    let (face, ink) = (faded(face, alpha), faded(ink, alpha));
     let r = Rect::from_xywh(x as f32, y as f32, bw as f32, bh as f32);
     canvas.draw_rrect(
         RRect::new_rect_xy(r, r.height() / 2.0, r.height() / 2.0),
@@ -220,8 +222,9 @@ pub(super) fn store_badge(
     );
 }
 
-/// `RESUME` in `rect`'s top-right, opposite the store badge. Fixed green on every palette.
-pub(super) fn running_badge(canvas: &Canvas, fonts: &Fonts, rect: Rect, k: f64) {
+/// `RESUME` in `rect`'s top-right, opposite the store badge. Fixed green on every palette;
+/// `alpha` is the cover's.
+pub(super) fn running_badge(canvas: &Canvas, fonts: &Fonts, rect: Rect, k: f64, alpha: f32) {
     const LABEL: &str = "RESUME";
     let size = 11.0 * k;
     let tw = f64::from(fonts.measure(LABEL, W::SemiBold, size));
@@ -232,9 +235,9 @@ pub(super) fn running_badge(canvas: &Canvas, fonts: &Fonts, rect: Rect, k: f64) 
     let r = Rect::from_xywh(x as f32, y as f32, bw as f32, bh as f32);
     canvas.draw_rrect(
         RRect::new_rect_xy(r, r.height() / 2.0, r.height() / 2.0),
-        &fill(crate::theme::ONLINE_GREEN),
+        &fill(faded(crate::theme::ONLINE_GREEN, alpha)),
     );
-    let ink = Color4f::new(0.04, 0.10, 0.05, 1.0);
+    let ink = Color4f::new(0.04, 0.10, 0.05, alpha);
     fonts.draw(
         canvas,
         LABEL,
@@ -244,6 +247,11 @@ pub(super) fn running_badge(canvas: &Canvas, fonts: &Fonts, rect: Rect, k: f64) 
         size,
         ink,
     );
+}
+
+/// `c` at `alpha` of its own opacity.
+fn faded(c: Color4f, alpha: f32) -> Color4f {
+    Color4f::new(c.r, c.g, c.b, c.a * alpha)
 }
 
 /// A host's desk in the Desktops row: OS mark and presence up top, name and what OK does

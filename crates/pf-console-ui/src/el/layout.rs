@@ -265,13 +265,14 @@ impl Tree {
                 at.filter(|p| p.0 == i)
             {
                 canvas.save();
-                if let Some(c) = c {
-                    canvas.clip_rect(c, None, true);
-                }
                 let was = self.plate.live();
                 take_over(&mut self.plate, canvas, space, d);
                 self.plate.step(id, target, corner, dt, space, d);
                 hand_off(&mut self.plate, canvas, was);
+                // A plate still coming in from outside its viewport would be cut at its edge.
+                if let Some(c) = c.filter(|_| !self.plate.arriving()) {
+                    canvas.clip_rect(c, None, true);
+                }
                 self.plate.draw(canvas, k, cheap);
                 canvas.restore();
             }

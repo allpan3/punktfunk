@@ -9,7 +9,9 @@
 
 use crate::anim::{springs, Spring};
 use crate::glyphs::GlyphStyle;
-use crate::library::{field_camera, field_sksl, palette, LibraryShared, VIOLET_FIELD};
+use crate::library::{
+    field_camera, field_motion, field_sksl, palette, LibraryShared, VIOLET_FIELD,
+};
 use crate::model::{
     ConsoleBus, ConsoleCmd, ConsoleShared, HostRow, PairPhase, SpeedPhase, SpeedStatus, WakeStatus,
 };
@@ -25,7 +27,7 @@ use pf_client_core::console::OverlayAction;
 use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuPulse, PadInfo};
 use pf_client_core::start;
 use pf_client_core::trust;
-use skia_safe::{Canvas, Color4f, Data, Paint, Rect, RuntimeEffect, Surface};
+use skia_safe::{Canvas, Color4f, Data, Image, Paint, Rect, RuntimeEffect, Surface};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -109,9 +111,10 @@ impl Tab {
 
 /// Long edge of the backdrop's offscreen, px. The field is a pure function of `xy/u_res`
 /// and soft, so a small buffer blitted up holds the same picture at any glass size — its
-/// per-pixel noise never scales with a 4K surface. The reduced interface takes less.
+/// per-pixel noise never scales with a 4K surface. The reduced interface takes a quarter of
+/// 384's pixels: on a 2025 LG TV the noise costs ~29 ms of GPU at 384 and ~8 ms at 192.
 const FIELD_EDGE: f64 = 512.0;
-const FIELD_EDGE_REDUCED: f64 = 384.0;
+const FIELD_EDGE_REDUCED: f64 = 192.0;
 /// Seconds between backdrop re-renders (~25 Hz). The field morphs slowly, so the step is
 /// invisible; a frozen (reduce-motion) field renders once.
 const FIELD_STEP: f64 = 0.04;
@@ -411,6 +414,8 @@ pub(crate) struct Shell {
     /// itself, so the service thread only ever advances the phase and `sync` can mirror
     /// the slot verbatim — including the `None` a dismiss writes.
     speed: Option<SpeedStatus>,
+    /// The speed chart as drawn, chasing `speed` every frame.
+    speed_view: overlays::SpeedView,
     toast: Option<Toast>,
     /// Fingerprint of a first pairing whose shelf has not opened yet. See
     /// [`Self::open_first_paired_library`].
@@ -537,6 +542,7 @@ impl Shell {
             wake: None,
             wake_optimistic: false,
             speed: None,
+            speed_view: overlays::SpeedView::default(),
             toast: None,
             first_pair: None,
             exit_armed: None,
@@ -1271,6 +1277,71 @@ impl Shell {
         }
     }
 
+    /// Tour the tabs once into `canvas`, off the glass, so the GPU programs they use compile
+    /// now, behind the host's splash, instead of on the first visit to each. It switches tabs
+    /// the way a player does, from a Hosts home through Games, Players and Settings, on a
+    /// stand-in library with covers and a bus nobody reads, then puts every part of the shell
+    /// back: nothing reaches the host, and the first real visits build and fetch as before.
+    pub(crate) fn warm_up(
+        &mut self,
+        canvas: &Canvas,
+        viewport: &crate::console::Viewport,
+        fonts: &crate::theme::Fonts,
+    ) {
+        let tab = std::mem::replace(&mut self.tab, Tab::Hosts);
+        let stack = std::mem::replace(&mut self.stack, vec![Screen::Home(HomeScreen::new())]);
+        let parked = std::mem::take(&mut self.parked);
+        let motion = std::mem::replace(&mut self.motion, Motion::None);
+        let strip_focus = std::mem::replace(&mut self.strip_focus, false);
+        let keys = (self.games_key.take(), self.library_fp.take());
+        let bus = std::mem::take(&mut self.bus);
+        let library = std::mem::take(&mut self.library);
+        // A host embedding this shell ticks its model after the warm-up, so no host is known
+        // yet: without a stand-in, Games and its shelf would never draw here.
+        let hosts = (
+            std::mem::replace(&mut self.hosts, vec![stand_in_host()]),
+            self.hosts_gen,
+        );
+        self.hosts_gen = self.console.hosts_gen();
+        self.library.set_games(stand_in_games());
+        let poster = stand_in_poster();
+        let draw = |s: &mut Shell, frames: usize| {
+            for _ in 0..frames {
+                s.render_in(canvas, viewport, fonts, None, None, &[]);
+                if let Some(p) = &poster {
+                    s.warm_shelves(p);
+                }
+            }
+        };
+        draw(self, 3);
+        for t in [Tab::Games, Tab::Players, Tab::Settings, Tab::Hosts] {
+            if self.switch_tab(t) {
+                draw(self, 12);
+            }
+        }
+        (self.tab, self.stack, self.parked, self.motion) = (tab, stack, parked, motion);
+        (self.strip_focus, self.bus, self.library) = (strip_focus, bus, library);
+        (self.games_key, self.library_fp) = keys;
+        // The saved generation, so a list published meanwhile is still taken on the next sync.
+        (self.hosts, self.hosts_gen) = hosts;
+        crate::el::forget_handoff();
+    }
+
+    /// Warm-up only: every shelf drawn or parked shows the stand-in cover, entrance over.
+    fn warm_shelves(&mut self, poster: &Image) {
+        for screen in self
+            .stack
+            .iter_mut()
+            .chain(self.parked.iter_mut().flatten())
+        {
+            match screen {
+                Screen::Library(l) => l.warm(poster),
+                Screen::Home(h) => h.shelf_mut().into_iter().for_each(|l| l.warm(poster)),
+                _ => {}
+            }
+        }
+    }
+
     /// The host Games shows: the one focused on Hosts when it is paired, else the first
     /// paired one.
     fn games_host(&self) -> Option<HostRow> {
@@ -1305,9 +1376,14 @@ impl Shell {
     }
 
     /// OK from a remote, both edges. A press acts on release; held [`HOLD_S`] it opens the
-    /// focused card's menu, as Y does on a pad.
+    /// focused card's menu, as Y does on a pad. In a text field the press types at once and
+    /// never holds: the keyboard has no menu, and its Secondary closes the field.
     pub(crate) fn ok(&mut self, down: bool) -> Option<MenuPulse> {
         self.last_input = Instant::now();
+        if self.editing() {
+            self.ok_down = None;
+            return down.then(|| self.handle_menu(MenuEvent::Confirm)).flatten();
+        }
         let t = self.t();
         if down {
             // A fresh press restarts the hold, so a lost release cannot strand it.
@@ -1961,9 +2037,10 @@ impl Shell {
     /// `passes` is the shader's work per pixel: 2 hits the displaced surface, 1 the plain
     /// sphere — the reduced path's saving on a TV, where the offscreen hides the difference.
     fn aurora_paint(&self, w: f64, h: f64, t: f64, calm: f64, passes: f32) -> Option<Paint> {
-        // Matches the SkSL block: u_res, u_tc, u_lift, u_scrim, u_cam (each float2/4).
+        // Matches the SkSL block: u_res, u_tc, u_lift, u_scrim, u_cam, then `field_motion`'s
+        // u_rot0..2, u_mot, u_wmot.
         let (focal, scale) = field_camera(w / h.max(1.0));
-        let uniforms: [f32; 16] = [
+        let head: [f32; 16] = [
             w as f32,
             h as f32,
             t as f32,
@@ -1981,6 +2058,9 @@ impl Shell {
             passes,
             0.0,
         ];
+        let mut uniforms = [0.0f32; 36];
+        uniforms[..16].copy_from_slice(&head);
+        uniforms[16..].copy_from_slice(&field_motion(t));
         let words = uniforms.map(f32::to_ne_bytes);
         let bytes = words.as_flattened();
         self.mesh
@@ -2091,6 +2171,77 @@ impl Shell {
     }
 }
 
+/// Every glyph a title commonly has, split across the stand-in titles: the warm-up puts each
+/// into the glyph atlas at the sizes and weights a shelf draws it, not on the first real visit.
+const STAND_IN_GLYPHS: &str = "ABCDEFGHIJKLM NOPQRSTUVWXYZ abcdefghijklm nopqrstuvwxyz \
+     0123456789 :'-.,!?&()/+ ®™©éèêëáàâäóòôöúùûüíìîïçñß ÉÀÖÜ–—’“”…";
+
+/// The warm-up's library: a title of each shape a shelf draws, store badges, a running one and
+/// launchers, so the programs and glyphs a loaded shelf needs are all asked for.
+fn stand_in_games() -> Vec<crate::library::LibraryGame> {
+    let glyphs: Vec<char> = STAND_IN_GLYPHS.chars().collect();
+    let chunk = glyphs.len().div_ceil(12);
+    let title = |i: usize| -> String {
+        glyphs
+            .chunks(chunk)
+            .nth(i)
+            .map_or_else(|| format!("Title {i}"), |c| c.iter().collect())
+    };
+    let game = |i: usize, store: &str, launcher: bool, icon: &str| crate::library::LibraryGame {
+        id: format!("warm:{i}"),
+        title: title(i),
+        store: store.into(),
+        launcher,
+        icon: icon.into(),
+        platform: Some("PC".into()),
+        developer: None,
+        year: None,
+        genres: Vec::new(),
+        stats: None,
+        running: i == 1,
+    };
+    let stores = ["steam", "lutris", "gog", "epic", "custom", "heroic"];
+    let mut out: Vec<_> = (0..12)
+        .map(|i| game(i, stores[i % stores.len()], false, ""))
+        .collect();
+    out.push(game(12, "steam", true, "steam"));
+    out.push(game(13, "desktop", true, "desktop"));
+    out
+}
+
+/// The paired, online host the warm-up tours with.
+fn stand_in_host() -> HostRow {
+    HostRow {
+        key: "warm".into(),
+        id: None,
+        name: "Stand-in".into(),
+        addr: "127.0.0.1".into(),
+        port: 9777,
+        fp_hex: "00".into(),
+        paired: true,
+        saved: true,
+        online: true,
+        mgmt_port: 9778,
+        can_wake: false,
+        clipboard_sync: false,
+        last_used: None,
+        os: "linux".into(),
+        actions: Vec::new(),
+        pin: None,
+        bound_preset: None,
+        running: String::new(),
+        game_presets: std::collections::BTreeMap::new(),
+    }
+}
+
+/// A cover the warm-up draws: a raster with mips, as a decoded poster is.
+fn stand_in_poster() -> Option<Image> {
+    let mut surface = skia_safe::surfaces::raster_n32_premul((300, 450))?;
+    surface.canvas().clear(Color4f::new(0.4, 0.3, 0.6, 1.0));
+    let image = surface.image_snapshot();
+    image.with_default_mipmaps().or(Some(image))
+}
+
 /// The reduced backdrop's retained pass: the offscreen and the inputs it was rendered
 /// from — anything that moves one of them is what a re-render keys on.
 struct FieldCache {
@@ -2149,8 +2300,8 @@ fn compile_mesh(
     let effect = RuntimeEffect::make_for_shader(field_sksl(ground, stops), None)
         .map_err(|e| anyhow!("backdrop SkSL: {e}"))?;
     anyhow::ensure!(
-        effect.uniform_size() == 64,
-        "mesh uniform block is {} bytes, expected 64 (u_res, u_tc, u_lift, u_scrim, u_cam)",
+        effect.uniform_size() == 144,
+        "mesh uniform block is {} bytes, expected 144 (u_res … u_cam, u_rot0..2, u_mot, u_wmot)",
         effect.uniform_size()
     );
     let g = ground;
