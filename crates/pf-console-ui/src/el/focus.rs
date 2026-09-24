@@ -6,9 +6,9 @@
 //! a group with an id hands focus back to the child it last had.
 //!
 //! [`Plate`] is one sprung rounded rect that morphs from target to target behind the
-//! focused node, stretching toward where it is going, then wobbling like jelly as it
-//! lands. With no target it fades out. Under Reduce Motion it jumps and fades.
-//! Pinned by `el::tests`.
+//! focused node. Its leading edge runs ahead and its trailing edge overshoots into it, so
+//! one motion stretches it on the way and squashes it on arrival. With no target it fades
+//! out. Under Reduce Motion it jumps and fades. Pinned by `el::tests`.
 
 use crate::anim::{Spring, SpringSpec};
 use crate::theme::{accent, fg, fill, stroke};
@@ -70,28 +70,30 @@ pub(crate) fn score(from: Rect, to: Rect, dir: MenuDir) -> Option<(u8, f32, f32)
     (ahead > 0.5).then_some((u8::from(across <= 0.0), gap.max(0.0), off.abs()))
 }
 
-/// The plate's travel: the focus spring.
+/// The plate's travel: the focus spring. The size it morphs through rides it too.
 pub const TRAVEL: SpringSpec = crate::anim::springs::FOCUS;
+/// The leading edge, quicker than [`TRAVEL`]: it covers most of the hop first.
+const LEAD: SpringSpec = SpringSpec {
+    response: 0.18,
+    damping: 0.85,
+};
+/// The trailing edge, softer: it lags, then runs a little past its target into the front.
+/// One motion stretches the plate on the way and squashes it on arrival: on a one-card hop
+/// about 1.35× at 50 ms, 0.92× at 220 ms, settled by 0.55 s.
+const TRAIL: SpringSpec = SpringSpec {
+    response: 0.36,
+    damping: 0.62,
+};
+/// An axis leads and trails only when the hop's unit direction moves along it this much.
+const AXIS_MIN: f64 = 0.3;
 /// Plate growth past its target, design units.
 const OUTSET: f32 = 7.0;
-/// The leading edge runs this many seconds of travel ahead: 22 px at 1000 px/s.
-const STRETCH_S: f64 = 0.022;
-/// Most a stretch adds, as a fraction of the plate's length along it.
-const STRETCH_MAX: f64 = 0.3;
-/// Of a stretch, the share the cross axis gives up.
-const SQUASH: f64 = 0.15;
-/// The landing: a jelly settle after a hop, kicked by arrival speed.
-const LAND: SpringSpec = SpringSpec {
-    response: 0.32,
-    damping: 0.3,
-};
-/// Of the arrival speed, the share the landing kick takes; capped by [`LAND_VMAX`].
-const LAND_GAIN: f64 = 0.25;
-const LAND_VMAX: f64 = 2400.0;
-/// Most a landing compresses, as a fraction of the plate's length along the travel.
-const LAND_MAX: f64 = 0.09;
-/// Of a landing squash, the share the cross axis takes up.
-const LAND_CROSS: f64 = 0.6;
+/// Stretch and squash saturate toward these fractions of the plate's length.
+const STRETCH_MAX: f64 = 0.5;
+const SQUASH_MAX: f64 = 0.12;
+/// Of a stretch, the share the cross axis gives up; of a squash, the share it bulges.
+const THIN: f64 = 0.2;
+const BULGE: f64 = 0.6;
 /// Fade time constant, seconds: out with no target or while dormant, in on the way back.
 const FADE_TAU: f64 = 0.06;
 
@@ -152,14 +154,21 @@ pub(crate) fn taken_from(owner: u64) -> bool {
 }
 
 /// Sprung rect behind the focused node. It springs in its scroll's content space, so it
-/// rides a scrolling list rigidly and only its own travel lags. In flight it stretches
-/// toward where it is going by its own speed; with nothing to rest on it glides on and
-/// fades out, and never freezes on a stale rect.
+/// rides a scrolling list rigidly and only its own travel lags. In flight its leading edge
+/// runs ahead and its trailing edge overshoots into it, so it stretches, squashes and settles
+/// as one motion; with nothing to rest on it glides on and fades out, and never freezes on
+/// a stale rect.
 #[derive(Default)]
 pub struct Plate {
     /// left, top, right, bottom, corner, in `space`'s content px; `None` until the first
     /// target.
     edges: Option<[Spring; 5]>,
+    /// Width and height on [`TRAVEL`]: the size the plate morphs through, which its span is
+    /// measured against.
+    size: [Spring; 2],
+    /// Came in from another tree or scroll this hop. Its viewport would cut it on the way
+    /// in, so it draws unclipped until it lands.
+    arriving: bool,
     /// Where the edges are springing to: the last target's rect and corner.
     goal: [f64; 5],
     /// Target the plate is travelling to or resting on.
@@ -169,16 +178,13 @@ pub struct Plate {
     shift: (f32, f32),
     /// Seconds on the plate's own clock.
     t: f64,
-    /// The landing wobble, px of compression along the travel; kicked on arrival.
-    land: Spring,
-    /// Unit direction of the last hop, the axis the landing compresses along.
+    /// Unit direction of the last hop: which edges lead and which trail.
     axis: (f64, f64),
+    /// Travelling: set by a new target, cleared on landing.
     armed: bool,
     /// Opacity 0..1, easing toward `fade_to`.
     shown: f64,
     fade_to: f64,
-    /// Fastest the plate moved since its target changed, px/s: the landing's strength.
-    peak: f64,
     /// OK went down: the plate's scale, springing back to 1.
     press: Option<Spring>,
     /// This plate's name in a [`Handoff`]; 0 until first asked.
@@ -211,6 +217,7 @@ impl Plate {
             for (s, d) in e.iter_mut().zip([dx, dy, dx, dy, 0.0]) {
                 s.pos += d;
             }
+            self.arriving = true;
         }
         self.space = space;
         self.shift = shift;
@@ -226,8 +233,6 @@ impl Plate {
         let live = !super::dormant();
         if self.to != Some(id) {
             self.armed = true;
-            self.peak = 0.0;
-            self.land = Spring::rest(0.0);
             let (dx, dy) = (
                 self.goal[0] + self.goal[2] - from[0] - from[2],
                 self.goal[1] + self.goal[3] - from[1] - from[3],
@@ -246,7 +251,7 @@ impl Plate {
         if empty && live && !reduced && !self.waiting {
             self.waiting = true;
             self.fresh = self.edges.is_none();
-            self.edges = Some(self.goal.map(Spring::rest));
+            self.rest_on(self.goal);
             self.shown = 0.0;
             self.armed = true;
             return;
@@ -259,9 +264,15 @@ impl Plate {
             self.shown = if live && !reduced { 1.0 } else { 0.0 };
         }
         if reduced || self.edges.is_none() || self.shown == 0.0 {
-            self.edges = Some(self.goal.map(Spring::rest));
+            self.rest_on(self.goal);
         }
         self.travel(dt, live);
+    }
+
+    /// At rest on `at` (left, top, right, bottom, corner), at its own size.
+    fn rest_on(&mut self, at: [f64; 5]) {
+        self.edges = Some(at.map(Spring::rest));
+        self.size = [Spring::rest(at[2] - at[0]), Spring::rest(at[3] - at[1])];
     }
 
     /// No target this frame: the plate glides on to its last goal and fades out, riding
@@ -292,8 +303,8 @@ impl Plate {
         self.waiting
     }
 
-    /// Start from `rect` (content px of `space`, shifted by `shift`), fully shown: the next
-    /// step glides from here to the target.
+    /// Start from `rect` (content px of `space`, shifted by `shift`), fully shown and drawn
+    /// unclipped: the next step glides from here to the target.
     pub(crate) fn seed(
         &mut self,
         rect: Rect,
@@ -315,12 +326,18 @@ impl Plate {
         if dx.hypot(dy) > 1.0 {
             self.axis = (dx / dx.hypot(dy), dy / dx.hypot(dy));
         }
-        self.edges = Some(at.map(Spring::rest));
+        self.rest_on(at);
         self.space = space;
         self.shift = shift;
         self.shown = 1.0;
         self.fade_to = 1.0;
         self.waiting = false;
+        self.arriving = true;
+    }
+
+    /// In from another tree or scroll and not landed yet: its viewport must not clip it.
+    pub(crate) fn arriving(&self) -> bool {
+        self.arriving
     }
 
     /// Gone at once: another plate took up where this one left.
@@ -334,19 +351,30 @@ impl Plate {
         self.space
     }
 
-    /// Spring the edges `dt` toward the goal and fade toward `live`. Landing kicks the
-    /// wobble by the hop's top speed, unless the plate is on its way out.
+    /// Spring the edges and size `dt` toward the goal and fade toward `live`. Along the hop
+    /// the leading edge takes [`LEAD`] and the trailing edge [`TRAIL`].
     fn travel(&mut self, dt: f64, live: bool) {
         self.t += dt;
         let Some(edges) = self.edges.as_mut() else {
             return;
         };
-        for (s, g) in edges.iter_mut().zip(self.goal) {
+        let (ax, ay) = self.axis;
+        let specs = [
+            edge_spec(ax, false),
+            edge_spec(ay, false),
+            edge_spec(ax, true),
+            edge_spec(ay, true),
+            TRAVEL,
+        ];
+        for ((s, g), spec) in edges.iter_mut().zip(self.goal).zip(specs) {
+            s.step_spec(g, spec, dt);
+            s.settle(g, 0.25, 4.0);
+        }
+        let size = [self.goal[2] - self.goal[0], self.goal[3] - self.goal[1]];
+        for (s, g) in self.size.iter_mut().zip(size) {
             s.step_spec(g, TRAVEL, dt);
             s.settle(g, 0.25, 4.0);
         }
-        let v = |a: usize, b: usize| (edges[a].vel + edges[b].vel) / 2.0;
-        self.peak = self.peak.max(v(0, 2).hypot(v(1, 3)));
         self.fade_to = if live { 1.0 } else { 0.0 };
         self.shown = crate::anim::approach(self.shown, self.fade_to, dt, FADE_TAU);
         if (self.shown - self.fade_to).abs() < 0.01 {
@@ -357,27 +385,20 @@ impl Plate {
             p.settle(1.0, 0.0005, 0.01);
         }
         self.press = self.press.filter(|p| p.pos != 1.0 || p.vel != 0.0);
-        self.land.step_spec(0.0, LAND, dt);
-        self.land.settle(0.0, 0.15, 2.0);
         let landed = edges
             .iter()
             .zip(self.goal)
+            .chain(self.size.iter().zip(size))
             .all(|(s, g)| s.pos == g && s.vel == 0.0);
-        if self.armed && landed {
+        if landed {
+            self.arriving = false;
             self.armed = false;
-            if live && !crate::theme::reduce_motion() {
-                self.land.vel -= self.peak.min(LAND_VMAX) * LAND_GAIN;
-            }
         }
     }
 
-    /// Still travelling, fading, pressed or wobbling: the frame loop must keep drawing.
+    /// Still travelling, fading or pressed: the frame loop must keep drawing.
     pub fn busy(&self) -> bool {
-        self.armed
-            || self.shown != self.fade_to
-            || self.press.is_some()
-            || self.land.pos != 0.0
-            || self.land.vel != 0.0
+        self.armed || self.shown != self.fade_to || self.press.is_some()
     }
 
     /// Any of the plate is on screen.
@@ -398,28 +419,20 @@ impl Plate {
         self.press.map_or(1.0, |p| p.pos as f32)
     }
 
-    /// The plate on screen this frame, before its outset: stretched along its travel,
-    /// squashed a little across it, compressed by its landing, dipped by a press.
+    /// The plate on screen this frame, before its outset: stretched or squashed along its
+    /// travel by where its edges are, the cross axis thinning or bulging to match, dipped by
+    /// a press.
     pub(crate) fn rect(&self) -> Option<(Rect, f32)> {
         let e = self.edges.as_ref()?;
-        let (l, r, sx) = stretch(e[0], e[2]);
-        let (t, b, sy) = stretch(e[1], e[3]);
-        let (qx, qy) = (sy * SQUASH / 2.0, sx * SQUASH / 2.0);
-        // The landing: shorter along the hop's axis, wider across it, both wobbling.
-        let (ax, ay) = (self.axis.0.abs(), self.axis.1.abs());
-        let along = self.land.pos.clamp(
-            -LAND_MAX * (r - l).abs().max((b - t).abs()),
-            LAND_MAX * (r - l).abs().max((b - t).abs()),
-        );
-        let (lx, ly) = (
-            (along * ax - along * LAND_CROSS * ay) / 2.0,
-            (along * ay - along * LAND_CROSS * ax) / 2.0,
-        );
+        let (w, h) = (self.size[0].pos, self.size[1].pos);
+        let (l, r, rx) = shape(e[0].pos, e[2].pos, w, leader(self.axis.0));
+        let (t, b, ry) = shape(e[1].pos, e[3].pos, h, leader(self.axis.1));
+        let (qx, qy) = (cross(ry) * w / 2.0, cross(rx) * h / 2.0);
         let r = Rect::from_ltrb(
-            (l + qx + lx) as f32,
-            (t + qy + ly) as f32,
-            (r - qx - lx) as f32,
-            (b - qy - ly) as f32,
+            (l - qx) as f32,
+            (t - qy) as f32,
+            (r + qx) as f32,
+            (b + qy) as f32,
         );
         let s = self.press.map_or(1.0, |p| p.pos) as f32;
         let (dx, dy) = (r.width() * (1.0 - s) / 2.0, r.height() * (1.0 - s) / 2.0);
@@ -430,8 +443,8 @@ impl Plate {
         ))
     }
 
-    /// A lifted glass plate with a brighter rim; the rim glows with the landing wobble.
-    /// `k` scales the outset; `cheap` skips the blurred shadow.
+    /// A lifted glass plate with a brighter rim; the rim glows as the plate squashes on
+    /// arrival. `k` scales the outset; `cheap` skips the blurred shadow.
     pub(crate) fn draw(&self, canvas: &Canvas, k: f32, cheap: bool) {
         let Some((r, corner)) = self.rect().filter(|_| self.visible()) else {
             return;
@@ -451,7 +464,12 @@ impl Plate {
         }
         canvas.draw_rrect(rr, &fill(fg(0.12 * alpha)));
         canvas.draw_rrect(rr, &fill(accent(0.10 * alpha)));
-        let pulse = (self.land.pos.abs() / (10.0 * f64::from(k))).min(0.35) as f32;
+        let squash = self.edges.as_ref().map_or(0.0, |e| {
+            let rx = shape(e[0].pos, e[2].pos, self.size[0].pos, None).2;
+            let ry = shape(e[1].pos, e[3].pos, self.size[1].pos, None).2;
+            (1.0 - rx.min(ry)).max(0.0)
+        });
+        let pulse = (squash / SQUASH_MAX * 0.35).min(0.35) as f32;
         let rim = [fg((0.62 + pulse) * alpha), fg((0.14 + pulse / 2.0) * alpha)];
         let mut p = stroke(fg(1.0), 1.5 * k);
         p.set_shader(linear(rr.rect(), &rim, None));
@@ -459,12 +477,49 @@ impl Plate {
     }
 }
 
-/// One axis, `lo` and `hi` its edges: the leading edge runs ahead by the axis speed times
-/// [`STRETCH_S`], at most [`STRETCH_MAX`] of the length. The edges, then the stretch.
-fn stretch(lo: Spring, hi: Spring) -> (f64, f64, f64) {
-    let cap = STRETCH_MAX * (hi.pos - lo.pos).abs();
-    let s = ((lo.vel + hi.vel) / 2.0 * STRETCH_S).clamp(-cap, cap);
-    (lo.pos + s.min(0.0), hi.pos + s.max(0.0), s.abs())
+/// The spring for one edge: `hi` is the right or bottom edge, `along` the hop's unit
+/// direction on its axis. An axis the hop barely moves along keeps both edges together.
+fn edge_spec(along: f64, hi: bool) -> SpringSpec {
+    match leader(along) {
+        None => TRAVEL,
+        Some(lead) if lead == hi => LEAD,
+        Some(_) => TRAIL,
+    }
+}
+
+/// Which edge of an axis leads for the hop's unit direction `along` on it: `Some(true)`
+/// the right or bottom one, `None` when the hop barely moves along the axis.
+fn leader(along: f64) -> Option<bool> {
+    (along.abs() >= AXIS_MIN).then_some(along > 0.0)
+}
+
+/// One axis: the edges' span against `size`, eased so a long throw saturates toward
+/// [`STRETCH_MAX`] and [`SQUASH_MAX`] instead of tearing. The leading edge stays put and
+/// the back gives; with no leader, the centre. The edges, then the span's ratio to `size`;
+/// exactly the edges when they span `size`.
+fn shape(lo: f64, hi: f64, size: f64, lead: Option<bool>) -> (f64, f64, f64) {
+    let d = (hi - lo) / size.max(1.0) - 1.0;
+    if d == 0.0 || size <= 1.0 {
+        return (lo, hi, 1.0);
+    }
+    let cap = if d > 0.0 { STRETCH_MAX } else { SQUASH_MAX };
+    let len = size * (1.0 + cap * (d / cap).tanh());
+    let (lo, hi) = match lead {
+        Some(true) => (hi - len, hi),
+        Some(false) => (lo, lo + len),
+        None => ((lo + hi - len) / 2.0, (lo + hi + len) / 2.0),
+    };
+    (lo, hi, len / size)
+}
+
+/// How far the cross axis grows, as a fraction of its size, for an axis at `ratio`:
+/// thinner under a stretch, wider under a squash.
+fn cross(ratio: f64) -> f64 {
+    if ratio >= 1.0 {
+        -(ratio - 1.0) * THIN
+    } else {
+        (1.0 - ratio) * BULGE
+    }
 }
 
 /// Top-left to bottom-right across `r`.
@@ -504,32 +559,61 @@ mod tests {
         assert!(p.press.is_none());
     }
 
-    /// Travelling right, the plate reaches ahead: its right edge lands before its left
-    /// does, it stretches on the way, and it rests on its target's rect exactly. A long
-    /// throw stretches no further than the cap.
+    /// Travelling right, as one motion: the front covers most of the hop while the back
+    /// still trails, the plate stretches on the way and squashes on arrival, a long throw
+    /// saturates inside the caps, and it rests on its target's rect exactly.
     #[test]
-    fn the_leading_edge_lands_before_the_trailing_edge() {
+    fn the_plate_stretches_then_squashes_in_one_motion() {
         let (a, b) = (super::super::Id::new("t", 0), super::super::Id::new("t", 1));
-        for (dist, most) in [(120.0, 1.30), (1000.0, 1.30)] {
+        for dist in [120.0_f32, 1000.0] {
             let mut p = Plate::default();
             let from = Rect::from_xywh(0.0, 0.0, 100.0, 60.0);
             let to = from.with_offset((dist, 0.0));
             p.step(a, from, 8.0, 1.0 / 60.0, None, (0.0, 0.0));
-            let (mut lead, mut trail, mut widest) = (None, None, 0.0f32);
-            for i in 0..120 {
+            let (mut widest, mut narrowest, mut ahead) = (0.0f32, f32::MAX, false);
+            for _ in 0..120 {
                 p.step(b, to, 8.0, 1.0 / 60.0, None, (0.0, 0.0));
                 let (r, _) = p.rect().unwrap();
-                widest = widest.max(r.width() / 100.0);
-                lead = lead.or((r.right >= to.right - 0.5).then_some(i));
-                trail = trail.or((r.left >= to.left - 0.5).then_some(i));
+                let w = r.width() / 100.0;
+                widest = widest.max(w);
+                if widest > 1.1 {
+                    narrowest = narrowest.min(w);
+                }
+                ahead |= to.right - r.right < 0.1 * dist && to.left - r.left > 15.0;
             }
-            let (lead, trail) = (lead.unwrap(), trail.unwrap());
+            assert!(ahead, "{dist}: the front arrives first");
+            let (most, least) = (1.0 + STRETCH_MAX as f32, 1.0 - SQUASH_MAX as f32);
+            assert!(widest > 1.2 && widest <= most + 0.01, "{dist}: {widest}");
             assert!(
-                lead < trail,
-                "{dist}: lead lands at {lead}, trail at {trail}"
+                narrowest < 0.97 && narrowest >= least - 0.01,
+                "{dist}: {narrowest}"
             );
-            assert!(widest > 1.1 && widest <= most + 0.01, "{dist}: {widest}");
             assert_eq!(p.rect().unwrap().0, to);
+            assert!(!p.busy(), "{dist}: settled");
         }
+    }
+
+    /// A plate seeded from another tree is arriving until it lands, and only then clips.
+    #[test]
+    fn a_handed_over_plate_arrives_then_lands() {
+        let id = super::super::Id::new("t", 0);
+        let mut p = Plate::default();
+        p.seed(
+            Rect::from_xywh(0.0, -80.0, 60.0, 30.0),
+            8.0,
+            None,
+            (0.0, 0.0),
+        );
+        assert!(p.arriving());
+        let to = Rect::from_xywh(0.0, 20.0, 200.0, 90.0);
+        for _ in 0..3 {
+            p.step(id, to, 12.0, 1.0 / 60.0, None, (0.0, 0.0));
+        }
+        assert!(p.arriving(), "still in flight");
+        for _ in 0..120 {
+            p.step(id, to, 12.0, 1.0 / 60.0, None, (0.0, 0.0));
+        }
+        assert!(!p.arriving());
+        assert_eq!(p.rect().unwrap().0, to);
     }
 }
