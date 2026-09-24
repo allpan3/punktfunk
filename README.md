@@ -15,7 +15,7 @@ monitors.
 [Support matrix](https://docs.punktfunk.unom.io/docs/support-matrix) (what works where) ·
 [Roadmap](https://docs.punktfunk.unom.io/docs/roadmap)
 
-💬 [Discord](https://discord.gg/kaPNvzMuGU) · [r/Punktfunk](https://www.reddit.com/r/Punktfunk/)
+💬 [Discord](https://discord.gg/wzEGg9y45z) · [r/Punktfunk](https://www.reddit.com/r/Punktfunk/)
 
 🔒 Vulnerabilities go privately to **security@punktfunk.com**, not to an issue — [SECURITY.md](SECURITY.md).
 

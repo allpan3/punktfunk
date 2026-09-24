@@ -112,13 +112,17 @@ impl UserData {
             return None;
         }
         let buf = pw_buf as usize;
-        // An async link lets the producer reclaim a buffer before this side marked it busy, so a
-        // late loop can be sent one it still holds. It cannot be given back twice.
-        if self.defer.book.lock().ok()?.contains(buf) {
-            if !self.signals.resent.swap(true, Ordering::Relaxed) {
-                tracing::warn!("producer re-sent a buffer this capture still holds");
-            }
-            return None;
+        // PipeWire below 1.6 (no `node.reliable`) lets the producer reclaim a buffer before this
+        // side marked it busy, then send it again. Its frame is fresh; the earlier hold's read may
+        // be torn. Re-held under a new generation, the stale hold's release is a no-op
+        // (`HoldBook::complete`), the pool stays whole, and the loop answers with one IDR.
+        if self.defer.book.lock().ok()?.contains(buf)
+            && self.signals.resent.fetch_add(1, Ordering::Relaxed) == 0
+        {
+            tracing::warn!(
+                "producer re-sent a buffer this capture still holds — re-holding it; one IDR \
+                 covers the frame encoded from the earlier read (PipeWire < 1.6)"
+            );
         }
         let pool_live = self.pool.live;
         let mut generation = self.defer.book.lock().ok()?.try_hold(buf, pool_live);
@@ -892,9 +896,11 @@ struct HoldBook {
 
 impl HoldBook {
     /// Withhold `buf` if the pool can spare it (`pool_live - HOLD_POOL_RESERVE` out at once).
+    /// A buffer already out was re-sent by the producer: the new generation takes over its
+    /// requeue, and the stale hold's [`complete`](Self::complete) no longer matches.
     fn try_hold(&mut self, buf: usize, pool_live: u32) -> Option<u64> {
         let cap = pool_live.saturating_sub(HOLD_POOL_RESERVE) as usize;
-        if self.out.len() >= cap || self.out.contains_key(&buf) {
+        if !self.out.contains_key(&buf) && self.out.len() >= cap {
             return None;
         }
         self.last_gen += 1;
@@ -1179,6 +1185,10 @@ fn consume_frame(
                 implausible = r.implausible,
                 hdr_pts_used = ud.hdr_pts_enabled,
                 held_drops = ud.held_drops,
+                // Session total of raw-passthrough frames that took the CPU copy instead.
+                cpu_fallbacks = ud.passthrough_fallbacks.frames,
+                // Buffers the producer sent again while held (PipeWire < 1.6); each re-held.
+                resent = ud.signals.resent.load(Ordering::Relaxed),
                 pool_depth = ud.pool.live,
                 "capture wire-pts provenance"
             );
@@ -2820,16 +2830,21 @@ fn producer_supports_request(
     supports.unwrap_or(false)
 }
 
-/// The offer's `maxFramerate`. KWin asks for its own signal (`Unpaced`); gamescope paints on
-/// every commit, so the wire rate caps its pushes (`Cap`); anyone else keeps its rate.
+/// KWin's unpaced ceiling, in multiples of the stream rate. Above one refresh its ms timer
+/// never gates a real frame; bounded, a game far above the stream rate cannot flood the pool.
+const KWIN_UNPACED_HEADROOM: u32 = 2;
+
+/// The offer's `maxFramerate`. KWin asks for its own signal under a ceiling of
+/// [`KWIN_UNPACED_HEADROOM`] times the stream rate; gamescope paints on every commit, so the
+/// wire rate caps its pushes (`Cap`); anyone else keeps its rate.
 fn offer_pacing(unpaced: bool, gamescope: bool, preferred: Option<(u32, u32, u32)>) -> Pacing {
+    let hz = preferred.map(|(_, _, hz)| hz).filter(|hz| *hz > 0);
     if unpaced {
-        Pacing::Unpaced
+        hz.map_or(Pacing::Unpaced, |hz| {
+            Pacing::Cap(hz * KWIN_UNPACED_HEADROOM)
+        })
     } else if gamescope {
-        preferred
-            .map(|(_, _, hz)| hz)
-            .filter(|hz| *hz > 0)
-            .map_or(Pacing::Producer, Pacing::Cap)
+        hz.map_or(Pacing::Producer, Pacing::Cap)
     } else {
         Pacing::Producer
     }
@@ -3021,10 +3036,31 @@ mod tests {
         assert!(!holds_possible(false, 8));
     }
 
-    /// Only gamescope gets the wire-rate cap; KWin keeps its own signal; a missing rate caps nothing.
+    /// A re-sent buffer is re-held: the stale generation no longer requeues, the new one does,
+    /// and the pool stays whole.
     #[test]
-    fn only_gamescope_is_capped_at_the_wire_rate() {
-        assert_eq!(offer_pacing(true, true, Some((1, 1, 90))), Pacing::Unpaced);
+    fn a_resent_buffer_is_reheld_under_a_new_generation() {
+        let mut book = HoldBook::default();
+        let old = book.try_hold(0x10, HOLD_POOL_RESERVE + 2).unwrap();
+        let new = book.try_hold(0x10, HOLD_POOL_RESERVE + 2).unwrap();
+        assert!(new > old);
+        assert_eq!(book.out.len(), 1);
+        assert!(!book.complete(0x10, old));
+        assert!(book.contains(0x10));
+        assert!(book.complete(0x10, new));
+        assert!(!book.contains(0x10));
+    }
+
+    /// gamescope is capped at the wire rate, KWin at its headroom above it; a missing rate
+    /// caps nothing.
+    #[test]
+    fn pacing_caps_follow_the_wire_rate() {
+        assert_eq!(
+            offer_pacing(true, false, Some((1, 1, 90))),
+            Pacing::Cap(180)
+        );
+        assert_eq!(offer_pacing(true, false, Some((1, 1, 0))), Pacing::Unpaced);
+        assert_eq!(offer_pacing(true, false, None), Pacing::Unpaced);
         assert_eq!(offer_pacing(false, true, Some((1, 1, 90))), Pacing::Cap(90));
         assert_eq!(offer_pacing(false, true, Some((1, 1, 0))), Pacing::Producer);
         assert_eq!(
@@ -3758,13 +3794,20 @@ mod tests {
         assert!(b.complete(0x1000, new), "its own hold releases it");
     }
 
-    /// A buffer already out cannot be withheld again (one requeue duty per buffer): `.process`
-    /// can only re-see an address after its requeue, so a duplicate try_hold means state
-    /// confusion — refuse it and let the epilogue requeue immediately.
+    /// A buffer already out keeps one requeue duty: the re-hold moves it to the new
+    /// generation instead of adding a second entry, and it does not spend the cap.
     #[test]
-    fn hold_book_refuses_a_buffer_already_out() {
+    fn hold_book_rehold_spends_no_second_slot() {
         let mut b = HoldBook::default();
-        b.try_hold(0x1000, 8).unwrap();
-        assert!(b.try_hold(0x1000, 8).is_none());
+        b.try_hold(0x1000, HOLD_POOL_RESERVE + 1).unwrap();
+        assert!(
+            b.try_hold(0x2000, HOLD_POOL_RESERVE + 1).is_none(),
+            "cap is one"
+        );
+        assert!(
+            b.try_hold(0x1000, HOLD_POOL_RESERVE + 1).is_some(),
+            "re-hold within cap"
+        );
+        assert_eq!(b.out.len(), 1);
     }
 }

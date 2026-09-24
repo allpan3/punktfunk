@@ -187,6 +187,8 @@ impl DataPump {
         // AUs dropped while nothing popped the channel (embedder decoder not
         // started yet). The first pop after one owes the host a keyframe.
         let mut unconsumed_aus: u64 = 0;
+        // A held opening GOP is draining until the depth first falls to QUEUE_LOW.
+        let mut preroll_draining = true;
         let mut resync_wanted = false;
         let mut seen_clock_gen = pump_clock_gen.load(Ordering::Relaxed);
         let mut seen_mode_gen = pump_mode_gen.load(Ordering::Relaxed);
@@ -535,13 +537,16 @@ impl DataPump {
                             }
                         }
                     }
-                    // No decoder yet (the embedder starts it on its stream
-                    // view; a console launch hold delays that up to 15 s).
-                    // Queued AUs would be reference-broken by then, and a
-                    // queue nobody drains is not link distress — so no push,
-                    // no detector, and one keyframe once something pops.
+                    // No decoder yet (a console launch hold delays it up to 15 s). Hold the
+                    // opening GOP so a prompt decoder starts on the stream's own IDR; past
+                    // PREROLL_AUS drop it and ask for one keyframe once something pops. A
+                    // queue nobody drains is not link distress, so no detector runs.
                     if !frames.consumer_seen() {
-                        unconsumed_aus += u64::from(is_au);
+                        unconsumed_aus += if unconsumed_aus == 0 {
+                            frames.preroll(frame) as u64
+                        } else {
+                            u64::from(is_au)
+                        };
                         stale_since = None;
                         standing_since = None;
                         continue;
@@ -588,7 +593,8 @@ impl DataPump {
                             stale_since = None;
                         }
                         let depth = frames.depth();
-                        if depth >= QUEUE_HIGH {
+                        preroll_draining &= depth > QUEUE_LOW;
+                        if depth >= QUEUE_HIGH && !preroll_draining {
                             standing_since.get_or_insert_with(Instant::now);
                         } else if depth <= QUEUE_LOW {
                             standing_since = None;

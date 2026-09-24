@@ -87,7 +87,7 @@ pub(super) fn run_apply(
     jobs::write_json_atomic(
         &jobs::intent_path(),
         &IntentRecord {
-            from: env!("PUNKTFUNK_VERSION").into(),
+            from: crate::version::get().into(),
             to: target_version.into(),
             serial,
             started_unix: super::now_unix(),
@@ -152,7 +152,7 @@ fn download(url: &str, part: &Path, progress: &dyn Fn(u64, Option<u64>)) -> Resu
         .max_redirects(3)
         .user_agent(format!(
             "punktfunk-host/{} (update-apply)",
-            env!("PUNKTFUNK_VERSION")
+            crate::version::get()
         ))
         .build()
         .into();

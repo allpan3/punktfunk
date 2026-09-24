@@ -20,23 +20,25 @@
 //! pointer UI (`webos-pointer-ui-overhaul.md` D3). No stability promise; a
 //! kit change there is a re-pin plus a compile fix, by design.
 
-// The shell runs on Linux, Windows, Android and wasm. Cargo.toml gates every
-// dependency on the same list, so macOS gets an empty crate — the Mac client is
-// clients/apple.
+// The shell runs on Linux, Windows, Android, wasm and Apple's platforms (Metal there; the
+// Mac also runs the tests). Cargo.toml gates every dependency on the same list.
 #![cfg(any(
     target_os = "linux",
     windows,
     target_os = "android",
+    target_vendor = "apple",
     target_family = "wasm"
 ))]
 
 pub mod anim;
 pub mod art_stats;
 pub mod brand;
+pub mod bridge;
 // The sort/group policy moved to pf-client-core so the GTK and WinUI dialogs share it rather
 // than growing a second order. Aliased here because every screen names `crate::collate`.
 pub(crate) use pf_client_core::collate;
 pub mod console;
+pub mod el;
 pub mod glyphs;
 pub mod icons;
 pub mod input;

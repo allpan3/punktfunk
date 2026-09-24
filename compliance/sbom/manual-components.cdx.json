@@ -144,7 +144,7 @@
     {
       "type": "application",
       "name": "Bun",
-      "version": "1.3.14 (pinned in .gitea/workflows/windows-host.yml)",
+      "version": "1.4.2 (pinned in .gitea/workflows/windows-host.yml)",
       "description": "Portable JavaScript runtime bundled in the Windows host installer to run the web console (.output) and the plugin/script runner. Embeds JavaScriptCore (LGPL-2.1).",
       "licenses": [
         {

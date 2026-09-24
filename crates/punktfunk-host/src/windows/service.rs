@@ -1806,7 +1806,7 @@ fn maybe_boot_loop_rollback(restarts: u32, attempted: &mut bool) {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     // Stale intent: no rollback. A boot-looping *old* binary is not this update; reconcile owns it.
-    if now.saturating_sub(intent.started_unix) > 30 * 60 || env!("PUNKTFUNK_VERSION") != intent.to {
+    if now.saturating_sub(intent.started_unix) > 30 * 60 || crate::version::get() != intent.to {
         return;
     }
     *attempted = true;

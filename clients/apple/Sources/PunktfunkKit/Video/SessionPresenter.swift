@@ -58,8 +58,8 @@ enum PresenterChoice: Equatable {
     ///
     /// Stage-2 remains a faithful arrival-pacing A/B. Stage-4 is limited to iOS/tvOS because the
     /// macOS path has separate synchronization constraints. `decoded` is tvOS-only because its
-    /// latency win and displayed-IOSurface metering are validated there. Stage-1 additionally
-    /// requires the caller's release-build gate.
+    /// displayed-IOSurface metering is validated there. Stage-1 additionally requires the
+    /// caller's release-build gate.
     static func explicit(setting: String?, env: String?, allowStage1: Bool) -> PresenterChoice? {
         let raw = env.flatMap { $0.isEmpty ? nil : $0 } ?? setting
         switch raw {
@@ -83,21 +83,17 @@ enum PresenterChoice: Equatable {
         }
     }
 
-    /// iOS uses deadline-paced Metal, tvOS the decoded video plane, and macOS arrival-paced Metal.
+    /// iOS and tvOS use deadline-paced Metal, macOS arrival-paced Metal.
     ///
-    /// A fixed-rate Apple TV vends CAMetalDisplayLink drawables about two refreshes before glass.
-    /// Passing VideoToolbox's decoded IOSurface directly to AVSampleBufferVideoRenderer removes
-    /// that reservation and the Metal FIFO: the measured display stage falls from 28–32 ms to
-    /// about 10–12 ms at 60 fps. tvOS before 17.4 retains deadline pacing because it cannot query
-    /// the displayed IOSurface for metrics; PyroWave, 4:4:4, and Smoothness retain Metal.
+    /// The deadline link late-latches each drawable to one refresh + 4 ms before glass
+    /// (`LatchBudget`). Filmed at 240 fps on a 60 Hz Apple TV, that answered controller presses
+    /// 9 ms sooner than the decoded video plane, whose displayed-surface metric reads about a
+    /// refresh early. `decoded` stays an explicit A/B on tvOS 17.4+.
     static var platformDefault: PresenterChoice {
-        #if os(iOS)
-        return .stage4
-        #elseif os(tvOS)
-        if #available(tvOS 17.4, *) { return .decoded }
-        return .stage4
-        #else
+        #if os(macOS)
         return .stage2
+        #else
+        return .stage4
         #endif
     }
 }
@@ -229,6 +225,14 @@ final class SessionPresenter {
     private var pump: StreamPump?
     private var stage2: Stage2Pipeline?
     private var stage2Link: CADisplayLink?
+    private var panel = PanelInfo(minHz: 0, maxHz: 0)
+
+    /// The hosting screen's refresh range and granularity, from the view on start and every
+    /// layout (a window can move screens). Main thread. Diagnostics only.
+    func setPanel(_ info: PanelInfo) {
+        panel = info
+        stage2?.setPanel(info)
+    }
     private var metalLayer: CAMetalLayer?
     #if os(macOS)
     /// The windowed present MECHANISM this session runs while composited (resolved once per
@@ -339,7 +343,9 @@ final class SessionPresenter {
                vsyncPaced: vsyncPaced,
                adaptiveSlotPaced: adaptiveSlotPaced) {
             pipeline.onPresentWedged = { [weak self] in
-                DispatchQueue.main.async { self?.rebuildPresentation() }
+                // The presenter lives on main; the hop only carries the reference back there.
+                nonisolated(unsafe) let presenter = self
+                DispatchQueue.main.async { presenter?.rebuildPresentation() }
             }
             let metal = pipeline.layer
             // Metal pacing overlays the idle video layer. The decoded path leaves the backing
@@ -376,6 +382,7 @@ final class SessionPresenter {
                 stage2Link = link
             }
             syncFrameRate(hz: connection.currentMode().refreshHz)
+            pipeline.setPanel(panel)
             pipeline.start(
                 connection: connection, onFrame: onFrame, onSessionEnd: onSessionEnd,
                 onDecodedSize: onDecodedSize, onFrameHDR: onFrameHDR)

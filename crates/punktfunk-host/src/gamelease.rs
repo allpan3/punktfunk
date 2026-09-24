@@ -565,6 +565,9 @@ struct WindowWatch {
     source: WindowSource,
     /// Last toplevels token seen. `None` re-reads.
     token: Option<u64>,
+    /// Roots of the last read. New roots re-read an unchanged desk: a late report can name the
+    /// owner of a window that is already up.
+    roots: Vec<u32>,
 }
 
 #[cfg(any(target_os = "linux", windows))]
@@ -573,6 +576,7 @@ impl WindowWatch {
         WindowWatch {
             source,
             token: None,
+            roots: Vec::new(),
         }
     }
 
@@ -584,6 +588,7 @@ impl WindowWatch {
             live,
             shared.owned_child().map(|c| c.pid),
             shared.spawned.map(|s| s.pid),
+            reported_proc(shared).map(|p| p.pid),
         );
         let found: Option<(String, String)> = match &self.source {
             #[cfg(target_os = "linux")]
@@ -591,10 +596,11 @@ impl WindowWatch {
                 let now = crate::vdisplay::toplevels_token(*compositor);
                 // A token that has not moved means no window opened, closed or was
                 // retitled since the last read, so the answer cannot have changed.
-                if now.is_some() && now == self.token {
+                if now.is_some() && now == self.token && roots == self.roots {
                     return false;
                 }
                 self.token = now;
+                self.roots.clone_from(&roots);
                 let pids = crate::procscan::with_descendants(&roots);
                 let Some(all) = crate::vdisplay::list_all_toplevels(*compositor) else {
                     // KWin without the grant, GNOME before the extension loads: waiting would hold
@@ -639,8 +645,9 @@ impl WindowWatch {
 
 /// Processes whose subtree may own the game's window.
 ///
-/// The ones the lease matched, always: the entry's own rule says those are the game. What the
-/// host spawned counts only when the entry names nothing to match — a launcher command
+/// The ones the lease matched and the one its provider reported, always: the entry's rule and
+/// the provider each say those are the game. A `playnite://` hand-off has only the report. What
+/// the host spawned counts only when the entry names nothing to match — a launcher command
 /// (`steam steam://rungameid/…`) starts the launcher when it is not already up, and every
 /// window the launcher draws would otherwise end the hold before the game drew anything.
 #[cfg(any(target_os = "linux", windows))]
@@ -649,8 +656,10 @@ fn window_roots(
     live: &[crate::procscan::ProcRef],
     owned: Option<u32>,
     spawned: Option<u32>,
+    reported: Option<u32>,
 ) -> Vec<u32> {
     let mut roots: Vec<u32> = live.iter().map(|r| r.pid).collect();
+    roots.extend(reported.filter(|pid| !roots.contains(pid)));
     if spec.is_empty() {
         roots.extend(owned);
         roots.extend(spawned);
@@ -2697,14 +2706,33 @@ mod tests {
             pid: 4242,
             start: 0,
         }];
-        let named = window_roots(&DetectSpec::steam(570), &live, Some(88), Some(99));
+        let named = window_roots(&DetectSpec::steam(570), &live, Some(88), Some(99), None);
         assert_eq!(
             named,
             vec![4242],
             "the entry says which process is the game; the launcher's is not it"
         );
         // Nothing to match on: the command the host ran is the only handle there is.
-        let bare = window_roots(&DetectSpec::default(), &live, Some(88), Some(99));
+        let bare = window_roots(&DetectSpec::default(), &live, Some(88), Some(99), None);
         assert_eq!(bare, vec![4242, 88, 99]);
+    }
+
+    /// A `playnite://` title with no detect hint: the matcher finds nothing and the hand-off's
+    /// pid is not tracked, so the provider's pid is the only way to its window.
+    #[cfg(any(target_os = "linux", windows))]
+    #[test]
+    fn the_reported_pid_roots_the_window_search() {
+        let handoff = window_roots(&DetectSpec::default(), &[], None, None, Some(21056));
+        assert_eq!(handoff, vec![21056]);
+        let live = [crate::procscan::ProcRef {
+            pid: 4242,
+            start: 0,
+        }];
+        let both = window_roots(&DetectSpec::steam(570), &live, None, None, Some(4242));
+        assert_eq!(
+            both,
+            vec![4242],
+            "a pid both matched and reported is one root"
+        );
     }
 }

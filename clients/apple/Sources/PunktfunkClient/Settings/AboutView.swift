@@ -19,7 +19,7 @@ struct AboutView: View {
     /// three of them can be checked against the README in one glance.
     private enum Destination {
         static let docs = URL(string: "https://docs.punktfunk.unom.io")!
-        static let community = URL(string: "https://discord.gg/kaPNvzMuGU")!
+        static let community = URL(string: "https://discord.gg/wzEGg9y45z")!
         static let source = URL(string: "https://git.unom.io/unom/punktfunk")!
     }
 

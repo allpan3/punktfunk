@@ -171,6 +171,7 @@ mod stats_recorder;
 mod store;
 mod stream_marker;
 mod update;
+mod version;
 // The browser plane (design/web-client-implementation-plan.md Phase 1). Runtime opt-in.
 mod webtransport;
 // Shim: virtual-display lives in `pf-vdisplay`; keep `crate::vdisplay::*` for this crate's callers.
@@ -378,7 +379,7 @@ fn real_main() -> Result<()> {
         args.first().map(String::as_str),
         Some("--version") | Some("-V") | Some("version")
     ) {
-        println!("punktfunk-host {}", env!("PUNKTFUNK_VERSION"));
+        println!("punktfunk-host {}", crate::version::get());
         return Ok(());
     }
 
@@ -387,7 +388,7 @@ fn real_main() -> Result<()> {
     if !management_cli {
         tracing::info!(
             "punktfunk-host {} (punktfunk_core ABI v{})",
-            env!("PUNKTFUNK_VERSION"),
+            crate::version::get(),
             punktfunk_core::ABI_VERSION
         );
     }
@@ -766,11 +767,15 @@ fn parse_serve(args: &[String]) -> Result<(mgmt::Options, native::NativeServe, b
     }
     // Mint only if the runner is installed — otherwise a second admin-adjacent credential sits
     // on disk for a subsystem that is not running. Scope: `plugin_may_access`, not pairing/hooks.
-    if crate::plugins::runtime_status().installed {
+    let runner = crate::plugins::runtime_status();
+    if runner.installed {
         opts.plugin_token = Some(crate::mgmt_token::load_or_generate_plugin()?);
         // One token per installed plugin, so the API can tell them apart: a plugin may write its
         // own registration and its own provider, and no other's.
         opts.plugin_tokens = crate::mgmt_token::load_or_generate_per_plugin()?;
+        // An upgrade or a hand-edited grants file may have changed what the runner must see.
+        crate::plugins::converge_runner_roots();
+        crate::plugins::converge_runner_acls(&runner);
     }
     // Default all-interfaces so paired clients browse over mTLS. Admin stays loopback in
     // `require_auth`. Packaged units ship a fixed ExecStart — `host.env` is the upgrade-safe pin;

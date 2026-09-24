@@ -299,7 +299,7 @@ pub(crate) const HOST_PLATFORM: &str = if cfg!(target_os = "windows") {
 /// Left-hand side of every `minHost` comparison: the build stamp, not the manifest version,
 /// which on a canary still names the last release.
 pub(crate) fn host_version() -> &'static str {
-    env!("PUNKTFUNK_VERSION")
+    crate::version::get()
 }
 
 /// Catalog strings land in logs and the console.

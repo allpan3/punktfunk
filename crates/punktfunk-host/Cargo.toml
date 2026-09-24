@@ -334,6 +334,9 @@ windows = { version = "0.62", features = [
     # CreateToolhelp32Snapshot/Process32*W — the conflicting-streaming-host process scan
     # (src/detect/windows.rs): is Sunshine/Apollo/... running alongside us?
     "Win32_System_Diagnostics_ToolHelp",
+    # GetApplicationUserModelId — a packaged (UWP) game's identity, which its frame window carries
+    # (src/windows/game_term.rs).
+    "Win32_Storage_Packaging_Appx",
     # The host power actions (src/power.rs, design/host-actions.md): SetSuspendState /
     # IsPwrSuspendAllowed (Power) and InitiateSystemShutdownExW + the SeShutdownPrivilege
     # constants (Shutdown).

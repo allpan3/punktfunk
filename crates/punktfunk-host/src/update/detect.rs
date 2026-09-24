@@ -15,10 +15,7 @@ use std::sync::OnceLock;
 pub(crate) fn detect() -> (InstallKind, Channel) {
     static DETECTED: OnceLock<(InstallKind, Channel)> = OnceLock::new();
     *DETECTED.get_or_init(|| {
-        classify_shared(
-            &gather(Product::Host, env!("PUNKTFUNK_VERSION")),
-            Product::Host,
-        )
+        classify_shared(&gather(Product::Host, crate::version::get()), Product::Host)
     })
 }
 

@@ -335,19 +335,38 @@ impl WinExecutor<'_> {
                 if self.dry {
                     self.ui
                         .ok("would re-enable only the tasks that were enabled before the stop");
-                    return Ok(());
-                }
-                for (task, enabled) in [
-                    ("PunktfunkWeb", web_enabled),
-                    ("PunktfunkScripting", scripting_enabled),
-                ] {
-                    if *enabled == Some(true) {
-                        self.spawn_quiet(&["schtasks", "/Change", "/TN", task, "/ENABLE"], true)?;
+                } else {
+                    for (task, enabled) in [
+                        ("PunktfunkWeb", web_enabled),
+                        ("PunktfunkScripting", scripting_enabled),
+                    ] {
+                        if *enabled == Some(true) {
+                            self.spawn_quiet(
+                                &["schtasks", "/Change", "/TN", task, "/ENABLE"],
+                                true,
+                            )?;
+                        }
                     }
+                    self.ui
+                        .ok("re-enabled the tasks that were enabled before the stop");
                 }
-                self.ui
-                    .ok("re-enabled the tasks that were enabled before the stop");
-                Ok(())
+                // The stop ended the runner and `/Create /F` left it enabled: start it again, or put
+                // back the operator's off. Its boot trigger alone would wait for the next reboot.
+                let runner: &[&str] = match scripting_enabled {
+                    Some(true) => &["schtasks", "/Run", "/TN", "PunktfunkScripting"],
+                    Some(false) => &[
+                        "schtasks",
+                        "/Change",
+                        "/TN",
+                        "PunktfunkScripting",
+                        "/DISABLE",
+                    ],
+                    None => return Ok(()),
+                };
+                self.spawn(
+                    &runner.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+                    true,
+                )
             }
             WinAction::WebSetup {
                 app_dir,

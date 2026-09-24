@@ -10,7 +10,8 @@ on the machine afterwards.
 > `~/.config/punktfunk` on Linux, `%ProgramData%\punktfunk` for the Windows host. It holds the
 > host's identity, your paired devices, the console password, `host.env`, the game library, logs,
 > and [plugin](/docs/plugins) state — which is what lets a reinstall pick up where you left off.
-> Each section gives the one command that clears it for a clean slate.
+> Each section gives the one command that clears it for a clean slate. On Linux the host also
+> keeps the plugin runner's folder list in `~/.config/systemd/user/punktfunk-scripting.service.d/`.
 
 Jump to what you installed:
 
@@ -330,7 +331,7 @@ stop testing — that removes the app and its data with it.
 Uninstall the app from Google Play or from Settings → Apps. That's the whole job — it's a public
 Play listing, so there's no tester list to leave. If you were on the invite-only **canary**
 (Internal testing) track and want off that too, say so on
-[Discord](https://discord.gg/kaPNvzMuGU).
+[Discord](https://discord.gg/wzEGg9y45z).
 
 ### Steam Deck — Decky plugin
 

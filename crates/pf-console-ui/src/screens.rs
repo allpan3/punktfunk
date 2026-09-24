@@ -201,6 +201,27 @@ impl Screen {
         }
     }
 
+    /// A finger drag, offered to what the screen scrolls: its menu list, or the library
+    /// grid. `false` scrolls it by ticks, as on the carousels or over a keyboard tray.
+    pub(crate) fn pan(&mut self, p: Pointer) -> bool {
+        if self.editing() {
+            return false;
+        }
+        match self {
+            Screen::Settings(s) => s.list.pan(p),
+            Screen::AddHost(s) => s.list.pan(p),
+            Screen::Pair(s) => s.list.pan(p),
+            Screen::PinHosts(s) => s.list.pan(p),
+            Screen::BindPreset(s) => s.list.pan(p),
+            Screen::Controllers(s) => s.list.pan(p),
+            Screen::HostOptions(s) => s.list.pan(p),
+            Screen::ShortcutEditor(s) => s.pan_list().is_some_and(|l| l.pan(p)),
+            Screen::RingEditor(s) => s.pan_list().pan(p),
+            Screen::Library(s) => s.pan(p),
+            Screen::Home(_) | Screen::Collections(_) => false,
+        }
+    }
+
     /// Mouse/touch in device pixels. `true` if the point landed on this screen's
     /// furniture, even when the press is a no-op — a stray tap must not fall through.
     /// `false` only for the empty backdrop.

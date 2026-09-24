@@ -22,18 +22,15 @@ pub const KWIN_POOL_MIN: i32 = 4;
 /// (`error alloc buffers: Invalid argument`).
 pub const KWIN_POOL_MAX: i32 = 4;
 
-/// Whether to ask a KWin output for unpaced delivery (`maxFramerate = 0/1`).
+/// Whether to ask a KWin output for delivery on its own frame signal.
 ///
 /// KWin schedules each screencast frame on a QTimer whose wait it rounds *up* to a whole
 /// millisecond, so an 8.333 ms frame is scheduled at 9 and the cadence jitters against the
-/// real refresh. Offering no ceiling zeroes its `frameInterval()`, and the timer then fires
-/// on the compositor's own frame signal. KWin 6.7+ accepts the value; older KWin floors at
-/// 1/1, rejects that pod, and fixates the plain twin listed behind it.
-///
-/// That timer also coalesces cursor-only records, which KWin schedules from
-/// `Cursors::positionChanged` — pointer cadence, not vblank. Uncapped, each such record
-/// takes a pool buffer, and KWin drops a frame outright when it finds none free.
-/// `PUNKTFUNK_KWIN_PACED=1` restores the throttle if that bites.
+/// real refresh. A ceiling well above the stream rate keeps that gate below one refresh, so
+/// every real frame passes; without one, a game far above the stream rate and cursor-only
+/// records take a pool buffer each, and KWin drops a frame outright when none is free.
+/// The ceiling is `KWIN_UNPACED_HEADROOM` times the rate, or none when the rate is unknown.
+/// `PUNKTFUNK_KWIN_PACED=1` asks for the stream rate itself.
 pub fn unpaced_capture() -> bool {
     !pf_host_config::env_on("PUNKTFUNK_KWIN_PACED").unwrap_or(false)
 }
@@ -266,6 +263,13 @@ pub trait Capturer: Send {
     /// and announces the gap. `None` = nothing recovered.
     fn take_recovered_outage(&mut self) -> Option<std::time::Duration> {
         None
+    }
+
+    /// Since the last call, the frame the encoder last read may be torn (a
+    /// producer re-sent a buffer this side still held). The stream loop
+    /// answers with one IDR. Default: never.
+    fn take_reference_risk(&mut self) -> bool {
+        false
     }
 
     /// Live capture health for the operator surface (WP18). `None` = this

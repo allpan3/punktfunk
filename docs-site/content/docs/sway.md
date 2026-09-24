@@ -17,6 +17,10 @@ compositors do have — but with no video there is no stream.
 > On **Hyprland**? It's a separate first-class backend (its own `hyprctl` IPC and xdph portal) —
 > see [Hyprland](/docs/hyprland). This page is for sway.
 
+> On **[scroll](https://github.com/dawsers/scroll)**? It is a sway fork and runs on this backend:
+> the host detects it and drives it through `scrollmsg`. Everything below applies, with
+> `scroll-portals.conf` in place of `sway-portals.conf`. It has not been tested on real hardware yet.
+
 This is **not a primary target.** It works and is validated live on **sway 1.11** (zero-copy), but it
 sees far less testing than the KDE and GNOME paths — expect rougher edges. If you have a choice,
 [KDE](/docs/kde) or [GNOME](/docs/gnome) are the better-exercised desktops.
@@ -71,10 +75,10 @@ For how long the virtual output lives, and extend-vs-exclusive topology, see
 
 ## Requirements
 
-- A running **sway** session — its IPC socket (`SWAYSOCK`) is what the whole video path runs on. You
-  don't have to export it: the host finds the live sway instance itself on every connect, so a
-  `systemd --user` host works even though it never inherited your login shell's environment. On
-  Hyprland, use the [Hyprland backend](/docs/hyprland) instead.
+- A running **sway** (or scroll) session — its IPC socket (`SWAYSOCK`) is what the whole video path
+  runs on. You don't have to export it: the host finds the live sway instance itself on every
+  connect, so a `systemd --user` host works even though it never inherited your login shell's
+  environment. On Hyprland, use the [Hyprland backend](/docs/hyprland) instead.
 - **xdg-desktop-portal-wlr (xdpw)** installed and running — the host captures through its ScreenCast
   portal. Without it there is no video.
 - **ScreenCast routed to xdpw** — only if another portal backend (gtk, gnome) is installed alongside

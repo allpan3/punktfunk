@@ -119,6 +119,9 @@ pub(crate) const PKEY_MIX_FORMAT_2: PROPERTYKEY = pkey(0x3d6e1656_2e50_4c4c_8d85
 pub(crate) const PKEY_MIX_FORMAT_3: PROPERTYKEY = pkey(0x3d6e1656_2e50_4c4c_8d85_d0acae3c6c68, 3);
 /// Host processing format (float leg).
 pub(crate) const PKEY_HOST_FORMAT: PROPERTYKEY = pkey(0xe4870e26_3cc5_4cd2_ba46_ca0a9a70ed04, 0);
+/// A capture pin's second mix-format copy, beside [`PKEY_MIX_FORMAT_3`]. Render pins lack it.
+pub(crate) const PKEY_CAPTURE_MIX_FORMAT: PROPERTYKEY =
+    pkey(0x624f56de_fd24_473e_814a_de40aacaed16, 3);
 
 /// 4 ch / 48 kHz / 16-bit PCM, mask 0x33 (FL FR BL BR), PCM subtype.
 const WFX_PCM16_4CH_48K: [u8; 40] = [
@@ -740,6 +743,22 @@ pub(crate) fn stamps_served(endpoint_id: &str, stamps: &[Stamp]) -> bool {
         return false;
     };
     stamps.iter().all(|s| stamp_served(&store, s))
+}
+
+/// One served property's raw blob (a format, say), or `None` when unreadable or not a blob.
+pub(crate) fn served_blob(endpoint_id: &str, key: &PROPERTYKEY) -> Option<Vec<u8>> {
+    let dev = open_mmdevice(endpoint_id).ok()?;
+    // SAFETY: read-only property store on a COM-initialized thread.
+    let store = unsafe { dev.OpenPropertyStore(STGM_READ) }.ok()?;
+    // SAFETY: the key is a valid PROPERTYKEY; GetValue returns an owned variant that is
+    // cleared below, exactly once.
+    let mut pv = unsafe { store.GetValue(key) }.ok()?;
+    let out = pv_bytes(&pv);
+    // SAFETY: `pv` owns store-allocated memory; cleared exactly once, then dropped inert.
+    unsafe {
+        let _ = PropVariantClear(&mut pv);
+    }
+    out
 }
 
 /// Idempotent pad-audio provision for one slot: reuse or create the devnode,

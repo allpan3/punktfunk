@@ -90,7 +90,7 @@ pub(crate) struct UpdateStatus {
 
 fn status_from(snap: update::Snapshot) -> UpdateStatus {
     let (kind, channel) = detect::detect();
-    let current = env!("PUNKTFUNK_VERSION");
+    let current = crate::version::get();
     let stale = snap.stale();
     // A source build's answer comes from its checkout, not the feed: its version can
     // never reach a published canary label, so the manifest would flag one forever.

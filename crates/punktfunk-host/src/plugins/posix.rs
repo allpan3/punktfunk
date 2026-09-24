@@ -110,6 +110,12 @@ pub(super) fn grant(_dir: &std::path::Path, _write: bool) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn revoke(_dir: &std::path::Path) -> Result<()> {
+    Ok(())
+}
+
+pub(super) fn converge_runner_acls(_status: &RuntimeStatus) {}
+
 /// Lifts a mask left by [`disable`] first; a no-op when there is none.
 #[cfg(target_os = "linux")]
 pub(super) fn enable() -> Result<()> {
@@ -133,6 +139,12 @@ pub(super) fn disable() -> Result<()> {
     Ok(())
 }
 
+/// Shown while systemd keeps restarting a runner that dies at start — "switched off" would send
+/// the operator to a switch that is already on.
+#[cfg(target_os = "linux")]
+const RUNNER_FAILING: &str =
+    "The plugin runner keeps failing to start. Troubleshooting → Plugins shows why.";
+
 #[cfg(target_os = "linux")]
 pub(super) fn runtime_status() -> RuntimeStatus {
     let enabled_raw = systemctl_output(&["is-enabled", UNIT]);
@@ -141,16 +153,21 @@ pub(super) fn runtime_status() -> RuntimeStatus {
     // is the other half of "can we install plugins".
     let unit_known = enabled_raw.as_deref().is_some_and(|s| s != "not-found");
     let installed = unit_known || runner_command().is_ok();
+    let failing = active == "failed"
+        || systemctl_output(&["show", UNIT, "-p", "SubState", "--value"]).as_deref()
+            == Some("auto-restart");
     RuntimeStatus {
         installed,
         enabled: enabled_raw.as_deref() == Some("enabled"),
         running: active == "active",
         unit: UNIT,
         principal: None,
-        detail: if installed {
-            String::new()
-        } else {
+        detail: if !installed {
             RUNNER_MISSING.into()
+        } else if failing {
+            RUNNER_FAILING.into()
+        } else {
+            String::new()
         },
     }
 }
@@ -200,9 +217,107 @@ fn systemctl_output(args: &[&str]) -> Option<String> {
     }
 }
 
+/// Is `PUNKTFUNK_PLUGIN_SANDBOX` off in the runner unit's own environment? The host's
+/// environment says nothing about it: the runner reads only what its unit sets.
+#[cfg(target_os = "linux")]
+pub(super) fn runner_sandbox_off() -> bool {
+    systemctl_output(&["show", UNIT, "-p", "Environment", "--value"]).is_some_and(|env| {
+        env.split_whitespace().any(|kv| {
+            kv.strip_prefix("PUNKTFUNK_PLUGIN_SANDBOX=")
+                .is_some_and(|v| matches!(v.trim_matches('"'), "0" | "off" | "false"))
+        })
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn runner_sandbox_off() -> bool {
+    false
+}
+
 #[cfg(target_os = "linux")]
 pub(super) fn restart_runtime() -> Result<()> {
     run_systemctl(&["restart", UNIT])
+}
+
+/// The runner unit's drop-in naming every root a sandbox binds; its tmpfs home hides the rest.
+#[cfg(target_os = "linux")]
+const ROOTS_DROPIN: &str = "50-plugin-roots.conf";
+
+/// Install the roots drop-in, then reload and restart the runner when it changed.
+#[cfg(target_os = "linux")]
+pub(super) fn converge_runner_roots(
+    roots: &[access::RunnerRoot],
+    home: &std::path::Path,
+) -> Result<bool> {
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| home.join(".config"));
+    let dir = config.join(format!("systemd/user/{UNIT}.service.d"));
+    let path = dir.join(ROOTS_DROPIN);
+    let body = render_roots(roots, home);
+    if std::fs::read_to_string(&path).is_ok_and(|old| old == body) {
+        return Ok(false);
+    }
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    // Per process: a CLI grant and the serving host may converge at the same moment.
+    let tmp = dir.join(format!("{ROOTS_DROPIN}.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, &body).with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("replace {}", path.display()))?;
+    run_systemctl(&["daemon-reload"])?;
+    run_systemctl(&["--no-block", "try-restart", UNIT])?;
+    Ok(true)
+}
+
+/// One self-bind per root the unit would otherwise hide or keep read-only. `ProtectHome` hides
+/// `/home` and `/root` (not just this `home`); a read anywhere else is visible already. A
+/// `src:dst` pair fails the unit's `+` ExecStartPre. systemd drops a bind whose path holds a
+/// quote, and a control character would end the line: left out.
+#[cfg(any(test, target_os = "linux"))]
+fn render_roots(roots: &[access::RunnerRoot], home: &std::path::Path) -> String {
+    let mut out = String::from(
+        "# Written by punktfunk-host from plugin manifests and folder grants. Edits are replaced.\n[Service]\n",
+    );
+    for r in roots {
+        let Some(path) = r.path.to_str() else {
+            continue;
+        };
+        if path
+            .chars()
+            .any(|c| c.is_control() || c == '"' || c == '\'')
+        {
+            tracing::warn!(
+                path,
+                cause = "a quote or control character in the name",
+                "plugin root left out of the runner unit"
+            );
+            continue;
+        }
+        let hidden = [
+            home,
+            std::path::Path::new("/home"),
+            std::path::Path::new("/root"),
+        ]
+        .iter()
+        .any(|h| r.path.starts_with(h));
+        let key = match (hidden, r.write) {
+            (true, true) => "BindPaths",
+            (true, false) => "BindReadOnlyPaths",
+            (false, true) => "ReadWritePaths",
+            (false, false) => continue,
+        };
+        let quoted = path.replace('\\', "\\\\").replace('%', "%%");
+        out.push_str(&format!("{key}=\"-{quoted}\"\n"));
+    }
+    out
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn converge_runner_roots(
+    _roots: &[access::RunnerRoot],
+    _home: &std::path::Path,
+) -> Result<bool> {
+    Ok(false)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -355,5 +470,55 @@ mod tests {
         ] {
             assert!(RUNNER_MISSING.contains(hint), "missing hint: {hint}");
         }
+    }
+
+    fn root(path: &str, write: bool) -> access::RunnerRoot {
+        access::RunnerRoot {
+            path: path.into(),
+            write,
+        }
+    }
+
+    /// systemd reads `"-path"`, `:`, `%%` and `\\` back as the paths written here.
+    #[test]
+    fn roots_render_as_the_unit_grammar() {
+        let body = render_roots(
+            &[
+                root("/h/Emu", false),
+                root("/h/My 100% Games:x\\y", false),
+                root("/h/saves", true),
+                root("/mnt/games", false),
+                root("/mnt/out", true),
+                root("/home/other/Games", false),
+            ],
+            Path::new("/h"),
+        );
+        let lines: Vec<&str> = body.lines().skip(2).collect();
+        assert_eq!(
+            lines,
+            [
+                r#"BindReadOnlyPaths="-/h/Emu""#,
+                r#"BindReadOnlyPaths="-/h/My 100%% Games:x\\y""#,
+                r#"BindPaths="-/h/saves""#,
+                r#"ReadWritePaths="-/mnt/out""#,
+                // ProtectHome hides every home, not only the operator's.
+                r#"BindReadOnlyPaths="-/home/other/Games""#,
+            ]
+        );
+        assert!(body.starts_with("# Written by punktfunk-host"));
+        assert_eq!(body.lines().nth(1), Some("[Service]"));
+    }
+
+    #[test]
+    fn a_root_that_could_break_the_unit_is_left_out() {
+        let body = render_roots(
+            &[
+                root("/h/it's", false),
+                root("/h/a\"b", false),
+                root("/h/x\nExecStartPre=+/bin/sh", false),
+            ],
+            Path::new("/h"),
+        );
+        assert_eq!(body.lines().count(), 2, "{body}");
     }
 }

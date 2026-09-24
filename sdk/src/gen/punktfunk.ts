@@ -662,6 +662,8 @@ export type ReportProviderRunning400 = ApiError
 export const ReportProviderRunning400 = ApiError
 export type ReportProviderRunning401 = ApiError
 export const ReportProviderRunning401 = ApiError
+export type ReportProviderRunning403 = ApiError
+export const ReportProviderRunning403 = ApiError
 export type ListLibraryScanners200 = ReadonlyArray<ScannerInfo>
 export const ListLibraryScanners200 = Schema.Array(ScannerInfo)
 export type ListLibraryScanners401 = ApiError
@@ -672,6 +674,8 @@ export type SetLibraryScanner200 = ReadonlyArray<ScannerInfo>
 export const SetLibraryScanner200 = Schema.Array(ScannerInfo)
 export type SetLibraryScanner401 = ApiError
 export const SetLibraryScanner401 = ApiError
+export type SetLibraryScanner403 = ApiError
+export const SetLibraryScanner403 = ApiError
 export type SetLibraryScanner404 = ApiError
 export const SetLibraryScanner404 = ApiError
 export type SetLibraryScanner500 = ApiError
@@ -1575,6 +1579,7 @@ export const make = (
       "2xx": decodeSuccess(ReportProviderRunning200),
       "400": decodeError("ReportProviderRunning400", ReportProviderRunning400),
       "401": decodeError("ReportProviderRunning401", ReportProviderRunning401),
+      "403": decodeError("ReportProviderRunning403", ReportProviderRunning403),
       orElse: unexpectedStatus
     }))
   ),
@@ -1590,6 +1595,7 @@ export const make = (
     withResponse(options.config)(HttpClientResponse.matchStatus({
       "2xx": decodeSuccess(SetLibraryScanner200),
       "401": decodeError("SetLibraryScanner401", SetLibraryScanner401),
+      "403": decodeError("SetLibraryScanner403", SetLibraryScanner403),
       "404": decodeError("SetLibraryScanner404", SetLibraryScanner404),
       "500": decodeError("SetLibraryScanner500", SetLibraryScanner500),
       orElse: unexpectedStatus
@@ -2363,7 +2369,7 @@ readonly "deleteProviderEntries": <Config extends OperationConfig>(provider: str
 * Titles the provider does not currently publish count as `unknown`, not an error — a
 * report may race its own reconcile.
 */
-readonly "reportProviderRunning": <Config extends OperationConfig>(provider: string, options: { readonly payload: typeof ReportProviderRunningRequestJson.Encoded; readonly config?: Config | undefined }) => Effect.Effect<WithOptionalResponse<typeof ReportProviderRunning200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"ReportProviderRunning400", typeof ReportProviderRunning400.Type> | PunktfunkError<"ReportProviderRunning401", typeof ReportProviderRunning401.Type>>
+readonly "reportProviderRunning": <Config extends OperationConfig>(provider: string, options: { readonly payload: typeof ReportProviderRunningRequestJson.Encoded; readonly config?: Config | undefined }) => Effect.Effect<WithOptionalResponse<typeof ReportProviderRunning200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"ReportProviderRunning400", typeof ReportProviderRunning400.Type> | PunktfunkError<"ReportProviderRunning401", typeof ReportProviderRunning401.Type> | PunktfunkError<"ReportProviderRunning403", typeof ReportProviderRunning403.Type>>
   /**
 * One row per installed library plugin, with its enable state. Sources default to
 * enabled; disabling hides titles from the next read. The custom store is not a
@@ -2375,7 +2381,7 @@ readonly "listLibraryScanners": <Config extends OperationConfig>(options: { read
 * Takes effect on the next library read. Disabling hides titles; the plugin may keep
 * reconciling while off. Nothing is deleted. Emits `library.changed` when the state changes.
 */
-readonly "setLibraryScanner": <Config extends OperationConfig>(id: string, options: { readonly payload: typeof SetLibraryScannerRequestJson.Encoded; readonly config?: Config | undefined }) => Effect.Effect<WithOptionalResponse<typeof SetLibraryScanner200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"SetLibraryScanner401", typeof SetLibraryScanner401.Type> | PunktfunkError<"SetLibraryScanner404", typeof SetLibraryScanner404.Type> | PunktfunkError<"SetLibraryScanner500", typeof SetLibraryScanner500.Type>>
+readonly "setLibraryScanner": <Config extends OperationConfig>(id: string, options: { readonly payload: typeof SetLibraryScannerRequestJson.Encoded; readonly config?: Config | undefined }) => Effect.Effect<WithOptionalResponse<typeof SetLibraryScanner200.Type, Config>, HttpClientError.HttpClientError | SchemaError | PunktfunkError<"SetLibraryScanner401", typeof SetLibraryScanner401.Type> | PunktfunkError<"SetLibraryScanner403", typeof SetLibraryScanner403.Type> | PunktfunkError<"SetLibraryScanner404", typeof SetLibraryScanner404.Type> | PunktfunkError<"SetLibraryScanner500", typeof SetLibraryScanner500.Type>>
   /**
 * Unauthenticated; `require_auth` admits loopback only.
 */

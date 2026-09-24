@@ -170,10 +170,12 @@ fn binding(mode: TargetMode, keep_default: bool, seat: bool) -> (bool, bool) {
 }
 
 /// First reopen wait after a transient failure. Doubles per miss up to [`REOPEN_BACKOFF_CAP`];
-/// resets on success or an endpoint-set change. Do not retry flat at 2 s — each attempt re-runs
-/// the wiring pass, IPolicyConfig included.
+/// resets after an attempt that lived [`REOPEN_STABLE_AFTER`] or an endpoint-set change. Do not
+/// retry flat at 2 s — each attempt re-runs the wiring pass, IPolicyConfig included.
 const REOPEN_BACKOFF_START: Duration = Duration::from_secs(2);
 const REOPEN_BACKOFF_CAP: Duration = Duration::from_secs(60);
+/// An attempt this old streamed: its death is a new failure, not the next miss of a failing open.
+const REOPEN_STABLE_AFTER: Duration = Duration::from_secs(5);
 /// Fingerprint poll while backing off or waiting out an unsatisfiable plan: enumerate-and-hash
 /// only. A change ends the wait immediately so a re-arrived endpoint is not stuck behind the cap.
 const ENDPOINT_POLL_EVERY: Duration = Duration::from_secs(2);
@@ -184,6 +186,15 @@ const DEFAULT_CHECK_EVERY: Duration = Duration::from_secs(1);
 const FIRST_OPEN_ATTEMPTS: u32 = 3;
 /// Endpoint churn settles in well under a second.
 const FIRST_OPEN_RETRY_PAUSE: Duration = Duration::from_secs(1);
+/// Live loopback captures. A join session opens a second one on the same sink, and the
+/// parked defaults, the sink's layout and the voice pins are shared: only the last capture
+/// to end puts them back, and only a capture alone on the sink reshapes it.
+static LIVE_CAPTURES: Mutex<usize> = Mutex::new(0);
+
+fn live_captures() -> std::sync::MutexGuard<'static, usize> {
+    LIVE_CAPTURES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Packet-less stretch after which `DATA_DISCONTINUITY` is idle-resume, not a hole.
 /// Classic loopback delivers nothing while nothing renders, then flags the resume packet;
 /// scoring that flag always would charge every notification on a silent host. ~10 ms engine
@@ -210,6 +221,7 @@ fn capture_thread(
     // Must wake on the engine event every ~10 ms or the loopback buffer wraps. Same MMCSS +
     // `THREAD_PRIORITY_HIGHEST` boost as the paced sender; a no-op if refused.
     pf_frame::thread_qos::boost_thread_priority(true);
+    *live_captures() += 1;
     // Each `capture_once` is one open + inner loop. First open gets [`FIRST_OPEN_ATTEMPTS`]
     // tries before `open()` surfaces Err; the native plane then retries the whole open.
     let mut ready = Some(ready);
@@ -222,6 +234,7 @@ fn capture_thread(
     // Outlives every reopen: the pins stay while the capture re-plans, and go at the end.
     let mut voice = voice_route::VoiceRoute::default();
     while !stop.load(Ordering::Relaxed) {
+        let attempt = Instant::now();
         match capture_once(
             &tx,
             &stop,
@@ -280,6 +293,10 @@ fn capture_thread(
                     }
                 } else {
                     unsat_logged = None;
+                    if attempt.elapsed() >= REOPEN_STABLE_AFTER {
+                        failures = 0;
+                        backoff = REOPEN_BACKOFF_START;
+                    }
                     failures += 1;
                     if failures.is_power_of_two() {
                         tracing::warn!(error = %format!("{e:#}"), count = failures,
@@ -298,12 +315,17 @@ fn capture_thread(
             }
         }
     }
-    // Voice apps back on the default first, then both parked defaults (no-op if never parked,
-    // or if the operator moved them), then the sink's speaker layout.
-    voice.clear();
-    audio_control::restore_default_playback();
-    audio_control::restore_default_recording();
-    audio_control::restore_endpoint_channels();
+    // Last capture out: voice apps back first, then both parked defaults (no-op if never
+    // parked, or if the operator moved them), then the sink's speaker layout. Held across the
+    // restore so a capture starting now parks after it, not before.
+    let mut live = live_captures();
+    *live -= 1;
+    if *live == 0 {
+        voice.clear();
+        audio_control::restore_default_playback();
+        audio_control::restore_default_recording();
+        audio_control::restore_endpoint_channels();
+    }
     Ok(())
 }
 
@@ -493,7 +515,11 @@ fn capture_once(
         .map(|f| f.get_nchannels())
         .filter(|&have| u32::from(have) != channels)
     {
-        if silent_loopback(&dev_name, &dev_id) {
+        let shared = *live_captures() > 1;
+        if silent_loopback(&dev_name, &dev_id) && shared {
+            tracing::info!(device = %dev_name, engine_ch = have, requested = channels,
+                "another session is capturing this sink — keeping its speaker layout");
+        } else if silent_loopback(&dev_name, &dev_id) {
             let hz = engine
                 .as_ref()
                 .map_or(SAMPLE_RATE, |f| f.get_samplespersec());
@@ -607,6 +633,15 @@ fn capture_once(
         .filter(|id| *id != dev_id);
     if let Some(id) = &host_out {
         voice.arm(id);
+    } else if voice_route::wanted() {
+        static NOTED: std::sync::Once = std::sync::Once::new();
+        NOTED.call_once(|| {
+            tracing::warn!(
+                "voice chat on the host is set, but this capture parked no host output to pin \
+                 voice apps to (PUNKTFUNK_KEEP_DEFAULT, a seat, or the default already was the \
+                 sink) — voice apps stay on the default and reach the stream"
+            )
+        });
     }
     // Only when the capture is silent on the host: a plan that fell back to real hardware
     // is already audible, and a second render would play the mix twice.
@@ -663,6 +698,7 @@ fn capture_once(
     // if nothing was lost) sizes missing audio in the device clock.
     let mut last_packet: Option<Instant> = None;
     let mut next_index: u64 = 0;
+    let index_hz = u64::from(engine_hz.filter(|&hz| hz > 0).unwrap_or(open_hz).max(1));
     let mut fight = FightDamper::new(Instant::now());
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -691,13 +727,18 @@ fn capture_once(
                         // Packet-ready then zero frames: a spinning tap looks like a quiet desktop.
                         stats.missed_dequeues += 1;
                     } else {
-                        if info.flags.data_discontinuity && flowing {
+                        // A SILENT packet's lost stretch was silence: an idling loopback delivers
+                        // them on the 100 ms timeout, each flagged discontinuous.
+                        if info.flags.data_discontinuity && flowing && !info.flags.silent {
                             let lost = info.index.saturating_sub(next_index);
                             stats.observe_gap(Duration::from_micros(
-                                lost.saturating_mul(1_000_000) / open_hz.max(1) as u64,
+                                lost.saturating_mul(1_000_000) / index_hz,
                             ));
                         }
-                        next_index = info.index.saturating_add(frames);
+                        // `index` counts engine frames, `frames` counts frames at `open_hz`.
+                        next_index = info
+                            .index
+                            .saturating_add(frames * index_hz / u64::from(open_hz.max(1)));
                         last_packet = Some(now);
                     }
                 }

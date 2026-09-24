@@ -1701,6 +1701,9 @@ public final class PunktfunkConnection: @unchecked Sendable {
     public static let userFlagRecoveryPoint: UInt32 = 16
     /// `AccessUnit.flags` bit: a clean RFI recovery anchor P (the wire's `USER_FLAG_RECOVERY_ANCHOR`).
     public static let userFlagRecoveryAnchor: UInt32 = 32
+    /// `AccessUnit.flags` bit: an idle-keepalive re-encode of the previous picture (the wire's
+    /// `USER_FLAG_REPEAT`). Its pts is the host's submit instant, not a capture — off-cadence.
+    public static let userFlagRepeat: UInt32 = 256
 
     /// Static HDR mastering metadata (SMPTE ST.2086 + content light level) the host sent for an HDR
     /// session. Mirrors the wire/ABI `PunktfunkHdrMeta`; primaries are in ST.2086 **G, B, R** order,

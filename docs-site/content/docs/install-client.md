@@ -191,7 +191,7 @@ Swap `latest` for `canary` to track `main`. Release APKs are also attached to ea
 browser or file manager the first time.
 
 **Canary on Play** is a separate **Internal testing** track, and that one *is* invite-only — ask on
-[Discord](https://discord.gg/kaPNvzMuGU) and we'll add your Google account. The `canary` APK above
+[Discord](https://discord.gg/wzEGg9y45z) and we'll add your Google account. The `canary` APK above
 needs no invite.
 
 ## LG webOS TV (community)

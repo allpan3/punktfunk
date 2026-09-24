@@ -41,16 +41,20 @@ RUN pacman -Syu --noconfirm --needed \
         # below. It does NOT affect the gamescope companion leg — that is meson + its own linker,
         # and its `-static-libstdc++` link is untouched.
         mold \
-        # bun builds the punktfunk-web console + the punktfunk-scripting runner AND is vendored as
-        # their runtime (PF_WITH_WEB=1 / PF_WITH_SCRIPTING=1) — so these bytes end up inside the
-        # package arch.yml signs and publishes. Arch ships bun in [extra], so take the
-        # pacman-signed package (pacman verifies package signatures by default) instead of piping
-        # bun.sh's installer into root's shell, which would be upstream code choosing them. Same
-        # call as arch.yml's bootstrap guard. It rides THIS transaction rather than a later layer
-        # on purpose: -Syu refreshes the db in the same step that installs, so a cache-hit rebuild
-        # can never resolve bun against a stale snapshot the mirrors no longer carry.
-        bun \
-    && pacman -Scc --noconfirm \
+    && pacman -Scc --noconfirm
+
+# bun builds the punktfunk-web console + the punktfunk-scripting runner AND is vendored as their
+# runtime (PF_WITH_WEB=1 / PF_WITH_SCRIPTING=1), so these bytes end up in the package arch.yml
+# signs. A PINNED release asset checked by SHA-256, not [extra]'s rolling bun: ONE bun across the
+# repo, same version, asset and sum as rust-ci.Dockerfile — bump BUN_VERSION and BUN_SHA together.
+ARG BUN_VERSION=1.4.2
+ARG BUN_SHA=c678040f14fe0440eb839d37cbd0ce4c051a32da72806ac97de6a6aab6bf728f
+RUN curl -fsSL -o /tmp/bun.zip \
+      "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-x64-baseline.zip" \
+    && echo "${BUN_SHA}  /tmp/bun.zip" | sha256sum -c - \
+    && unzip -q -o -j /tmp/bun.zip '*/bun' -d /tmp \
+    && install -m0755 /tmp/bun /usr/local/bin/bun \
+    && rm -f /tmp/bun.zip /tmp/bun \
     && bun --version
 
 # Shared compile cache: jobs set RUSTC_WRAPPER=sccache (backend = RustFS S3 on the LAN,

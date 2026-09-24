@@ -323,6 +323,48 @@ fn ensure_all(identity: &'static AudioIdentity) -> Result<MintedAudio> {
     Ok(out)
 }
 
+/// Put either minted mic pin back on the stamped 16-bit stereo 48 kHz device format. Steam's
+/// driver hands render bytes to the capture pin raw, so a pin at another depth or width turns
+/// the mic into noise. A property stamp is only served after an audio-service restart;
+/// `SetDeviceFormat` is served at once. Runs before the virtual mic opens its stream.
+pub(crate) fn repair_mic_formats() {
+    let Some(m) = provisioned() else {
+        return;
+    };
+    for id in [m.mic_render.as_deref(), m.mic_capture.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        let served = pe::served_blob(id, &pe::PKEY_DEVICE_FORMAT);
+        if served
+            .as_deref()
+            .is_some_and(|f| same_pcm_shape(f, &WFX_PCM16_2CH_48K))
+        {
+            continue;
+        }
+        let pcm16 = [(16, 16, wasapi::SampleType::Int)];
+        match audio_control::set_endpoint_format(id, 2, 48_000, &[0x3], &pcm16) {
+            Ok(()) => {
+                tracing::warn!(endpoint = id,
+                "virtual mic pin was not on 16-bit stereo 48 kHz — put it back (a mismatched pin \
+                 turns the mic into noise)")
+            }
+            Err(e) => tracing::warn!(endpoint = id, error = %format!("{e:#}"),
+                "virtual mic pin is off its format and couldn't be put back — the mic may carry \
+                 noise until the pin is set to 16-bit stereo 48 kHz"),
+        }
+    }
+}
+
+/// Same channels, rate, sample depth and subtype (the fields the driver's raw copy depends
+/// on). Byte equality would also compare fields the audio service rewrites on its own.
+fn same_pcm_shape(served: &[u8], want: &[u8; 40]) -> bool {
+    let field = |b: &[u8], r: std::ops::Range<usize>| b.get(r).map(<[u8]>::to_vec);
+    [2..4, 4..8, 14..16, 24..40]
+        .into_iter()
+        .all(|r| field(served, r.clone()).is_some() && field(served, r.clone()) == field(want, r))
+}
+
 /// Reuses this identity's healthy marker pair or creates it, then restores changed defaults.
 fn ensure_role(
     identity: &'static AudioIdentity,
@@ -377,20 +419,23 @@ fn ensure_role(
             }
         }
     };
-    da::bind_driver(&hwid, &inf)?;
-
-    let render = wait_for(&devnode, false)?;
-    let capture = match role {
-        Role::Mic => Some(wait_for(&devnode, true).with_context(|| {
-            format!("the minted mic devnode {devnode} produced no capture endpoint")
-        })?),
-        Role::Speakers => None,
-    };
-
-    stamp_identity(&render, identity, role, false);
-    if let Some(cap) = capture.as_ref() {
-        stamp_identity(cap, identity, role, true);
-    }
+    // Once bound, an endpoint can take a default before a later step fails: the restore below
+    // runs on every exit from here.
+    let endpoints = (|| -> Result<(String, Option<String>)> {
+        da::bind_driver(&hwid, &inf)?;
+        let render = wait_for(&devnode, false)?;
+        let capture = match role {
+            Role::Mic => Some(wait_for(&devnode, true).with_context(|| {
+                format!("the minted mic devnode {devnode} produced no capture endpoint")
+            })?),
+            Role::Speakers => None,
+        };
+        stamp_identity(&render, identity, role, false);
+        if let Some(cap) = capture.as_ref() {
+            stamp_identity(cap, identity, role, true);
+        }
+        Ok((render, capture))
+    })();
 
     // A fresh endpoint can grab a default; routing policy belongs to the wiring plan.
     if let Some(prev) = prev_render {
@@ -415,6 +460,7 @@ fn ensure_role(
             );
         }
     }
+    let (render, capture) = endpoints?;
     Ok((devnode, render, capture))
 }
 
@@ -492,32 +538,40 @@ fn stamp_identity(endpoint_id: &str, identity: &'static AudioIdentity, role: Rol
             value: pe::StampValue::Str("Punktfunk"),
         },
     ];
-    // Both mic pins are stereo 48 kHz. Mix/host keys are render-only properties.
+    // Both mic pins are stereo 48 kHz, and every mix-format copy a pin carries must agree with
+    // its device format. Left on the driver's 44.1 kHz mono, the capture pin refuses its own
+    // mix format and Control Panel's Recording tab hangs on it.
     if role == Role::Mic {
-        stamps.push(pe::Stamp {
-            label: "device-format",
-            key: pe::PKEY_DEVICE_FORMAT,
-            value: pe::StampValue::Format(&WFX_PCM16_2CH_48K),
+        stamps.extend([
+            pe::Stamp {
+                label: "device-format",
+                key: pe::PKEY_DEVICE_FORMAT,
+                value: pe::StampValue::Format(&WFX_PCM16_2CH_48K),
+            },
+            pe::Stamp {
+                label: "host-format",
+                key: pe::PKEY_HOST_FORMAT,
+                value: pe::StampValue::Format(&WFX_F32_2CH_48K),
+            },
+            pe::Stamp {
+                label: "mix-format-3",
+                key: pe::PKEY_MIX_FORMAT_3,
+                value: pe::StampValue::Format(&WFX_F32_2CH_48K),
+            },
+        ]);
+        stamps.push(if capture {
+            pe::Stamp {
+                label: "capture-mix-format",
+                key: pe::PKEY_CAPTURE_MIX_FORMAT,
+                value: pe::StampValue::Format(&WFX_F32_2CH_48K),
+            }
+        } else {
+            pe::Stamp {
+                label: "mix-format-2",
+                key: pe::PKEY_MIX_FORMAT_2,
+                value: pe::StampValue::Format(&WFX_F32_2CH_48K),
+            }
         });
-        if !capture {
-            stamps.extend([
-                pe::Stamp {
-                    label: "mix-format-2",
-                    key: pe::PKEY_MIX_FORMAT_2,
-                    value: pe::StampValue::Format(&WFX_F32_2CH_48K),
-                },
-                pe::Stamp {
-                    label: "mix-format-3",
-                    key: pe::PKEY_MIX_FORMAT_3,
-                    value: pe::StampValue::Format(&WFX_F32_2CH_48K),
-                },
-                pe::Stamp {
-                    label: "host-format",
-                    key: pe::PKEY_HOST_FORMAT,
-                    value: pe::StampValue::Format(&WFX_F32_2CH_48K),
-                },
-            ]);
-        }
     }
     // Served stamps need no writes or settle delay on later boots.
     if pe::stamps_served(endpoint_id, &stamps) {
@@ -820,5 +874,29 @@ mod seat_tests {
         assert!(!markers_match(&seat_a, Role::Speakers, Some(2), marker_a));
         assert!(!markers_match(&seat_a, Role::Speakers, None, None));
         assert!(markers_match(&seat_b, Role::Mic, Some(2), marker_b));
+    }
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+
+    /// Depth, width and rate each make a different pin; a rewritten byte rate alone does not.
+    #[test]
+    fn only_the_raw_copy_fields_decide_the_mic_shape() {
+        assert!(same_pcm_shape(&WFX_PCM16_2CH_48K, &WFX_PCM16_2CH_48K));
+        let mut deep = WFX_PCM16_2CH_48K;
+        deep[14] = 24;
+        assert!(!same_pcm_shape(&deep, &WFX_PCM16_2CH_48K));
+        let mut rate = WFX_PCM16_2CH_48K;
+        rate[4..8].copy_from_slice(&44_100u32.to_le_bytes());
+        assert!(!same_pcm_shape(&rate, &WFX_PCM16_2CH_48K));
+        assert!(!same_pcm_shape(
+            &WFX_PCM16_2CH_48K[..18],
+            &WFX_PCM16_2CH_48K
+        ));
+        let mut avg = WFX_PCM16_2CH_48K;
+        avg[8] ^= 1;
+        assert!(same_pcm_shape(&avg, &WFX_PCM16_2CH_48K));
     }
 }

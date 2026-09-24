@@ -13,8 +13,10 @@ use super::egl::{EglContext, EglSurface, GlesVersion};
 use super::gpu::Gpu;
 use anyhow::{bail, Result};
 use ndk::native_window::NativeWindow;
-use pf_client_core::console::{OverlayAction, PointerInput, SessionPhase};
-use pf_client_core::menu_nav::{MenuEvent, MenuNav, MenuPulse, MenuSample, PadInfo};
+use pf_client_core::console::{PointerInput, SessionPhase};
+use pf_client_core::menu_nav::{MenuEvent, MenuNav, MenuSample, PadInfo};
+use pf_console_ui::bridge::{Event, Published};
+use pf_console_ui::console::FrameCost;
 use pf_console_ui::{
     Console, ConsoleEntry, ConsoleHandles, ConsoleOptions, InputSource, Insets, Key, SnapshotStore,
     Viewport,
@@ -68,14 +70,9 @@ pub(super) enum Cmd {
 
 /// What the render thread raises for Kotlin.
 pub(super) enum HostEvent {
-    Action(OverlayAction),
-    Pulse(MenuPulse),
-    Editing(bool),
-    /// What the console's focus now reads as. Raised only when it changes; Kotlin speaks it
-    /// through `announceForAccessibility`, which is a no-op with no screen reader running.
-    Announce(String),
-    /// The shell saved settings: here is the whole snapshot to persist.
-    Settings(Box<pf_client_core::trust::Settings>),
+    /// What the shell raised; Kotlin speaks `announce` through `announceForAccessibility`,
+    /// which is a no-op with no screen reader running.
+    Console(Event),
     /// The GLES generation the context came up with — Kotlin logs it, nothing more.
     Gles(GlesVersion),
     /// The render thread died (EGL/Skia init failed). Kotlin falls back to its own console.
@@ -83,31 +80,10 @@ pub(super) enum HostEvent {
 }
 
 impl HostEvent {
-    /// The JSON Kotlin parses. Hand-rolled for the small variants; the two model payloads
-    /// ride serde.
+    /// The JSON Kotlin parses.
     pub(super) fn to_json(&self) -> String {
         match self {
-            HostEvent::Action(a) => format!(
-                "{{\"action\":{}}}",
-                serde_json::to_string(a).unwrap_or_else(|_| "null".into())
-            ),
-            HostEvent::Pulse(p) => format!(
-                "{{\"pulse\":\"{}\"}}",
-                match p {
-                    MenuPulse::Move => "move",
-                    MenuPulse::Confirm => "confirm",
-                    MenuPulse::Boundary => "boundary",
-                }
-            ),
-            HostEvent::Editing(e) => format!("{{\"editing\":{e}}}"),
-            HostEvent::Announce(text) => format!(
-                "{{\"announce\":{}}}",
-                serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into())
-            ),
-            HostEvent::Settings(s) => format!(
-                "{{\"settings\":{}}}",
-                serde_json::to_string(s).unwrap_or_else(|_| "null".into())
-            ),
+            HostEvent::Console(e) => e.to_json(),
             HostEvent::Gles(v) => format!(
                 "{{\"gles\":{}}}",
                 match v {
@@ -285,17 +261,7 @@ fn boost_thread_priority() {
     }
 }
 
-/// How often the render loop reports what a frame is costing it. Nothing in a bug report from a
-/// TV said whether the console was drawing at 4K or at 60 Hz, so "it feels sluggish" could not be
-/// triaged from a log bundle at all — this is that missing line. One line a minute is cheap
-/// enough to leave on for everyone, and the answer is only useful from the box that is slow.
-const FRAME_REPORT: Duration = Duration::from_secs(60);
-
-/// No input for this long = the console is being looked at, not used — halve the redraw
-/// rate (`IDLE_FRAME_STEP` slept between swaps). 60 s keeps every interaction and its
-/// afterglow at full smoothness and only calms a genuinely parked screen.
-const IDLE_AFTER: Duration = Duration::from_secs(60);
-/// One extra ~vsync period per frame while idle: 60 Hz → ~30, 120 Hz → ~40.
+/// One extra ~vsync period per frame once the console is idle: 60 Hz → ~30, 120 Hz → ~40.
 const IDLE_FRAME_STEP: Duration = Duration::from_millis(16);
 
 /// The render thread. Owns EGL + Skia + the console; runs until `Cmd::Quit`.
@@ -337,7 +303,7 @@ fn render_loop(mut console: Console, shared: Arc<Shared>, store: Arc<SnapshotSto
             ui.nav.poll(&ui.sample, Instant::now(), &mut menu_out);
             for ev in menu_out.drain(..) {
                 if let Some(p) = console.menu(ev, InputSource::Pad) {
-                    shared.emit(HostEvent::Pulse(p));
+                    shared.emit(HostEvent::Console(Event::Pulse(p)));
                 }
             }
         }
@@ -345,7 +311,7 @@ fn render_loop(mut console: Console, shared: Arc<Shared>, store: Arc<SnapshotSto
         // Half-rate after 60 s without input — one extra frame period between swaps, so an
         // idle carousel stops redrawing a phone's panel at full rate; the aurora still
         // breathes, at half tempo. Any input restores full rate on its own frame.
-        if ui.last_input.elapsed() >= IDLE_AFTER {
+        if console.idle() {
             std::thread::sleep(IDLE_FRAME_STEP);
         }
         glass.draw(&mut console, &ui);
@@ -356,7 +322,7 @@ fn render_loop(mut console: Console, shared: Arc<Shared>, store: Arc<SnapshotSto
                 glass.gl_failures
             );
         }
-        published.publish(&mut console, &shared, &store);
+        published.publish(&mut console, &store, |e| shared.emit(HostEvent::Console(e)));
     }
 }
 
@@ -378,11 +344,8 @@ struct Glass {
     gpu: Option<Gpu>,
     egl: EglContext,
     gl_failures: u32,
-    /// What a frame is costing, reported once a `FRAME_REPORT` window (see there).
-    frames: u32,
-    frame_time: Duration,
-    frame_peak: Duration,
-    report_at: Instant,
+    /// What a frame is costing, logged once a window. A slow TV's log bundle carries it.
+    cost: FrameCost,
 }
 
 impl Glass {
@@ -394,10 +357,7 @@ impl Glass {
             surface: None,
             skia: None,
             gl_failures: 0,
-            frames: 0,
-            frame_time: Duration::ZERO,
-            frame_peak: Duration::ZERO,
-            report_at: Instant::now(),
+            cost: FrameCost::default(),
         }
     }
 
@@ -469,12 +429,7 @@ impl Glass {
                     // Start the frame window here, not at loop entry: the console parks
                     // with no surface while a stream is up, and a window that had been
                     // open across that would report its first frame as "1 frame in 20 min".
-                    (
-                        self.frames,
-                        self.frame_time,
-                        self.frame_peak,
-                        self.report_at,
-                    ) = (0, Duration::ZERO, Duration::ZERO, Instant::now());
+                    self.cost = FrameCost::default();
                 }
                 Err(e) => {
                     log::error!("console: {e:#}");
@@ -504,24 +459,15 @@ impl Glass {
             &ui.pads,
         );
         g.context.flush_and_submit();
-        let cost = drew.elapsed();
-        self.frame_time += cost;
-        self.frame_peak = self.frame_peak.max(cost);
-        self.frames += 1;
-        if self.report_at.elapsed() >= FRAME_REPORT {
+        let now = Instant::now();
+        if let Some(r) = self.cost.add(now - drew, now) {
             log::info!(
                 "console: {w}×{h}, {} frames in {:?} — {:.1} ms/frame mean, {:.1} ms peak",
-                self.frames,
-                self.report_at.elapsed(),
-                self.frame_time.as_secs_f64() * 1000.0 / f64::from(self.frames),
-                self.frame_peak.as_secs_f64() * 1000.0,
+                r.frames,
+                r.window,
+                r.mean_ms,
+                r.peak_ms,
             );
-            (
-                self.frames,
-                self.frame_time,
-                self.frame_peak,
-                self.report_at,
-            ) = (0, Duration::ZERO, Duration::ZERO, Instant::now());
         }
         if let Err(e) = s.swap() {
             // The window went away under us; wait for the next surface.
@@ -532,7 +478,7 @@ impl Glass {
 }
 
 /// What Kotlin's commands leave behind for the frame: the pad synthesizer, the viewport and
-/// the pad legend, and when the last input arrived (the idle throttle's clock).
+/// the pad legend.
 struct Ui {
     nav: MenuNav,
     sample: MenuSample,
@@ -541,7 +487,6 @@ struct Ui {
     pad_label: Option<String>,
     pad_pref: Option<GamepadPref>,
     pads: Vec<PadInfo>,
-    last_input: Instant,
 }
 
 impl Ui {
@@ -554,7 +499,6 @@ impl Ui {
             pad_label: None,
             pad_pref: None,
             pads: Vec::new(),
-            last_input: Instant::now(),
         }
     }
 
@@ -571,30 +515,25 @@ impl Ui {
         match cmd {
             Cmd::Quit => return Ok(false),
             Cmd::Menu(ev) => {
-                self.last_input = Instant::now();
                 // Discrete events are the remote/keyboard path (Kotlin routes pad
                 // buttons through PadSample) — with one wrinkle: a pad's SELECT also
                 // arrives here (SkiaConsoleShell's ▲-on-Home shortcut), briefly
                 // reading as keys. The next real pad press corrects the legend.
                 if let Some(p) = console.menu(ev, InputSource::Keys) {
-                    shared.emit(HostEvent::Pulse(p));
+                    shared.emit(HostEvent::Console(Event::Pulse(p)));
                 }
             }
             Cmd::PadSample(s) => {
-                self.last_input = Instant::now();
                 self.sample = s;
                 *poll_now = true;
             }
             Cmd::Pointer(p) => {
-                self.last_input = Instant::now();
                 console.pointer(p);
             }
             Cmd::Key { key, shift, repeat } => {
-                self.last_input = Instant::now();
                 console.key(key, shift, repeat);
             }
             Cmd::Text(t) => {
-                self.last_input = Instant::now();
                 console.text(&t);
             }
             Cmd::Phase(ph) => {
@@ -648,47 +587,5 @@ impl Ui {
             }
         }
         Ok(true)
-    }
-}
-
-/// The last of each edge-triggered event the render thread raised, so a repeat is silence.
-struct Published {
-    was_editing: bool,
-    /// Last string handed to the screen reader. Repeating one is worse than silence.
-    spoken: Option<String>,
-    saved_gen: u64,
-}
-
-impl Published {
-    fn new(console: &Console, store: &SnapshotStore) -> Published {
-        Published {
-            was_editing: console.editing(),
-            spoken: None,
-            saved_gen: store.saved_gen(),
-        }
-    }
-
-    /// Publish what the console raised this frame.
-    fn publish(&mut self, console: &mut Console, shared: &Shared, store: &SnapshotStore) {
-        while let Some(a) = console.take_action() {
-            shared.emit(HostEvent::Action(a));
-        }
-        let editing = console.editing();
-        if editing != self.was_editing {
-            self.was_editing = editing;
-            shared.emit(HostEvent::Editing(editing));
-        }
-        let announce = console.focus_announcement();
-        if announce != self.spoken {
-            self.spoken = announce;
-            if let Some(text) = &self.spoken {
-                shared.emit(HostEvent::Announce(text.clone()));
-            }
-        }
-        if store.saved_gen() != self.saved_gen {
-            let (settings, current_gen) = store.snapshot();
-            self.saved_gen = current_gen;
-            shared.emit(HostEvent::Settings(Box::new(settings)));
-        }
     }
 }

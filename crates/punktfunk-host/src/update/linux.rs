@@ -168,7 +168,7 @@ pub(super) fn run_apply_steamos(
     jobs::write_json_atomic(
         &jobs::intent_path(),
         &IntentRecord {
-            from: env!("PUNKTFUNK_VERSION").into(),
+            from: crate::version::get().into(),
             to: target_version.into(),
             serial,
             started_unix: super::now_unix(),
@@ -325,7 +325,7 @@ pub(super) fn run_apply(
         ));
     }
 
-    let current = env!("PUNKTFUNK_VERSION");
+    let current = crate::version::get();
     if result.staged {
         // rpm-ostree: new deployment activates on reboot. Durable now; do not restart.
         let _ = jobs::write_json_atomic(

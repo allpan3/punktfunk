@@ -442,7 +442,7 @@ impl StreamState {
                     let gamescope = c == crate::vdisplay::Compositor::Gamescope;
                     self.plan.cursor_blend = crate::session_plan::cursor_blend_for(
                         self.plan.cursor_forward,
-                        gamescope,
+                        c,
                         self.plan.codec,
                         self.plan.bit_depth,
                         rebuilt_route.as_ref(),

@@ -290,6 +290,8 @@ pub fn detect_active_session() -> ActiveSession {
     let mut best = 0u8;
     // So a same-kind restart (new PID) bumps the epoch, not just a kind change.
     let mut winning_pid: Option<u32> = None;
+    // scroll shares sway's backend but not its desktop name, which portal routing reads.
+    let mut winning_scroll = false;
     if let Ok(entries) = std::fs::read_dir("/proc") {
         for e in entries.flatten() {
             let name = e.file_name();
@@ -313,7 +315,8 @@ pub fn detect_active_session() -> ActiveSession {
                 "gnome-shell" => (ActiveKind::DesktopGnome, 4),
                 // Own backend (hyprctl + xdph), not the sway/river wlroots family.
                 "Hyprland" | "hyprland" => (ActiveKind::DesktopHyprland, 4),
-                "sway" | "river" => (ActiveKind::DesktopWlroots, 4),
+                // scroll is a sway fork: same IPC, `scrollmsg`, `scroll-ipc.*` socket.
+                "sway" | "river" | "scroll" => (ActiveKind::DesktopWlroots, 4),
                 _ => continue,
             };
             let pid = name.parse::<u32>().ok();
@@ -321,6 +324,7 @@ pub fn detect_active_session() -> ActiveSession {
                 best = prio;
                 kind = k;
                 winning_pid = pid;
+                winning_scroll = comm == "scroll";
             } else if prio == best {
                 // Lowest pid among same-priority hits, so `/proc` order cannot flap `winning_pid`
                 // and look like a compositor restart.
@@ -328,6 +332,7 @@ pub fn detect_active_session() -> ActiveSession {
                     if p < w {
                         kind = k;
                         winning_pid = Some(p);
+                        winning_scroll = comm == "scroll";
                     }
                 }
             }
@@ -343,6 +348,7 @@ pub fn detect_active_session() -> ActiveSession {
     let xdg_current_desktop = match kind {
         ActiveKind::DesktopKde => Some("KDE".to_string()),
         ActiveKind::DesktopGnome => Some("GNOME".to_string()),
+        ActiveKind::DesktopWlroots if winning_scroll => Some("scroll".to_string()),
         ActiveKind::DesktopWlroots => Some("sway".to_string()),
         // Real desktop name so portal routing (`[Hyprland]`) and xdph's own checks fire.
         ActiveKind::DesktopHyprland => Some("Hyprland".to_string()),
@@ -399,9 +405,13 @@ fn find_hypr_signature(env: &EnvProbe, runtime: &str, uid: u32) -> Option<String
     cands.into_iter().next().map(|(_, n)| n)
 }
 
-/// Live sway IPC socket for this uid. Inherited path if it still exists; else
-/// `sway-ipc.<uid>.<pid>.sock` for the detected compositor PID (identity, not a guess); else newest
-/// owned `sway-ipc.<uid>.*.sock` (re-exec / wrapper). `None` on river: no sway IPC, and the wlroots
+/// sway and scroll name their IPC socket `<stem>.<uid>.<pid>.sock`.
+#[cfg(target_os = "linux")]
+const SWAY_IPC_STEMS: [&str; 2] = ["sway-ipc", "scroll-ipc"];
+
+/// Live sway-protocol IPC socket for this uid. Inherited path if it still exists; else
+/// `<stem>.<uid>.<pid>.sock` for the detected compositor PID (identity, not a guess); else newest
+/// owned `<stem>.<uid>.*.sock` (re-exec / wrapper). `None` on river: no sway IPC, and the wlroots
 /// backend talks through `swaymsg`.
 #[cfg(target_os = "linux")]
 fn find_sway_socket(env: &EnvProbe, runtime: &str, uid: u32, pid: Option<u32>) -> Option<String> {
@@ -412,16 +422,18 @@ fn find_sway_socket(env: &EnvProbe, runtime: &str, uid: u32, pid: Option<u32>) -
         }
     }
     if let Some(pid) = pid {
-        let exact = std::path::Path::new(runtime).join(format!("sway-ipc.{uid}.{pid}.sock"));
-        if exact.exists() {
-            return Some(exact.to_string_lossy().into_owned());
+        for stem in SWAY_IPC_STEMS {
+            let exact = std::path::Path::new(runtime).join(format!("{stem}.{uid}.{pid}.sock"));
+            if exact.exists() {
+                return Some(exact.to_string_lossy().into_owned());
+            }
         }
     }
-    let prefix = format!("sway-ipc.{uid}.");
+    let prefixes = SWAY_IPC_STEMS.map(|stem| format!("{stem}.{uid}."));
     let mut cands: Vec<(std::time::SystemTime, String)> = Vec::new();
     for e in std::fs::read_dir(runtime).ok()?.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
-        if !name.starts_with(&prefix) || !name.ends_with(".sock") {
+        if !prefixes.iter().any(|p| name.starts_with(p)) || !name.ends_with(".sock") {
             continue;
         }
         let Ok(md) = e.metadata() else { continue };
@@ -856,6 +868,18 @@ mod tests {
             got,
             Some(format!("{}/sway-ipc.{}.777.sock", rt.path(), rt.uid))
         );
+    }
+
+    /// scroll's socket is `scroll-ipc.*`; both the exact-pid and the newest-owned rungs find it.
+    #[test]
+    fn a_scroll_socket_is_found_like_a_sway_one() {
+        let rt = FakeRuntime::new("scroll", &[]);
+        let sock = format!("{}/scroll-ipc.{}.4242.sock", rt.path(), rt.uid);
+        std::fs::write(&sock, b"").unwrap();
+        for pid in [Some(4242), None] {
+            let got = find_sway_socket(&no_inherited_env(), rt.path(), rt.uid, pid);
+            assert_eq!(got.as_deref(), Some(sock.as_str()));
+        }
     }
 
     /// river has no sway IPC. `None` keeps [`sway_socket`] from handing `swaymsg` a dead path.

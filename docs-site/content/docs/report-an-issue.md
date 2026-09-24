@@ -40,7 +40,7 @@ names.
 ## 4. File the issue
 
 Open an issue at [git.unom.io/unom/punktfunk/issues](https://git.unom.io/unom/punktfunk/issues), or
-ask on [Discord](https://discord.gg/kaPNvzMuGU) first. Include:
+ask on [Discord](https://discord.gg/wzEGg9y45z) first. Include:
 
 - host and client versions (the console's **Host** page; the first line of each client log)
 - host OS and desktop, GPU, the client device, wired or Wi-Fi

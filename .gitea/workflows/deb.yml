@@ -224,16 +224,24 @@ jobs:
           key: cargo-home-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-home-
       - id: target
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target
           # `-release-`, never ci.yml's debug key: a job that hits a shared key exactly skips its
           # save, so this release tree would never be stored.
           key: cargo-target-release-v3-${{ env.rustc }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-target-release-v3-${{ env.rustc }}-
-      # The post-step save still runs after a failed restore, once the whole job passes.
+      # A failed restore reads as a miss, so the save at the end of the job replaces the entry.
       - name: Drop a partial target restore
         run: sh scripts/ci/drop-partial-target.sh "${{ steps.target.outputs.cache-hit }}" "cargo-target-release-v3-${{ env.rustc }}-${{ hashFiles('Cargo.lock') }}"
+
+      # Cargo judges path crates by mtime, and this checkout is new. Every job that saves this
+      # target cache must run this first: scripts/ci/src-mtimes.rs.
+      - name: Carry source mtimes (unchanged crates stay fresh)
+        continue-on-error: true
+        run: |
+          rustc -O scripts/ci/src-mtimes.rs -o /tmp/src-mtimes
+          /tmp/src-mtimes target
 
       - name: Build release clients
         env:
@@ -280,22 +288,22 @@ jobs:
         # (our Bun.serve TLS entry), so prove the build IS a bun bundle and serves /login.
         # No TLS env here, so the custom entry binds plain HTTP — the smoke curl stays simple.
         run: |
-          # bun builds AND runs the console. Baked into the rust-ci image; bootstrap here too so the
-          # job stays green against the PREVIOUS image (docker.yml bootstrap lag).
+          # bun builds AND runs the console. Baked into the rust-ci image; fetched here too when the
+          # image's bun is missing or another version (docker.yml bootstrap lag).
           #
           # A PINNED release asset, checked by SHA-256 — never `curl https://bun.sh/install | bash`.
           # build-bun-deb.sh VENDORS this very binary into the punktfunk-bun .deb (BUN_BIN, below),
           # so an install script piped into root's shell is upstream code choosing bytes we then
           # publish under REGISTRY_TOKEN. Not in Debian/Ubuntu, so a pin is the only option here.
-          # ONE bun across the repo: same version as rpm.yml and windows-host.yml, and the same
-          # asset + sum as rpm.yml (windows pins bun-windows-x64.zip, so its sum differs) — bump
-          # all three together (the sums are in the release's SHASUMS256.txt). `-baseline` on
+          # ONE bun across the repo: same version and asset as rpm.yml, arch.yml, the CI images
+          # and the Nix overlay in flake.nix; windows-host.yml pins the same release. Bump them
+          # together (the sums are in the release's SHASUMS256.txt). `-baseline` on
           # purpose: it needs no AVX2, so the bun we ship starts on every x86-64 box — something the
           # auto-detecting installer never promised, since it reads the BUILDER's CPU, not the user's.
-          command -v bun >/dev/null || {
+          [ "$(bun --version 2>/dev/null)" = 1.4.2 ] || {
             apt-get install -y --no-install-recommends unzip
-            BUN_VER=bun-v1.3.14
-            BUN_SHA=a063908ae08b7852ca10939bbdc6ceed3ddabce8fb9402dce83d65d73b36e6c7
+            BUN_VER=bun-v1.4.2
+            BUN_SHA=c678040f14fe0440eb839d37cbd0ce4c051a32da72806ac97de6a6aab6bf728f
             curl -fsSL -o /tmp/bun.zip \
               "https://github.com/oven-sh/bun/releases/download/$BUN_VER/bun-linux-x64-baseline.zip"
             echo "$BUN_SHA  /tmp/bun.zip" | sha256sum -c -
@@ -391,6 +399,16 @@ jobs:
             upsert_asset "$RID" "$DEB"
           done
 
+      # Only main writes the target cache, so no branch dispatch feeds a published build. Only on
+      # a miss: the version-stamped binaries rebuild every run, so a save per push costs more
+      # than it saves.
+      - name: Save target
+        if: github.ref == 'refs/heads/main' && steps.target.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: cargo-target-release-v3-${{ env.rustc }}-${{ hashFiles('Cargo.lock') }}
+
   # ---------------------------------------------------------------------------------------------
   # The HOST .deb — built on Ubuntu 24.04 (noble), so it installs on Ubuntu 24.04 LTS through
   # 26.04 (see the file header + packaging/debian/README.md). Runs in
@@ -444,7 +462,7 @@ jobs:
           key: cargo-home-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-home-
       - id: target
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target
           # Own key: this target dir is built against 24.04's glibc/toolchain and must NOT share
@@ -456,6 +474,14 @@ jobs:
           restore-keys: cargo-target-noble-release-v1-${{ env.rustc }}-
       - name: Drop a partial target restore
         run: sh scripts/ci/drop-partial-target.sh "${{ steps.target.outputs.cache-hit }}" "cargo-target-noble-release-v1-${{ env.rustc }}-${{ hashFiles('Cargo.lock') }}"
+
+      # Cargo judges path crates by mtime, and this checkout is new. Every job that saves this
+      # target cache must run this first: scripts/ci/src-mtimes.rs.
+      - name: Carry source mtimes (unchanged crates stay fresh)
+        continue-on-error: true
+        run: |
+          rustc -O scripts/ci/src-mtimes.rs -o /tmp/src-mtimes
+          /tmp/src-mtimes target
 
       - name: Build release host
         env:
@@ -529,6 +555,14 @@ jobs:
           for DEB in dist/*.deb; do
             upsert_asset "$RID" "$DEB"
           done
+
+      # Same rule as build-publish's save.
+      - name: Save target
+        if: github.ref == 'refs/heads/main' && steps.target.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: cargo-target-noble-release-v1-${{ env.rustc }}-${{ hashFiles('Cargo.lock') }}
 
   # ---------------------------------------------------------------------------------------------
   # `punktfunk-gamescope` for apt — the patched build that gives a gamescope session HDR, a cursor,
@@ -697,7 +731,7 @@ jobs:
           key: cargo-home-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-home-
       - id: target
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target
           # Its OWN key: aarch64 artifacts never share the amd64 target cache, and `-release-`
@@ -706,6 +740,14 @@ jobs:
           restore-keys: cargo-target-arm64-release-v1-${{ env.rustc }}-
       - name: Drop a partial target restore
         run: sh scripts/ci/drop-partial-target.sh "${{ steps.target.outputs.cache-hit }}" "cargo-target-arm64-release-v1-${{ env.rustc }}-${{ hashFiles('Cargo.lock') }}"
+
+      # Cargo judges path crates by mtime, and this checkout is new. Every job that saves this
+      # target cache must run this first: scripts/ci/src-mtimes.rs.
+      - name: Carry source mtimes (unchanged crates stay fresh)
+        continue-on-error: true
+        run: |
+          rustc -O scripts/ci/src-mtimes.rs -o /tmp/src-mtimes
+          /tmp/src-mtimes target
 
       - name: Build the arm64 client .deb
         env:
@@ -748,6 +790,14 @@ jobs:
           for DEB in dist/*.deb; do
             upsert_asset "$RID" "$DEB"
           done
+
+      # Same rule as build-publish's save.
+      - name: Save target
+        if: github.ref == 'refs/heads/main' && steps.target.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: cargo-target-arm64-release-v1-${{ env.rustc }}-${{ hashFiles('Cargo.lock') }}
 
   # ---------------------------------------------------------------------------------------------
   # Does the thing we just published actually INSTALL? Nothing in this repo asked that before, and

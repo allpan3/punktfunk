@@ -68,6 +68,7 @@ impl Shell {
         // Shaped-paragraph cache clock, before anything draws.
         fonts.begin_frame();
         self.sync();
+        self.tick_touch();
         // Publish ink before any draw. Widgets read `theme::set_ink`; skipping this
         // paints the previous palette's text on the new field.
         crate::theme::set_ink(self.ink);
@@ -400,8 +401,11 @@ fn glyph_style(
     platform: crate::platform::Platform,
 ) -> GlyphStyle {
     let keys = || match platform {
-        // A TV remote either way — the legend says D-pad, not keys.
-        crate::platform::Platform::Android | crate::platform::Platform::WebOS => GlyphStyle::Remote,
+        // A TV remote either way — the legend says D-pad, not keys. Apple's key device in
+        // this shell is the Siri Remote; a Mac keyboard here is the exception.
+        crate::platform::Platform::Android
+        | crate::platform::Platform::WebOS
+        | crate::platform::Platform::Apple => GlyphStyle::Remote,
         crate::platform::Platform::Desktop | crate::platform::Platform::Web => GlyphStyle::Keyboard,
     };
     match (source, pad_pref) {

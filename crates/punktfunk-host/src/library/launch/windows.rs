@@ -843,17 +843,20 @@ mod tests {
         );
         assert!(windows_launch_for(&LaunchSpec {
             kind: "aumid".into(),
-            value: "no-bang".into()
+            value: "no-bang".into(),
+            args: None,
         })
         .is_none());
         assert!(windows_launch_for(&LaunchSpec {
             kind: "command".into(),
-            value: "  ".into()
+            value: "  ".into(),
+            args: None,
         })
         .is_none());
         assert!(windows_launch_for(&LaunchSpec {
             kind: "wat".into(),
-            value: "x".into()
+            value: "x".into(),
+            args: None,
         })
         .is_none());
         let uplay = windows_launch_for(&LaunchSpec {
@@ -876,12 +879,14 @@ mod tests {
         );
         assert!(windows_launch_for(&LaunchSpec {
             kind: "uplay".into(),
-            value: "5595\" & calc".into()
+            value: "5595\" & calc".into(),
+            args: None,
         })
         .is_none());
         assert!(windows_launch_for(&LaunchSpec {
             kind: "battlenet".into(),
-            value: "WTCG\" & calc".into()
+            value: "WTCG\" & calc".into(),
+            args: None,
         })
         .is_none());
     }

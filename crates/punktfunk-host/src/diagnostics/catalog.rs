@@ -68,9 +68,7 @@ fn plugin_sandbox() -> HostCheck {
     if !crate::plugins::runtime_status().installed {
         return HostCheck::inapplicable(id, "The plugin runner is not installed on this host.");
     }
-    if std::env::var("PUNKTFUNK_PLUGIN_SANDBOX")
-        .is_ok_and(|v| matches!(v.trim(), "0" | "off" | "false"))
-    {
+    if crate::plugins::runner_sandbox_off() {
         return HostCheck::problem(
             id,
             CheckStatus::Warn,
@@ -81,9 +79,9 @@ fn plugin_sandbox() -> HostCheck {
                 .to_string(),
         )
         .with_remedy(Remedy {
-            text: "Remove PUNKTFUNK_PLUGIN_SANDBOX from host.env and restart the plugin runner."
+            text: "Remove PUNKTFUNK_PLUGIN_SANDBOX from the plugin runner's override, then restart it."
                 .into(),
-            command: Some("systemctl --user restart punktfunk-scripting".into()),
+            command: Some("systemctl --user edit punktfunk-scripting".into()),
             relogin_required: false,
         });
     }

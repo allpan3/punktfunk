@@ -110,6 +110,10 @@ struct Args {
     /// host must composite the metadata cursor on its own; decode the dump and look for the
     /// pointer.
     cursor_nochannel: bool,
+    /// `--cursor-channel` — negotiate the channel and leave the client drawing (a desktop
+    /// client), flip to the capture model at 15 s and back at 35 s, wiggling throughout. The
+    /// host's encoder must follow each flip.
+    cursor_channel: bool,
     /// `--discover [SECS]` — browse the LAN for native (`_punktfunk._udp`) hosts for `SECS`
     /// seconds (default 4), print what's found, and exit. No connection is made.
     discover: Option<u64>,
@@ -347,6 +351,7 @@ fn parse_args() -> Args {
         clock_resync: argv.iter().any(|a| a == "--clock-resync"),
         cursor_capture: argv.iter().any(|a| a == "--cursor-capture"),
         cursor_nochannel: argv.iter().any(|a| a == "--cursor-nochannel"),
+        cursor_channel: argv.iter().any(|a| a == "--cursor-channel"),
     }
 }
 
@@ -622,7 +627,7 @@ async fn session(args: Args) -> Result<()> {
             // advertises it deliberately and then flips the channel to the capture model, so the
             // HOST composites and the dump is where the pointer must appear.
             client_caps: {
-                let mut c = if args.cursor_capture {
+                let mut c = if args.cursor_capture || args.cursor_channel {
                     punktfunk_core::quic::CLIENT_CAP_CURSOR
                 } else {
                     0
@@ -946,7 +951,7 @@ async fn session(args: Args) -> Result<()> {
                 "SPEED TEST complete",
             );
         });
-    } else if args.cursor_capture || args.cursor_nochannel {
+    } else if args.cursor_capture || args.cursor_nochannel || args.cursor_channel {
         // Capture-model cursor repro. `--cursor-capture`: flip the negotiated cursor channel to
         // "host composites" and drive RELATIVE pointer motion, exactly like a pointer-lock
         // client. `--cursor-nochannel`: the same motion with NO channel at all (a
@@ -955,9 +960,22 @@ async fn session(args: Args) -> Result<()> {
         // still in its initial client-draws state, and dropping our recv half would fail those
         // writes host-side.
         let flip_channel = args.cursor_capture;
+        let flip_twice = args.cursor_channel;
         let mut cs = send;
         let mut cr = recv;
         tokio::spawn(async move {
+            if flip_twice {
+                for (at, client_draws) in [(15, false), (20, true)] {
+                    tokio::time::sleep(std::time::Duration::from_secs(at)).await;
+                    if let Err(e) =
+                        io::write_msg(&mut cs, &CursorRenderMode { client_draws }.encode()).await
+                    {
+                        tracing::error!(error = %format!("{e:#}"), "cursor-channel: render-mode write failed");
+                        return;
+                    }
+                    tracing::info!(client_draws, "cursor-channel: render mode flipped");
+                }
+            }
             if flip_channel {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 match io::write_msg(
@@ -1164,11 +1182,6 @@ async fn session(args: Args) -> Result<()> {
     //                  pattern that exposed the Windows host's missing jitter buffer (constant
     //                  crackle, 2026-07-03): a steady 5 ms stream never trips it. Record the
     //                  host mic and count silence gaps to regression-test host-side buffering.
-    #[cfg(not(target_os = "linux"))]
-    if args.mic_test {
-        tracing::warn!("--mic-test requires Linux (libopus) — skipped");
-    }
-    #[cfg(target_os = "linux")]
     if args.mic_test {
         let conn2 = conn.clone();
         let burst = args.mic_burst;

@@ -171,12 +171,16 @@ jobs:
             git nodejs rust clang cmake ninja nasm pkgconf python vulkan-headers \
             gtk4 libadwaita sdl3 pipewire wayland libxkbcommon opus libei \
             mesa libglvnd unzip libarchive || echo "::warning::pacman guard failed (stale image db?) — proceeding with baked packages"
-          # Arch ships bun in [extra], so the bootstrap takes the pacman-signed package instead of
-          # piping bun.sh's installer into root's shell — this job builds and publishes the package,
-          # and the installer would be upstream code choosing bytes we then ship. Kept behind the
-          # `command -v` guard rather than folded into the list above: the image's baked bun is not
-          # in pacman's db, so `--needed` cannot see it and would re-download bun on every run.
-          command -v bun >/dev/null || pacman -S --noconfirm --needed bun
+          # The PKGBUILD vendors this bun, so it is the pinned asset from arch-ci.Dockerfile, fetched
+          # here when the image's bun is missing or another version (bootstrap lag). Never [extra]'s
+          # rolling bun and never bun.sh's installer. Bump with the Dockerfile's BUN_VERSION/BUN_SHA.
+          [ "$(bun --version 2>/dev/null)" = 1.4.2 ] || {
+            curl -fsSL -o /tmp/bun.zip \
+              "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64-baseline.zip"
+            echo "c678040f14fe0440eb839d37cbd0ce4c051a32da72806ac97de6a6aab6bf728f  /tmp/bun.zip" | sha256sum -c -
+            unzip -q -o -j /tmp/bun.zip '*/bun' -d /tmp
+            install -m0755 /tmp/bun /usr/local/bin/bun
+          }
           bun --version
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

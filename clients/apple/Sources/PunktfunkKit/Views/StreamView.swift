@@ -1070,6 +1070,7 @@ public final class StreamLayerView: NSView {
         // Refresh BEFORE the fit below reads it. Enumerating display modes costs ~150 µs, and
         // `videoBounds` is read on every mouse event — that belongs on layout, not on input.
         safeModePixels = window?.screen?.notchSafePixelSize
+        presenter.setPanel(Self.panelInfo(window?.screen ?? NSScreen.main))
         presenter.layout(in: videoBounds, contentsScale: window?.backingScaleFactor ?? 1)
         displayLayer.videoGravity = SessionPresenter.gravity(VideoFit(name: connection?.settings.videoFit))
         // Present routing tracks the window's composited state (fullscreen transitions always
@@ -1096,6 +1097,15 @@ public final class StreamLayerView: NSView {
     static func isAdaptiveSync(_ screen: NSScreen?) -> Bool {
         guard let screen else { return false }
         return screen.maximumRefreshInterval - screen.minimumRefreshInterval > 0.001
+    }
+
+    /// The screen's refresh range and the step its interval moves in (0 = any interval).
+    static func panelInfo(_ screen: NSScreen?) -> PanelInfo {
+        guard let screen, screen.minimumRefreshInterval > 0, screen.maximumRefreshInterval > 0
+        else { return PanelInfo(minHz: 0, maxHz: 0) }
+        return PanelInfo(
+            minHz: 1 / screen.maximumRefreshInterval, maxHz: 1 / screen.minimumRefreshInterval,
+            granularity: screen.displayUpdateGranularity)
     }
 
     public override func viewDidChangeBackingProperties() {

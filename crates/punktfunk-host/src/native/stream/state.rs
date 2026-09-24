@@ -311,7 +311,7 @@ impl StreamState {
             ctx.codec,
             crate::session_plan::cursor_blend_for(
                 ctx.cursor_forward,
-                ctx.compositor == pf_vdisplay::Compositor::Gamescope,
+                ctx.compositor,
                 ctx.codec,
                 ctx.bit_depth,
                 ctx.gamescope_route.as_ref(),
@@ -457,8 +457,8 @@ impl StreamState {
         }
         if metadata_composite {
             tracing::info!(
-                "no cursor channel — compositing the metadata cursor into the video (embedded \
-                 fallback is unreliable on virtual streams)"
+                "no cursor channel — compositing the metadata cursor into the video (this \
+                 compositor never embeds a pointer on a virtual stream)"
             );
         }
         if streamed_wire {

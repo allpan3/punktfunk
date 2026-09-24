@@ -223,7 +223,8 @@ impl VirtualMic for WasapiVirtualMic {
 /// Resolve the mic inject target from the wiring plan, auto-installing the
 /// Steam Streaming pair when nothing usable exists (then re-planning). Runs
 /// on the COM-initialized render thread.
-fn resolve_target() -> Result<(wasapi::Device, String)> {
+/// The device, its name, and whether it is the minted mic (whose pins [`repair_pins`] owns).
+fn resolve_target() -> Result<(wasapi::Device, String, bool)> {
     // Endpoints must exist before this open: the pump holds one device for its
     // life, so racing provision here latches the cable while later plans pair
     // default recording with a minted mic nothing writes into.
@@ -255,8 +256,18 @@ fn resolve_target() -> Result<(wasapi::Device, String)> {
              substring>."
         );
     };
+    let minted = super::minted::minted_ids().mic_render.as_deref() == Some(ep.1.as_str());
+    repair_pins(minted);
     let name = ep.0.clone();
-    Ok((audio_control::open_endpoint(&ep)?, name))
+    Ok((audio_control::open_endpoint(&ep)?, name, minted))
+}
+
+/// Before the stream opens or resumes: a pin set to another format since only turns the mic
+/// into noise once audio flows, and a capture pin's change never invalidates this stream.
+fn repair_pins(minted: bool) {
+    if minted {
+        super::minted::repair_mic_formats();
+    }
 }
 
 /// Best-effort install of both Steam Streaming driver INFs so mic inject and
@@ -399,8 +410,8 @@ fn render_thread(
     }
     // Build WASAPI objects here so they outlive the loop; a returning closure
     // would drop them. Failure reports Err and exits.
-    let setup = (|| -> Result<(wasapi::AudioClient, wasapi::AudioRenderClient, wasapi::Handle, i64, String)> {
-        let (device, name) = resolve_target()?;
+    let setup = (|| -> Result<(wasapi::AudioClient, wasapi::AudioRenderClient, wasapi::Handle, i64, String, bool)> {
+        let (device, name, minted) = resolve_target()?;
         let mut audio_client = device.get_iaudioclient().context("IAudioClient")?;
         // Autoconvert: WASAPI shared-mode SRC matches the device mix format.
         let desired = WaveFormat::new(
@@ -427,9 +438,9 @@ fn render_thread(
         let buf_frames = audio_client.get_buffer_size().context("buffer size")? as usize;
         let _ = render_client.write_to_device(buf_frames, &vec![0u8; buf_frames * BLOCK_ALIGN], None);
         audio_client.start_stream().context("start render stream")?;
-        Ok((audio_client, render_client, h_event, default_period, name))
+        Ok((audio_client, render_client, h_event, default_period, name, minted))
     })();
-    let (audio_client, render_client, h_event, default_period, name) = match setup {
+    let (audio_client, render_client, h_event, default_period, name, minted) = match setup {
         Ok(t) => t,
         Err(e) => {
             let _ = ready.send(Err(anyhow!("{e:#}")));
@@ -471,6 +482,7 @@ fn render_thread(
                 }
             }
             // Endpoint died while stopped — same path as any death: exit, pump reopens.
+            repair_pins(minted);
             audio_client
                 .start_stream()
                 .context("resume render stream")?;

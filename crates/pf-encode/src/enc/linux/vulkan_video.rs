@@ -932,7 +932,16 @@ pub struct VulkanVideoEncoder {
     force_kf: bool, // request_keyframe / non-recoverable loss → next frame is IDR
     pending_loss: Option<i64>, // invalidate_ref_frames(first) → recover on next frame
     pending: VecDeque<EncodedFrame>,
+    /// A cursor-blend session that may run on EFC while no cursor reaches it
+    /// ([`Self::switch_for_cursor`]). False pins whatever `open` chose.
+    cursor_switch: bool,
+    /// First cursorless submit since the CSC last blended; EFC after [`EFC_AFTER_CURSORLESS`].
+    cursorless_since: Option<std::time::Instant>,
 }
+
+/// How long a CSC session must see no cursor before it reopens on EFC. A pointer that blinks
+/// or hides for a moment must not cost an IDR each way.
+const EFC_AFTER_CURSORLESS: std::time::Duration = std::time::Duration::from_secs(2);
 
 // SAFETY: the encoder is used only from the single encode thread; all Vulkan handles are owned and
 // never shared. Matches `NvencCudaEncoder`'s `unsafe impl Send`.
@@ -981,7 +990,7 @@ impl VulkanVideoEncoder {
             );
         }
         let want_rgb = !native_nv12 && !cursor_blend && rgb_request().unwrap_or(true);
-        Self::open_opts_inner(
+        let mut enc = Self::open_opts_inner(
             codec,
             width,
             height,
@@ -993,7 +1002,83 @@ impl VulkanVideoEncoder {
             ten_bit,
             is_hdr,
             src_rgb_fmt,
-        )
+        )?;
+        enc.cursor_switch = cursor_blend && !native_nv12 && rgb_request() != Some(false);
+        Ok(enc)
+    }
+
+    /// Move a cursor-blend session between the CSC (which blends) and EFC (which cannot) by
+    /// what this frame carries: a visible cursor needs the CSC now; EFC returns after
+    /// [`EFC_AFTER_CURSORLESS`] without one. Each move reopens the session: one IDR.
+    fn switch_for_cursor(&mut self, frame: &CapturedFrame) -> Result<()> {
+        if !self.cursor_switch || self.reframe.is_some() {
+            return Ok(());
+        }
+        let cursor = frame.cursor.as_ref().is_some_and(|c| c.visible);
+        if cursor {
+            self.cursorless_since = None;
+            if self.rgb.is_some() {
+                self.reopen(false)?;
+            }
+            return Ok(());
+        }
+        if self.rgb.is_some() {
+            return Ok(());
+        }
+        let since = *self
+            .cursorless_since
+            .get_or_insert_with(std::time::Instant::now);
+        if since.elapsed() >= EFC_AFTER_CURSORLESS {
+            self.cursorless_since = None;
+            self.reopen(true)?;
+        }
+        Ok(())
+    }
+
+    /// Reopen the session on EFC (`rgb`) or the CSC, keeping what the caller already set.
+    /// Finished AUs carry over; the new session starts on an IDR.
+    fn reopen(&mut self, rgb: bool) -> Result<()> {
+        self.flush()?;
+        let t0 = std::time::Instant::now();
+        let mut next = Self::open_opts_inner(
+            self.codec,
+            self.render_w,
+            self.render_h,
+            self.fps,
+            self.pending_bitrate.unwrap_or(self.bitrate),
+            rgb,
+            false,
+            self.native_fmt,
+            self.ten_bit,
+            self.is_hdr,
+            if rgb {
+                pixel_to_vk(self.native_fmt).unwrap_or(vk::Format::B8G8R8A8_UNORM)
+            } else {
+                vk::Format::B8G8R8A8_UNORM
+            },
+        )?;
+        if rgb && next.rgb.is_none() {
+            // The probe refused EFC on this mode: stay on the CSC for good.
+            self.cursor_switch = false;
+            return Ok(());
+        }
+        next.pending = std::mem::take(&mut self.pending);
+        next.auto_wire = self.auto_wire;
+        next.hdr_meta = self.hdr_meta.take();
+        next.pipelined = self.pipelined;
+        next.cursor_switch = true;
+        tracing::info!(
+            efc = rgb,
+            cost_ms = t0.elapsed().as_millis() as u64,
+            "vulkan-encode: {} — reopened the session, one IDR",
+            if rgb {
+                "no cursor to blend, back on EFC"
+            } else {
+                "a cursor to blend, moving to the compute CSC"
+            }
+        );
+        *self = next;
+        Ok(())
     }
 
     /// `open` with the RGB-direct request explicit (smoke tests: env mutation races parallel
@@ -1217,9 +1302,13 @@ impl VulkanVideoEncoder {
                     (_, _, Some(RgbDirect { padded: true, .. })) =>
                         "active(padded-copy: mode is not 64x16-aligned — staging blit + edge \
                          duplication instead of the direct import)",
-                    (Ok(_), false, None) =>
-                        "available(off: PUNKTFUNK_VULKAN_RGB_DIRECT=0, or a cursor-blend session \
-                         — =1 forces)",
+                    (Ok(_), false, None) => match rgb_request() {
+                        Some(false) => "available(off: PUNKTFUNK_VULKAN_RGB_DIRECT=0)",
+                        _ =>
+                            "available(off: this session composites the pointer, which EFC \
+                             cannot — a cursor channel or a compositor that embeds it restores \
+                             RGB-direct; =1 does not)",
+                    },
                     (Err(e), _, None) => e,
                     (Ok(_), true, None) => unreachable!("rgb gate and cfg disagree"),
                 },
@@ -1878,6 +1967,8 @@ impl VulkanVideoEncoder {
             force_kf: false,
             pending_loss: None,
             pending: VecDeque::new(),
+            cursor_switch: false,
+            cursorless_since: None,
             pipelined: false,
         })
     }
@@ -4045,6 +4136,7 @@ impl VulkanVideoEncoder {
 
     /// Acquire a free ring slot (drain the oldest if full), record+submit without waiting.
     unsafe fn enqueue(&mut self, frame: &CapturedFrame, wire: i64) -> Result<()> {
+        self.switch_for_cursor(frame)?;
         // If every slot is outstanding, block on the oldest (the round-robin `ring` cursor).
         while self.in_flight.len() >= self.frames.len() {
             let slot = self.in_flight.pop_front().unwrap();
@@ -4099,8 +4191,9 @@ impl Encoder for VulkanVideoEncoder {
     fn caps(&self) -> EncoderCaps {
         EncoderCaps {
             supports_rfi: true,
-            // Only CSC composites (`prep_cursor`). RGB-direct/EFC and native NV12 have no blend.
-            blends_cursor: self.rgb.is_none() && !self.native_nv12,
+            // Only CSC composites (`prep_cursor`); a switching session reaches it on the first
+            // cursor. Native NV12 has no blend.
+            blends_cursor: (self.rgb.is_none() || self.cursor_switch) && !self.native_nv12,
             // `set_input_crop` moves an EFC session onto the CSC; a producer's NV12 has no RGB stage.
             downscales_input: !self.native_nv12,
             crops_input: !self.native_nv12,
@@ -5206,6 +5299,70 @@ mod tests {
     }
 
     /// 24-bpp CPU session via `normalize_cpu_rgb`. Frames alternate Rgb/Bgr (staging re-key).
+    /// A cursor-blend session leaves the CSC for EFC once no cursor reaches it and returns on
+    /// the first visible one; every frame comes back, with an IDR at each move.
+    #[test]
+    #[ignore = "needs VK_VALVE_video_encode_rgb_conversion (RADV >= Mesa 26.0 on EFC hardware)"]
+    fn vulkan_encode_cursor_switch_follows_the_cursor() {
+        let (w, h) = (256, 256);
+        let mut enc =
+            VulkanVideoEncoder::open(Codec::Av1, PixelFormat::Bgrx, w, h, 60, 10_000_000, true, 8)
+                .expect("open");
+        assert!(
+            enc.rgb.is_none() && enc.cursor_switch,
+            "a blend session opens on the CSC"
+        );
+        let cursor = |mut f: CapturedFrame| {
+            f.cursor = Some(pf_frame::CursorOverlay {
+                x: 10,
+                y: 10,
+                w: 8,
+                h: 8,
+                rgba: std::sync::Arc::new(vec![255; 8 * 8 * 4]),
+                serial: 1,
+                hot_x: 0,
+                hot_y: 0,
+                visible: true,
+            });
+            f
+        };
+        let mut aus = Vec::new();
+        let drain = |enc: &mut VulkanVideoEncoder, aus: &mut Vec<crate::EncodedFrame>| {
+            while let Some(au) = enc.poll().expect("poll") {
+                aus.push(au);
+            }
+        };
+        enc.submit(&cpu_frame(w, h, 0, [40, 40, 200, 255])).unwrap();
+        enc.cursorless_since = Some(std::time::Instant::now() - super::EFC_AFTER_CURSORLESS);
+        enc.submit(&cpu_frame(w, h, 1, [40, 200, 40, 255])).unwrap();
+        if !enc.cursor_switch {
+            eprintln!("cursor switch: RGB-direct unavailable on this driver — skipping");
+            return;
+        }
+        assert!(
+            enc.rgb.is_some(),
+            "no cursor for the hysteresis window: EFC"
+        );
+        enc.submit(&cpu_frame(w, h, 2, [200, 40, 40, 255])).unwrap();
+        drain(&mut enc, &mut aus);
+        enc.submit(&cursor(cpu_frame(w, h, 3, [200, 200, 40, 255])))
+            .unwrap();
+        assert!(
+            enc.rgb.is_none(),
+            "a visible cursor moves the session to the CSC"
+        );
+        enc.submit(&cursor(cpu_frame(w, h, 4, [40, 200, 200, 255])))
+            .unwrap();
+        enc.flush().unwrap();
+        drain(&mut enc, &mut aus);
+        let kf: Vec<bool> = aus.iter().map(|a| a.keyframe).collect();
+        assert_eq!(
+            kf,
+            [true, true, false, true, false],
+            "an IDR opens each session"
+        );
+    }
+
     fn run_smoke_cpu24(rgb_direct: bool) -> Option<Vec<crate::EncodedFrame>> {
         let env_dim = |k: &str, d: u32| {
             std::env::var(k)
