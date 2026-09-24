@@ -22,9 +22,9 @@ use punktfunk_core::input::{InputEvent, InputKind};
 use punktfunk_core::packet::{FLAG_PIC, FLAG_PROBE, FLAG_SOF};
 use punktfunk_core::quic::{
     classify, endpoint, io, AccessUpdate, AckReason, BitrateChanged, ClockEcho, ClockProbe,
-    ColorInfo, GrantClass, Hello, LossReport, PairRequest, PipelineGap, ProbeRequest, ProbeResult,
-    Reconfigure, Reconfigured, RequestKeyframe, RfiRequest, SetBitrate, Start, Welcome, GRANT_ALL,
-    GRANT_CLIPBOARD, GRANT_GAMEPAD, GRANT_LAUNCH, GRANT_MIC, GRANT_POINTER,
+    ColorInfo, GrantClass, Hello, LinkReport, LossReport, PairRequest, PipelineGap, ProbeRequest,
+    ProbeResult, Reconfigure, Reconfigured, RequestKeyframe, RfiRequest, SetBitrate, Start,
+    Welcome, GRANT_ALL, GRANT_CLIPBOARD, GRANT_GAMEPAD, GRANT_LAUNCH, GRANT_MIC, GRANT_POINTER,
 };
 use punktfunk_core::transport::UdpTransport;
 use punktfunk_core::Session;
@@ -1706,6 +1706,8 @@ pub(crate) async fn run_admitted(
         Punktfunk1Source::SyntheticAbr(_) => fec_target.clone(),
         _ => Arc::new(AtomicU8::new(welcome.fec.fec_percent)),
     };
+    // The client's proven link rate; the send loop paces a pinned stream against it.
+    let link_kbps = Arc::new(AtomicU32::new(0));
     // PhaseReports from the control task; encode loop drains. Inert until a vsync-aware client.
     let phase_ctl = Arc::new(stream::PhaseCtl::new());
     let phase_ctl_control = phase_ctl.clone();
@@ -1797,6 +1799,7 @@ pub(crate) async fn run_admitted(
         client_packets_received: client_packets_received_ctl,
         fec_target: fec_target.clone(),
         fec_requested: fec_requested.clone(),
+        link_kbps: link_kbps.clone(),
         phase_ctl: phase_ctl_control,
         reconfig_tx,
         keyframe_tx,
@@ -2326,6 +2329,7 @@ pub(crate) async fn run_admitted(
     // Client HDR volume for EDID + 0xCE. `None` = older client / no HDR → built-in defaults.
     let client_hdr = hello.display_hdr.map(crate::encode::hdr_meta_from_wire);
     let fec_target_dp = fec_target.clone();
+    let link_kbps_dp = link_kbps.clone();
     let fec_requested_dp = fec_requested.clone();
     let conn_stream = conn.clone();
     // 0xCF host-timing only if the client advertised the cap; older clients get no extra datagrams.
@@ -2550,6 +2554,7 @@ pub(crate) async fn run_admitted(
                         gap_tx,
                         fec_target: fec_target_dp,
                         fec_requested: fec_requested_dp,
+                        link_kbps: link_kbps_dp,
                         phase: phase_ctl,
                         conn: conn_stream,
                         timing_conn,

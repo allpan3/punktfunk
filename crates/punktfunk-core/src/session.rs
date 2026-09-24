@@ -504,6 +504,12 @@ impl Session {
         self.wire_pool = wires;
     }
 
+    /// Host: GSO on this session's transport where the platform has it. The env gate
+    /// (`PUNKTFUNK_GSO`) stays beside it; a path that refused GSO stays refused.
+    pub fn set_gso(&self, on: bool) {
+        self.transport.set_gso(on);
+    }
+
     /// Host: send one chunk of already-sealed packets in one `sendmmsg`. Returns how many
     /// the kernel accepted; the rest are send-buffer drops. Whole frame, or per paced chunk.
     pub fn send_sealed(&self, packets: &[&[u8]]) -> Result<usize> {

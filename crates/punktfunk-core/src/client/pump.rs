@@ -11,8 +11,8 @@ use crate::config::Role;
 use crate::packet::FLAG_PROBE;
 use crate::quic::{
     io, wall_clock_ns, BitrateChanged, ClipState, ClockEcho, ClockResync, DeliveryReport, Hello,
-    LossReport, ProbeResult, Reconfigure, Reconfigured, RequestKeyframe, ResyncAdmit, ResyncGuard,
-    ResyncStep, SetBitrate, Start, Welcome,
+    LinkReport, LossReport, ProbeResult, Reconfigure, Reconfigured, RequestKeyframe, ResyncAdmit,
+    ResyncGuard, ResyncStep, SetBitrate, Start, Welcome,
 };
 use crate::session::Session;
 use crate::transport::UdpTransport;

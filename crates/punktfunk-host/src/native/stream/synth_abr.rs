@@ -324,6 +324,9 @@ pub(crate) fn synthetic_abr_stream(ctx: SynthAbrContext) -> Result<()> {
         codec: "synthetic-abr",
         client: client_label.clone(),
         bitrate_kbps: live_bitrate.clone(),
+        // No client ramp reaches the synthetic source; the factor paces it.
+        link_kbps: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        link_paced: false,
         bringup: bringup.clone(),
         wire_sock,
         driver_dropped: Arc::new(AtomicU64::new(0)),

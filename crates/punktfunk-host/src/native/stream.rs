@@ -349,9 +349,10 @@ fn service_probes(
 /// ([`crate::send_pacing::auto_burst_bytes`]); `Some` = `PUNKTFUNK_PACE_BURST_KB`. An unpaced
 /// line-rate burst overruns the kernel tx buffer → EAGAIN → freeze until the next keyframe.
 ///
-/// `pace_rate_bps` is ~3× the live encoder bitrate — the overflow's wire time at that rate is
-/// the budget ([`crate::send_pacing::native_budget`], [`MAX_PACE_SPREAD`]-bounded). `0` =
-/// deadline-only spread (`PUNKTFUNK_PACE_FACTOR=0`, or bitrate not yet known).
+/// `pace_rate_bps` is ~3× the live encoder bitrate, or the link rate the client's ramp proved
+/// for a pinned stream — the overflow's wire time at that rate is the budget
+/// ([`crate::send_pacing::native_budget`], [`MAX_PACE_SPREAD`]-bounded). `0` = deadline-only
+/// spread (`PUNKTFUNK_PACE_FACTOR=0`, or bitrate not yet known).
 #[allow(clippy::too_many_arguments)]
 fn paced_submit(
     session: &mut Session,
