@@ -758,11 +758,9 @@ impl HomeScreen {
         self.shelf_rect = Rect::new_empty();
         let games_top = top + block + GAMES_AIR * k;
         if self.shelf_live(ctx.hosts) {
-            // The games run on to the screen's foot rather than stopping short of it.
-            let foot = canvas
-                .local_clip_bounds()
-                .map_or(rect.bottom, |c| c.bottom.max(rect.bottom));
-            let games = Rect::from_ltrb(rect.left, games_top as f32, rect.right, foot);
+            // To the content's foot, not the screen's: the grid runs on under the band by
+            // its own clip, and measures its last row against this edge.
+            let games = Rect::from_ltrb(rect.left, games_top as f32, rect.right, rect.bottom);
             if let Some(shelf) = self.shelf.as_mut() {
                 shelf.render(canvas, games, k, dt, fonts, ctx);
             }

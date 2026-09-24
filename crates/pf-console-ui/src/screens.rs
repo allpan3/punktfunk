@@ -8,6 +8,7 @@ pub(crate) mod add_host;
 pub(crate) mod bind_preset;
 pub(crate) mod card_menu;
 pub(crate) mod collections;
+pub(crate) mod grants;
 pub(crate) mod home;
 pub(crate) mod library;
 
@@ -174,6 +175,8 @@ pub(crate) enum Screen {
     Customize(library::CustomizeScreen),
     /// The Background row's cards. Raised by the Interface section.
     Palette(palette::PaletteScreen),
+    /// Controller grants and tests. Raised by the Players tab's last card.
+    Grants(grants::GrantsScreen),
 }
 
 impl Screen {
@@ -207,6 +210,7 @@ impl Screen {
             Screen::CardMenu(s) => s.menu(ev, ctx, fx),
             Screen::Customize(s) => s.menu(ev, ctx, fx),
             Screen::Palette(s) => s.menu(ev, ctx, fx),
+            Screen::Grants(s) => s.menu(ev, ctx, fx),
         }
     }
 
@@ -224,6 +228,7 @@ impl Screen {
             Screen::CardMenu(s) => s.press(),
             Screen::Customize(s) => s.list.dip(),
             Screen::Palette(s) => s.press(),
+            Screen::Grants(s) => s.list.dip(),
             _ => {}
         }
     }
@@ -243,6 +248,7 @@ impl Screen {
             Screen::CardMenu(s) => s.list.pan(p),
             Screen::Customize(s) => s.list.pan(p),
             Screen::Palette(s) => s.pan(p),
+            Screen::Grants(s) => s.list.pan(p),
             Screen::ShortcutEditor(s) => s.pan_list().is_some_and(|l| l.pan(p)),
             Screen::RingEditor(s) => s.pan_list().pan(p),
             Screen::Library(s) => s.pan(p),
@@ -270,6 +276,7 @@ impl Screen {
             Screen::CardMenu(s) => s.pointer(p, ctx, fx),
             Screen::Customize(s) => s.pointer(p, ctx, fx),
             Screen::Palette(s) => s.pointer(p, ctx, fx),
+            Screen::Grants(s) => s.pointer(p, ctx, fx),
         }
     }
 
@@ -314,6 +321,7 @@ impl Screen {
             Screen::Library(s) => s.pinned(k),
             Screen::Players(s) => s.pinned(k),
             Screen::Settings(s) => s.pinned(k),
+            Screen::Grants(s) => s.pinned(k),
             _ => (0.0, 0.0),
         }
     }
@@ -333,6 +341,7 @@ impl Screen {
             Screen::Library(s) => s.render_pinned(canvas, rect, k, fonts, ctx),
             Screen::Players(s) => s.render_pinned(canvas, rect, k, fonts, ctx),
             Screen::Settings(s) => s.render_pinned(canvas, rect, k, dt, fonts, ctx),
+            Screen::Grants(s) => s.render_pinned(canvas, rect, k, fonts),
             _ => {}
         }
     }
@@ -362,6 +371,7 @@ impl Screen {
             Screen::CardMenu(s) => s.title(),
             Screen::Customize(_) => "Customize".into(),
             Screen::Palette(_) => "Background".into(),
+            Screen::Grants(_) => "Controller access".into(),
         }
     }
 
@@ -374,6 +384,7 @@ impl Screen {
             Screen::Collections(s) => s.announcement(),
             Screen::Customize(s) => s.announcement(ctx),
             Screen::Palette(s) => s.announcement(ctx),
+            Screen::Grants(s) => s.announcement(),
             Screen::Settings(s) => s.announcement(ctx),
             Screen::Players(s) => s.announcement(ctx),
             _ => None,
@@ -396,6 +407,7 @@ impl Screen {
             Screen::CardMenu(s) => s.hints(ctx),
             Screen::Customize(s) => s.hints(ctx),
             Screen::Palette(s) => s.hints(ctx),
+            Screen::Grants(s) => s.hints(ctx),
         }
     }
 
@@ -428,6 +440,7 @@ impl Screen {
             Screen::CardMenu(s) => s.render(canvas, rect, k, dt, fonts, ctx),
             Screen::Customize(s) => s.render(canvas, rect, k, dt, fonts, ctx),
             Screen::Palette(s) => s.render(canvas, rect, k, dt, fonts, ctx),
+            Screen::Grants(s) => s.render(canvas, rect, k, dt, fonts, ctx),
         }
     }
 }

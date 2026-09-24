@@ -161,6 +161,20 @@ impl PaletteScreen {
         let grid_w = cw * cols as f64 + gap * (cols - 1) as f64;
         let left = f64::from(rect.left) + (f64::from(rect.width()) - grid_w) / 2.0;
         let air = (12.0 * k) as f32;
+        // The viewport reaches the layer's edges and pads back to `rect`, so cards run under
+        // the shell's trays and blur there instead of stopping short.
+        let view = if crate::blur::active() {
+            let clip = canvas.local_clip_bounds().unwrap_or(rect);
+            Rect::from_ltrb(
+                rect.left,
+                clip.top.min(rect.top),
+                rect.right,
+                clip.bottom.max(rect.bottom),
+            )
+        } else {
+            rect
+        };
+        let (pad_top, pad_bottom) = (rect.top - view.top + air, view.bottom - rect.bottom + air);
 
         let current = ctx.settings.ui_palette.clone();
         let mut tree = std::mem::take(&mut self.tree);
@@ -185,11 +199,11 @@ impl PaletteScreen {
                 s.align_items = Some(taffy::AlignItems::START);
                 s.padding.left =
                     taffy::LengthPercentage::length((left - f64::from(rect.left)) as f32);
-                s.padding.top = taffy::LengthPercentage::length(air);
-                s.padding.bottom = taffy::LengthPercentage::length(air);
+                s.padding.top = taffy::LengthPercentage::length(pad_top);
+                s.padding.bottom = taffy::LengthPercentage::length(pad_bottom);
             })
             .children(rows);
-        let frame = tree.layout(root, rect);
+        let frame = tree.layout(root, view);
         // Centre the focused card's row, eased, while no finger has the grid.
         let (_, max) = frame.scroll(grid).expect("the grid is a scroll");
         let target = frame
@@ -208,10 +222,14 @@ impl PaletteScreen {
         }
         tree.set_focus(Some(card_id(self.cursor)));
         let cheap = super::settings::reduce_ui_res(ctx.settings, ctx.platform, ctx.fallback_ui);
-        let scrolled = (tree.offset(grid), max);
-        crate::widgets::soft_scroll(canvas, rect, rect, scrolled, k, || {
+        if view == rect {
+            let scrolled = (tree.offset(grid), max);
+            crate::widgets::soft_scroll(canvas, rect, rect, scrolled, k, || {
+                tree.paint_focus(canvas, frame, k as f32, dt, cheap);
+            });
+        } else {
             tree.paint_focus(canvas, frame, k as f32, dt, cheap);
-        });
+        }
         self.geom = (0..PALETTES.len())
             .map(|i| tree.rect(card_id(i)).unwrap_or_else(Rect::new_empty))
             .collect();

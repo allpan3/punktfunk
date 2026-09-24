@@ -1,13 +1,12 @@
-//! Players: the connected pads as cards, then the grants and tests only the platform can
-//! perform. The fourth tab.
+//! Players: the connected pads as cards, and on Android a last "Not showing?" card that
+//! opens the grants and tests only the host can perform ([`super::grants`]). The fourth tab.
 //!
-//! Cards are a focus row, the grant rows a focus column below them; the tree moves focus
-//! between them and the plate follows. OK on a card is its rumble test, on a row its grant
-//! or test. Only devices the OS classifies as a gamepad are forwarded; adapters often
-//! enumerate as something else, so each card's identity line is the support answer.
+//! Cards are one focus row. OK on a pad is its rumble test. Only devices the OS classifies
+//! as a gamepad are forwarded; adapters often enumerate as something else, so each card's
+//! identity line is the support answer.
 //!
-//! Grant dialogs and a rumble pulse on a real device stay with the host via
-//! [`ConsoleCmd::PadAction`]; the desktop has neither, so it lists pads and nothing more.
+//! A rumble pulse on a real device stays with the host via [`ConsoleCmd::PadAction`]; the
+//! desktop has no device handle, so it lists pads and nothing more.
 //! Seat order joins when `seats.rs` lands (`console-ui-redesign.md` §2).
 
 use crate::el::{Axis, El, Group, Id, Tree};
@@ -15,7 +14,7 @@ use crate::glyphs::{device_icon, Hint};
 use crate::model::ConsoleCmd;
 use crate::platform::Platform;
 use crate::pointer::{Pointer, PointerKind};
-use crate::screens::{Ctx, Outbox};
+use crate::screens::{Ctx, Outbox, Screen};
 use crate::theme::{accent, edge, fg, Fonts, PanelStroke, W};
 use pf_client_core::menu_nav::{MenuEvent, MenuPulse, PadInfo};
 use skia_safe::{Canvas, Rect};
@@ -27,11 +26,6 @@ const CARD_GAP: f64 = 24.0;
 const CARD_CORNER: f64 = 22.0;
 /// Device mark box, dp: the size the tells inside each pad outline are drawn for.
 const MARK: f64 = 44.0;
-/// A grant row, design units.
-const ROW_W: f64 = 560.0;
-const ROW_H: f64 = 50.0;
-const ROW_GAP: f64 = 8.0;
-const ROW_CORNER: f64 = 14.0;
 
 /// Host-only pad work: a permission dialog or a real device handle. Neither
 /// exists on this side of the bridge.
@@ -63,7 +57,7 @@ impl PadAction {
 }
 
 /// Grant/test rows, Android's alone: the desktop has no USB capture and no grants.
-const PASSTHROUGH: [(PadAction, &str, &str); 4] = [
+pub(crate) const PASSTHROUGH: [(PadAction, &str, &str); 4] = [
     (
         PadAction::Sc2Bluetooth,
         "Steam Controller 2 over Bluetooth",
@@ -79,7 +73,8 @@ enum Target {
     Pad(usize),
     /// The inert card that stands in for no pads, so the row is never empty.
     NoPads,
-    Passthrough(usize),
+    /// The last card on Android: OK opens the grants and tests.
+    Grants,
 }
 
 fn targets(ctx: &Ctx) -> Vec<Target> {
@@ -89,7 +84,7 @@ fn targets(ctx: &Ctx) -> Vec<Target> {
         (0..ctx.pads.len()).map(Target::Pad).collect()
     };
     if ctx.platform == Platform::Android {
-        all.extend((0..PASSTHROUGH.len()).map(Target::Passthrough));
+        all.push(Target::Grants);
     }
     all
 }
@@ -99,7 +94,7 @@ fn target_id(t: Target, pads: &[PadInfo]) -> Id {
     match t {
         Target::Pad(i) => Id::new(&pads[i].key, 0),
         Target::NoPads => Id::new("no-pads", 0),
-        Target::Passthrough(i) => Id::new("grant", i),
+        Target::Grants => Id::new("grants", 0),
     }
 }
 
@@ -171,7 +166,7 @@ impl PlayersScreen {
         Some(match self.focused(ctx) {
             Target::Pad(i) => format!("{}, {}", ctx.pads[i].name, pad_detail(&ctx.pads[i])),
             Target::NoPads => "No controller connected".into(),
-            Target::Passthrough(i) => format!("{}, {}", PASSTHROUGH[i].1, PASSTHROUGH[i].2),
+            Target::Grants => "Controller not showing? Opens the access list".into(),
         })
     }
 
@@ -195,11 +190,7 @@ impl PlayersScreen {
         }
         let (platform, pads) = (ctx.platform, ctx.pads);
         let (cw, ch, gap) = (CARD_W * k, CARD_H * k, CARD_GAP * k);
-        let cards: Vec<Target> = all
-            .iter()
-            .copied()
-            .filter(|t| !matches!(t, Target::Passthrough(_)))
-            .collect();
+        let cards = &all;
         let row_w = cards.len() as f64 * (cw + gap) - gap;
         let w = f64::from(rect.width());
         // The viewport reaches past the cards so the plate's lift is not clipped.
@@ -238,47 +229,10 @@ impl PlayersScreen {
                 (w + air) as f32,
                 (ch + 2.0 * air) as f32,
             ));
-        let grants_top = top + ch + 36.0 * k;
-        let (rw, rh) = ((ROW_W * k).min(w - 2.0 * edge(k)), ROW_H * k);
-        let grants = El::column()
-            .id(Id::new("grants", 0))
-            .group(Group::Column)
-            .children(
-                all.iter()
-                    .filter_map(|t| match t {
-                        Target::Passthrough(i) => Some(*i),
-                        _ => None,
-                    })
-                    .map(|i| {
-                        let r = Rect::from_xywh(
-                            edge(k) as f32,
-                            (grants_top + 28.0 * k + i as f64 * (rh + ROW_GAP * k)) as f32,
-                            rw as f32,
-                            rh as f32,
-                        );
-                        El::paint(move |canvas, r| grant_row(canvas, fonts, i, r, k))
-                            .id(target_id(Target::Passthrough(i), pads))
-                            .focusable((ROW_CORNER * k) as f32)
-                            .place(r)
-                    }),
-            );
-        let has_grants = all.iter().any(|t| matches!(t, Target::Passthrough(_)));
-        let root = El::column().child(row).child(grants);
+        let root = El::column().child(row);
         let frame = self.tree.layout(root, rect);
         let cheap = super::settings::reduce_ui_res(ctx.settings, ctx.platform, ctx.fallback_ui);
         self.tree.paint_focus(canvas, frame, k as f32, dt, cheap);
-        if has_grants {
-            fonts.draw_tracked(
-                canvas,
-                "PASSTHROUGH",
-                f64::from(rect.left) + edge(k) + 16.0 * k,
-                f64::from(rect.top) + grants_top + 16.0 * k,
-                W::SemiBold,
-                12.0 * k,
-                1.4 * k,
-                fg(0.45),
-            );
-        }
     }
 
     /// The explainer's band reaches the shell's tray in: grant rows run under it on a
@@ -315,22 +269,23 @@ impl PlayersScreen {
     }
 }
 
-/// OK on `t`: a rumble pulse for a pad with a motor the host can reach, a grant or test
-/// for a row. Anything else is a thud.
+/// OK on `t`: a rumble pulse for a pad with a motor the host can reach; the grants list
+/// for the last card. Anything else is a thud.
 fn activate(t: Target, ctx: &Ctx, fx: &mut Outbox) -> Option<MenuPulse> {
-    let (action, pad_key) = match t {
+    match t {
         Target::Pad(i) if can_rumble(&ctx.pads[i], ctx.platform) => {
-            (PadAction::Rumble, ctx.pads[i].key.clone())
+            fx.cmds.push(ConsoleCmd::PadAction {
+                action: PadAction::Rumble.id().to_string(),
+                pad_key: ctx.pads[i].key.clone(),
+            });
+            Some(MenuPulse::Confirm)
         }
-        Target::Pad(_) | Target::NoPads => return Some(MenuPulse::Boundary),
-        // Empty key: the device is not an input device yet (SC2 keyboard/mouse mode).
-        Target::Passthrough(i) => (PASSTHROUGH[i].0, String::new()),
-    };
-    fx.cmds.push(ConsoleCmd::PadAction {
-        action: action.id().to_string(),
-        pad_key,
-    });
-    Some(MenuPulse::Confirm)
+        Target::Pad(_) | Target::NoPads => Some(MenuPulse::Boundary),
+        Target::Grants => {
+            fx.push(Screen::Grants(super::grants::GrantsScreen::new()));
+            Some(MenuPulse::Confirm)
+        }
+    }
 }
 
 /// A pad card: its family mark, name, what it streams as, battery, and the test OK runs.
@@ -357,6 +312,40 @@ fn card(
     let max_w = f64::from(r.width()) - 2.0 * pad;
     let base = f64::from(r.bottom) - pad;
     let mark_cy = t0 + 16.0 * k;
+    if t == Target::Grants {
+        if let Some(icon) = crate::icons::by_name("circle-help") {
+            let box_px = (MARK * 0.62 * k) as f32;
+            crate::icons::draw_icon(
+                canvas,
+                icon,
+                (l + f64::from(box_px) / 2.0) as f32,
+                mark_cy as f32,
+                box_px,
+                accent(1.0),
+            );
+        }
+        fonts.draw_clipped(
+            canvas,
+            "Not showing?",
+            l,
+            base - 22.0 * k,
+            W::Bold,
+            21.0 * k,
+            fg(1.0),
+            max_w,
+        );
+        fonts.draw_clipped(
+            canvas,
+            "Some controllers need access first",
+            l,
+            base,
+            W::Regular,
+            13.0 * k,
+            fg(0.55),
+            max_w,
+        );
+        return;
+    }
     let Target::Pad(i) = t else {
         // No pad: the key device that drives instead.
         let mark = device_icon(None, platform);
@@ -439,40 +428,6 @@ fn card(
     );
 }
 
-fn grant_row(canvas: &Canvas, fonts: &Fonts, i: usize, r: Rect, k: f64) {
-    crate::theme::panel(
-        canvas,
-        r,
-        ROW_CORNER as f32,
-        None,
-        PanelStroke::Plain(0.12),
-        k as f32,
-    );
-    let (_, label, verb) = PASSTHROUGH[i];
-    let cy = f64::from(r.center_y()) + 15.0 * k * 0.36;
-    let pad = 16.0 * k;
-    fonts.draw_clipped(
-        canvas,
-        label,
-        f64::from(r.left) + pad,
-        cy,
-        W::SemiBold,
-        15.0 * k,
-        fg(1.0),
-        f64::from(r.width()) * 0.7,
-    );
-    let vw = f64::from(fonts.measure(verb, W::SemiBold, 15.0 * k));
-    fonts.draw(
-        canvas,
-        verb,
-        f64::from(r.right) - pad - vw,
-        cy,
-        W::SemiBold,
-        15.0 * k,
-        accent(1.0),
-    );
-}
-
 fn detail(t: Target, ctx: &Ctx) -> String {
     match t {
         Target::NoPads => "Punktfunk only forwards devices the system classifies as a gamepad or \
@@ -480,30 +435,10 @@ fn detail(t: Target, ctx: &Ctx) -> String {
                            adapter's identity, or not at all."
             .into(),
         Target::Pad(i) => pad_detail(&ctx.pads[i]),
-        Target::Passthrough(i) => match PASSTHROUGH[i].0 {
-            PadAction::Sc2Bluetooth => {
-                "A Steam Controller 2 paired over Bluetooth can't be detected at all without \
-                 Bluetooth access. Wired and Puck-dongle controllers need no permission."
-                    .into()
-            }
-            PadAction::Sc2Usb => {
-                "A wired or Puck-dongle Steam Controller 2 needs USB access to be captured; \
-                 until then it stays in its built-in keyboard/mouse mode."
-                    .into()
-            }
-            PadAction::DsUsb => {
-                "A wired DualSense or DualShock 4 needs USB access to be captured — with it, \
-                 streams drive rumble, adaptive triggers, lightbar and gyro directly."
-                    .into()
-            }
-            PadAction::DsHaptics => {
-                "Play a short tone through a wired DualSense's audio endpoint, to tell a pad \
-                 that can't do haptics from a stream that is not sending them."
-                    .into()
-            }
-            // Not a passthrough row; pads carry rumble.
-            PadAction::Rumble => String::new(),
-        },
+        Target::Grants => "A wired DualSense or Steam Controller 2 needs USB access before it can \
+                           be captured, and a Steam Controller 2 over Bluetooth needs Bluetooth \
+                           access to be seen at all. OK lists the grants and a haptics test."
+            .into(),
     }
 }
 
@@ -640,10 +575,10 @@ mod tests {
         );
     }
 
-    /// Down from the cards lands on the grant rows, Android's alone; up from the cards is
-    /// the tab strip's.
+    /// Right past the last pad lands on the "Not showing?" card, Android's alone; OK on it
+    /// opens the grants list rather than asking the host for anything.
     #[test]
-    fn down_from_the_cards_reaches_the_grants() {
+    fn right_from_the_cards_reaches_the_grants_card() {
         let pads = [pad("DualSense", true)];
         let mut s = PlayersScreen::new();
         let out = drive(
@@ -652,24 +587,22 @@ mod tests {
             &pads,
             &[
                 MenuEvent::Move(MenuDir::Up),
-                MenuEvent::Move(MenuDir::Down),
+                MenuEvent::Move(MenuDir::Right),
                 MenuEvent::Confirm,
             ],
         );
         assert!(matches!(out[0].1, Some(MenuPulse::Boundary)));
-        assert_eq!(
-            out[2].0.cmds,
-            vec![ConsoleCmd::PadAction {
-                action: "sc2_bluetooth".into(),
-                pad_key: String::new(),
-            }]
+        assert!(out[2].0.cmds.is_empty());
+        assert!(
+            matches!(out[2].0.nav, Some(crate::screens::Nav::Push(ref b))
+            if matches!(**b, Screen::Grants(_)))
         );
         let mut s = PlayersScreen::new();
         let out = drive(
             &mut s,
             Platform::Apple,
             &pads,
-            &[MenuEvent::Move(MenuDir::Down)],
+            &[MenuEvent::Move(MenuDir::Right)],
         );
         assert!(
             matches!(out[0].1, Some(MenuPulse::Boundary)),
