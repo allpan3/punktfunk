@@ -92,7 +92,7 @@ PunktfunkConsole *punktfunk_console_new(const char *options_json,
 // `c` is NULL or from `punktfunk_console_new`, and is not used again.
 void punktfunk_console_free(PunktfunkConsole *c);
 
-// Draw one frame into `mtl_texture` (BGRA8, `width`×`height`) and submit it to the queue.
+// Draw one frame into `mtl_texture` (BGR10A2 or BGRA8, `width`×`height`) and submit it to the queue.
 // `scale` is design units per pixel; `0` takes the shell's own formula. `false` = nothing
 // drawn (idle, or the texture could not be wrapped): present nothing.
 //

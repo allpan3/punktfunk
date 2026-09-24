@@ -1889,6 +1889,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
             let ctx = FrameCtx {
                 width: pw,
                 height: ph,
+                ten_bit: presenter.ten_bit(),
                 // Re-read per frame: dragging to a second monitor with a different scale
                 // updates this.
                 scale: overlay_scale(window.display_scale(), osd_scale_pref),

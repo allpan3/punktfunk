@@ -87,7 +87,7 @@ private let sdrColorspace: CGColorSpace? = {
 ///
 /// `PUNKTFUNK_SDR10_DRAWABLE=8` keeps the 8-bit drawable — the A/B lever if a panel composites
 /// the wide format wrong.
-private let sdr10Drawable: MTLPixelFormat =
+let sdr10Drawable: MTLPixelFormat =
     ProcessInfo.processInfo.environment["PUNKTFUNK_SDR10_DRAWABLE"] == "8"
     ? .bgra8Unorm : .bgr10a2Unorm
 

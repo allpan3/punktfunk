@@ -48,7 +48,9 @@ public final class ConsoleMetalView: ConsolePlatformView {
         #endif
         let metal = metalLayer
         metal.device = device
-        metal.pixelFormat = .bgra8Unorm
+        // 10-bit like the video's SDR drawable: the backdrop's gradients band in 8. Skia wraps
+        // the texture as BGRA1010102, or BGRA8888 under the `PUNKTFUNK_SDR10_DRAWABLE=8` lever.
+        metal.pixelFormat = sdr10Drawable
         // Skia reads back while blending, so the drawable cannot be write-only.
         metal.framebufferOnly = false
         metal.isOpaque = true

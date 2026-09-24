@@ -466,7 +466,11 @@ pub fn soft_scroll(
     let below = ((max - offset) / soft).clamp(0.0, 1.0);
     let edged = above > 0.0 || below > 0.0;
     if edged {
-        canvas.save_layer(&skia_safe::canvas::SaveLayerRec::default().bounds(&view));
+        canvas.save_layer(
+            &skia_safe::canvas::SaveLayerRec::default()
+                .bounds(&view)
+                .flags(crate::theme::layer_flags(canvas)),
+        );
     }
     paint();
     if edged {
@@ -1053,7 +1057,7 @@ impl MenuList {
         let fading = ent.fade < 1.0;
         if fading {
             let bounds = Rect::from_xywh(x0 as f32, top as f32, row_w as f32, (ROW_H * k) as f32);
-            canvas.save_layer_alpha_f(bounds, ent.fade as f32);
+            crate::theme::save_layer_alpha(canvas, bounds, ent.fade as f32);
         }
         let r = Rect::from_xywh(x0 as f32, top as f32, row_w as f32, (ROW_H * k) as f32);
         // The field being typed into keeps its accent; focus is the plate behind the row.

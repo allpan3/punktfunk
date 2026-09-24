@@ -2097,14 +2097,11 @@ struct FieldCache {
     mesh: (String, Option<u64>),
 }
 
-/// The reduced backdrop's offscreen, on `canvas`'s own backend: a GPU target under a GPU
-/// canvas (GL, Vulkan or Metal alike), raster only under a raster one. A raster offscreen
-/// under a GPU canvas runs the field's SkSL on the CPU, several frames' worth on a TV.
+/// The reduced backdrop's offscreen, on `canvas`'s own backend ([`crate::blur::offscreen`]).
+/// A raster offscreen under a GPU canvas runs the field's SkSL on the CPU, several frames'
+/// worth on a TV.
 fn field_surface(canvas: &Canvas, size: (i32, i32)) -> Option<Surface> {
-    let info = skia_safe::ImageInfo::new_n32_premul(size, None);
-    canvas
-        .new_surface(&info, None)
-        .or_else(|| skia_safe::surfaces::raster(&info, None, None))
+    crate::blur::offscreen(canvas, size.0, size.1)
 }
 
 /// Compile the mesh for a palette and the lift, scrim, and ink it decides.

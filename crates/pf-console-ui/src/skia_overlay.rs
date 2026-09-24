@@ -36,6 +36,7 @@ struct Slot {
     view: avk::ImageView,
     width: u32,
     height: u32,
+    ten_bit: bool,
 }
 
 impl Slot {
@@ -397,15 +398,14 @@ impl Overlay for SkiaOverlay {
         if self.console_visible() {
             let idle = self.shell.as_ref().is_some_and(Shell::idle)
                 && self.console_at.is_some_and(|t| t.elapsed() < IDLE_FRAME);
-            if let Some(slot) = self.slots[self.current]
-                .as_ref()
-                .filter(|s| idle && (s.width, s.height) == (ctx.width, ctx.height))
-            {
+            if let Some(slot) = self.slots[self.current].as_ref().filter(|s| {
+                idle && (s.width, s.height, s.ten_bit) == (ctx.width, ctx.height, ctx.ten_bit)
+            }) {
                 return Ok(Some(slot.frame()));
             }
             let drew = Instant::now();
             let next = 1 - self.current;
-            self.ensure_slot(next, ctx.width, ctx.height)?;
+            self.ensure_slot(next, ctx.width, ctx.height, ctx.ten_bit)?;
             let Self {
                 gpu,
                 slots,
@@ -513,7 +513,7 @@ impl Overlay for SkiaOverlay {
 
         // Other slot: the presenter may still be sampling this one (one frame in flight).
         let next = 1 - self.current;
-        self.ensure_slot(next, ctx.width, ctx.height)?;
+        self.ensure_slot(next, ctx.width, ctx.height, ctx.ten_bit)?;
         let gpu = self.gpu.as_mut().expect("init ran");
         let slot = self.slots[next].as_mut().expect("just ensured");
 
@@ -651,10 +651,12 @@ impl SkiaOverlay {
         )
     }
 
-    fn ensure_slot(&mut self, i: usize, width: u32, height: u32) -> Result<()> {
+    /// `ten_bit` follows the swapchain: a deep slot under an 8-bit blit gains nothing. F16,
+    /// not 10/10/10/2: the overlay blends over video, and two bits of alpha step its fades.
+    fn ensure_slot(&mut self, i: usize, width: u32, height: u32, ten_bit: bool) -> Result<()> {
         if self.slots[i]
             .as_ref()
-            .is_some_and(|s| s.width == width && s.height == height)
+            .is_some_and(|s| s.width == width && s.height == height && s.ten_bit == ten_bit)
         {
             return Ok(());
         }
@@ -665,8 +667,16 @@ impl SkiaOverlay {
             // before each record), so the GPU is done with it.
             unsafe { gpu.device.destroy_image_view(old.view, None) };
         }
-        let info =
-            skia_safe::ImageInfo::new_n32_premul((width.max(1) as i32, height.max(1) as i32), None);
+        let info = skia_safe::ImageInfo::new(
+            (width.max(1) as i32, height.max(1) as i32),
+            if ten_bit {
+                skia_safe::ColorType::RGBAF16
+            } else {
+                skia_safe::ColorType::n32()
+            },
+            skia_safe::AlphaType::Premul,
+            None,
+        );
         let mut surface = gpu::surfaces::render_target(
             &mut gpu.context,
             gpu::Budgeted::Yes,
@@ -712,6 +722,7 @@ impl SkiaOverlay {
             view,
             width,
             height,
+            ten_bit,
         });
         Ok(())
     }

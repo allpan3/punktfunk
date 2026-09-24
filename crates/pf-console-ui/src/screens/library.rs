@@ -1413,7 +1413,7 @@ impl LibraryScreen {
                 // Layer only for multi-piece fades (the placeholder). Paint alpha otherwise.
                 let layered = ent.fade < 1.0 && art.is_none();
                 if layered {
-                    canvas.save_layer_alpha_f(slot, ent.fade as f32);
+                    crate::theme::save_layer_alpha(canvas, slot, ent.fade as f32);
                 }
                 let alpha = if layered { 1.0 } else { ent.fade as f32 };
                 let desk = (game.id == crate::library::DESKTOP_ID).then(|| this.desktop_caption());
@@ -1778,7 +1778,11 @@ impl LibraryScreen {
                     None,
                 ));
             }
-            canvas.save_layer(&skia_safe::canvas::SaveLayerRec::default().paint(&lp));
+            canvas.save_layer(
+                &skia_safe::canvas::SaveLayerRec::default()
+                    .paint(&lp)
+                    .flags(crate::theme::layer_flags(canvas)),
+            );
         }
         match self.art.get(&game.id) {
             Some(img) => {
@@ -3193,7 +3197,7 @@ mod tests {
         menu(&mut s, &[down(), down(), right()]);
         dump(&mut s, 50, "L3-games-grid");
         // Under the Recent sort each card captions when it was played; a pale palette.
-        let mut s = tab(LibraryView::Grid, "recent", "mint", &full());
+        let mut s = tab(LibraryView::Grid, "recent", "sky", &full());
         dump(&mut s, 60, "_settle");
         menu(&mut s, &[down(), down(), down(), down()]);
         dump(&mut s, 50, "L3b-games-recent-mint");

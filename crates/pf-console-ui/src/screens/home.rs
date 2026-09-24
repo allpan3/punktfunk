@@ -734,7 +734,7 @@ impl HomeScreen {
             );
             under = under.child(
                 El::paint(move |canvas, r| {
-                    canvas.save_layer_alpha_f(r.with_outset((8.0, 8.0)), fade);
+                    crate::theme::save_layer_alpha(canvas, r.with_outset((8.0, 8.0)), fade);
                     button(canvas, fonts, label, r, k);
                     canvas.restore();
                 })
@@ -820,7 +820,7 @@ impl TileLook {
         let layered = fade < 0.999;
         if layered {
             let bounds = tile.with_outset(((24.0 * k) as f32, (24.0 * k) as f32));
-            canvas.save_layer_alpha_f(bounds, fade as f32);
+            crate::theme::save_layer_alpha(canvas, bounds, fade as f32);
         }
         match slot {
             Slot::Host(h) => draw_host_tile(canvas, fonts, h, tile, k),

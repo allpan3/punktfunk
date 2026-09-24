@@ -441,7 +441,7 @@ fn open_at(canvas: &Canvas, alpha: f64) -> bool {
         return false;
     }
     if alpha < 0.999 {
-        canvas.save_layer_alpha_f(None, alpha as f32);
+        crate::theme::save_layer_alpha(canvas, None, alpha as f32);
     } else {
         canvas.save();
     }
@@ -469,7 +469,7 @@ impl LayerEnv<'_> {
         // Settled SrcOver draws are pixel-identical without the isolation.
         let layered = alpha < 0.999 || (scale - 1.0).abs() > 0.001 || dy.abs() > 0.001;
         if layered {
-            canvas.save_layer_alpha_f(None, alpha.clamp(0.0, 1.0) as f32);
+            crate::theme::save_layer_alpha(canvas, None, alpha.clamp(0.0, 1.0) as f32);
         } else {
             // Save anyway: the transform below is undone by the same `restore`.
             canvas.save();

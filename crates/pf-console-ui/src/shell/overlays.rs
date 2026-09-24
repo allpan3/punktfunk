@@ -249,7 +249,7 @@ impl Shell {
             // Bound the fade layer to the pill. Unbounded `save_layer` is a full-surface
             // offscreen every frame. 12 k outset is stroke slack (no blur to reach further).
             let bounds = rect.with_outset((12.0 * k as f32, 12.0 * k as f32));
-            canvas.save_layer_alpha_f(Some(bounds), alpha);
+            crate::theme::save_layer_alpha(canvas, Some(bounds), alpha);
             canvas.draw_rrect(
                 skia_safe::RRect::new_rect_xy(rect, (bh / 2.0) as f32, (bh / 2.0) as f32),
                 &fill(crate::theme::shade(0.6)),
@@ -298,7 +298,7 @@ impl Shell {
         // Only while it is arriving: an unbounded layer is a full-screen offscreen per frame,
         // and `appear` is at 1.0 within half a second of a hold that runs for many.
         if appear < 0.999 {
-            canvas.save_layer_alpha_f(None, appear as f32);
+            crate::theme::save_layer_alpha(canvas, None, appear as f32);
         } else {
             canvas.save();
         }
@@ -478,7 +478,7 @@ impl Shell {
         // Fades in rather than replacing the shelf outright: the cover has to be seen
         // LEAVING its tile, which means the tile has to still be there when it does.
         if l.appear < 0.999 {
-            canvas.save_layer_alpha_f(None, l.appear as f32);
+            crate::theme::save_layer_alpha(canvas, None, l.appear as f32);
         } else {
             canvas.save();
         }

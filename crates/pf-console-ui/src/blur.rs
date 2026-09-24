@@ -11,8 +11,8 @@
 //! band. Pinned by `a_band_blurs_more_toward_its_edge`.
 
 use skia_safe::{
-    runtime_effect::ChildPtr, Canvas, Color4f, Data, FilterMode, IRect, Image, ImageInfo, Matrix,
-    Paint, Rect, RuntimeEffect, SamplingOptions, Shader, Surface, TileMode,
+    runtime_effect::ChildPtr, Canvas, Color4f, Data, FilterMode, IRect, Image, Matrix, Paint, Rect,
+    RuntimeEffect, SamplingOptions, Shader, Surface, TileMode,
 };
 use std::cell::OnceCell;
 
@@ -202,8 +202,21 @@ fn snap(canvas: &Canvas, rect: Rect) -> Option<(Image, IRect, Rect, f32)> {
     Some((image, dev, dst, m.scale_y()))
 }
 
-fn offscreen(canvas: &Canvas, w: i32, h: i32) -> Option<Surface> {
-    let info = ImageInfo::new_n32_premul((w.max(1), h.max(1)), None);
+/// An offscreen on `canvas`'s own backend and colour depth, so a 10-bit canvas keeps its
+/// gradients through the pass. 10/10/10/2 becomes F16: the band's alpha ramp needs more
+/// than two bits. A GPU target under a GPU canvas, raster under a raster one.
+pub(crate) fn offscreen(canvas: &Canvas, w: i32, h: i32) -> Option<Surface> {
+    use skia_safe::ColorType::{BGRA1010102, RGBA1010102, RGBAF16};
+    let color_type = match canvas.image_info().color_type() {
+        RGBA1010102 | BGRA1010102 => RGBAF16,
+        other => other,
+    };
+    let info = skia_safe::ImageInfo::new(
+        (w.max(1), h.max(1)),
+        color_type,
+        skia_safe::AlphaType::Premul,
+        None,
+    );
     canvas
         .new_surface(&info, None)
         .or_else(|| skia_safe::surfaces::raster(&info, None, None))

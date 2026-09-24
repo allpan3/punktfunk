@@ -535,7 +535,8 @@ impl CollectionsScreen {
                         canvas.save_layer(
                             &skia_safe::canvas::SaveLayerRec::default()
                                 .bounds(&bounds)
-                                .paint(&lp),
+                                .paint(&lp)
+                                .flags(crate::theme::layer_flags(canvas)),
                         );
                     }
                     this.draw_tile(canvas, fonts, i, tile, k);
