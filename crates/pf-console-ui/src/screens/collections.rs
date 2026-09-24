@@ -194,13 +194,18 @@ impl CollectionsScreen {
         if want.is_empty() {
             return;
         }
+        use super::library::{share_cover, shared_cover};
+        let (fp, k) = (self.host.fp_hex.clone(), self.art_k);
         // Already decoded by the host: a move, not work this frame.
         for (id, poster) in library.drain_decoded() {
-            self.art.entry(id).or_insert_with(|| poster.into_image());
+            let img = poster.into_image();
+            share_cover(&fp, &id, k, &img);
+            self.art.entry(id).or_insert(img);
         }
         for (id, img) in self.decoder.finished() {
             match img {
                 Some(img) => {
+                    share_cover(&fp, &id, k, &img);
                     self.art.entry(id).or_insert(img);
                 }
                 None => {
@@ -209,7 +214,15 @@ impl CollectionsScreen {
                 }
             }
         }
-        // The rest decode off the render thread, like the shelf's.
+        // Another screen's cover is a clone; the rest decode off the render thread.
+        let mut want = want;
+        want.retain(|id| match shared_cover(&fp, id, k) {
+            Some(img) => {
+                self.art.insert(id.clone(), img);
+                false
+            }
+            None => true,
+        });
         let ask = want.iter().filter(|id| !self.decoder.pending(id));
         for (id, bytes) in library.art_for(ask.map(String::as_str), 4) {
             self.decoder.want(id, bytes, self.art_k);

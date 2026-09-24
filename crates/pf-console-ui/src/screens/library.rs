@@ -54,6 +54,9 @@ const ROW_GAP: f64 = 22.0;
 const GRID_HEADING: f64 = 34.0;
 /// Row 0's air under the Hosts row: the plate's outset and a breath.
 const EMBED_AIR: f64 = 14.0;
+/// New covers a screen adopts a frame. Each is a texture upload on its first draw, and a
+/// shelf's worth landing together stalls the GPU for a frame.
+const ADOPT_PER_FRAME: usize = 4;
 /// A grid row down counts as this many entrance steps, 120 ms at [`entrances::GRID`], so
 /// rows follow one another instead of each rippling at once.
 const ROW_STEPS: usize = 3;
@@ -100,6 +103,52 @@ fn art_cache_size(src: (i32, i32), k: f64) -> (i32, i32) {
 /// either way the caller still has its encoded bytes and can push those instead.
 pub fn decode_poster_off_thread(bytes: &[u8], k: f64) -> Option<crate::library::DecodedPoster> {
     crate::library::DecodedPoster::new(decode_poster(bytes, k)?)
+}
+
+thread_local! {
+    /// Covers every screen on the drawing thread shares, by host fingerprint and title. One
+    /// decode and one upload serve the Hosts shelf, the Games tab and Collections alike.
+    static SHARED_ART: RefCell<SharedArt> = RefCell::new(SharedArt::default());
+}
+
+/// [`SHARED_ART`]: at most [`ART_BUDGET`] covers, the oldest shared first out, all at one scale.
+#[derive(Default)]
+struct SharedArt {
+    k: f64,
+    covers: HashMap<(String, String), Image>,
+    order: std::collections::VecDeque<(String, String)>,
+}
+
+/// The cover another screen already holds for `id` on the host `fp`, at scale `k`.
+pub(super) fn shared_cover(fp: &str, id: &str, k: f64) -> Option<Image> {
+    SHARED_ART.with(|a| {
+        let a = a.borrow();
+        (a.k == k)
+            .then(|| a.covers.get(&(fp.to_string(), id.to_string())).cloned())
+            .flatten()
+    })
+}
+
+/// Offer a cover to every screen. A new scale starts the cache over.
+pub(super) fn share_cover(fp: &str, id: &str, k: f64, img: &Image) {
+    SHARED_ART.with(|a| {
+        let mut a = a.borrow_mut();
+        if a.k != k {
+            *a = SharedArt {
+                k,
+                ..SharedArt::default()
+            };
+        }
+        let key = (fp.to_string(), id.to_string());
+        if a.covers.insert(key.clone(), img.clone()).is_none() {
+            a.order.push_back(key);
+        }
+        while a.order.len() > ART_BUDGET {
+            if let Some(old) = a.order.pop_front() {
+                a.covers.remove(&old);
+            }
+        }
+    });
 }
 
 /// A cover to decode: its id, its bytes, the scale; and what came of it.
@@ -440,6 +489,8 @@ pub(crate) struct LibraryScreen {
     art_failed: std::collections::HashSet<String>,
     /// Covers this screen has only the bytes of, decoding off the render thread.
     decoder: ArtDecoder,
+    /// Covers decoded and waiting to join `art`, [`ADOPT_PER_FRAME`] at a time.
+    arriving: std::collections::VecDeque<(String, Image)>,
     /// Decode scale. This screen does not republish `k`; a grow cannot re-decode.
     art_k: f64,
     /// Last-draw frame per id. Grid pages the whole library; unstamped covers stay forever.
@@ -501,6 +552,7 @@ impl LibraryScreen {
             art: HashMap::new(),
             art_failed: std::collections::HashSet::new(),
             decoder: ArtDecoder::default(),
+            arriving: std::collections::VecDeque::new(),
             // Design scale. Decode runs at this `k` for the life of the screen.
             art_k: 1.0,
             art_seen: HashMap::new(),
@@ -848,33 +900,47 @@ impl LibraryScreen {
         // Publish the size a host should decode at, so one that can decode off-thread produces
         // exactly what this screen would have cached.
         shared.set_art_scale(k);
-        // Already-decoded posters cost a move. One this screen holds stays: a new copy would
-        // only upload the same cover again.
-        for (id, poster) in shared.drain_decoded() {
-            self.art.entry(id).or_insert_with(|| poster.into_image());
-        }
+        // Already-decoded posters cost a move; they queue with the decoder's for adoption.
+        let decoded = shared.drain_decoded().into_iter();
+        self.arriving
+            .extend(decoded.map(|(id, poster)| (id, poster.into_image())));
         self.adopt_decoded();
         // What this screen lacks goes to its decoder. The bytes stay in the model, so a cover
         // another screen took, or one this screen evicted, comes back here.
-        let wanted = self.art_wanted();
+        // Another screen's cover is a clone, no decode and no upload; the rest decode here.
+        let mut wanted = self.art_wanted();
+        wanted.retain(|id| match shared_cover(&self.host.fp_hex, id, k) {
+            Some(img) => {
+                self.art.insert(id.clone(), img);
+                false
+            }
+            None => true,
+        });
         let ask = wanted.iter().filter(|id| !self.decoder.pending(id));
         for (id, bytes) in shared.art_for(ask.map(String::as_str), 8) {
             self.decoder.want(id, bytes, k);
         }
     }
 
-    /// Covers the decoder finished: kept, or marked undecodable so they are asked once.
+    /// Covers the host or the decoder finished join `art` a few a frame, and one this screen
+    /// holds stays: a new copy would only upload the same cover again. Undecodable ones are
+    /// marked so they are asked once.
     fn adopt_decoded(&mut self) {
         for (id, img) in self.decoder.finished() {
             match img {
-                Some(img) => {
-                    self.art.entry(id).or_insert(img);
-                }
+                Some(img) => self.arriving.push_back((id, img)),
                 None => {
                     tracing::info!(%id, "undecodable poster");
                     self.art_failed.insert(id);
                 }
             }
+        }
+        for _ in 0..ADOPT_PER_FRAME {
+            let Some((id, img)) = self.arriving.pop_front() else {
+                break;
+            };
+            share_cover(&self.host.fp_hex, &id, self.art_k, &img);
+            self.art.entry(id).or_insert(img);
         }
     }
 
@@ -884,7 +950,11 @@ impl LibraryScreen {
     fn art_wanted(&self) -> Vec<String> {
         const AHEAD: usize = 48;
         let recent = self.frame.saturating_sub(2);
-        let lacking = |id: &String| !self.art.contains_key(id) && !self.art_failed.contains(id);
+        let lacking = |id: &String| {
+            !self.art.contains_key(id)
+                && !self.art_failed.contains(id)
+                && !self.arriving.iter().any(|(a, _)| a == id)
+        };
         let mut out: Vec<String> = Vec::new();
         let mut first_seen = None;
         for (i, &g) in self.view.iter().enumerate() {
@@ -3153,6 +3223,22 @@ mod tests {
             second.art.contains_key("g0"),
             "the second decodes the bytes"
         );
+    }
+
+    /// Two screens on one host share a cover: the second takes the first's image, with no
+    /// bytes to decode from and nothing sent to its decoder.
+    #[test]
+    fn screens_on_one_host_share_a_cover() {
+        let library = LibraryShared::default();
+        library.set_games(games(&[("Alpha", None)]));
+        let poster = decode_poster_off_thread(&poster_png(2), 1.0).unwrap();
+        library.push_decoded("g0".into(), poster);
+        let mut first = LibraryScreen::new(&host(), 0);
+        let mut second = LibraryScreen::new(&host(), 0);
+        first.sync(&library);
+        second.sync(&library);
+        assert!(second.art.contains_key("g0"), "shared, not decoded");
+        assert!(!second.decoder.pending("g0"));
     }
 
     /// A 2:3 poster, PNG-encoded: a two-hue gradient with a pale disc, colour from `seed`.
