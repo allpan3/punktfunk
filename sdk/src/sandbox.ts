@@ -189,23 +189,29 @@ export const bwrapArgv = (
  * every plugin's token. Checked on the path and on what it resolves to in the runner's view.
  */
 export const refusedRoot = (abs: string, home: string): boolean => {
-	const refused = (p: string) => {
+	const refused = (p: string, h: string) => {
 		const under = (base: string) => p === base || p.startsWith(`${base}/`);
 		return (
 			p === "/" ||
-			`${home}/`.startsWith(`${p}/`) ||
+			`${h}/`.startsWith(`${p}/`) ||
 			["/proc", "/sys", "/dev"].some(under) ||
 			(under("/run") && !p.startsWith("/run/media/")) ||
-			[".ssh", ".gnupg"].some((d) => under(path.join(home, d))) ||
-			p.startsWith(path.join(home, ".config", "punktfunk"))
+			[".ssh", ".gnupg"].some((d) => under(path.join(h, d))) ||
+			p.startsWith(path.join(h, ".config", "punktfunk"))
 		);
 	};
+	const real = (p: string) => {
+		try {
+			return fs.realpathSync(p);
+		} catch {
+			return p;
+		}
+	};
+	// Both spellings of both sides: on Fedora Atomic `/home` is a link to `/var/home`.
 	const p = path.resolve(abs);
-	let real = p;
-	try {
-		real = fs.realpathSync(p);
-	} catch {}
-	return refused(p) || refused(real);
+	const paths = [p, real(p)];
+	const homes = [home, real(home)];
+	return paths.some((x) => homes.some((h) => refused(x, h)));
 };
 
 const bindable = (abs: string, home: string): boolean =>

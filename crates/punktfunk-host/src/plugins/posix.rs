@@ -255,7 +255,7 @@ pub(super) fn converge_runner_roots(
         .unwrap_or_else(|| home.join(".config"));
     let dir = config.join(format!("systemd/user/{UNIT}.service.d"));
     let path = dir.join(ROOTS_DROPIN);
-    let body = render_roots(roots, home);
+    let body = render_roots(roots, &hidden_roots(home));
     if std::fs::read_to_string(&path).is_ok_and(|old| old == body) {
         return Ok(false);
     }
@@ -269,12 +269,30 @@ pub(super) fn converge_runner_roots(
     Ok(true)
 }
 
-/// One self-bind per root the unit would otherwise hide or keep read-only. `ProtectHome` hides
-/// `/home` and `/root` (not just this `home`); a read anywhere else is visible already. A
-/// `src:dst` pair fails the unit's `+` ExecStartPre. systemd drops a bind whose path holds a
-/// quote, and a control character would end the line: left out.
+/// What `ProtectHome` hides: `/home` and `/root` (not just this `home`), each also as it
+/// resolves. Roots are canonical, and on Fedora Atomic `/home` is a link to `/var/home`.
 #[cfg(any(test, target_os = "linux"))]
-fn render_roots(roots: &[access::RunnerRoot], home: &std::path::Path) -> String {
+fn hidden_roots(home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for p in [
+        home,
+        std::path::Path::new("/home"),
+        std::path::Path::new("/root"),
+    ] {
+        out.push(p.to_path_buf());
+        if let Ok(real) = p.canonicalize() {
+            out.push(real);
+        }
+    }
+    out
+}
+
+/// One self-bind per root the unit would otherwise hide or keep read-only; a read anywhere
+/// outside `hidden` is visible already. A `src:dst` pair fails the unit's `+` ExecStartPre.
+/// systemd drops a bind whose path holds a quote, and a control character would end the line:
+/// left out.
+#[cfg(any(test, target_os = "linux"))]
+fn render_roots(roots: &[access::RunnerRoot], hidden: &[std::path::PathBuf]) -> String {
     let mut out = String::from(
         "# Written by punktfunk-host from plugin manifests and folder grants. Edits are replaced.\n[Service]\n",
     );
@@ -293,14 +311,7 @@ fn render_roots(roots: &[access::RunnerRoot], home: &std::path::Path) -> String 
             );
             continue;
         }
-        let hidden = [
-            home,
-            std::path::Path::new("/home"),
-            std::path::Path::new("/root"),
-        ]
-        .iter()
-        .any(|h| r.path.starts_with(h));
-        let key = match (hidden, r.write) {
+        let key = match (hidden.iter().any(|h| r.path.starts_with(h)), r.write) {
             (true, true) => "BindPaths",
             (true, false) => "BindReadOnlyPaths",
             (false, true) => "ReadWritePaths",
@@ -491,7 +502,7 @@ mod tests {
                 root("/mnt/out", true),
                 root("/home/other/Games", false),
             ],
-            Path::new("/h"),
+            &hidden_roots(Path::new("/h")),
         );
         let lines: Vec<&str> = body.lines().skip(2).collect();
         assert_eq!(
@@ -517,8 +528,29 @@ mod tests {
                 root("/h/a\"b", false),
                 root("/h/x\nExecStartPre=+/bin/sh", false),
             ],
-            Path::new("/h"),
+            &hidden_roots(Path::new("/h")),
         );
         assert_eq!(body.lines().count(), 2, "{body}");
+    }
+
+    /// Fedora Atomic: `$HOME` is spelled under `/home`, a link to `/var/home`, and every root
+    /// arrives canonical. Such a root is hidden all the same, so it gets its bind.
+    #[test]
+    fn a_home_behind_a_link_still_gets_its_binds() {
+        let tmp = std::env::temp_dir().join(format!("pf-roots-link-{}", std::process::id()));
+        let real_home = tmp.join("var/home/u");
+        std::fs::create_dir_all(real_home.join(".local/share/Steam")).unwrap();
+        std::os::unix::fs::symlink(tmp.join("var/home"), tmp.join("home")).unwrap();
+        let steam = real_home.canonicalize().unwrap().join(".local/share/Steam");
+        let body = render_roots(
+            &[root(steam.to_str().unwrap(), false)],
+            &hidden_roots(&tmp.join("home/u")),
+        );
+        std::fs::remove_dir_all(&tmp).unwrap();
+        assert_eq!(
+            body.lines().nth(2),
+            Some(format!("BindReadOnlyPaths=\"-{}\"", steam.display()).as_str()),
+            "{body}"
+        );
     }
 }
