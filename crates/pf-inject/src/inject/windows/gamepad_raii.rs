@@ -30,7 +30,7 @@ use windows::Win32::Devices::DeviceAndDriverInstallation::{
 };
 use windows::Win32::Devices::Enumeration::Pnp::{SwDeviceClose, HSWDEVICE};
 use windows::Win32::Devices::Properties::{
-    DEVPKEY_Device_ProblemStatus, DEVPROPTYPE, DEVPROP_TYPE_NTSTATUS,
+    DEVPKEY_Device_HardwareIds, DEVPROPTYPE, DEVPROP_TYPE_STRING_LIST,
 };
 use windows::Win32::Foundation::{
     CloseHandle, DuplicateHandle, GetLastError, LocalFree, SetLastError, DUPLICATE_HANDLE_OPTIONS,
@@ -840,9 +840,10 @@ impl DriverAttach {
         let (driver, inf, driver_log) = (self.driver, self.inf, self.driver_log);
         let shm_name = self.shm_name.clone();
         let instance_id = self.instance_id.clone();
+        let pad = self.identity.is_some();
         std::thread::Builder::new()
             .name("pf-driver-diagnose".into())
-            .spawn(move || diagnose_blocking(driver, inf, driver_log, &shm_name, instance_id))
+            .spawn(move || diagnose_blocking(driver, inf, driver_log, &shm_name, instance_id, pad))
             .ok();
     }
 }
@@ -854,6 +855,7 @@ fn diagnose_blocking(
     driver_log: &'static str,
     shm_name: &str,
     instance_id: Option<String>,
+    pad: bool,
 ) {
     let store = match driver_store_has(inf) {
         Some(true) => "driver package present in the driver store",
@@ -863,7 +865,7 @@ fn diagnose_blocking(
         None => "driver store could not be queried (pnputil failed or still enumerating)",
     };
     let devnode = match &instance_id {
-        Some(id) => devnode_status_line(id),
+        Some(id) => devnode_status_line(id, pad),
         None => "no per-session devnode (SwDeviceCreate failed earlier — see the warning above)"
             .to_string(),
     };
@@ -929,7 +931,7 @@ fn driver_store_has(inf: &str) -> Option<bool> {
     Some(inv.contains(&inf.to_ascii_lowercase()))
 }
 
-fn devnode_status_line(instance_id: &str) -> String {
+fn devnode_status_line(instance_id: &str, pad: bool) -> String {
     let wide: Vec<u16> = instance_id
         .encode_utf16()
         .chain(std::iter::once(0))
@@ -957,12 +959,13 @@ fn devnode_status_line(instance_id: &str) -> String {
         return format!("devnode {instance_id}: status query failed (CR={})", cr.0);
     }
     if status.0 & DN_HAS_PROBLEM.0 != 0 {
-        let hint = match problem_status(devinst) {
-            Some(pf_driver_proto::gamepad::STATUS_NO_PAD_IDENTITY) => {
-                "the gamepad driver refused it: no pf_* hardware id names this pad; the host and \
-                 driver disagree on the controller list — reinstall both"
-            }
-            _ => cm_problem_hint(problem.0),
+        let refused =
+            pad && hardware_ids(devinst).is_some_and(|ids| crate::pad_refused(problem.0, &ids));
+        let hint = if refused {
+            "the gamepad driver refused it: no pf_* hardware id names this pad; the host and \
+             driver disagree on the controller list — reinstall both"
+        } else {
+            cm_problem_hint(problem.0)
         };
         return format!(
             "devnode {instance_id} has PnP problem code {} ({hint}) [status 0x{:08x}]",
@@ -977,25 +980,34 @@ fn devnode_status_line(instance_id: &str) -> String {
     )
 }
 
-/// The NTSTATUS a failed devnode reports (`DEVPKEY_Device_ProblemStatus`), as a raw `u32`.
-fn problem_status(devinst: u32) -> Option<u32> {
+/// A devnode's hardware ids, lowercase and `;`-terminated, the form the driver matches on.
+fn hardware_ids(devinst: u32) -> Option<String> {
     let mut ty = DEVPROPTYPE(0);
-    let mut value = [0u8; 4];
-    let mut size = value.len() as u32;
-    // SAFETY: `devinst` is a located devnode; the key is a static const; `value` holds `size`
+    let mut buf = [0u16; 512];
+    let mut size = std::mem::size_of_val(&buf) as u32;
+    // SAFETY: `devinst` is a located devnode; the key is a static const; `buf` holds `size`
     // bytes and `ty` / `size` are valid out-params.
     let cr = unsafe {
         CM_Get_DevNode_PropertyW(
             devinst,
-            &DEVPKEY_Device_ProblemStatus,
+            &DEVPKEY_Device_HardwareIds,
             &mut ty,
-            Some(value.as_mut_ptr()),
+            Some(buf.as_mut_ptr().cast()),
             &mut size,
             0,
         )
     };
-    (cr == CR_SUCCESS && ty == DEVPROP_TYPE_NTSTATUS && size == 4)
-        .then(|| u32::from_le_bytes(value))
+    if cr != CR_SUCCESS || ty != DEVPROP_TYPE_STRING_LIST {
+        return None;
+    }
+    let len = (size as usize / 2).min(buf.len());
+    Some(
+        buf[..len]
+            .split(|&c| c == 0)
+            .filter(|id| !id.is_empty())
+            .map(|id| String::from_utf16_lossy(id).to_ascii_lowercase() + ";")
+            .collect(),
+    )
 }
 
 fn cm_problem_hint(problem: u32) -> &'static str {

@@ -2433,8 +2433,8 @@ pub mod gamepad {
     }
 
     /// NTSTATUS the driver fails `EvtDeviceAdd` with when no `pf_*` hardware id names the pad
-    /// (`STATUS_DEVICE_CONFIGURATION_ERROR`). The host reads it back from the devnode's problem
-    /// status to name the cause.
+    /// (`STATUS_DEVICE_CONFIGURATION_ERROR`). UMDF does not pass it on: the devnode reports
+    /// `STATUS_DEVICE_DATA_ERROR`, so the host judges the devnode's hardware ids instead.
     pub const STATUS_NO_PAD_IDENTITY: u32 = 0xC000_0182;
 }
 

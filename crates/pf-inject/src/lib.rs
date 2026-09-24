@@ -561,6 +561,13 @@ pub fn pad_attach_verdict(
     PadDriverVerdict::Current
 }
 
+/// Whether a pad devnode that failed to start (`CM_PROB_FAILED_START`, 10) is one the driver
+/// refused: its lowercase hardware ids name no identity. UMDF reports that refusal as
+/// `STATUS_DEVICE_DATA_ERROR`, not the driver's own status, so the ids are the evidence.
+pub fn pad_refused(problem: u32, hwids: &str) -> bool {
+    problem == 10 && pf_driver_proto::gamepad::devtype_from_hwids(hwids).is_none()
+}
+
 #[cfg(target_os = "windows")]
 static PAD_DRIVER: std::sync::Mutex<PadDriverVerdict> =
     std::sync::Mutex::new(PadDriverVerdict::Unseen);
@@ -606,6 +613,23 @@ mod pad_driver_verdict_tests {
             pad_attach_verdict(DEVTYPE_DUALSENSE, GAMEPAD_DRIVER_REV, None),
             PadDriverVerdict::Current,
             "an unread VID/PID is no evidence against the pad"
+        );
+    }
+
+    /// A failed start on a devnode whose ids carry no pf_* token is the driver's refusal; the
+    /// ids as the devnode reported them on .173.
+    #[test]
+    fn a_failed_pad_with_no_pf_id_reads_as_refused() {
+        let unknown =
+            "zz_unknown_pad;usb\\vid_054c&pid_0ce6&rev_0100&mi_03;usb\\vid_054c&pid_0ce6&mi_03;";
+        assert!(pad_refused(10, unknown));
+        assert!(!pad_refused(
+            10,
+            "pf_dualsense;usb\\vid_054c&pid_0ce6&mi_03;"
+        ));
+        assert!(
+            !pad_refused(28, unknown),
+            "no driver bound is not a refusal"
         );
     }
 
