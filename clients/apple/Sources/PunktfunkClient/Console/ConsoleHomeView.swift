@@ -69,11 +69,6 @@ struct ConsoleHomeView: View {
             .onChange(of: pairing?.id) { _, _ in takePairing() }
             .onChange(of: linkConfirm?.id) { _, _ in takeLinkConfirm() }
             .onChange(of: waker.waking) { _, _ in console?.pushWake() }
-            // A screen this app owns, asked for by a console row (`PlatformScreen`). The console
-            // keeps drawing underneath and takes no input while one is up.
-            .sheet(isPresented: platformScreen) {
-                platformScreenBody.onDisappear { console?.platformScreen = nil }
-            }
     }
 
     @ViewBuilder private var content: some View {
@@ -136,17 +131,6 @@ struct ConsoleHomeView: View {
             guard linkConfirm?.id == confirm.id else { return }
             linkConfirm = nil
             if choice == 0 { runLink(confirm) }
-        }
-    }
-
-    private var platformScreen: Binding<Bool> {
-        Binding(get: { console?.platformScreen != nil }, set: { if !$0 { console?.platformScreen = nil } })
-    }
-
-    @ViewBuilder private var platformScreenBody: some View {
-        switch console?.platformScreen {
-        case "licenses": AcknowledgementsView()
-        default: EmptyView()
         }
     }
 

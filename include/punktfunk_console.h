@@ -64,6 +64,10 @@
 // answer comes back as the `PromptAnswer` command.
 #define PUNKTFUNK_CONSOLE_PUSH_PROMPT 16
 
+// `[{"heading", "text"}]` — what this app bundles, for the Licences screen. The answer to
+// the `LoadLicenses` command.
+#define PUNKTFUNK_CONSOLE_PUSH_LICENSES 17
+
 // One console. Opaque to C.
 typedef struct PunktfunkConsole PunktfunkConsole;
 

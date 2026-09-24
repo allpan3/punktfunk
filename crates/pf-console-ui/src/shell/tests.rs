@@ -704,6 +704,44 @@ fn next_section(s: &mut Shell) {
     s.handle_menu(MenuEvent::Move(MenuDir::Down));
 }
 
+/// The licences take a host's full notices once they arrive, draw them, and page with
+/// Right; Back leaves.
+#[test]
+fn the_licences_page_through_a_hosts_notices() {
+    let fonts = crate::theme::build_fonts().unwrap();
+    let mut surface = skia_safe::surfaces::raster_n32_premul((1280, 800)).unwrap();
+    let mut fx = crate::screens::Outbox::default();
+    let licenses = crate::screens::licenses::LicensesScreen::new(&mut fx);
+    let (mut s, console, _library) = shell(vec![
+        Screen::Home(HomeScreen::new()),
+        Screen::Licenses(licenses),
+    ]);
+    let notices: String = (0..12_000)
+        .map(|i| format!("crate-{i} 1.0.0 — MIT OR Apache-2.0 — https://example.com/{i}\n"))
+        .collect();
+    console.set_licenses(vec![crate::model::LicenseSection {
+        heading: "Third-party software".into(),
+        text: notices,
+    }]);
+    let mut frame = |s: &mut Shell| s.render(surface.canvas(), 1280, 800, &fonts, None, None, &[]);
+    frame(&mut s);
+    let Some(Screen::Licenses(l)) = s.stack.last() else {
+        panic!("the licences are on top");
+    };
+    assert!(!l.waiting(), "the host's sections reached the screen");
+    for _ in 0..3 {
+        s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    }
+    frame(&mut s);
+    let Some(Screen::Licenses(l)) = s.stack.last() else {
+        panic!("paging stays on the licences");
+    };
+    assert!(l.scrolled() > 1000.0, "three pages down: {}", l.scrolled());
+    s.handle_menu(MenuEvent::Back);
+    finish_motion(&mut s);
+    assert!(matches!(s.stack.last(), Some(Screen::Home(_))));
+}
+
 #[test]
 fn every_settings_tab_rasters() {
     let fonts = crate::theme::build_fonts().unwrap();

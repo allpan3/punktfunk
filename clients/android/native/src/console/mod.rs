@@ -586,6 +586,14 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleLibr
 }
 
 json_pusher!(
+/// `NativeBridge.nativeConsoleSetLicenses(handle, json)` — `[{"heading", "text"}]`, what this app
+/// bundles; the answer to `ConsoleCmd::LoadLicenses`.
+    Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetLicenses,
+    Vec<pf_console_ui::LicenseSection>,
+    |h, v| h.handles.console.set_licenses(v)
+);
+
+json_pusher!(
 /// `NativeBridge.nativeConsoleLibraryPhase(handle, json)` — `"Loading"`, `"Empty"`, `"Ready"`,
 /// or `{"Error": {"title", "body", "can_retry"}}`.
     Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleLibraryPhase,

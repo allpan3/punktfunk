@@ -828,6 +828,19 @@ impl ServiceState {
             ConsoleCmd::PadAction { .. } => {}
             // Only a host that raised a prompt hears its answer; the desktop raises none.
             ConsoleCmd::PromptAnswer { .. } => {}
+            // The notices this build ships beside it, compiled in: an installed session has
+            // no reliable path to the file.
+            ConsoleCmd::LoadLicenses => {
+                #[cfg(windows)]
+                const NOTICES: &str = include_str!("../../windows/THIRD-PARTY-NOTICES.txt");
+                #[cfg(not(windows))]
+                const NOTICES: &str = include_str!("../../linux/THIRD-PARTY-NOTICES.txt");
+                self.console
+                    .set_licenses(vec![pf_console_ui::LicenseSection {
+                        heading: "Third-party software".into(),
+                        text: NOTICES.into(),
+                    }]);
+            }
             ConsoleCmd::SetPin {
                 key,
                 preset_id,

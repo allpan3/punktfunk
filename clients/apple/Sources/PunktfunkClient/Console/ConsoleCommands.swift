@@ -18,6 +18,7 @@ extension ConsoleModel {
                 switch name {
                 case "CancelWake": waker.cancel()
                 case "Probe": Task { await store.refreshReachability(discovery: discovery) }
+                case "LoadLicenses": pushLicenses()
                 default: break
                 }
                 continue
@@ -72,8 +73,6 @@ extension ConsoleModel {
             hostAction(
                 fp: a["fp_hex"] as? String ?? "", id: a["action_id"] as? String ?? "",
                 label: a["label"] as? String ?? "")
-        case "OpenPlatformScreen":
-            platformScreen = a["id"] as? String
         case "PadAction":
             padAction(a["action"] as? String ?? "", key: a["pad_key"] as? String ?? "")
         case "PromptAnswer":
@@ -88,6 +87,21 @@ extension ConsoleModel {
     }
 
     private func port(_ value: Any?) -> UInt16 { UInt16(value as? Int ?? 0) }
+
+    /// What this app bundles beside the console's own texts, for its Licences screen.
+    private func pushLicenses() {
+        let sections: [[String: String]] = [
+            ["heading": "Swift packages", "text": Licenses.swiftPackages],
+            [
+                "heading": "Third-party software",
+                "text": Licenses.thirdPartyIntro + "\n\n" + Licenses.thirdPartyNotices,
+            ],
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: sections),
+            let json = String(data: data, encoding: .utf8)
+        else { return }
+        bridge.push(.licenses, json)
+    }
 
     /// The console's link test: one probe burst over a second connect, each phase pushed back
     /// as `SpeedPhase`. The console raised the takeover itself and owns clearing it. 720p60, as

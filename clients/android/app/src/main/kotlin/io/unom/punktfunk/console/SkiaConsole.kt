@@ -148,7 +148,6 @@ object SkiaConsole {
     private var holdsLaunch = false
     private var onSettingsChange: ((Settings) -> Unit)? = null
     private var onQuit: (() -> Unit)? = null
-    private var onPlatformScreen: ((String) -> Unit)? = null
     private var onPadAction: ((String, String) -> Unit)? = null
     private var onPulse: ((String) -> Unit)? = null
 
@@ -441,7 +440,6 @@ object SkiaConsole {
         onConnected: (ActiveSession) -> Unit,
         onSettingsChange: (Settings) -> Unit,
         onQuit: () -> Unit,
-        onPlatformScreen: (String) -> Unit,
         onPadAction: (String, String) -> Unit,
         onPulse: (String) -> Unit,
         onAnnounce: (String) -> Unit,
@@ -449,7 +447,6 @@ object SkiaConsole {
         this.onConnected = onConnected
         this.onSettingsChange = onSettingsChange
         this.onQuit = onQuit
-        this.onPlatformScreen = onPlatformScreen
         this.onPadAction = onPadAction
         this.onPulse = onPulse
         this.onAnnounce = onAnnounce
@@ -467,7 +464,6 @@ object SkiaConsole {
         onConnected = null
         onSettingsChange = null
         onQuit = null
-        onPlatformScreen = null
         onPadAction = null
         onPulse = null
         onAnnounce = null
@@ -823,6 +819,20 @@ object SkiaConsole {
 
     // ---- commands from the console -----------------------------------------------------
 
+    /** `ConsoleCmd::LoadLicenses`: the notices this APK bundles, for the console's Licences screen. */
+    private fun loadLicenses() {
+        val app = appContext ?: return
+        ioPool.execute {
+            val notices = runCatching {
+                app.assets.open("THIRD-PARTY-NOTICES.txt").bufferedReader().use { it.readText() }
+            }.getOrDefault("Third-party notices unavailable.")
+            val json = JSONArray()
+                .put(JSONObject().put("heading", "Third-party software").put("text", notices))
+                .toString()
+            main.post { if (handle != 0L) NativeBridge.nativeConsoleSetLicenses(handle, json) }
+        }
+    }
+
     private fun drainCommands() {
         val arr = runCatching { JSONArray(NativeBridge.nativeConsoleDrainCmds(handle)) }.getOrNull() ?: return
         for (i in 0 until arr.length()) {
@@ -830,6 +840,7 @@ object SkiaConsole {
                 is String -> when (c) {
                     "CancelWake" -> { wakeGen.incrementAndGet(); NativeBridge.nativeConsoleSetWake(handle, "null") }
                     "Probe" -> { resumeDiscovery(); pushHosts() }
+                    "LoadLicenses" -> loadLicenses()
                 }
                 is JSONObject -> {
                     c.optJSONObject("FetchLibrary")?.let { fetchLibrary(it, refreshOnly = false) }
@@ -845,10 +856,7 @@ object SkiaConsole {
                     c.optJSONObject("SetPin")?.let(::setPin)
                     c.optJSONObject("BindPreset")?.let(::bindPreset)
                     c.optJSONObject("SetClipboard")?.let(::setClipboard)
-                    c.optJSONObject("OpenPlatformScreen")?.let { onPlatformScreen?.invoke(it.optString("id")) }
                     c.optJSONObject("PadAction")?.let { onPadAction?.invoke(it.optString("action"), it.optString("pad_key")) }
-                    c.optString("OpenPlatformScreen").takeIf { c.has("OpenPlatformScreen") && c.opt("OpenPlatformScreen") is String }
-                        ?.let { onPlatformScreen?.invoke(it) }
                 }
             }
         }

@@ -186,6 +186,15 @@ struct ConsoleState {
     /// One-shot toast. The shell `take`s it on the next sync — unlike [`PairPhase`]
     /// there is no modal state, so a take-once string is the whole protocol.
     notice: Option<String>,
+    /// What the host bundles, for the Licences screen. Kept once sent.
+    licenses: Option<Arc<Vec<LicenseSection>>>,
+}
+
+/// One block of a host's bundled licences: a heading, then its text as the file has it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LicenseSection {
+    pub heading: String,
+    pub text: String,
 }
 
 /// Service threads write; the shell polls per frame. Cheap locks; no GPU data.
@@ -208,6 +217,14 @@ impl ConsoleShared {
     pub(crate) fn hosts_snapshot(&self) -> (Vec<HostRow>, u64) {
         let s = self.0.lock().unwrap();
         (s.hosts.clone(), s.hosts_gen)
+    }
+
+    pub fn set_licenses(&self, sections: Vec<LicenseSection>) {
+        self.0.lock().unwrap().licenses = Some(Arc::new(sections));
+    }
+
+    pub(crate) fn licenses(&self) -> Option<Arc<Vec<LicenseSection>>> {
+        self.0.lock().unwrap().licenses.clone()
     }
 
     pub fn set_pair(&self, phase: PairPhase) {
@@ -377,6 +394,8 @@ pub enum ConsoleCmd {
     OpenPlatformScreen {
         id: String,
     },
+    /// The Licences screen opened: send this host's [`LicenseSection`]s.
+    LoadLicenses,
     /// The answer to a [`crate::screens::prompt::Prompt`]: the row picked, or `None` for
     /// Back. Only a host that raised the prompt receives one.
     PromptAnswer {

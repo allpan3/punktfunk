@@ -14,8 +14,8 @@ use pf_console_ui::bridge::{
 use pf_console_ui::console::FrameCost;
 use pf_console_ui::{
     Console, ConsoleEntry, ConsoleHandles, HostRow, InputSource, Insets, Key, LibraryGame,
-    LibraryPhase, PairPhase, Platform, Prompt, SnapshotStore, SpeedPhase, Stale, Viewport,
-    WakeStatus,
+    LibraryPhase, LicenseSection, PairPhase, Platform, Prompt, SnapshotStore, SpeedPhase, Stale,
+    Viewport, WakeStatus,
 };
 use skia_safe::gpu::{self, mtl, DirectContext, SurfaceOrigin};
 use skia_safe::ColorType;
@@ -76,6 +76,9 @@ pub const PUNKTFUNK_CONSOLE_PUSH_NAVIGATE: u8 = 15;
 /// `{"id", "title", "message", "choices": [..]}` — a question over the top screen; the
 /// answer comes back as the `PromptAnswer` command.
 pub const PUNKTFUNK_CONSOLE_PUSH_PROMPT: u8 = 16;
+/// `[{"heading", "text"}]` — what this app bundles, for the Licences screen. The answer to
+/// the `LoadLicenses` command.
+pub const PUNKTFUNK_CONSOLE_PUSH_LICENSES: u8 = 17;
 
 /// One console. Opaque to C.
 pub struct PunktfunkConsole {
@@ -631,6 +634,9 @@ pub unsafe extern "C" fn punktfunk_console_push(
             }
             PUNKTFUNK_CONSOLE_PUSH_PROMPT => {
                 json::<Prompt>(text).map(|v| *lock(&c.prompt) = Some(v))
+            }
+            PUNKTFUNK_CONSOLE_PUSH_LICENSES => {
+                json::<Vec<LicenseSection>>(text).map(|v| c.handles.console.set_licenses(v))
             }
             _ => {
                 tracing::error!("console: unknown push kind {kind}");

@@ -918,13 +918,19 @@ impl SettingsScreen {
                     ListMsg::None => pulse,
                 };
             }
-            // Platform screen: A asks the host to open it; nothing here edits.
+            // The console draws the licences with the host's sections. webOS still opens
+            // its own screen: that host sends no sections yet.
             RowId::Licenses => {
                 return match msg {
-                    ListMsg::Activate => {
+                    ListMsg::Activate if ctx.platform == crate::platform::Platform::WebOS => {
                         fx.cmds.push(crate::model::ConsoleCmd::OpenPlatformScreen {
                             id: crate::platform::PlatformScreen::Licenses.id().to_string(),
                         });
+                        pulse
+                    }
+                    ListMsg::Activate => {
+                        let screen = super::licenses::LicensesScreen::new(fx);
+                        fx.push(Screen::Licenses(screen));
                         pulse
                     }
                     ListMsg::Adjust(_) => Some(MenuPulse::Boundary),
@@ -1159,9 +1165,10 @@ pub fn row_on(id: RowId, platform: crate::platform::Platform) -> bool {
         // Offered wherever there is a second UI to fall back to: Android's touch home,
         // webOS's cursor shell. `row_applies` still needs `fallback_ui` from the host.
         RowId::GamepadUi | RowId::GamepadUiMode => &[Android, WebOS, Apple],
-        // A pad list and a licences screen: both real on a TV, and both already in the
-        // Apple client (its Controllers screen and the Acknowledgements it ships).
-        RowId::Controllers | RowId::Licenses => &[Android, WebOS, Apple],
+        // A pad list: real on a TV, and on Apple its Controllers screen.
+        RowId::Controllers => &[Android, WebOS, Apple],
+        // Every client ships third-party code. The browser build has no bundle to list.
+        RowId::Licenses => &[Desktop, Android, WebOS, Apple],
         // DualSense capture — the pad reaches webOS over Bluetooth HID, not hidraw, so the
         // concept is real there too (punktfunk-webos docs/NOTES.md).
         RowId::DsCapture => &[Android, WebOS],
@@ -3602,7 +3609,6 @@ pub(crate) mod tests {
                 RowId::ReduceUiResolution,
                 RowId::GamepadUi,
                 RowId::GamepadUiMode,
-                RowId::Licenses,
             ]
         );
         let off_android: Vec<RowId> = all

@@ -972,6 +972,13 @@ impl Shell {
         if let Some(text) = self.console.take_notice() {
             self.show_toast(text);
         }
+        if let Some(Screen::Licenses(l)) = self.stack.last_mut() {
+            if l.waiting() {
+                if let Some(sections) = self.console.licenses() {
+                    l.set_host(sections.as_ref().clone());
+                }
+            }
+        }
 
         let pair = self.console.pair();
         match &pair {

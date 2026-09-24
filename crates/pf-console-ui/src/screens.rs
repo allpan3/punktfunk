@@ -11,6 +11,7 @@ pub(crate) mod collections;
 pub(crate) mod grants;
 pub(crate) mod home;
 pub(crate) mod library;
+pub(crate) mod licenses;
 
 pub(crate) mod pair;
 pub(crate) mod palette;
@@ -180,6 +181,8 @@ pub(crate) enum Screen {
     Grants(grants::GrantsScreen),
     /// A question the app asks through the console ([`prompt::Prompt`]).
     Prompt(prompt::PromptScreen),
+    /// Open-source licences. Raised by the About section.
+    Licenses(licenses::LicensesScreen),
 }
 
 impl Screen {
@@ -215,6 +218,7 @@ impl Screen {
             Screen::Palette(s) => s.menu(ev, ctx, fx),
             Screen::Grants(s) => s.menu(ev, ctx, fx),
             Screen::Prompt(s) => s.menu(ev, ctx, fx),
+            Screen::Licenses(s) => s.menu(ev, ctx, fx),
         }
     }
 
@@ -263,6 +267,7 @@ impl Screen {
             Screen::Palette(s) => s.pan(p),
             Screen::Grants(s) => s.list.pan(p),
             Screen::Prompt(s) => s.list.pan(p),
+            Screen::Licenses(s) => s.pan(p),
             Screen::ShortcutEditor(s) => s.pan_list().is_some_and(|l| l.pan(p)),
             Screen::RingEditor(s) => s.pan_list().pan(p),
             Screen::Library(s) => s.pan(p),
@@ -292,6 +297,7 @@ impl Screen {
             Screen::Palette(s) => s.pointer(p, ctx, fx),
             Screen::Grants(s) => s.pointer(p, ctx, fx),
             Screen::Prompt(s) => s.pointer(p, ctx, fx),
+            Screen::Licenses(s) => s.pointer(p, ctx, fx),
         }
     }
 
@@ -388,6 +394,7 @@ impl Screen {
             Screen::Palette(_) => "Background".into(),
             Screen::Grants(_) => "Controller access".into(),
             Screen::Prompt(s) => s.title(),
+            Screen::Licenses(_) => "Open-source licences".into(),
         }
     }
 
@@ -426,6 +433,7 @@ impl Screen {
             Screen::Palette(s) => s.hints(ctx),
             Screen::Grants(s) => s.hints(ctx),
             Screen::Prompt(s) => s.hints(ctx),
+            Screen::Licenses(s) => s.hints(ctx),
         }
     }
 
@@ -460,6 +468,7 @@ impl Screen {
             Screen::Palette(s) => s.render(canvas, rect, k, dt, fonts, ctx),
             Screen::Grants(s) => s.render(canvas, rect, k, dt, fonts, ctx),
             Screen::Prompt(s) => s.render(canvas, rect, k, dt, fonts, ctx),
+            Screen::Licenses(s) => s.render(canvas, rect, k, dt, fonts, ctx),
         }
     }
 }

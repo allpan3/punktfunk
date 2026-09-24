@@ -32,7 +32,6 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.app.ActivityCompat
-import io.unom.punktfunk.ConsoleLicensesScreen
 import io.unom.punktfunk.DS_USB_PERMISSION_ACTION
 import io.unom.punktfunk.MainActivity
 import io.unom.punktfunk.Settings
@@ -77,9 +76,6 @@ fun SkiaConsoleShell(
     // composition, and would then be the SECOND screen the user sees.
     val handle = remember { SkiaConsole.ensure(context, settings, pendingLink = deepLink != null) }
     val haptics = rememberConsoleHaptics()
-    // A platform-native screen the console opened over itself (design D7): the console's own
-    // input is held while it is up, and Back closes it.
-    var platformScreen by remember { mutableStateOf<String?>(null) }
 
     // The console's surface, once `factory` has built it. A Skia surface has no accessibility
     // node tree, so the focused row is spoken through this view instead — the only thing a
@@ -93,7 +89,6 @@ fun SkiaConsoleShell(
             onConnected = { currentOnConnected(it) },
             onSettingsChange = { currentOnSettingsChange(it) },
             onQuit = { activity?.moveTaskToBack(true) },
-            onPlatformScreen = { platformScreen = it },
             onPadAction = { action, key -> padAction(activity, action, key) },
             onPulse = { pulse ->
                 when (pulse) {
@@ -183,7 +178,7 @@ fun SkiaConsoleShell(
     // The pointer listeners below are installed in `factory`, which runs ONCE — capturing `render`
     // directly would freeze them at its first-composition value (1, before the first layout has
     // reported a size), and a mouse would keep reporting view pixels into a half-size surface for
-    // the rest of the session. Same reason `platformUp` is held this way.
+    // the rest of the session.
     val currentRender by rememberUpdatedState(render)
     val dm = context.resources.displayMetrics
     val scale = if (tv) 0f else {
@@ -209,7 +204,6 @@ fun SkiaConsoleShell(
     // stick/HAT become one MenuSample the shared synthesizer turns into menu events; a TV remote's
     // D-pad keys (not SOURCE_GAMEPAD) go in as discrete events; hardware keys as `Key`s.
     val padState = remember { PadState() }
-    val platformUp by rememberUpdatedState(platformScreen != null)
     // Re-push the pad list whenever the SC2's own state moves: neither hot-plug nor the capture
     // claim changes `Gamepad.pads()`, so nothing else here would notice.
     val sc2Captured = activity?.sc2MenuActive == true
@@ -220,7 +214,6 @@ fun SkiaConsoleShell(
     DisposableEffect(handle, activity) {
         if (activity == null || handle == 0L) return@DisposableEffect onDispose {}
         val keyProbe: (KeyEvent) -> Boolean = probe@{ ev ->
-            if (platformUp) return@probe false
             val down = ev.action == KeyEvent.ACTION_DOWN
             if (ev.action != KeyEvent.ACTION_DOWN && ev.action != KeyEvent.ACTION_UP) return@probe false
             // Not the event's source class alone: a pad whose keys arrive stamped SOURCE_KEYBOARD,
@@ -320,7 +313,6 @@ fun SkiaConsoleShell(
             true
         }
         val motionProbe: (MotionEvent) -> Boolean = probe@{ ev ->
-            if (platformUp) return@probe false
             if (!ev.isFromSource(InputDevice.SOURCE_JOYSTICK) && !ev.isFromSource(InputDevice.SOURCE_GAMEPAD)) {
                 return@probe false
             }
@@ -346,7 +338,7 @@ fun SkiaConsoleShell(
     }
 
     // The system Back (gesture or key) is the console's B; at its root the shell raises Quit.
-    BackHandler(enabled = platformScreen == null) {
+    BackHandler {
         if (handle != 0L) NativeBridge.nativeConsoleMenu(handle, 5)
     }
 
@@ -438,9 +430,6 @@ fun SkiaConsoleShell(
                 }
             },
         )
-        when (platformScreen) {
-            "licenses" -> ConsoleLicensesScreen(onBack = { platformScreen = null }, navActive = true)
-        }
     }
 }
 
