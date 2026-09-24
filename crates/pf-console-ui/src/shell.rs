@@ -9,7 +9,7 @@
 
 use crate::anim::{springs, Spring};
 use crate::glyphs::GlyphStyle;
-use crate::library::{field_sksl, palette, LibraryShared};
+use crate::library::{field_camera, field_sksl, palette, LibraryShared, VIOLET_FIELD};
 use crate::model::{
     ConsoleBus, ConsoleCmd, ConsoleShared, HostRow, PairPhase, SpeedPhase, SpeedStatus, WakeStatus,
 };
@@ -1953,9 +1953,12 @@ impl Shell {
     /// The field as a paint for an `w`×`h` target — `u_res` is the TARGET's pixels,
     /// the shader's `xy/u_res` normalises everything, so the reduced pass's small
     /// offscreen renders the same picture the full surface would.
-    fn aurora_paint(&self, w: f64, h: f64, t: f64, calm: f64) -> Option<Paint> {
-        // Matches the SkSL block: u_res, u_tc, u_lift, u_scrim (each float2/4).
-        let uniforms: [f32; 12] = [
+    /// `passes` is the shader's work per pixel: 2 hits the displaced surface, 1 the plain
+    /// sphere — the reduced path's saving on a TV, where the offscreen hides the difference.
+    fn aurora_paint(&self, w: f64, h: f64, t: f64, calm: f64, passes: f32) -> Option<Paint> {
+        // Matches the SkSL block: u_res, u_tc, u_lift, u_scrim, u_cam (each float2/4).
+        let (focal, scale) = field_camera(w / h.max(1.0));
+        let uniforms: [f32; 16] = [
             w as f32,
             h as f32,
             t as f32,
@@ -1968,6 +1971,10 @@ impl Shell {
             self.mesh_scrim[1],
             self.mesh_scrim[2],
             self.mesh_scrim[3],
+            focal as f32,
+            scale as f32,
+            passes,
+            0.0,
         ];
         let words = uniforms.map(f32::to_ne_bytes);
         let bytes = words.as_flattened();
@@ -1993,7 +2000,7 @@ impl Shell {
             // Hand the offscreen back while the full-rate path runs — it is dead weight
             // under the resource cache until the switch comes back on.
             cache.take();
-            match self.aurora_paint(w, h, t, calm) {
+            match self.aurora_paint(w, h, t, calm, 2.0) {
                 Some(paint) => {
                     canvas.draw_rect(Rect::from_wh(w as f32, h as f32), &paint);
                 }
@@ -2034,7 +2041,7 @@ impl Shell {
         if stale {
             if let Some(mut surface) = field_surface(canvas, size) {
                 // u_res is the offscreen's own pixels — `aurora_paint` is resolution-free.
-                if let Some(paint) = self.aurora_paint(size.0 as f64, size.1 as f64, t, calm) {
+                if let Some(paint) = self.aurora_paint(size.0 as f64, size.1 as f64, t, calm, 1.0) {
                     surface
                         .canvas()
                         .draw_rect(Rect::from_wh(size.0 as f32, size.1 as f32), &paint);
@@ -2050,7 +2057,7 @@ impl Shell {
             } else {
                 // No offscreen (context teardown): the full-rate draw is the fallback,
                 // never a black frame — the same stance the unreduced path takes.
-                match self.aurora_paint(w, h, t, calm) {
+                match self.aurora_paint(w, h, t, calm, 1.0) {
                     Some(paint) => {
                         canvas.draw_rect(Rect::from_wh(w as f32, h as f32), &paint);
                     }
@@ -2111,7 +2118,11 @@ type MeshLook = (RuntimeEffect, [f32; 3], [f32; 4], crate::theme::Ink);
 
 fn build_mesh(palette_id: &str) -> Result<MeshLook> {
     let p = palette(palette_id);
-    compile_mesh(p.pair, crate::theme::Ink::of(p), p.ground)
+    compile_mesh(
+        p.stops.unwrap_or(&VIOLET_FIELD),
+        crate::theme::Ink::of(p),
+        p.ground,
+    )
 }
 
 /// Follow-system field: a quiet ramp from the theme's own colours, not the
@@ -2121,24 +2132,24 @@ fn build_mesh_os(t: &crate::os_theme::OsTheme) -> Result<MeshLook> {
     let (bg, fg, ac) = (t.background, t.foreground, t.accent);
     // A pale field shades toward its text colour, not black: darkening a pastel strands
     // dark ink on it (see `theme::Ink` scrim).
-    let pair = if t.light {
-        [mix(bg, ac, 0.18), mix(bg, fg, 0.10)]
+    let stops = if t.light {
+        [mix(bg, fg, 0.10), mix(bg, ac, 0.18), bg]
     } else {
-        [mix(bg, ac, 0.30), mix(bg, (0.0, 0.0, 0.0), 0.35)]
+        [mix(bg, (0.0, 0.0, 0.0), 0.35), mix(bg, ac, 0.30), bg]
     };
-    compile_mesh(pair, crate::theme::Ink::of_os(t), bg)
+    compile_mesh(&stops, crate::theme::Ink::of_os(t), bg)
 }
 
 fn compile_mesh(
-    pair: [(f64, f64, f64); 2],
+    stops: &[(f64, f64, f64)],
     ink: crate::theme::Ink,
     ground: (f64, f64, f64),
 ) -> Result<MeshLook> {
-    let effect = RuntimeEffect::make_for_shader(field_sksl(ground, pair), None)
+    let effect = RuntimeEffect::make_for_shader(field_sksl(ground, stops), None)
         .map_err(|e| anyhow!("backdrop SkSL: {e}"))?;
     anyhow::ensure!(
-        effect.uniform_size() == 48,
-        "mesh uniform block is {} bytes, expected 48 (u_res, u_tc, u_lift, u_scrim)",
+        effect.uniform_size() == 64,
+        "mesh uniform block is {} bytes, expected 64 (u_res, u_tc, u_lift, u_scrim, u_cam)",
         effect.uniform_size()
     );
     let g = ground;

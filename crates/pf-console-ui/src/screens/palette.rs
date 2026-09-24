@@ -9,7 +9,7 @@ use crate::anim::approach;
 use crate::el::{Axis, El, Id, Tree};
 use crate::glyphs::{Hint, HintKey};
 use crate::icons::{by_name, draw_icon_weight};
-use crate::library::{field_pools, Palette, PALETTES};
+use crate::library::{Palette, PALETTES, VIOLET_FIELD};
 use crate::pointer::{Pointer, PointerKind};
 use crate::screens::{Ctx, Outbox};
 use crate::theme::{edge, fill, stroke, Fonts, W};
@@ -244,27 +244,27 @@ fn draw_card(canvas: &Canvas, fonts: &Fonts, p: &Palette, rect: Rect, chosen: bo
     let rgb = |(r, g, b): (f64, f64, f64), a: f32| Color4f::new(r as f32, g as f32, b as f32, a);
     canvas.save();
     canvas.clip_rrect(rr, ClipOp::Intersect, true);
-    canvas.draw_rect(rect, &fill(rgb(p.ground, 1.0)));
-    // The shell's field is three Gaussian pools on the ground; a radial fade per pool is
-    // the same picture at card size. Pool x runs in heights, so `bx` scales by the width.
-    let h = f64::from(rect.height());
-    for (col, [bx, by, _, _, _, _, _, sigma, weight]) in field_pools(p.pair) {
-        let c = Point::new(
-            rect.left + (bx * f64::from(rect.width())) as f32,
-            rect.top + (by * h) as f32,
-        );
-        let colors = [rgb(col, weight as f32), rgb(col, 0.0)];
-        let mut paint = fill(Color4f::new(0.0, 0.0, 0.0, 1.0));
-        paint.set_shader(skia_safe::gradient::shaders::radial_gradient(
-            (c, (2.2 * sigma * h) as f32),
-            &skia_safe::gradient::Gradient::new(
-                skia_safe::gradient::Colors::new_evenly_spaced(&colors, TileMode::Clamp, None),
-                skia_safe::gradient::Interpolation::default(),
-            ),
-            None,
-        ));
-        canvas.draw_rect(rect, &paint);
-    }
+    // The field's gradient along its backdrop diagonal: the stops the shader blends,
+    // without the noise. Enough to tell the palettes apart at card size.
+    let colors: Vec<Color4f> = p
+        .stops
+        .unwrap_or(&VIOLET_FIELD)
+        .iter()
+        .map(|c| rgb(*c, 1.0))
+        .collect();
+    let mut paint = fill(rgb(p.ground, 1.0));
+    paint.set_shader(skia_safe::gradient::shaders::linear_gradient(
+        (
+            Point::new(rect.left, rect.top),
+            Point::new(rect.right, rect.bottom),
+        ),
+        &skia_safe::gradient::Gradient::new(
+            skia_safe::gradient::Colors::new_evenly_spaced(&colors, TileMode::Clamp, None),
+            skia_safe::gradient::Interpolation::default(),
+        ),
+        None,
+    ));
+    canvas.draw_rect(rect, &paint);
     canvas.restore();
     // Ink is the card's, not the shell's: a pale card under a dark shell still reads.
     let ink = if p.light {

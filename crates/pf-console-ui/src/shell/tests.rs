@@ -221,7 +221,12 @@ fn the_strip_holds_still_across_a_tab_switch() {
         matches!(s.motion, Motion::Tab { .. }),
         "still mid-switch after five frames"
     );
-    let settled = band(&mut s, 90);
+    // Settle, then read the strip at the mid frame's field time: the field moves under it,
+    // and only the strip is on trial.
+    let clock = s.fake_clock;
+    band(&mut s, 90);
+    s.fake_clock = clock.map(|(t, step)| (t - step, step));
+    let settled = band(&mut s, 1);
     let worst = mid
         .iter()
         .zip(&settled)

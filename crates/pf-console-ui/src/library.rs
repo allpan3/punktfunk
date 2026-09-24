@@ -432,9 +432,10 @@ pub struct Palette {
     /// The stored `ui_palette` value (see `trust::Settings::ui_palette`).
     pub id: &'static str,
     pub name: &'static str,
-    /// Colour ramp, dark end first. `None` = [`MESH_COLORS`] verbatim.
+    /// Colour ramp, dark end first: the field's gradient ([`field_sksl`]) and the mesh.
+    /// `None` = [`MESH_COLORS`] verbatim for the mesh and [`VIOLET_FIELD`] for the field.
     pub stops: Option<&'static [(f64, f64, f64)]>,
-    /// The two dominant colours of the console's field ([`field_sksl`]).
+    /// Two dominant colours; the native pickers' backdrop pairs (`console-vectors.json`).
     pub pair: [(f64, f64, f64); 2],
     /// The field's ground — what the corners settle onto and what the calm mix lifts toward.
     pub ground: (f64, f64, f64),
@@ -872,76 +873,242 @@ const VIOLET_BLOBS: [(f64, f64, f64); 5] = [
     (0.53, 0.47, 0.96),
 ];
 
-/// The console's field: three large soft pools of a palette's two dominant colours on its
-/// ground. Each pool is `(colour, base x, base y, amp x, amp y, speed x, speed y, phase,
-/// sigma, weight)` in UV (x in heights), rad·s⁻¹. Periods run 200–290 s, out of phase.
-pub(crate) fn field_pools(pair: [(f64, f64, f64); 2]) -> [((f64, f64, f64), [f64; 9]); 3] {
-    let (a, b) = (pair[0], pair[1]);
-    let mid = ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0, (a.2 + b.2) / 2.0);
-    [
-        (a, [0.22, 0.28, 0.16, 0.12, 0.031, 0.027, 0.4, 0.42, 1.0]),
-        (b, [0.80, 0.66, 0.18, 0.14, 0.024, 0.029, 2.3, 0.46, 1.0]),
-        (mid, [0.52, 1.00, 0.20, 0.08, 0.027, 0.022, 4.1, 0.38, 0.8]),
-    ]
+/// The brand default's field ramp: the mockup's lavender → periwinkle → magenta.
+pub const VIOLET_FIELD: [(f64, f64, f64); 3] =
+    [(0.80, 0.60, 0.98), (0.47, 0.44, 1.00), (0.98, 0.12, 0.62)];
+
+/// The camera the field is seen through, from the surface's aspect: `(focal length,
+/// sphere scale)`. The Figma shader's cover-zoom rule at its 72 % zoom, so the noise
+/// sphere fills any glass the same way it fills the mockup's frame.
+pub fn field_camera(aspect: f64) -> (f64, f64) {
+    let diagonal = (1.0 + aspect * aspect).sqrt();
+    let (safe, cam, base_f) = (0.72, 3.0, 1.73);
+    let target_f = base_f * 4.0;
+    let required = cam * diagonal / (target_f * target_f + diagonal * diagonal).sqrt();
+    let scale = (required / safe).max(0.82);
+    let conservative = (cam - 0.001).min(scale * safe);
+    let depth = (cam * cam - conservative * conservative).max(0.0001).sqrt();
+    let min_cover = (diagonal * depth / (base_f * conservative) * 1.12).clamp(0.5, 10.0);
+    let minimum = (min_cover * 0.65).clamp(0.5, 10.0);
+    let zoom = (minimum * (10.0 / minimum).powf(0.72)).clamp(minimum, 10.0);
+    (base_f * zoom, scale)
 }
 
-/// How much of the ground shows between the pools.
-const FIELD_GROUND_WEIGHT: f64 = 0.30;
-
-/// The field as SkSL: palette and motion baked in; resolution, time and calm are uniforms.
-///
-/// Three pools ([`field_pools`]) blended by normalised Gaussian weights, so no edge is hard;
-/// then a ±4° hue sway, the elliptical vignette and the vertical scrim.
+/// The field as SkSL: the Figma "Moving gradient" shader's maths, per pixel. Its vertex
+/// stage displaced a sphere by a Perlin height field and coloured each point by that
+/// height through an OKLab gradient; here a pixel's view ray meets the sphere, the hit's
+/// direction gives the height, the sphere is re-sized by it and hit once more, and the
+/// second height picks the colour. Detail 3.33, intensity 4.29, flow 0.26, twist 0.04,
+/// morph 3.74 and speed 12 % are the mockup's; `stops` are the gradient, even spaced.
 ///
 /// `u_tc.y` is the calm mix (0 launcher, 1 form): flatten toward `u_lift` so a screen
-/// crossfade never jumps the field. Motion speed is unchanged.
-pub fn field_sksl(ground: (f64, f64, f64), pair: [(f64, f64, f64); 2]) -> String {
+/// crossfade never jumps the field. `u_cam` is [`field_camera`].
+pub fn field_sksl(ground: (f64, f64, f64), stops: &[(f64, f64, f64)]) -> String {
     let rgb = |(r, g, b): (f64, f64, f64)| format!("float3({r}, {g}, {b})");
-    let mut pools = String::new();
-    for (col, [bx, by, ax, ay, sx, sy, ph, sigma, weight]) in field_pools(pair) {
-        pools.push_str(&format!(
-            "    c = float2({bx} * ar + {ax} * sin(tt * {sx} + {ph}), \
-                         {by} + {ay} * cos(tt * {sy} + {ph} * 1.3));\n\
-                 q = p - c;\n\
-                 ww = {weight} * exp(-dot(q, q) / (2.0 * {sigma} * {sigma}));\n\
-                 acc += {col} * ww; wtot += ww;\n",
-            col = rgb(col),
-        ));
+    let n = stops.len().max(2);
+    let stops: Vec<(f64, f64, f64)> = if stops.len() < 2 {
+        vec![ground, ground]
+    } else {
+        stops.to_vec()
+    };
+    // One segment per pair of stops, picked by an if-chain: a two-stop ramp is one bare segment.
+    let mut segs = String::new();
+    for i in 0..n - 1 {
+        let (a, b) = (rgb(stops[i]), rgb(stops[i + 1]));
+        let seg = format!("a = {a}; b = {b}; f = x - {i}.0;");
+        segs.push_str(&if n == 2 {
+            format!("    {seg}\n")
+        } else if i == 0 {
+            format!("    if (x < 1.0) {{ {seg} }}\n")
+        } else if i == n - 2 {
+            format!("    else {{ {seg} }}\n")
+        } else {
+            format!("    else if (x < {}.0) {{ {seg} }}\n", i + 1)
+        });
     }
-    let ground = rgb(ground);
     format!(
         "uniform float2 u_res;\n\
          // x = seconds since the shell started, y = the calm mix (0 launcher, 1 form).\n\
          uniform float2 u_tc;\n\
-         // rgb = the palette's corner colour scaled for the calm lift; a is unused (float4\n\
-         // so the uniform block stays 16-byte aligned under any packing rule).\n\
+         // rgb = the palette's ground scaled for the calm lift; a is unused (float4 so\n\
+         // the uniform block stays 16-byte aligned under any packing rule).\n\
          uniform float4 u_lift;\n\
          // rgb = what the vignette and scrims tend toward (black under a dark palette, white\n\
          // under a pale one — darkening a pastel field would strand the dark text on it), and\n\
          // a = how hard. A pale field needs far less: mixing toward white at the dark field's\n\
          // strength bleaches the chroma straight out of the gradient.\n\
          uniform float4 u_scrim;\n\
+         // x = focal length, y = sphere scale (`field_camera`), z = passes over the sphere\n\
+         // (1 = the plain sphere's height, 2 = re-hit at that height: the displaced surface).\n\
+         uniform float4 u_cam;\n\
          \n\
-         // Hue rotation about the grey axis (Rodrigues) — the ±4° warm/cool sway.\n\
-         float3 hue(float3 col, float a) {{\n\
-         \x20   float3 k = float3(0.5773503);\n\
-         \x20   float cs = cos(a); float sn = sin(a);\n\
-         \x20   return col*cs + cross(k, col)*sn + k*dot(k, col)*(1.0 - cs);\n\
+         const float TAU = 6.28318530718;\n\
+         const float DETAIL = 3.33;\n\
+         const float INTENSITY = 4.29;\n\
+         const float TWIST = 0.04;\n\
+         const float WARP = 0.26;\n\
+         const float MORPH = 3.74;\n\
+         const float ROT = 0.03;\n\
+         \n\
+         float3 hash33(float3 p) {{\n\
+         \x20   float3 q = float3(dot(p, float3(127.1, 311.7, 74.7)),\n\
+         \x20                     dot(p, float3(269.5, 183.3, 246.1)),\n\
+         \x20                     dot(p, float3(113.5, 271.9, 124.6)));\n\
+         \x20   return fract(sin(q) * 43758.5453) * 2.0 - 1.0;\n\
          }}\n\
+         float3 smoother(float3 t) {{ return t * t * t * (t * (t * 6.0 - 15.0) + 10.0); }}\n\
+         float gradDot(float3 cell, float3 off, float3 local) {{\n\
+         \x20   return dot(hash33(cell + off), local - off);\n\
+         }}\n\
+         float perlin3(float3 p) {{\n\
+         \x20   float3 cell = floor(p); float3 local = fract(p); float3 w = smoother(local);\n\
+         \x20   float n000 = gradDot(cell, float3(0.0, 0.0, 0.0), local);\n\
+         \x20   float n100 = gradDot(cell, float3(1.0, 0.0, 0.0), local);\n\
+         \x20   float n010 = gradDot(cell, float3(0.0, 1.0, 0.0), local);\n\
+         \x20   float n110 = gradDot(cell, float3(1.0, 1.0, 0.0), local);\n\
+         \x20   float n001 = gradDot(cell, float3(0.0, 0.0, 1.0), local);\n\
+         \x20   float n101 = gradDot(cell, float3(1.0, 0.0, 1.0), local);\n\
+         \x20   float n011 = gradDot(cell, float3(0.0, 1.0, 1.0), local);\n\
+         \x20   float n111 = gradDot(cell, float3(1.0, 1.0, 1.0), local);\n\
+         \x20   float nx00 = mix(n000, n100, w.x); float nx10 = mix(n010, n110, w.x);\n\
+         \x20   float nx01 = mix(n001, n101, w.x); float nx11 = mix(n011, n111, w.x);\n\
+         \x20   return mix(mix(nx00, nx10, w.y), mix(nx01, nx11, w.y), w.z) * 1.1547;\n\
+         }}\n\
+         float3 rotateOctave(float3 p) {{\n\
+         \x20   return float3(0.80 * p.y + 0.60 * p.z,\n\
+         \x20                 -0.80 * p.x + 0.36 * p.y - 0.48 * p.z,\n\
+         \x20                 -0.60 * p.x - 0.48 * p.y + 0.64 * p.z);\n\
+         }}\n\
+         float fbm(float3 p) {{\n\
+         \x20   float3 q = p; float total = 0.0; float amp = 1.0; float weight = 0.0;\n\
+         \x20   for (int i = 0; i < 3; i++) {{\n\
+         \x20       total += perlin3(q) * amp; weight += amp;\n\
+         \x20       q = rotateOctave(q) * 2.02 + float3(3.7, 1.9, 6.3);\n\
+         \x20       amp *= 0.48;\n\
+         \x20   }}\n\
+         \x20   return total / max(weight, 0.0001);\n\
+         }}\n\
+         float3 warpVector(float3 p) {{\n\
+         \x20   return float3(perlin3(p), perlin3(p + float3(5.2, 1.3, 2.8)),\n\
+         \x20                 perlin3(p + float3(1.7, 9.2, 4.4)));\n\
+         }}\n\
+         float wrapPhase(float ph) {{ return ph - floor(ph / TAU) * TAU; }}\n\
+         float3 curved(float mt, float3 rates, float3 phases) {{\n\
+         \x20   return float3(sin(wrapPhase(mt * rates.x + phases.x)),\n\
+         \x20                 sin(wrapPhase(mt * rates.y + phases.y)),\n\
+         \x20                 cos(wrapPhase(mt * rates.z + phases.z)));\n\
+         }}\n\
+         float3 primaryMotion(float mt) {{\n\
+         \x20   return normalize(float3(0.73, -0.41, 0.55)) * mt * 0.105\n\
+         \x20        + normalize(float3(-0.28, 0.91, 0.31)) * mt * 0.023\n\
+         \x20        + curved(mt, float3(0.071, 0.043, 0.029), float3(0.0, 1.73, 4.11)) * 0.16;\n\
+         }}\n\
+         float3 warpMotion(float mt) {{\n\
+         \x20   return normalize(float3(-0.46, 0.38, 0.80)) * mt * 0.137\n\
+         \x20        + normalize(float3(0.84, 0.51, -0.18)) * mt * 0.031\n\
+         \x20        + curved(mt, float3(0.089, 0.053, 0.034), float3(2.21, 5.07, 0.83)) * 0.12;\n\
+         }}\n\
+         float heightField(float3 dir, float mt) {{\n\
+         \x20   float frequency = mix(1.05, 3.4, clamp(DETAIL / 5.0, 0.0, 1.0));\n\
+         \x20   float3 p = dir * frequency + float3(1.7, 3.1, 5.3) + primaryMotion(mt);\n\
+         \x20   float3 warp = warpVector(p * 0.55 + warpMotion(mt) * 0.42 + float3(0.7, -1.1, 0.4)) * WARP;\n\
+         \x20   return fbm(p + warp);\n\
+         }}\n\
+         float3 rotateAxis(float3 p, float3 axis, float angle) {{\n\
+         \x20   float c = cos(angle); float s = sin(angle);\n\
+         \x20   return p * c + cross(axis, p) * s + axis * dot(axis, p) * (1.0 - c);\n\
+         }}\n\
+         float torsion(float3 dir) {{\n\
+         \x20   float axial = clamp(dot(dir, normalize(float3(-0.68, 0.54, 0.49))), -1.0, 1.0);\n\
+         \x20   return axial * (1.5 - 0.5 * axial * axial) * TWIST;\n\
+         }}\n\
+         float3 rotateX(float3 p, float angle) {{\n\
+         \x20   float c = cos(angle); float s = sin(angle);\n\
+         \x20   return float3(p.x, c * p.y - s * p.z, s * p.y + c * p.z);\n\
+         }}\n\
+         // The mesh's orientation, undone: world back to the sphere's own frame.\n\
+         float3 unorient(float3 p, float rt) {{\n\
+         \x20   float3 o = rotateX(p, 0.24);\n\
+         \x20   o = rotateAxis(o, normalize(float3(0.58, -0.69, 0.43)), -wrapPhase(rt * 0.1732051));\n\
+         \x20   o = rotateAxis(o, normalize(float3(-0.71, 0.29, 0.64)), -wrapPhase(rt * 0.2236068));\n\
+         \x20   return rotateAxis(o, normalize(float3(0.36, 0.81, 0.46)), -wrapPhase(rt * 0.287));\n\
+         }}\n\
+         float3 srgbToLinear(float3 c) {{\n\
+         \x20   float3 v = max(c, float3(0.0));\n\
+         \x20   return mix(v / 12.92, pow((v + 0.055) / 1.055, float3(2.4)), step(float3(0.04045), v));\n\
+         }}\n\
+         float3 linearToSrgb(float3 c) {{\n\
+         \x20   float3 v = max(c, float3(0.0));\n\
+         \x20   return mix(v * 12.92, 1.055 * pow(v, float3(1.0 / 2.4)) - 0.055, step(float3(0.0031308), v));\n\
+         }}\n\
+         float3 linearToOklab(float3 c) {{\n\
+         \x20   float l = 0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b;\n\
+         \x20   float m = 0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b;\n\
+         \x20   float s = 0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b;\n\
+         \x20   float lc = pow(max(l, 0.0), 1.0 / 3.0); float mc = pow(max(m, 0.0), 1.0 / 3.0);\n\
+         \x20   float sc = pow(max(s, 0.0), 1.0 / 3.0);\n\
+         \x20   return float3(0.2104542553 * lc + 0.7936177850 * mc - 0.0040720468 * sc,\n\
+         \x20                 1.9779984951 * lc - 2.4285922050 * mc + 0.4505937099 * sc,\n\
+         \x20                 0.0259040371 * lc + 0.7827717662 * mc - 0.8086757660 * sc);\n\
+         }}\n\
+         float3 oklabToLinear(float3 c) {{\n\
+         \x20   float lc = c.x + 0.3963377774 * c.y + 0.2158037573 * c.z;\n\
+         \x20   float mc = c.x - 0.1055613458 * c.y - 0.0638541728 * c.z;\n\
+         \x20   float sc = c.x - 0.0894841775 * c.y - 1.2914855480 * c.z;\n\
+         \x20   float l = lc * lc * lc; float m = mc * mc * mc; float s = sc * sc * sc;\n\
+         \x20   return float3(4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,\n\
+         \x20                 -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,\n\
+         \x20                 -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s);\n\
+         }}\n\
+         // The gradient's stops, even spaced, blended in OKLab with a smoothstep between.\n\
+         float3 gradientAt(float t) {{\n\
+         \x20   float x = clamp(t, 0.0, 1.0) * {last}.0;\n\
+         \x20   float3 a; float3 b; float f;\n\
+         {segs}\
+         \x20   f = f * f * (3.0 - 2.0 * f);\n\
+         \x20   float3 la = linearToOklab(srgbToLinear(a)); float3 lb = linearToOklab(srgbToLinear(b));\n\
+         \x20   return linearToSrgb(oklabToLinear(mix(la, lb, f)));\n\
+         }}\n\
+         float spread(float raw) {{ return clamp((raw - 0.5) * 3.0 + 0.5, 0.0, 1.0); }}\n\
          \n\
          half4 main(float2 xy) {{\n\
          \x20   float tt = u_tc.x; float calm = u_tc.y;\n\
-         \x20   // Heights as the unit, so a pool stays round on any aspect.\n\
-         \x20   float ar = u_res.x / u_res.y;\n\
-         \x20   float2 p = float2(xy.x / u_res.y, xy.y / u_res.y);\n\
-         \x20   float3 acc = {ground} * {gw}; float wtot = {gw};\n\
-         \x20   float2 c; float2 q; float ww;\n\
-         {pools}\
-         \x20   float3 col = acc / wtot;\n\
+         \x20   float aspect = u_res.x / u_res.y;\n\
+         \x20   float2 uv = xy / u_res;\n\
+         \x20   float rt = tt * ROT; float mt = tt * MORPH;\n\
+         \x20   // The backdrop behind the sphere: the same gradient along a fixed diagonal.\n\
+         \x20   float2 axis = normalize(float2(0.62 * aspect, 0.78));\n\
+         \x20   float2 centered = float2((uv.x - 0.5) * aspect, uv.y - 0.5);\n\
+         \x20   float extent = abs(axis.x) * aspect * 0.5 + abs(axis.y) * 0.5;\n\
+         \x20   float3 col = gradientAt(dot(centered, axis) / max(extent * 2.0, 0.0001) + 0.5);\n\
+         \x20   // The pixel's ray, in the camera's frame: origin, looking down -z at a sphere\n\
+         \x20   // three units away. Focal length and scale are the cover-zoom's.\n\
+         \x20   float2 ndc = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);\n\
+         \x20   float3 rd = normalize(float3(ndc.x * aspect / u_cam.x, ndc.y / u_cam.x, -1.0));\n\
+         \x20   float3 sc = float3(0.0, 0.0, -3.0);\n\
+         \x20   float scale = u_cam.y;\n\
+         \x20   float disp = 0.30 * INTENSITY;\n\
+         \x20   float3 twistAxis = normalize(float3(-0.68, 0.54, 0.49));\n\
+         \x20   float radius = scale;\n\
+         \x20   float h = 0.0; bool seen = false;\n\
+         \x20   // Two passes: the plain sphere's hit names a height, the sphere re-sized by it\n\
+         \x20   // is hit again — the displaced surface, near enough, without the mesh.\n\
+         \x20   for (int i = 0; i < 2; i++) {{\n\
+         \x20       if (float(i) >= u_cam.z) {{ break; }}\n\
+         \x20       float mid = dot(rd, sc);\n\
+         \x20       float disc = mid * mid - dot(sc, sc) + radius * radius;\n\
+         \x20       if (disc < 0.0) {{ break; }}\n\
+         \x20       float3 obj = (rd * (mid - sqrt(disc)) - sc) / scale;\n\
+         \x20       float3 base = unorient(obj, rt);\n\
+         \x20       float3 dir = normalize(base);\n\
+         \x20       dir = normalize(rotateAxis(base, twistAxis, -torsion(dir)));\n\
+         \x20       h = heightField(dir, mt);\n\
+         \x20       seen = true;\n\
+         \x20       radius = scale * max(1.0 + h * disp, 0.72);\n\
+         \x20   }}\n\
+         \x20   if (seen) {{ col = gradientAt(spread(h * 0.5 + 0.5)); }}\n\
          \n\
-         \x20   col = hue(col, sin(tt * 0.017) * 0.0698132);\n\
-         \n\
-         \x20   // Calm: flatten the field toward its own corner colour — the pools dim and the\n\
+         \x20   // Calm: flatten the field toward its own ground — the pools dim and the\n\
          \x20   // corners lift, so a form screen keeps real colour under its glass rows while\n\
          \x20   // losing the launcher's contrast. Motion is untouched (see the doc comment).\n\
          \x20   col = mix(col, col * 0.60 + u_lift.rgb, calm);\n\
@@ -949,13 +1116,13 @@ pub fn field_sksl(ground: (f64, f64, f64), pair: [(f64, f64, f64); 2]) -> String
          \x20   // Elliptical vignette: clear at r=0.25 → black·0.42 at r=1.15 (aspect-fit ellipse).\n\
          \x20   // Halved under calm: a launcher's cards sit in the pooled centre, but a form\n\
          \x20   // screen's rows run out toward the edges, where crushing to black just eats them.\n\
-         \x20   float2 e = (xy / u_res - 0.5) * 2.0;\n\
+         \x20   float2 e = (uv - 0.5) * 2.0;\n\
          \x20   float vig = clamp((length(e) - 0.25) / 0.90, 0.0, 1.0)\n\
          \x20             * mix(0.42, 0.21, calm) * u_scrim.a;\n\
          \x20   col = mix(col, u_scrim.rgb, vig);\n\
          \n\
          \x20   // Vertical legibility scrim: black 0.38/0.06/0.08/0.40 at 0/0.32/0.68/1.\n\
-         \x20   float v = xy.y / u_res.y;\n\
+         \x20   float v = uv.y;\n\
          \x20   float s = v < 0.32 ? mix(0.38, 0.06, v / 0.32)\n\
          \x20           : v < 0.68 ? mix(0.06, 0.08, (v - 0.32) / 0.36)\n\
          \x20           : mix(0.08, 0.40, (v - 0.68) / 0.32);\n\
@@ -963,10 +1130,9 @@ pub fn field_sksl(ground: (f64, f64, f64), pair: [(f64, f64, f64); 2]) -> String
          \n\
          \x20   return half4(half3(col), 1.0);\n\
          }}\n",
-        gw = FIELD_GROUND_WEIGHT,
+        last = n - 1,
     )
 }
-
 // --- The shared binary↔overlay model ------------------------------------------------------
 
 #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -2323,18 +2489,21 @@ mod tests {
         assert_eq!(initials("half-life"), "H");
     }
 
-    /// Generated SkSL: three pools, braces balanced, and it compiles with the 48-byte block
-    /// the shell packs.
+    /// Generated SkSL compiles for every palette (and a two-stop ramp), with the 64-byte
+    /// block the shell packs.
     #[test]
-    fn field_sksl_compiles_with_three_pools() {
+    fn field_sksl_compiles_for_every_palette() {
         for p in &PALETTES {
-            let src = field_sksl(p.ground, p.pair);
-            assert_eq!(src.matches("wtot +=").count(), 3, "{}", p.id);
+            let src = field_sksl(p.ground, p.stops.unwrap_or(&VIOLET_FIELD));
             assert_eq!(src.matches('{').count(), src.matches('}').count());
             let effect = skia_safe::RuntimeEffect::make_for_shader(&src, None)
                 .unwrap_or_else(|e| panic!("{}: {e}", p.id));
-            assert_eq!(effect.uniform_size(), 48, "{}", p.id);
+            assert_eq!(effect.uniform_size(), 64, "{}", p.id);
         }
+        let two = field_sksl((0.0, 0.0, 0.0), &[(0.0, 0.0, 0.0), (1.0, 1.0, 1.0)]);
+        assert!(skia_safe::RuntimeEffect::make_for_shader(&two, None).is_ok());
+        let (focal, scale) = field_camera(16.0 / 9.0);
+        assert!(focal > 1.0 && scale > 0.8, "{focal} {scale}");
     }
 
     /// Every palette's pair vs `backdrop_pairs` in `console-vectors.json`.
