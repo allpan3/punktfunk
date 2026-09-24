@@ -504,7 +504,10 @@ impl Presenter {
                     .unwrap_or_default(),
                 graphics_qf: qfi,
                 decode_qf,
-                decode_video_caps: decode_caps.as_raw(),
+                decode_video_caps: pf_client_core::video::usable_decode_ops(
+                    dev_props.vendor_id,
+                    decode_caps.as_raw(),
+                ),
                 instance_extensions: instance_extensions
                     .iter()
                     .map(|e| CString::new(e.as_str()).unwrap())

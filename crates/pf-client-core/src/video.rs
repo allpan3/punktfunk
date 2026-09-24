@@ -872,6 +872,20 @@ pub fn decodable_codecs() -> u8 {
         | software_decodable_codecs()
 }
 
+/// PCI vendor of Intel GPUs.
+const VENDOR_INTEL: u32 = 0x8086;
+
+/// The decode ops the native Vulkan rung may use, from what the device advertises.
+/// Intel's Mesa driver decodes H.264 and HEVC bit-exact with libavcodec but not AV1,
+/// so Linux Intel keeps AV1 off Vulkan: never advertised through it, never decoded on it.
+pub fn usable_decode_ops(vendor_id: u32, advertised: u32) -> u32 {
+    if cfg!(target_os = "linux") && vendor_id == VENDOR_INTEL {
+        advertised & !VIDEO_CODEC_OP_DECODE_AV1
+    } else {
+        advertised
+    }
+}
+
 /// Can this machine decode AV1 in hardware? Device facts only, never a decoder existing:
 /// Vulkan `DECODE_AV1` on the decode family, or (Windows) D3D11 import so DXVA
 /// can run Profile 0. The CPU AV1 rung still exists; the wire promise is made once.
@@ -2178,6 +2192,19 @@ mod tests {
         // Discrete Arc advertises Vulkan Video and must still land on D3D11VA in auto.
         assert!(!decode_device(0x8086, "Intel(R) Arc(TM) B580 Graphics").prefer_vulkan_first());
         assert!(!decode_device(0x8086, "Intel(R) Arc(TM) Pro Graphics").prefer_vulkan_first());
+    }
+
+    #[test]
+    fn linux_intel_keeps_av1_off_the_vulkan_rung() {
+        let all =
+            VIDEO_CODEC_OP_DECODE_H264 | VIDEO_CODEC_OP_DECODE_H265 | VIDEO_CODEC_OP_DECODE_AV1;
+        let intel = usable_decode_ops(0x8086, all);
+        let h26x = VIDEO_CODEC_OP_DECODE_H264 | VIDEO_CODEC_OP_DECODE_H265;
+        assert_eq!(intel & h26x, h26x);
+        let av1_kept = intel & VIDEO_CODEC_OP_DECODE_AV1 != 0;
+        assert_eq!(av1_kept, !cfg!(target_os = "linux"));
+        assert_eq!(usable_decode_ops(0x1002, all), all);
+        assert_eq!(usable_decode_ops(0x10DE, all), all);
     }
 
     /// `auto` enters the VAAPI rung only on a presenter that imports its
