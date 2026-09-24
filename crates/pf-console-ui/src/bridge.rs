@@ -22,6 +22,9 @@ pub struct CreateOptions {
     /// gates the console-off settings row. Absent means don't offer it.
     #[serde(default)]
     pub fallback_ui: bool,
+    /// A TV. Absent means a handheld or a desktop.
+    #[serde(default)]
+    pub tv: bool,
     /// Whether a real AV1 decoder exists, as the host's codec list answers it. Absent means
     /// don't claim the device lacks it, so the codec row stays unmarked.
     #[serde(default = "yes")]
@@ -67,6 +70,7 @@ impl CreateOptions {
         let opts = ConsoleOptions {
             device_name: self.device_name,
             deck: false,
+            tv: self.tv,
             fallback_ui: self.fallback_ui,
             pyrowave_ok: self.pyrowave_ok,
             av1_ok: self.av1_ok,

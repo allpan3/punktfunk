@@ -505,6 +505,7 @@ mod tests {
             screen: None,
             pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,

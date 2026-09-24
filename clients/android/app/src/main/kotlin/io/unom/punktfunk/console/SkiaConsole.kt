@@ -232,6 +232,8 @@ object SkiaConsole {
             // The touch shell exists as a fallback on phones/tablets but not on a TV —
             // gates the console's own "Controller-optimized UI" off switch.
             .put("fallback_ui", !io.unom.punktfunk.isTvDevice(app))
+            // No clipboard worth copying a link to on a TV.
+            .put("tv", io.unom.punktfunk.isTvDevice(app))
             // The same MediaCodec answer the Hello advertises by: without a real AV1
             // decoder the codec row marks AV1 unsupported instead of offering a dead pick.
             .put("av1_ok", VideoDecoders.decodableCodecBits() and 4 != 0)

@@ -1215,6 +1215,9 @@ pub fn row_applies(id: RowId, ctx: &Ctx) -> bool {
         // ignores the value (`GamepadUi.kt`: the tv term alone satisfies the OR);
         // webOS obeys it — a Magic Remote with no pad is why its cursor UI exists.
         RowId::GamepadUiMode => ctx.fallback_ui && extra_bool(ctx.settings, GAMEPAD_UI_KEY, true),
+        // The phone's own motor, gyro and SC2 dongle: only a handheld sends its screen
+        // (`ConsoleOptions::screen`), so a TV or a Mac never offers them.
+        RowId::PhoneRumble | RowId::PhoneGyro | RowId::Sc2Passthrough => ctx.screen.is_some(),
         // `os_theme::available()`, not platform: a new publisher needs no edit here.
         RowId::FollowOsTheme => crate::os_theme::available(),
         // Hidden while follow_os_theme; sits below the switch that drops it.
@@ -1257,6 +1260,7 @@ pub fn row_spec(
             screen: None,
             pads: ctx.pads,
             deck: ctx.deck,
+            tv: ctx.tv,
             fallback_ui: ctx.fallback_ui,
             pyrowave_ok: ctx.pyrowave_ok,
             av1_ok: ctx.av1_ok,
@@ -2416,6 +2420,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -2540,6 +2545,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -2574,6 +2580,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -2697,6 +2704,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -2744,6 +2752,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -2779,6 +2788,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -2825,6 +2835,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: true,
             pyrowave_ok: true,
             av1_ok: true,
@@ -2865,6 +2876,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -2916,6 +2928,7 @@ pub(crate) mod tests {
             }),
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -2958,6 +2971,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -2989,6 +3003,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -3026,6 +3041,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: true,
             pyrowave_ok: true,
             av1_ok: true,
@@ -3056,6 +3072,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: false,
             av1_ok: false,
@@ -3103,6 +3120,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: false,
@@ -3150,6 +3168,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -3183,6 +3202,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -3255,6 +3275,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -3290,6 +3311,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -3323,6 +3345,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -3355,6 +3378,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -3388,6 +3412,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -3478,6 +3503,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -3531,6 +3557,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -3564,6 +3591,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -3835,6 +3863,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -3878,6 +3907,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -3916,6 +3946,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -3962,6 +3993,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -4038,6 +4070,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -4102,6 +4135,7 @@ pub(crate) mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -4148,5 +4182,20 @@ pub(crate) mod tests {
             "Host list",
             "a resolved default host does not dress up the list"
         );
+    }
+
+    /// The phone's own motor, gyro and SC2 dongle: only a console that has the phone's
+    /// screen offers them, so a TV and a Mac never do.
+    #[test]
+    fn the_phone_rows_need_the_phones_screen() {
+        let phone_rows = [RowId::PhoneRumble, RowId::PhoneGyro, RowId::Sc2Passthrough];
+        with_ctx(|ctx| {
+            assert!(phone_rows.iter().all(|id| !row_applies(*id, ctx)));
+            ctx.screen = Some(crate::shell::DeviceScreen {
+                full: (2796, 1290),
+                safe: (2796, 1290),
+            });
+            assert!(phone_rows.iter().all(|id| row_applies(*id, ctx)));
+        });
     }
 }

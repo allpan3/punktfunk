@@ -292,6 +292,8 @@ pub struct ConsoleOptions {
     pub device_name: String,
     /// Steam Deck: Steam's keyboard types; this shell never draws one.
     pub deck: bool,
+    /// A TV (Apple TV, Android TV): rows for a clipboard or a phone's sensors do nothing.
+    pub tv: bool,
     /// Host has another UI when the console is off (phone/tablet touch shell).
     /// False on desktop and Android TV — offering "off" would strand the user.
     pub fallback_ui: bool,
@@ -329,6 +331,7 @@ impl ConsoleOptions {
         ConsoleOptions {
             device_name,
             deck,
+            tv: false,
             fallback_ui: false,
             // The desktop probe reads the session's Vulkan device, which the console does
             // not own yet. A GPU that runs this shell is a Vulkan 1.3 one, so it is yes.
@@ -396,6 +399,7 @@ pub(crate) struct Shell {
     hosts_gen: u64,
     device_name: String,
     deck: bool,
+    tv: bool,
     fallback_ui: bool,
     pyrowave_ok: bool,
     pub(crate) av1_ok: bool,
@@ -532,6 +536,7 @@ impl Shell {
             hosts_gen: u64::MAX,
             device_name: opts.device_name,
             deck: opts.deck,
+            tv: opts.tv,
             fallback_ui: opts.fallback_ui,
             pyrowave_ok: opts.pyrowave_ok,
             av1_ok: opts.av1_ok,
@@ -694,6 +699,7 @@ impl Shell {
             screen: self.screen,
             pads: &self.pads,
             deck: self.deck,
+            tv: self.tv,
             fallback_ui: self.fallback_ui,
             pyrowave_ok: self.pyrowave_ok,
             av1_ok: self.av1_ok,
@@ -1538,6 +1544,7 @@ impl Shell {
                 screen: self.screen,
                 pads: &self.pads,
                 deck: self.deck,
+                tv: self.tv,
                 fallback_ui: self.fallback_ui,
                 pyrowave_ok: self.pyrowave_ok,
                 av1_ok: self.av1_ok,
@@ -1679,6 +1686,7 @@ impl Shell {
                 screen: self.screen,
                 pads: &self.pads,
                 deck: self.deck,
+                tv: self.tv,
                 fallback_ui: self.fallback_ui,
                 pyrowave_ok: self.pyrowave_ok,
                 av1_ok: self.av1_ok,
@@ -1716,6 +1724,7 @@ impl Shell {
                 screen: self.screen,
                 pads: &self.pads,
                 deck: self.deck,
+                tv: self.tv,
                 fallback_ui: self.fallback_ui,
                 pyrowave_ok: self.pyrowave_ok,
                 av1_ok: self.av1_ok,

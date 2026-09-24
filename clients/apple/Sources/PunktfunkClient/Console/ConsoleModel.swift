@@ -195,6 +195,7 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
             // Every Apple platform keeps an interface to fall back to, so the console's own
             // off switch always has somewhere to land.
             "fallback_ui": true,
+            "tv": isTV,
             "av1_ok": AV1.hardwareDecodeSupported,
             "pyrowave_ok": MetalWaveletDecoder.supported,
             "settings": settings(hosts),
@@ -211,6 +212,14 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
             options["entry"] = row
         }
         return ConsoleJSON.string(options)
+    }
+
+    private static var isTV: Bool {
+        #if os(tvOS)
+        return true
+        #else
+        return false
+        #endif
     }
 
     private static var deviceName: String {

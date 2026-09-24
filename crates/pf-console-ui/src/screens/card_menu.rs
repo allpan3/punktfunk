@@ -228,7 +228,16 @@ impl CardMenu {
             .unwrap_or_default()
     }
 
-    fn actions(&self, store: &dyn SettingsStore) -> Vec<Action> {
+    /// The rows this menu offers. A TV has no clipboard, so no Copy link.
+    fn actions(&self, store: &dyn SettingsStore, tv: bool) -> Vec<Action> {
+        let mut rows = self.all_actions(store);
+        if tv {
+            rows.retain(|a| *a != Action::CopyLink);
+        }
+        rows
+    }
+
+    fn all_actions(&self, store: &dyn SettingsStore) -> Vec<Action> {
         let host = match (&self.subject, self.mode) {
             (_, Mode::ConnectWith) => {
                 return std::iter::once(Action::Preset(None))
@@ -473,7 +482,7 @@ impl CardMenu {
                 _ => {}
             }
         }
-        let actions = self.actions(ctx.store);
+        let actions = self.actions(ctx.store, ctx.tv);
         let (msg, pulse) = self.list.menu(ev, actions.len());
         self.dispatch(msg, pulse, &actions, ctx, fx)
     }
@@ -490,7 +499,7 @@ impl CardMenu {
                 self.strip_focus = false;
             }
         }
-        let actions = self.actions(ctx.store);
+        let actions = self.actions(ctx.store, ctx.tv);
         let (msg, pulse) = self.list.pointer(p, actions.len());
         if matches!(msg, ListMsg::None) && pulse.is_none() {
             return false;
@@ -825,7 +834,7 @@ impl CardMenu {
         };
         let strip_top = list_rect.top;
         list_rect.top += strip_h as f32;
-        let actions = self.actions(ctx.store);
+        let actions = self.actions(ctx.store, ctx.tv);
         let rows: Vec<RowSpec> = actions
             .iter()
             .map(|&a| RowSpec::action(self.label(a, ctx), self.enabled(a)).with_icon(self.icon(a)))
@@ -933,6 +942,7 @@ mod tests {
             screen: None,
             pads: &[],
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -949,7 +959,7 @@ mod tests {
     }
 
     fn rows(s: &CardMenu) -> Vec<Action> {
-        s.actions(crate::store::file_store())
+        s.actions(crate::store::file_store(), false)
     }
 
     fn label(s: &CardMenu, a: Action) -> String {
@@ -1449,5 +1459,16 @@ mod tests {
         let mut fx = Outbox::default();
         run_action(&mut s, Action::MakeDefault, &mut fx);
         assert_eq!(crate::store::file_store().load().default_host, None);
+    }
+
+    /// A TV has no clipboard: Copy link leaves every menu, and nothing else does.
+    #[test]
+    fn a_tv_offers_no_copy_link() {
+        let menu = CardMenu::for_host(&host());
+        let desk = menu.actions(crate::store::file_store(), false);
+        let tv = menu.actions(crate::store::file_store(), true);
+        assert!(desk.contains(&Action::CopyLink));
+        assert!(!tv.contains(&Action::CopyLink));
+        assert_eq!(desk.len(), tv.len() + 1);
     }
 }
