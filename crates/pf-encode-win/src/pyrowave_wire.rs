@@ -513,7 +513,8 @@ mod tests {
     #[test]
     fn slice_target_matches_the_vec_inside_the_bound() {
         let bs: Vec<u8> = (0..2000u32).map(|i| (i * 7) as u8).collect();
-        let cases: [(&[(usize, usize)], Option<usize>); 4] = [
+        type Case = (&'static [(usize, usize)], Option<usize>);
+        let cases: [Case; 4] = [
             (
                 &[(0, 20), (20, 20), (40, 100), (140, 500), (640, 3)],
                 Some(64),
