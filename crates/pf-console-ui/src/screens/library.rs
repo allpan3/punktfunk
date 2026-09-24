@@ -945,14 +945,15 @@ impl LibraryScreen {
         }
     }
 
-    /// Warm-up only: every title's cover set to `art` and the entrance over, so a frame draws
-    /// what a loaded shelf draws.
+    /// Warm-up only: `art` for the titles, bare leading tiles and every third title, so the
+    /// warm-up draws each placeholder beside covers. The entrance runs as on a first visit;
+    /// both are programs the GPU would otherwise compile then.
     pub(crate) fn warm(&mut self, art: &Image) {
-        for g in &self.games {
-            self.art.insert(g.id.clone(), art.clone());
+        for (i, g) in self.games.iter().enumerate() {
+            if !g.leads() && i % 3 != 2 {
+                self.art.insert(g.id.clone(), art.clone());
+            }
         }
-        self.entrance = None;
-        self.entrance_armed = true;
     }
 
     /// Titles to decode next: on screen last frame first, then the view from its first drawn

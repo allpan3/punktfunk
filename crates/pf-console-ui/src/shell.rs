@@ -1296,6 +1296,13 @@ impl Shell {
         let keys = (self.games_key.take(), self.library_fp.take());
         let bus = std::mem::take(&mut self.bus);
         let library = std::mem::take(&mut self.library);
+        // A host embedding this shell ticks its model after the warm-up, so no host is known
+        // yet: without a stand-in, Games and its shelf would never draw here.
+        let hosts = (
+            std::mem::replace(&mut self.hosts, vec![stand_in_host()]),
+            self.hosts_gen,
+        );
+        self.hosts_gen = self.console.hosts_gen();
         self.library.set_games(stand_in_games());
         let poster = stand_in_poster();
         let draw = |s: &mut Shell, frames: usize| {
@@ -1315,6 +1322,8 @@ impl Shell {
         (self.tab, self.stack, self.parked, self.motion) = (tab, stack, parked, motion);
         (self.strip_focus, self.bus, self.library) = (strip_focus, bus, library);
         (self.games_key, self.library_fp) = keys;
+        // The saved generation, so a list published meanwhile is still taken on the next sync.
+        (self.hosts, self.hosts_gen) = hosts;
         crate::el::forget_handoff();
     }
 
@@ -2162,12 +2171,25 @@ impl Shell {
     }
 }
 
+/// Every glyph a title commonly has, split across the stand-in titles: the warm-up puts each
+/// into the glyph atlas at the sizes and weights a shelf draws it, not on the first real visit.
+const STAND_IN_GLYPHS: &str = "ABCDEFGHIJKLM NOPQRSTUVWXYZ abcdefghijklm nopqrstuvwxyz \
+     0123456789 :'-.,!?&()/+ ®™©éèêëáàâäóòôöúùûüíìîïçñß ÉÀÖÜ–—’“”…";
+
 /// The warm-up's library: a title of each shape a shelf draws, store badges, a running one and
-/// launchers, so the programs a loaded shelf needs are all asked for.
+/// launchers, so the programs and glyphs a loaded shelf needs are all asked for.
 fn stand_in_games() -> Vec<crate::library::LibraryGame> {
+    let glyphs: Vec<char> = STAND_IN_GLYPHS.chars().collect();
+    let chunk = glyphs.len().div_ceil(12);
+    let title = |i: usize| -> String {
+        glyphs
+            .chunks(chunk)
+            .nth(i)
+            .map_or_else(|| format!("Title {i}"), |c| c.iter().collect())
+    };
     let game = |i: usize, store: &str, launcher: bool, icon: &str| crate::library::LibraryGame {
         id: format!("warm:{i}"),
-        title: format!("Title {i}"),
+        title: title(i),
         store: store.into(),
         launcher,
         icon: icon.into(),
@@ -2185,6 +2207,31 @@ fn stand_in_games() -> Vec<crate::library::LibraryGame> {
     out.push(game(12, "steam", true, "steam"));
     out.push(game(13, "desktop", true, "desktop"));
     out
+}
+
+/// The paired, online host the warm-up tours with.
+fn stand_in_host() -> HostRow {
+    HostRow {
+        key: "warm".into(),
+        id: None,
+        name: "Stand-in".into(),
+        addr: "127.0.0.1".into(),
+        port: 9777,
+        fp_hex: "00".into(),
+        paired: true,
+        saved: true,
+        online: true,
+        mgmt_port: 9778,
+        can_wake: false,
+        clipboard_sync: false,
+        last_used: None,
+        os: "linux".into(),
+        actions: Vec::new(),
+        pin: None,
+        bound_preset: None,
+        running: String::new(),
+        game_presets: std::collections::BTreeMap::new(),
+    }
 }
 
 /// A cover the warm-up draws: a raster with mips, as a decoded poster is.
