@@ -742,6 +742,36 @@ fn the_licences_page_through_a_hosts_notices() {
     assert!(matches!(s.stack.last(), Some(Screen::Home(_))));
 }
 
+/// The search screen draws with its keyboard up, and a search that found nothing draws its
+/// state line rather than an empty field.
+#[test]
+fn a_search_and_its_empty_result_raster() {
+    let fonts = crate::theme::build_fonts().unwrap();
+    let mut surface = skia_safe::surfaces::raster_n32_premul((1280, 800)).unwrap();
+    let host = hosts().remove(0);
+    let search = crate::screens::search::SearchScreen::new(&host, 0, &Default::default());
+    let (mut s, _console, library) = shell(vec![
+        Screen::Home(HomeScreen::new()),
+        Screen::Search(search),
+    ]);
+    library.set_games(Vec::new());
+    library.set_phase(crate::library::LibraryPhase::Ready);
+    let mut frame = |s: &mut Shell| s.render(surface.canvas(), 1280, 800, &fonts, None, None, &[]);
+    for _ in 0..3 {
+        frame(&mut s);
+    }
+    s.text_input("zz");
+    s.handle_menu(MenuEvent::Back);
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    s.handle_menu(MenuEvent::Confirm);
+    finish_motion(&mut s);
+    frame(&mut s);
+    let Some(Screen::Library(shelf)) = s.stack.last() else {
+        panic!("the results replace the search");
+    };
+    assert!(shelf.no_match());
+}
+
 #[test]
 fn every_settings_tab_rasters() {
     let fonts = crate::theme::build_fonts().unwrap();

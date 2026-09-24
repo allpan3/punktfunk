@@ -19,6 +19,7 @@ pub(crate) mod pin_hosts;
 pub(crate) mod players;
 pub(crate) mod prompt;
 pub(crate) mod ring_editor;
+pub(crate) mod search;
 pub(crate) mod settings;
 pub(crate) mod shortcut_editor;
 
@@ -185,6 +186,8 @@ pub(crate) enum Screen {
     Prompt(prompt::PromptScreen),
     /// Open-source licences. Raised by the About section.
     Licenses(licenses::LicensesScreen),
+    /// A title search over one host's shelf. Raised by the shelf's Search pill.
+    Search(search::SearchScreen),
 }
 
 impl Screen {
@@ -221,6 +224,7 @@ impl Screen {
             Screen::Grants(s) => s.menu(ev, ctx, fx),
             Screen::Prompt(s) => s.menu(ev, ctx, fx),
             Screen::Licenses(s) => s.menu(ev, ctx, fx),
+            Screen::Search(s) => s.menu(ev, ctx, fx),
         }
     }
 
@@ -248,6 +252,7 @@ impl Screen {
             Screen::Palette(s) => s.press(),
             Screen::Grants(s) => s.list.dip(),
             Screen::Prompt(s) => s.list.dip(),
+            Screen::Search(s) => s.list.dip(),
             _ => {}
         }
     }
@@ -270,6 +275,7 @@ impl Screen {
             Screen::Grants(s) => s.list.pan(p),
             Screen::Prompt(s) => s.list.pan(p),
             Screen::Licenses(s) => s.pan(p),
+            Screen::Search(s) => s.list.pan(p),
             Screen::ShortcutEditor(s) => s.pan_list().is_some_and(|l| l.pan(p)),
             Screen::RingEditor(s) => s.pan_list().pan(p),
             Screen::Library(s) => s.pan(p),
@@ -300,6 +306,7 @@ impl Screen {
             Screen::Grants(s) => s.pointer(p, ctx, fx),
             Screen::Prompt(s) => s.pointer(p, ctx, fx),
             Screen::Licenses(s) => s.pointer(p, ctx, fx),
+            Screen::Search(s) => s.pointer(p, ctx, fx),
         }
     }
 
@@ -309,6 +316,7 @@ impl Screen {
             Screen::AddHost(s) => s.text_input(text),
             Screen::ShortcutEditor(s) => s.text_input(text),
             Screen::Pair(s) => s.text_input(text),
+            Screen::Search(s) => s.text_input(text),
             Screen::Settings(s) => s.text_input(text),
             _ => {}
         }
@@ -321,6 +329,7 @@ impl Screen {
             Screen::AddHost(s) => s.edit_key(key),
             Screen::ShortcutEditor(s) => s.edit_key(key),
             Screen::Pair(s) => s.edit_key(key),
+            Screen::Search(s) => s.edit_key(key),
             Screen::Settings(s) => s.edit_key(key, ctx),
             _ => false,
         }
@@ -332,6 +341,7 @@ impl Screen {
             Screen::AddHost(s) => s.editing(),
             Screen::ShortcutEditor(s) => s.editing(),
             Screen::Pair(s) => s.editing(),
+            Screen::Search(s) => s.editing(),
             Screen::Settings(s) => s.editing(),
             _ => false,
         }
@@ -397,6 +407,7 @@ impl Screen {
             Screen::Grants(_) => "Controller access".into(),
             Screen::Prompt(s) => s.title(),
             Screen::Licenses(_) => "Open-source licences".into(),
+            Screen::Search(s) => s.title(),
         }
     }
 
@@ -436,6 +447,7 @@ impl Screen {
             Screen::Grants(s) => s.hints(ctx),
             Screen::Prompt(s) => s.hints(ctx),
             Screen::Licenses(s) => s.hints(ctx),
+            Screen::Search(s) => s.hints(ctx),
         }
     }
 
@@ -471,6 +483,7 @@ impl Screen {
             Screen::Grants(s) => s.render(canvas, rect, k, dt, fonts, ctx),
             Screen::Prompt(s) => s.render(canvas, rect, k, dt, fonts, ctx),
             Screen::Licenses(s) => s.render(canvas, rect, k, dt, fonts, ctx),
+            Screen::Search(s) => s.render(canvas, rect, k, dt, fonts, ctx),
         }
     }
 }

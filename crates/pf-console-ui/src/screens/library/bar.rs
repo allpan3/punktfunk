@@ -1,4 +1,5 @@
-//! The sort and view pills: SORT's six on the leading edge, VIEW's two on the trailing.
+//! The sort and view pills: SORT's six on the leading edge, VIEW's two on the trailing,
+//! and Search last, uncaptioned: it opens a screen rather than applying a state.
 //!
 //! A line of focus targets in the screen's own tree, so the plate walks onto it from the
 //! line below: Left and Right move between pills and OK applies the focused one. Each
@@ -24,25 +25,29 @@ const CAPTION_GAP: f64 = 10.0;
 /// Least air between the two groups.
 const GROUP_GAP: f64 = 24.0;
 
-/// One pill: a sort, or an arrangement.
+/// One pill: a sort, an arrangement, or the way into a title search.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Pill {
     Sort(SortKey),
     View(LibraryView),
+    Search,
 }
 
 impl Pill {
-    /// Every pill in row order; `views` adds the VIEW group.
+    /// Every pill in row order; `views` adds the VIEW group and Search, the shelf's own.
     pub(crate) fn all(views: bool) -> Vec<Pill> {
         let sorts = SortKey::ALL.iter().map(|&s| Pill::Sort(s));
-        let views = LibraryView::ALL.iter().filter(|_| views);
-        sorts.chain(views.map(|&v| Pill::View(v))).collect()
+        let rest = (LibraryView::ALL.iter().map(|&v| Pill::View(v)))
+            .chain([Pill::Search])
+            .filter(|_| views);
+        sorts.chain(rest).collect()
     }
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             Pill::Sort(s) => s.label(),
             Pill::View(v) => v.label(),
+            Pill::Search => "Search",
         }
     }
 }
@@ -96,10 +101,19 @@ fn layout(fonts: &Fonts, k: f64, width: f64, views: bool) -> Layout {
     let sort_w = caption_w(fonts, "SORT", k) + CAPTION_GAP * k + run(0..sorts);
     place(0.0, 0..sorts, "SORT");
     if views {
-        let view_w = caption_w(fonts, "VIEW", k) + CAPTION_GAP * k + run(sorts..pills.len());
+        let search = pills.len() - 1;
+        let search_w = widths[search];
+        let view_w = caption_w(fonts, "VIEW", k) + CAPTION_GAP * k + run(sorts..search);
         // A narrow window crowds the groups rather than pushing SORT off the leading edge.
-        let x = (width - view_w).max(sort_w + GROUP_GAP * k);
-        place(x, sorts..pills.len(), "VIEW");
+        let x = (width - search_w - GROUP_GAP * k - view_w).max(sort_w + GROUP_GAP * k);
+        place(x, sorts..search, "VIEW");
+        let x = (width - search_w).max(x + view_w + GROUP_GAP * k);
+        out.pills.push(Rect::from_xywh(
+            x as f32,
+            top as f32,
+            search_w as f32,
+            (PILL_H * k) as f32,
+        ));
     }
     out
 }
@@ -222,14 +236,15 @@ impl Bar {
 mod tests {
     use super::*;
 
-    /// SORT leads at the margin; VIEW ends on the trailing edge; no pill overlaps another.
+    /// SORT leads at the margin; Search ends on the trailing edge, VIEW before it; no pill
+    /// overlaps another.
     #[test]
     fn the_groups_sit_on_both_edges_without_touching() {
         let fonts = crate::theme::build_fonts().unwrap();
         let l = layout(&fonts, 1.0, 1200.0, true);
-        assert_eq!(l.pills.len(), 8);
+        assert_eq!(l.pills.len(), 9);
         assert_eq!(l.captions[0].0, 0.0);
-        assert!((f64::from(l.pills[7].right) - 1200.0).abs() < 0.5);
+        assert!((f64::from(l.pills[8].right) - 1200.0).abs() < 0.5);
         assert!(l.pills.windows(2).all(|w| w[0].right < w[1].left));
         let narrow = layout(&fonts, 1.0, 400.0, true);
         assert!(narrow.pills.windows(2).all(|w| w[0].right < w[1].left));

@@ -462,6 +462,8 @@ pub(crate) struct LibraryScreen {
     filter: Option<crate::collate::GroupKey>,
     /// Held, not re-derived: `Store("Steam")` and `Platform("Steam")` both read "Steam".
     filter_label: Option<String>,
+    /// A title search, lowercased: only titles containing it stay.
+    query: Option<String>,
     /// Reached from collections (group or "All titles"). Y must refuse both, or it loops.
     drilled: bool,
     /// Collections hand-over, once. A later rescan must not replace a shelf already in use.
@@ -545,6 +547,7 @@ impl LibraryScreen {
             sort: crate::collate::SortKey::default(),
             filter: None,
             filter_label: None,
+            query: None,
             drilled: false,
             pending_collections: true,
             entry_epoch,
@@ -712,8 +715,10 @@ impl LibraryScreen {
     /// Rebuild display order. Clamp the cursor; identity follow is [`Self::sync`]'s job.
     fn recollate(&mut self) {
         let view = crate::collate::filtered(&self.games, self.sort, self.filter.as_ref());
+        let query = self.query.as_deref();
         self.view = (view.into_iter())
             .filter(|&i| !self.banded(&self.games[i]))
+            .filter(|&i| query.is_none_or(|q| self.games[i].title.to_lowercase().contains(q)))
             .collect();
         self.cursor = self.cursor.clamp(0, (self.view.len() as i32 - 1).max(0));
         self.seat_grid_col();
@@ -791,6 +796,15 @@ impl LibraryScreen {
     pub(crate) fn set_filter(&mut self, key: crate::collate::GroupKey, label: String) {
         self.filter = Some(key);
         self.filter_label = Some(label);
+        self.drilled = true;
+        self.recollate();
+    }
+
+    /// The titles whose name contains `query`, any case. Called before first render, as
+    /// [`Self::set_filter`] is.
+    pub(crate) fn set_query(&mut self, query: &str) {
+        self.query = Some(query.to_lowercase());
+        self.filter_label = Some(format!("\u{201c}{query}\u{201d}"));
         self.drilled = true;
         self.recollate();
     }
@@ -1114,6 +1128,11 @@ impl LibraryScreen {
 
     /// The button the state card offers: Retry after a failure that can retry, the desk
     /// when the host has no titles.
+    /// A search that found nothing: the shelf says so instead of standing empty.
+    pub(crate) fn no_match(&self) -> bool {
+        self.query.is_some() && self.len() == 0 && matches!(self.phase, LibraryPhase::Ready)
+    }
+
     fn state_action(&self) -> Option<&'static str> {
         match self.phase {
             LibraryPhase::Error {
@@ -1287,6 +1306,7 @@ impl LibraryScreen {
                 let group = match pill {
                     bar::Pill::Sort(_) => "Sort",
                     bar::Pill::View(_) => "View",
+                    bar::Pill::Search => return Some("Search titles".into()),
                 };
                 let on = self.applied().contains(&i);
                 let state = if on { ", selected" } else { "" };
@@ -2039,9 +2059,17 @@ impl LibraryScreen {
                  This host still streams its desktop."
                     .into(),
             ),
+            LibraryPhase::Ready if self.no_match() => (
+                "No matches".into(),
+                format!(
+                    "No title on this host contains {}.",
+                    self.filter_label.as_deref().unwrap_or_default()
+                ),
+            ),
             _ => (String::new(), "Loading library\u{2026}".into()),
         };
-        let loading = matches!(self.phase, LibraryPhase::Loading | LibraryPhase::Ready);
+        let loading = matches!(self.phase, LibraryPhase::Loading)
+            || (matches!(self.phase, LibraryPhase::Ready) && !self.no_match());
         let action = (!self.embedded).then(|| self.state_action()).flatten();
         let button_h = BUTTON_H * k;
         let content = 30.0 * k
@@ -2252,6 +2280,25 @@ mod tests {
         (s, library)
     }
 
+    /// A query keeps the titles containing it, any case; one that matches nothing says so
+    /// on the state line instead of an empty field.
+    #[test]
+    fn a_search_keeps_only_the_matching_titles() {
+        let (mut s, _library) = live_shelf();
+        s.set_query("A");
+        let titles: Vec<&str> = (0..s.len())
+            .filter_map(|i| s.game(i).map(|g| g.title.as_str()))
+            .collect();
+        assert_eq!(titles.len(), 4, "{titles:?}");
+        assert!(titles.iter().all(|t| t.to_lowercase().contains('a')));
+        assert!(!s.no_match());
+
+        let (mut s, _library) = live_shelf();
+        s.set_query("xyz");
+        assert!(s.no_match());
+        assert!(s.lines(&[], 0).contains(&Line::State));
+    }
+
     fn up() -> MenuEvent {
         MenuEvent::Move(MenuDir::Up)
     }
@@ -2304,18 +2351,31 @@ mod tests {
         );
     }
 
-    /// Walk to the VIEW group: Grid is one press of OK, and the pills end there.
+    /// Walk to the VIEW group: Grid is one press of OK. Search ends the row, and OK there
+    /// opens the search.
     #[test]
     fn the_view_pills_swap_the_arrangement() {
         let (mut s, library) = plain_shelf();
         let mut settings = shelf_settings();
         press(&mut s, &library, &mut settings, up());
-        for _ in 0..7 {
+        for _ in 0..8 {
             press(&mut s, &library, &mut settings, right());
         }
-        assert_eq!(s.zone, Zone::Bar(7));
+        assert_eq!(s.zone, Zone::Bar(8));
         let (pulse, _) = press(&mut s, &library, &mut settings, right());
         assert!(matches!(pulse, Some(MenuPulse::Boundary)), "the last pill");
+        let (_, fx) = press(&mut s, &library, &mut settings, MenuEvent::Confirm);
+        assert!(
+            matches!(&fx.nav, Some(crate::screens::Nav::Push(b)) if matches!(**b, Screen::Search(_))),
+            "Search opens its screen"
+        );
+        press(
+            &mut s,
+            &library,
+            &mut settings,
+            MenuEvent::Move(MenuDir::Left),
+        );
+        assert_eq!(s.zone, Zone::Bar(7));
         press(&mut s, &library, &mut settings, MenuEvent::Confirm);
         assert_eq!(settings.library_view, LibraryView::Grid.id());
         s.adopt_settings(&ctx(&library, &mut settings));
