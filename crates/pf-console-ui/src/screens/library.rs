@@ -1623,7 +1623,7 @@ impl LibraryScreen {
             title: band.title.as_deref(),
             subtitle: band.subtitle.as_deref(),
             note: band.note,
-            deep: true,
+            deep: false,
             ..Default::default()
         }
         .paint(
