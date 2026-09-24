@@ -108,6 +108,12 @@ pub enum RowId {
     /// off strands the user with no UI.
     GamepadUi,
     GamepadUiMode,
+    /// A session stays up while the app is in the background. Phones, tablets and TVs.
+    BackgroundKeepAlive,
+    /// How long a backgrounded session lasts. Under [`RowId::BackgroundKeepAlive`].
+    BackgroundTimeout,
+    /// The statistics overlay's corner. Apple draws that overlay itself.
+    StatsPosition,
     /// Which path decodes the stream's audio on a TV — see `WEBOS_AUDIO_ROUTES`. webOS only:
     /// the offload route is that client's NDL audio plane, which no other platform has.
     AudioRoute,
@@ -161,6 +167,27 @@ const GAMEPAD_UI_MODE_KEY: &str = "gamepad_ui_mode";
 const GAMEPAD_UI_MODES: [(&str, &str); 2] =
     [("connected", "With a controller"), ("always", "Always")];
 
+/// The background-session pair, the names Android's and Apple's stores share.
+const BACKGROUND_KEEP_ALIVE_KEY: &str = "background_keep_alive";
+const BACKGROUND_TIMEOUT_KEY: &str = "background_timeout_minutes";
+/// Minutes, as the two touch UIs offer them. Stored as a number.
+const BACKGROUND_TIMEOUTS: [(&str, &str); 4] = [
+    ("1", "1 minute"),
+    ("5", "5 minutes"),
+    ("10", "10 minutes"),
+    ("30", "30 minutes"),
+];
+const BACKGROUND_TIMEOUT_DEFAULT: u64 = 10;
+
+/// Apple's `HUDPlacement` raw values.
+const STATS_POSITION_KEY: &str = "hud_placement";
+const STATS_POSITIONS: [(&str, &str); 4] = [
+    ("topLeading", "Top left"),
+    ("topTrailing", "Top right"),
+    ("bottomLeading", "Bottom left"),
+    ("bottomTrailing", "Bottom right"),
+];
+
 /// `"pad"` is the only live value; `"mix"` renders as off. Local copy because
 /// `pad_audio` is `cfg(linux|windows)` and Android still sends the setting.
 fn pad_speaker_on(mode: &str) -> bool {
@@ -181,6 +208,12 @@ fn set_extra_bool(s: &mut pf_client_core::trust::Settings, key: &str, value: boo
 
 fn extra_str<'a>(s: &'a pf_client_core::trust::Settings, key: &str, default: &'a str) -> &'a str {
     s.extra.get(key).and_then(|v| v.as_str()).unwrap_or(default)
+}
+
+fn background_timeout(s: &pf_client_core::trust::Settings) -> u64 {
+    (s.extra.get(BACKGROUND_TIMEOUT_KEY))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(BACKGROUND_TIMEOUT_DEFAULT)
 }
 
 fn toggle_extra(
@@ -244,6 +277,8 @@ const TABS: [(&str, &[RowId]); 8] = [
             RowId::VideoFit,
             RowId::RenderScale,
             RowId::Compositor,
+            RowId::BackgroundKeepAlive,
+            RowId::BackgroundTimeout,
         ],
     ),
     (
@@ -313,6 +348,7 @@ const TABS: [(&str, &[RowId]); 8] = [
             RowId::GamepadUi,
             RowId::GamepadUiMode,
             RowId::Stats,
+            RowId::StatsPosition,
             RowId::AdvancedStats,
             RowId::ReduceMotion,
             RowId::Fullscreen,
@@ -1167,6 +1203,10 @@ pub fn row_on(id: RowId, platform: crate::platform::Platform) -> bool {
         RowId::GamepadUi | RowId::GamepadUiMode => &[Android, WebOS, Apple],
         // A pad list: real on a TV, and on Apple its Controllers screen.
         RowId::Controllers => &[Android, WebOS, Apple],
+        // Apps a phone or TV can put in the background; `row_applies` drops the Mac.
+        RowId::BackgroundKeepAlive | RowId::BackgroundTimeout => &[Android, Apple],
+        // Apple draws the statistics overlay itself, in a corner the player picks.
+        RowId::StatsPosition => &[Apple],
         // Every client ships third-party code. The browser build has no bundle to list.
         RowId::Licenses => &[Desktop, Android, WebOS, Apple],
         // DualSense capture — the pad reaches webOS over Bluetooth HID, not hidraw, so the
@@ -1218,6 +1258,14 @@ pub fn row_applies(id: RowId, ctx: &Ctx) -> bool {
         // The phone's own motor, gyro and SC2 dongle: only a handheld sends its screen
         // (`ConsoleOptions::screen`), so a TV or a Mac never offers them.
         RowId::PhoneRumble | RowId::PhoneGyro | RowId::Sc2Passthrough => ctx.screen.is_some(),
+        // A Mac window has no background session; Android and the other Apple devices do.
+        RowId::BackgroundKeepAlive => backgroundable(ctx),
+        RowId::BackgroundTimeout => {
+            backgroundable(ctx) && extra_bool(ctx.settings, BACKGROUND_KEEP_ALIVE_KEY, false)
+        }
+        RowId::StatsPosition => {
+            ctx.settings.stats_verbosity() != pf_client_core::trust::StatsVerbosity::Off
+        }
         // The OS answered, and the console follows it: no second switch.
         RowId::ReduceMotion => crate::os_theme::os_reduce_motion().is_none(),
         // `os_theme::available()`, not platform: a new publisher needs no edit here.
@@ -1226,6 +1274,10 @@ pub fn row_applies(id: RowId, ctx: &Ctx) -> bool {
         RowId::Palette => !(ctx.settings.follow_os_theme && crate::os_theme::available()),
         _ => true,
     }
+}
+
+fn backgroundable(ctx: &Ctx) -> bool {
+    ctx.platform != crate::platform::Platform::Apple || ctx.screen.is_some() || ctx.tv
 }
 
 /// Where a launch will actually land, named. Not the stored value: with no default host
@@ -1315,6 +1367,9 @@ fn row_icon(id: RowId) -> &'static str {
         RowId::StartIn => "play",
         RowId::GamepadUi | RowId::GamepadUiMode => "tv",
         RowId::Stats | RowId::AdvancedStats => "chart-column",
+        RowId::StatsPosition => "panel-right",
+        RowId::BackgroundKeepAlive => "moon",
+        RowId::BackgroundTimeout => "clock",
         RowId::ReduceMotion => "eye",
         RowId::AutoWake => "power",
         RowId::Version | RowId::Licenses => "info",
@@ -1667,6 +1722,25 @@ fn row_spec_base(id: RowId, ctx: &Ctx, presets: &[(String, String)]) -> RowSpec 
             s.stats_verbosity().label().into(),
         ),
         RowId::AdvancedStats => (None, "Advanced statistics", on_off(s.advanced_stats).into()),
+        RowId::StatsPosition => (
+            None,
+            "Stats position",
+            label_for(
+                &STATS_POSITIONS,
+                extra_str(s, STATS_POSITION_KEY, "topTrailing"),
+            )
+            .into(),
+        ),
+        RowId::BackgroundKeepAlive => (
+            None,
+            "Keep streaming in background",
+            on_off(extra_bool(s, BACKGROUND_KEEP_ALIVE_KEY, false)).into(),
+        ),
+        RowId::BackgroundTimeout => (
+            None,
+            "Disconnect after",
+            label_for(&BACKGROUND_TIMEOUTS, &background_timeout(s).to_string()).into(),
+        ),
         RowId::Fullscreen => (
             None,
             "Start streams fullscreen",
@@ -1951,6 +2025,14 @@ pub fn detail(id: RowId, ctx: &Ctx) -> &'static str {
              p50/p95 and every stage between. Every number: docs.punktfunk.unom.io/docs/stats"
         }
         RowId::Fullscreen => "Streams open fullscreen instead of windowed.",
+        RowId::StatsPosition => "Which corner the statistics overlay sits in.",
+        RowId::BackgroundKeepAlive => {
+            "Audio and the connection stay live when you switch away; video pauses."
+        }
+        RowId::BackgroundTimeout if ctx.tv => {
+            "Ends a session left in the background after this long."
+        }
+        RowId::BackgroundTimeout => "Ends a backgrounded session so it can't run down the battery.",
         RowId::AutoWake => {
             "Send Wake-on-LAN to a sleeping host before connecting. Turn off for hosts \
              reached over a VPN, where the wake wait only adds delay."
@@ -2313,6 +2395,24 @@ pub fn adjust(id: RowId, delta: i32, wrap: bool, ctx: &mut Ctx) -> bool {
             })
         }
         RowId::GamepadUi => toggle_extra(s, GAMEPAD_UI_KEY, true, delta, wrap),
+        RowId::BackgroundKeepAlive => {
+            toggle_extra(s, BACKGROUND_KEEP_ALIVE_KEY, false, delta, wrap)
+        }
+        RowId::BackgroundTimeout => {
+            let mut v = background_timeout(s).to_string();
+            step_str(&BACKGROUND_TIMEOUTS, &mut v, delta, wrap).map(|()| {
+                let minutes: u64 = v.parse().unwrap_or(BACKGROUND_TIMEOUT_DEFAULT);
+                s.extra
+                    .insert(BACKGROUND_TIMEOUT_KEY.to_string(), minutes.into());
+            })
+        }
+        RowId::StatsPosition => {
+            let mut v = extra_str(s, STATS_POSITION_KEY, "topTrailing").to_string();
+            step_str(&STATS_POSITIONS, &mut v, delta, wrap).map(|()| {
+                s.extra
+                    .insert(STATS_POSITION_KEY.to_string(), serde_json::Value::String(v));
+            })
+        }
         RowId::GamepadUiMode => {
             let mut v = extra_str(s, GAMEPAD_UI_MODE_KEY, "connected").to_string();
             step_str(&GAMEPAD_UI_MODES, &mut v, delta, wrap).map(|()| {
@@ -3628,6 +3728,8 @@ pub(crate) mod tests {
         assert_eq!(
             off_desktop,
             vec![
+                RowId::BackgroundKeepAlive,
+                RowId::BackgroundTimeout,
                 RowId::LowLatency,
                 RowId::AudioRoute,
                 RowId::Controllers,
@@ -3639,6 +3741,7 @@ pub(crate) mod tests {
                 RowId::ReduceUiResolution,
                 RowId::GamepadUi,
                 RowId::GamepadUiMode,
+                RowId::StatsPosition,
             ]
         );
         let off_android: Vec<RowId> = all
@@ -3660,6 +3763,7 @@ pub(crate) mod tests {
                 RowId::Pad,
                 RowId::Shortcuts,
                 RowId::CursorGestures,
+                RowId::StatsPosition,
                 RowId::Fullscreen,
             ]
         );
@@ -3786,7 +3890,7 @@ pub(crate) mod tests {
                 seen.push(*id);
             }
         }
-        assert_eq!(seen.len(), 57, "{seen:?}");
+        assert_eq!(seen.len(), 60, "{seen:?}");
         assert!(seen.contains(&RowId::StartIn));
         assert!(seen.contains(&RowId::AdvancedStats));
         assert!(seen.contains(&RowId::FollowOsTheme));
@@ -4211,6 +4315,36 @@ pub(crate) mod tests {
             assert!(!row_applies(RowId::ReduceMotion, ctx));
             crate::os_theme::set_os_reduce_motion(None);
             assert!(row_applies(RowId::ReduceMotion, ctx));
+        });
+    }
+
+    /// The background pair shows on Android and on an Apple phone, tablet or TV, never on a
+    /// Mac window; the timeout only while the switch is on, and it steps through the minutes
+    /// the touch UIs offer.
+    #[test]
+    fn the_background_rows_follow_the_device() {
+        use crate::platform::Platform;
+        with_ctx(|ctx| {
+            ctx.platform = Platform::Apple;
+            assert!(!row_applies(RowId::BackgroundKeepAlive, ctx), "a Mac");
+            ctx.tv = true;
+            assert!(row_applies(RowId::BackgroundKeepAlive, ctx), "an Apple TV");
+            assert!(!row_applies(RowId::BackgroundTimeout, ctx), "switch off");
+            assert!(adjust(RowId::BackgroundKeepAlive, 1, true, ctx));
+            assert!(row_applies(RowId::BackgroundTimeout, ctx));
+            assert_eq!(background_timeout(ctx.settings), 10);
+            assert!(adjust(RowId::BackgroundTimeout, 1, false, ctx));
+            assert_eq!(background_timeout(ctx.settings), 30);
+            assert!(
+                !adjust(RowId::BackgroundTimeout, 1, false, ctx),
+                "30 is the top"
+            );
+            ctx.platform = Platform::Android;
+            ctx.tv = false;
+            assert!(
+                row_applies(RowId::BackgroundKeepAlive, ctx),
+                "an Android phone"
+            );
         });
     }
 }

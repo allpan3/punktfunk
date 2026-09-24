@@ -149,6 +149,9 @@ public enum ConsoleSettings {
         .bool("auto_wake", DefaultsKey.autoWake, true),
         // The console's own off switch lands on the touch, TV or Mac UI.
         .bool("gamepad_ui_enabled", DefaultsKey.gamepadUIEnabled, true),
+        .bool("background_keep_alive", DefaultsKey.backgroundKeepAlive, false),
+        .int("background_timeout_minutes", DefaultsKey.backgroundTimeoutMinutes, 10),
+        .string("hud_placement", DefaultsKey.hudPlacement, "topTrailing"),
         .string("gamepad_ui_mode", DefaultsKey.gamepadUIMode, GamepadUIEnvironment.modeWhenConnected),
         // `Settings::extra` (flattened, so plain top-level keys). The `android.` prefix is
         // where these were first written; the console reads the same names here.
