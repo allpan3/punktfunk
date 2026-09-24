@@ -492,6 +492,8 @@ impl Presenter {
                 device_extensions.push(CString::from(ash::ext::hdr_metadata::NAME));
             }
             device_extensions.extend(video_ext_names.iter().map(|n| CString::from(*n)));
+            let decode_ops =
+                pf_client_core::video::usable_decode_ops(dev_props.vendor_id, decode_caps.as_raw());
             Some(pf_client_core::video::VulkanDecodeDevice {
                 get_instance_proc_addr: entry.static_fn().get_instance_proc_addr as usize,
                 instance: instance.handle().as_raw() as usize,
@@ -504,7 +506,7 @@ impl Presenter {
                     .unwrap_or_default(),
                 graphics_qf: qfi,
                 decode_qf,
-                decode_video_caps: decode_caps.as_raw(),
+                decode_video_caps: decode_ops,
                 instance_extensions: instance_extensions
                     .iter()
                     .map(|e| CString::new(e.as_str()).unwrap())
@@ -532,6 +534,16 @@ impl Presenter {
                 dmabuf_import: hw_capable,
                 #[cfg(not(target_os = "linux"))]
                 dmabuf_import: false,
+                #[cfg(target_os = "linux")]
+                vaapi_av1_decode: hw_capable
+                    && pf_client_core::video::vaapi_av1_decodable(
+                        dev_props.vendor_id,
+                        video_ok
+                            && decode_ops & vk::VideoCodecOperationFlagsKHR::DECODE_AV1.as_raw()
+                                != 0,
+                    ),
+                #[cfg(not(target_os = "linux"))]
+                vaapi_av1_decode: false,
                 // HDR10 surface facts arrive with `pick_formats` below.
                 d3d11_hdr10: false,
                 d3d11_nv12: false,

@@ -404,6 +404,25 @@ pub(crate) struct NativeVaapiDecoder {
     stale_releases: u64,
 }
 
+/// Does the node this rung would open for `presenter_vendor` decode AV1 Profile 0?
+/// Opens and closes a display, so callers ask once and keep the answer.
+pub(crate) fn av1_decodable(presenter_vendor: u32) -> bool {
+    let answer = pf_vaapi::profile_for(pf_vaapi::Codec::Av1, 1, 8)
+        .map_err(|e| anyhow!("{e}"))
+        .and_then(|profile| {
+            let va = Libva::load().context("libva")?;
+            Display::open_for_vendor(va, Some(presenter_vendor))?.require_entrypoint(profile.value)
+        });
+    match &answer {
+        Ok(()) => tracing::info!("the presenter's VAAPI node decodes AV1"),
+        Err(e) => tracing::info!(
+            reason = %format!("{e:#}"),
+            "the presenter's VAAPI node does not decode AV1"
+        ),
+    }
+    answer.is_ok()
+}
+
 impl NativeVaapiDecoder {
     /// Tests use render-node name order unless they set `PUNKTFUNK_VAAPI_DEVICE`.
     #[cfg(test)]
@@ -2117,6 +2136,58 @@ mod tests {
         assert_eq!(
             delivered, 250,
             "the vector displays 250 frames (274 coded, 24 hidden)"
+        );
+    }
+
+    /// The presenter's AV1 fact on this box, for `PF_VAAPI_VENDOR` (hex, default Intel).
+    #[test]
+    #[ignore = "needs a machine with a libva runtime"]
+    fn av1_decodable_answers_on_this_machine() {
+        let vendor = std::env::var("PF_VAAPI_VENDOR")
+            .ok()
+            .and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+            .unwrap_or(0x8086);
+        eprintln!(
+            "VAAPI AV1 for vendor {vendor:#06x}: {}",
+            av1_decodable(vendor)
+        );
+    }
+
+    /// Wall time of each `decode` call — submit, sync and export, the span the
+    /// session reports as decode time — on `PF_VAAPI_BENCH_STREAM` (Annex-B H.265).
+    /// Three frames stay held, as a presenter holds them.
+    #[test]
+    #[ignore = "needs a machine with a libva runtime and PF_VAAPI_BENCH_STREAM"]
+    fn h265_decode_time_on_this_machines_vaapi() {
+        let path = std::env::var("PF_VAAPI_BENCH_STREAM").expect("PF_VAAPI_BENCH_STREAM");
+        let stream = std::fs::read(&path).expect("read the bench stream");
+        let units = split_h265_aus(&stream);
+        let mut decoder = NativeVaapiDecoder::new(pf_vaapi::Codec::H265, StreamFormat::SDR_420_8)
+            .expect("this box is supposed to have a VAAPI HEVC decode entry point");
+        let mut us = Vec::with_capacity(units.len());
+        let mut held = std::collections::VecDeque::new();
+        let start = std::time::Instant::now();
+        for (index, unit) in units.iter().enumerate() {
+            let t = std::time::Instant::now();
+            let frame = decoder
+                .decode(unit)
+                .unwrap_or_else(|e| panic!("unit {index}: {e:#}"));
+            us.push(t.elapsed().as_micros() as u64);
+            held.extend(frame);
+            if held.len() > 3 {
+                held.pop_front();
+            }
+        }
+        let total = start.elapsed();
+        us.sort_unstable();
+        let at = |p: usize| us[(us.len() - 1) * p / 100];
+        eprintln!(
+            "{path}: {} AUs in {total:?} ({:.0} fps); decode call p50 {} us, p95 {} us, max {} us",
+            us.len(),
+            us.len() as f64 / total.as_secs_f64(),
+            at(50),
+            at(95),
+            us[us.len() - 1]
         );
     }
 
