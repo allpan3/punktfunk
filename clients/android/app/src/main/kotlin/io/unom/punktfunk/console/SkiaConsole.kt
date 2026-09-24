@@ -854,6 +854,7 @@ object SkiaConsole {
                     c.optJSONObject("SaveHost")?.let(::saveHost)
                     c.optJSONObject("UpdateHost")?.let(::updateHost)
                     c.optJSONObject("ForgetHost")?.let(::forgetHost)
+                    c.optJSONObject("UnpairHost")?.let(::unpairHost)
                     c.optJSONObject("Wake")?.let(::wake)
                     c.optJSONObject("SetPin")?.let(::setPin)
                     c.optJSONObject("BindPreset")?.let(::bindPreset)
@@ -896,6 +897,13 @@ object SkiaConsole {
         val kh = hostForKey(c.optString("key")) ?: return
         knownHostStore.remove(kh)
         appContext?.let { LibraryCache.standard(it.cacheDir).forget(kh.id) }
+        pushHosts(); pushKnownHosts()
+    }
+
+    /** `ConsoleCmd::UnpairHost`: keep the record, drop its pin, so the next connect pairs again. */
+    private fun unpairHost(c: JSONObject) {
+        val kh = hostForKey(c.optString("key")) ?: return
+        knownHostStore.save(kh.copy(fpHex = "", paired = false))
         pushHosts(); pushKnownHosts()
     }
 

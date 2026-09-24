@@ -794,6 +794,28 @@ impl ServiceState {
                 // DISCOVERED row — unsaved and unpaired, which is the honest state.
                 self.last_probe = Instant::now() - Duration::from_secs(60);
             }
+            ConsoleCmd::UnpairHost { key } => {
+                let mut known = trust::KnownHosts::load();
+                let Some(i) = index_for_key(&known, &key) else {
+                    tracing::warn!(%key, "unpair for an unknown host — ignoring");
+                    return;
+                };
+                let host = &mut known.hosts[i];
+                let fp = std::mem::take(&mut host.fp_hex);
+                host.paired = false;
+                let (id, name) = (host.id.clone(), host.name.clone());
+                self.save_known(&known);
+                // The catalog cache is keyed on the fingerprint just dropped; nothing reaches
+                // it again, so it goes now, as a forget's does.
+                pf_client_core::library_cache::forget(&fp);
+                // An unpaired host is no landing: the resolver skips it, and this stops a
+                // later re-pair inheriting the choice.
+                let mut settings = trust::Settings::load();
+                if start::clear_default(&mut settings, id.as_deref()) {
+                    settings.save();
+                }
+                tracing::info!(%name, "host unpaired");
+            }
             ConsoleCmd::Wake { key, then_connect } => {
                 if let Some(c) = self.wake_cancel.take() {
                     c.store(true, Ordering::SeqCst);

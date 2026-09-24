@@ -394,6 +394,11 @@ pub enum ConsoleCmd {
     OpenPlatformScreen {
         id: String,
     },
+    /// Forget a saved host's identity and keep the record: its pin and paired flag clear, so
+    /// the next connect asks for a PIN again. `key` as in [`Self::ForgetHost`].
+    UnpairHost {
+        key: String,
+    },
     /// The Licences screen opened: send this host's [`LicenseSection`]s.
     LoadLicenses,
     /// The answer to a [`crate::screens::prompt::Prompt`]: the row picked, or `None` for

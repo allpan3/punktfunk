@@ -54,6 +54,8 @@ extension ConsoleModel {
                 addr: a["addr"] as? String ?? "", port: port(a["port"]))
         case "ForgetHost":
             if let host = host(key: a["key"] as? String ?? "") { store.remove(host) }
+        case "UnpairHost":
+            if let host = host(key: a["key"] as? String ?? "") { store.forgetIdentity(host) }
         case "Wake":
             wake(key: a["key"] as? String ?? "", thenConnect: a["then_connect"] as? Bool ?? false)
         case "SetPin":

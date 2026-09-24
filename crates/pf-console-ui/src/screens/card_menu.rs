@@ -31,6 +31,8 @@ enum Action {
     Details,
     Unpin,
     Pair,
+    /// Forget the host's identity and keep the host: the next connect asks for a PIN.
+    Unpair,
     /// Save a discovered host.
     AddHost,
     /// The presets, for one launch of this title.
@@ -306,6 +308,9 @@ impl CardMenu {
             a.push(Action::MakeDefault);
         }
         a.push(Action::Pair);
+        if host.paired {
+            a.push(Action::Unpair);
+        }
         if host.can_wake && !host.online {
             a.push(Action::Wake);
         }
@@ -325,7 +330,7 @@ impl CardMenu {
             Action::SpeedTest | Action::Clipboard | Action::Edit | Action::MakeDefault => {
                 "Connection"
             }
-            Action::Pair => "Pairing",
+            Action::Pair | Action::Unpair => "Pairing",
             Action::Wake | Action::Host(_) => "Power",
             Action::SendLogs => "Logs",
             _ => "Remove",
@@ -344,6 +349,7 @@ impl CardMenu {
             Action::Details => "info",
             Action::Unpin | Action::Pin(_) => "pin",
             Action::Pair => "lock",
+            Action::Unpair => "log-out",
             Action::AddHost => "plus",
             Action::BindPreset => "settings",
             Action::SpeedTest => "gauge",
@@ -386,6 +392,10 @@ impl CardMenu {
             Action::Unpin => "Unpin card".into(),
             Action::Pair if self.host().paired => "Pair again\u{2026}".into(),
             Action::Pair => "Pair\u{2026}".into(),
+            Action::Unpair if self.armed == Some(Action::Unpair) => {
+                "Unpair \u{2014} press again".into()
+            }
+            Action::Unpair => "Unpair".into(),
             Action::AddHost => "Add host".into(),
             Action::PlayWith => "Play with preset\u{2026}".into(),
             Action::Play => match &self.subject {
@@ -726,6 +736,17 @@ impl CardMenu {
                     format!("Clipboard no longer shared with {}", host.name)
                 });
                 fx.cmds.push(ConsoleCmd::SetClipboard { key, on });
+                fx.pop();
+            }
+            Action::Unpair if self.armed != Some(Action::Unpair) => {
+                self.armed = Some(Action::Unpair)
+            }
+            Action::Unpair => {
+                fx.cmds.push(ConsoleCmd::UnpairHost { key });
+                fx.toast = Some(format!(
+                    "Unpaired {}. The next connect asks for a PIN.",
+                    self.host().name
+                ));
                 fx.pop();
             }
             Action::Forget if self.armed != Some(Action::Forget) => {
@@ -1470,5 +1491,34 @@ mod tests {
         assert!(desk.contains(&Action::CopyLink));
         assert!(!tv.contains(&Action::CopyLink));
         assert_eq!(desk.len(), tv.len() + 1);
+    }
+
+    /// A paired host's Pairing tab offers Unpair beside Pair again; it arms, then sends one
+    /// UnpairHost. An unpaired host has nothing to forget.
+    #[test]
+    fn unpair_arms_then_forgets_the_identity() {
+        let pairing = |h: &HostRow| -> Vec<Action> {
+            let d = details(h);
+            let sections = d.sections(crate::store::file_store());
+            let tab = sections.iter().position(|s| *s == "Pairing");
+            rows(&CardMenu {
+                tab: tab.expect("a Pairing tab"),
+                ..d
+            })
+        };
+        assert_eq!(pairing(&host()), vec![Action::Pair, Action::Unpair]);
+        let unpaired = HostRow {
+            paired: false,
+            ..host()
+        };
+        assert_eq!(pairing(&unpaired), vec![Action::Pair]);
+
+        let mut s = details(&host());
+        let mut fx = Outbox::default();
+        run_action(&mut s, Action::Unpair, &mut fx);
+        assert!(fx.cmds.is_empty(), "the first press only arms");
+        assert_eq!(label(&s, Action::Unpair), "Unpair \u{2014} press again");
+        run_action(&mut s, Action::Unpair, &mut fx);
+        assert_eq!(fx.cmds, vec![ConsoleCmd::UnpairHost { key: "aa".into() }]);
     }
 }
