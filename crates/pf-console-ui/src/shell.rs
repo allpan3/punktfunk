@@ -1305,9 +1305,14 @@ impl Shell {
     }
 
     /// OK from a remote, both edges. A press acts on release; held [`HOLD_S`] it opens the
-    /// focused card's menu, as Y does on a pad.
+    /// focused card's menu, as Y does on a pad. In a text field the press types at once and
+    /// never holds: the keyboard has no menu, and its Secondary closes the field.
     pub(crate) fn ok(&mut self, down: bool) -> Option<MenuPulse> {
         self.last_input = Instant::now();
+        if self.editing() {
+            self.ok_down = None;
+            return down.then(|| self.handle_menu(MenuEvent::Confirm)).flatten();
+        }
         let t = self.t();
         if down {
             // A fresh press restarts the hold, so a lost release cannot strand it.

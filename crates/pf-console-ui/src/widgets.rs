@@ -1605,6 +1605,8 @@ pub struct Keyboard {
     /// Tray slide-in, 0 hidden → 1 seated. Swift `.spring(0.32, 0.86)`.
     tray: Spring,
     key_flash: f64,
+    /// Last-drawn tray. A press in its padding or between keys is still on the keyboard.
+    tray_rect: Rect,
     /// Last-drawn key rects. The tray slides, so hit-test what was drawn, not a seated layout.
     keys: Vec<(Rect, Key)>,
 }
@@ -1622,6 +1624,7 @@ impl Keyboard {
             col: 0,
             tray: Spring::rest(0.0),
             key_flash: 0.0,
+            tray_rect: Rect::new_empty(),
             keys: Vec::new(),
         }
     }
@@ -1654,10 +1657,10 @@ impl Keyboard {
         }
     }
 
-    /// Whether `p` hits the tray. The screen asks first so a press outside a
-    /// raised keyboard dismisses it instead of falling through to the list.
+    /// Whether `p` hits the tray, gaps and padding included. The screen asks first so only a
+    /// press outside the raised keyboard dismisses it; a wobbly pointer between keys stays.
     pub fn covers(&self, p: Pointer) -> bool {
-        self.keys.iter().any(|(r, _)| p.hits(*r))
+        p.hits(self.tray_rect)
     }
 
     /// The screen applies `Type`/`Backspace` (charset included); a refusal
@@ -1742,6 +1745,7 @@ impl Keyboard {
         let x0 = (w - tray_w) / 2.0;
         let y0 = bottom - tray_h * seat;
         let rect = Rect::from_xywh(x0 as f32, y0 as f32, tray_w as f32, tray_h as f32);
+        self.tray_rect = rect;
         crate::theme::panel(
             canvas,
             rect,
@@ -1916,6 +1920,30 @@ mod tests {
         assert_eq!(k.col, 2, "rightmost column maps onto Done");
         let (msg, _) = k.menu(MenuEvent::Confirm);
         assert_eq!(msg, KeyMsg::Done);
+    }
+
+    /// A press between two keys is still on the keyboard: it types nothing and must not
+    /// read as outside, which is what closes the field.
+    #[test]
+    fn keyboard_covers_its_gaps() {
+        let mut k = kb();
+        let mut surface = skia_safe::surfaces::raster_n32_premul((800, 600)).unwrap();
+        let fonts = crate::theme::build_fonts().unwrap();
+        k.render(surface.canvas(), &fonts, 800.0, 600.0, 1.0, 1.0);
+        let (a, b) = (k.keys[10].0, k.keys[11].0);
+        let at = |x: f32, y: f32| Pointer {
+            x: f64::from(x),
+            y: f64::from(y),
+            kind: PointerKind::Press,
+        };
+        let gap = at((a.right + b.left) / 2.0, a.center_y());
+        assert!(!gap.hits(a) && !gap.hits(b), "the press lands in no key");
+        assert!(k.covers(gap), "between keys is on the tray");
+        assert_eq!(k.pointer(gap).0, KeyMsg::None, "and types nothing");
+        assert!(
+            !k.covers(at(a.center_x(), k.tray_rect.top - 4.0)),
+            "above it is not"
+        );
     }
 
     #[test]

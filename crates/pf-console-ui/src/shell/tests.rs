@@ -343,6 +343,25 @@ fn a_held_ok_opens_the_card_menu() {
     );
 }
 
+/// In a field, OK presses the on-screen key at once and never becomes the hold, whose
+/// Secondary would close the field under the player's thumb.
+#[test]
+fn ok_in_a_field_types_and_never_holds() {
+    let (mut s, _console, _library) = shell(vec![Screen::AddHost(
+        crate::screens::add_host::AddHostScreen::new(),
+    )]);
+    s.sync();
+    s.fake_clock = Some((10.0, 0.0));
+    s.ok(true);
+    s.ok(false);
+    assert!(s.editing(), "OK on a field row opens it");
+    s.ok(true);
+    s.fake_clock = Some((11.0, 0.0));
+    s.tick_ok();
+    s.ok(false);
+    assert!(s.editing(), "a held OK types, the field stays open");
+}
+
 #[test]
 fn connect_flow_raises_launch_and_cancel() {
     let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
