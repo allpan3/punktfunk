@@ -672,7 +672,7 @@ impl SkiaOverlay {
             if ten_bit {
                 skia_safe::ColorType::RGBAF16
             } else {
-                skia_safe::ColorType::n32()
+                skia_safe::ColorType::N32
             },
             skia_safe::AlphaType::Premul,
             None,
