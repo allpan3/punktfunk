@@ -60,6 +60,10 @@
 // `{}` for Home, `{"library": HostRow}` for a shelf — re-roots on the next frame.
 #define PUNKTFUNK_CONSOLE_PUSH_NAVIGATE 15
 
+// `{"id", "title", "message", "choices": [..]}` — a question over the top screen; the
+// answer comes back as the `PromptAnswer` command.
+#define PUNKTFUNK_CONSOLE_PUSH_PROMPT 16
+
 // One console. Opaque to C.
 typedef struct PunktfunkConsole PunktfunkConsole;
 

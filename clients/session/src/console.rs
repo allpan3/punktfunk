@@ -826,6 +826,8 @@ impl ServiceState {
             // Grants and rumble tests from the controllers screen. Android-only for the same
             // reason: the settings row that opens that screen is not on the desktop's list.
             ConsoleCmd::PadAction { .. } => {}
+            // Only a host that raised a prompt hears its answer; the desktop raises none.
+            ConsoleCmd::PromptAnswer { .. } => {}
             ConsoleCmd::SetPin {
                 key,
                 preset_id,

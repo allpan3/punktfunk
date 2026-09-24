@@ -377,6 +377,12 @@ pub enum ConsoleCmd {
     OpenPlatformScreen {
         id: String,
     },
+    /// The answer to a [`crate::screens::prompt::Prompt`]: the row picked, or `None` for
+    /// Back. Only a host that raised the prompt receives one.
+    PromptAnswer {
+        id: String,
+        choice: Option<usize>,
+    },
     /// Platform-only pad work. `action` is [`crate::screens::players::PadAction::id`];
     /// `pad_key` indexes [`crate::screens::Ctx::pads`] and is empty when the pad list
     /// cannot name the device. One command, not one per button: the host's answer is

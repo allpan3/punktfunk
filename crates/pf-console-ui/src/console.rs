@@ -38,6 +38,9 @@ pub enum ConsoleEntry {
     /// frame (`start_in = stream`). Cancel or a refusal lands on the shelf underneath,
     /// and nothing retries.
     Stream(Box<HostRow>),
+    /// This host's Pair screen over the host list: a pairing the app asked for (the trust
+    /// card's "Pair instead", a Mac host window). Back lands on Home.
+    Pair(Box<HostRow>),
 }
 
 /// Host-side models and the command bus. Built before [`Console`]: handles are `Clone` +
@@ -149,7 +152,7 @@ impl Console {
     ) -> Result<Console> {
         let stream = stream_intent(&entry);
         let fetch = entry_fetch(&entry);
-        let stack = entry_stack(entry, &handles.library);
+        let stack = entry_stack(entry, &handles.library, &opts.device_name);
         if let Some(cmd) = fetch {
             handles.bus.send(cmd);
         }
@@ -261,7 +264,7 @@ impl Console {
         }
         let stream = stream_intent(&entry);
         let fetch = entry_fetch(&entry);
-        let stack = entry_stack(entry, self.shell.library());
+        let stack = entry_stack(entry, self.shell.library(), self.shell.device_name());
         if let Some(cmd) = fetch {
             self.shell.send_cmd(cmd);
         }
@@ -269,6 +272,13 @@ impl Console {
         if let Some(intent) = stream {
             self.shell.start_connect(intent);
         }
+    }
+
+    /// Ask the player something a system alert would put out of a pad's reach. The answer
+    /// arrives as [`ConsoleCmd::PromptAnswer`].
+    pub fn prompt(&mut self, prompt: crate::screens::prompt::Prompt) {
+        let screen = crate::screens::prompt::PromptScreen::new(prompt);
+        self.shell.push_screen(Screen::Prompt(screen));
     }
 
     /// Skia resource-cache budget for the host `DirectContext`. The shell only carries it.
@@ -315,9 +325,17 @@ fn entry_fetch(entry: &ConsoleEntry) -> Option<ConsoleCmd> {
     })
 }
 
-fn entry_stack(entry: ConsoleEntry, library: &crate::library::LibraryShared) -> Vec<Screen> {
+fn entry_stack(
+    entry: ConsoleEntry,
+    library: &crate::library::LibraryShared,
+    device_name: &str,
+) -> Vec<Screen> {
     match entry {
         ConsoleEntry::Home => vec![Screen::Home(crate::screens::home::HomeScreen::new())],
+        ConsoleEntry::Pair(host) => vec![
+            Screen::Home(crate::screens::home::HomeScreen::new()),
+            Screen::Pair(crate::screens::pair::PairScreen::new(&host, device_name)),
+        ],
         // The Games tab's root. Snapshot the model's fetch epoch so the host's following
         // `FetchLibrary` is the first raise; that is how the shelf knows the result is its own.
         ConsoleEntry::Library(host) | ConsoleEntry::Stream(host) => vec![Screen::Library(
@@ -420,9 +438,24 @@ mod tests {
             ConsoleEntry::Library(Box::new(row())),
             ConsoleEntry::Stream(Box::new(row())),
         ] {
-            let stack = entry_stack(entry, &library);
+            let stack = entry_stack(entry, &library, "d");
             assert!(matches!(stack.as_slice(), [Screen::Library(_)]));
         }
+    }
+
+    /// A pairing the app asks for opens Pair over Home, so Back lands on the host list. It
+    /// fetches nothing and connects nothing.
+    #[test]
+    fn a_pair_entry_opens_pair_over_home() {
+        let library = crate::library::LibraryShared::default();
+        let entry = ConsoleEntry::Pair(Box::new(row()));
+        assert!(entry_fetch(&entry).is_none());
+        assert!(stream_intent(&entry).is_none());
+        let stack = entry_stack(entry, &library, "d");
+        assert!(matches!(
+            stack.as_slice(),
+            [Screen::Home(_), Screen::Pair(_)]
+        ));
     }
 
     /// Returning to the shelf on top keeps it (its posters survive the stream); another
@@ -430,7 +463,7 @@ mod tests {
     #[test]
     fn a_library_entry_for_the_shelf_on_top_is_a_no_op() {
         let library = crate::library::LibraryShared::default();
-        let stack = entry_stack(ConsoleEntry::Library(Box::new(row())), &library);
+        let stack = entry_stack(ConsoleEntry::Library(Box::new(row())), &library, "d");
         let top = stack.last();
         assert!(already_showing(
             top,

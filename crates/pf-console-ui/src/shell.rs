@@ -580,6 +580,11 @@ impl Shell {
         self.stack.last()
     }
 
+    /// Push a screen the host asked for ([`crate::console::Console::prompt`]).
+    pub(crate) fn push_screen(&mut self, screen: Screen) {
+        self.apply_nav(Nav::Push(Box::new(screen)));
+    }
+
     /// Replace the stack (deep link, return-to-shelf). Cut, no transition:
     /// this is re-entry, not navigation the user watched.
     pub(crate) fn replace_stack(&mut self, stack: Vec<Screen>) {
@@ -858,6 +863,10 @@ impl Shell {
         if let Some(l) = &mut self.launching {
             l.window_wait = window_wait;
         }
+    }
+
+    pub(crate) fn device_name(&self) -> &str {
+        &self.device_name
     }
 
     pub(crate) fn session_ended(&mut self, reason: Option<&str>) {

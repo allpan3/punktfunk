@@ -90,14 +90,18 @@ pub struct EntryJson {
     /// wins if a caller sends both — a shelf is the safe half of the pair.
     #[serde(default)]
     stream: Option<HostRow>,
+    /// The row's Pair screen over Home. Either shelf key above wins over it.
+    #[serde(default)]
+    pair: Option<HostRow>,
 }
 
 impl EntryJson {
     pub fn into_entry(self) -> ConsoleEntry {
-        match (self.library, self.stream) {
-            (Some(h), _) => ConsoleEntry::Library(Box::new(h)),
-            (None, Some(h)) => ConsoleEntry::Stream(Box::new(h)),
-            (None, None) => ConsoleEntry::Home,
+        match (self.library, self.stream, self.pair) {
+            (Some(h), _, _) => ConsoleEntry::Library(Box::new(h)),
+            (None, Some(h), _) => ConsoleEntry::Stream(Box::new(h)),
+            (None, None, Some(h)) => ConsoleEntry::Pair(Box::new(h)),
+            (None, None, None) => ConsoleEntry::Home,
         }
     }
 }
@@ -287,6 +291,18 @@ mod tests {
         let (opts, entry, _) = o.into_console(Platform::Android);
         assert!(matches!(entry, ConsoleEntry::Home));
         assert_eq!(opts.gpu_cache_bytes, 16 << 20);
+    }
+
+    #[test]
+    fn a_pair_key_enters_on_the_pair_screen() {
+        let row = r#"{"key": "aa", "name": "Desk", "addr": "10.0.0.5", "port": 47989,
+            "fp_hex": "", "paired": false, "saved": true, "online": true, "mgmt_port": 47990,
+            "can_wake": false, "last_used": null, "os": "", "pin": null, "bound_preset": null}"#;
+        let pair: EntryJson = serde_json::from_str(&format!(r#"{{"pair": {row}}}"#)).unwrap();
+        assert!(matches!(pair.into_entry(), ConsoleEntry::Pair(_)));
+        let both: EntryJson =
+            serde_json::from_str(&format!(r#"{{"library": {row}, "pair": {row}}}"#)).unwrap();
+        assert!(matches!(both.into_entry(), ConsoleEntry::Library(_)));
     }
 
     #[test]

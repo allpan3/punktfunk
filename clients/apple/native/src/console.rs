@@ -14,7 +14,8 @@ use pf_console_ui::bridge::{
 use pf_console_ui::console::FrameCost;
 use pf_console_ui::{
     Console, ConsoleEntry, ConsoleHandles, HostRow, InputSource, Insets, Key, LibraryGame,
-    LibraryPhase, PairPhase, Platform, SnapshotStore, SpeedPhase, Stale, Viewport, WakeStatus,
+    LibraryPhase, PairPhase, Platform, Prompt, SnapshotStore, SpeedPhase, Stale, Viewport,
+    WakeStatus,
 };
 use skia_safe::gpu::{self, mtl, DirectContext, SurfaceOrigin};
 use skia_safe::ColorType;
@@ -72,6 +73,9 @@ pub const PUNKTFUNK_CONSOLE_PUSH_KNOWN_HOSTS: u8 = 13;
 pub const PUNKTFUNK_CONSOLE_PUSH_PADS: u8 = 14;
 /// `{}` for Home, `{"library": HostRow}` for a shelf — re-roots on the next frame.
 pub const PUNKTFUNK_CONSOLE_PUSH_NAVIGATE: u8 = 15;
+/// `{"id", "title", "message", "choices": [..]}` — a question over the top screen; the
+/// answer comes back as the `PromptAnswer` command.
+pub const PUNKTFUNK_CONSOLE_PUSH_PROMPT: u8 = 16;
 
 /// One console. Opaque to C.
 pub struct PunktfunkConsole {
@@ -83,6 +87,7 @@ pub struct PunktfunkConsole {
     /// Pushed from any thread, read by the next frame.
     pads: Mutex<Pads>,
     navigate: Mutex<Option<ConsoleEntry>>,
+    prompt: Mutex<Option<Prompt>>,
 }
 
 struct Shell {
@@ -210,6 +215,7 @@ pub unsafe extern "C" fn punktfunk_console_new(
             events: Mutex::new(VecDeque::new()),
             pads: Mutex::new((None, None, Vec::new())),
             navigate: Mutex::new(None),
+            prompt: Mutex::new(None),
         }))
     })
 }
@@ -263,6 +269,9 @@ pub unsafe extern "C" fn punktfunk_console_frame(
         }
         if let Some(entry) = lock(&c.navigate).take() {
             shell.console.navigate(entry);
+        }
+        if let Some(prompt) = lock(&c.prompt).take() {
+            shell.console.prompt(prompt);
         }
         let now = Instant::now();
         if let Some((at, w, h)) = shell.drawn {
@@ -619,6 +628,9 @@ pub unsafe extern "C" fn punktfunk_console_push(
             }
             PUNKTFUNK_CONSOLE_PUSH_NAVIGATE => {
                 json::<EntryJson>(text).map(|v| *lock(&c.navigate) = Some(v.into_entry()))
+            }
+            PUNKTFUNK_CONSOLE_PUSH_PROMPT => {
+                json::<Prompt>(text).map(|v| *lock(&c.prompt) = Some(v))
             }
             _ => {
                 tracing::error!("console: unknown push kind {kind}");
