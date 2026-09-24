@@ -54,6 +54,9 @@ const ROW_GAP: f64 = 22.0;
 const GRID_HEADING: f64 = 34.0;
 /// Row 0's air under the Hosts row: the plate's outset and a breath.
 const EMBED_AIR: f64 = 14.0;
+/// A grid row down counts as this many entrance steps, 120 ms at [`entrances::GRID`], so
+/// rows follow one another instead of each rippling at once.
+const ROW_STEPS: usize = 3;
 /// Room for the plate's outset past the first column.
 const PLATE_AIR: f64 = 32.0;
 /// Air under the sort/view row before the next line.
@@ -560,7 +563,13 @@ impl LibraryScreen {
         if have_art || self.len() == 0 || t - since >= 0.4 {
             self.entrance_armed = true;
             self.entrance_anchor = cursor;
-            self.entrance = Some(Entrance::new(entrances::CARDS, cursor, t));
+            let shelf = self.view_mode == LibraryView::Shelf && !self.embedded;
+            let spec = if shelf {
+                entrances::CARDS
+            } else {
+                entrances::GRID
+            };
+            self.entrance = Some(Entrance::new(spec, cursor, t));
         }
     }
 
@@ -1506,7 +1515,8 @@ impl LibraryScreen {
             El::paint(move |canvas, slot| {
                 painted.borrow_mut().push(i);
                 let Some(game) = this.game(i) else { return };
-                let ent = this.entrance_at(anchor_row.abs_diff(row) + anchor_col.abs_diff(col), t);
+                let steps = ROW_STEPS * anchor_row.abs_diff(row) + anchor_col.abs_diff(col);
+                let ent = this.entrance_at(steps, t);
                 let focused = i == this.cursor.max(0) as usize && this.zone == Zone::Grid;
                 let arrive = (ENTER_SCALE + (1.0 - ENTER_SCALE) * ent.travel) as f32;
                 let (cx, cy) = (slot.center_x(), slot.center_y());
