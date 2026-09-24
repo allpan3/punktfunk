@@ -85,6 +85,8 @@ pub(crate) struct CollectionsScreen {
     art: HashMap<String, Image>,
     /// Posters Skia could not decode; asked once, not every frame.
     art_failed: std::collections::HashSet<String>,
+    /// Covers this screen has only the bytes of, decoding off the render thread.
+    decoder: super::library::ArtDecoder,
     /// Decode scale: last frame's `k`, published by `render` before `sync`.
     art_k: f64,
     /// Opened as the host's library, not from a shelf's Y. Pumps the poster queue
@@ -128,6 +130,7 @@ impl CollectionsScreen {
             generation: u64::MAX,
             art: HashMap::new(),
             art_failed: std::collections::HashSet::new(),
+            decoder: super::library::ArtDecoder::default(),
             // Design scale until the first frame publishes the real `k` before `sync`.
             art_k: 1.0,
             root: false,
@@ -193,23 +196,23 @@ impl CollectionsScreen {
         }
         // Already decoded by the host: a move, not work this frame.
         for (id, poster) in library.drain_decoded() {
-            self.art.insert(id, poster.into_image());
+            self.art.entry(id).or_insert_with(|| poster.into_image());
         }
-        // Against the clock, like the shelf's own pass — at least one a frame.
-        let started = std::time::Instant::now();
-        for (id, bytes) in library.art_for(want.iter().map(String::as_str), 4) {
-            match super::library::decode_poster(&bytes, self.art_k) {
+        for (id, img) in self.decoder.finished() {
+            match img {
                 Some(img) => {
-                    self.art.insert(id, img);
+                    self.art.entry(id).or_insert(img);
                 }
                 None => {
                     tracing::info!(%id, "undecodable poster");
                     self.art_failed.insert(id);
                 }
             }
-            if started.elapsed() >= super::library::ART_FRAME_BUDGET {
-                break;
-            }
+        }
+        // The rest decode off the render thread, like the shelf's.
+        let ask = want.iter().filter(|id| !self.decoder.pending(id));
+        for (id, bytes) in library.art_for(ask.map(String::as_str), 4) {
+            self.decoder.want(id, bytes, self.art_k);
         }
     }
 

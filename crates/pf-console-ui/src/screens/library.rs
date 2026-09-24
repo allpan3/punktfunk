@@ -29,6 +29,7 @@ use pf_client_core::menu_nav::{MenuDir, MenuEvent, MenuPulse};
 use skia_safe::{Canvas, Color4f, Data, Image, Point, RRect, Rect, M44};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 pub(crate) mod bar;
 mod card;
@@ -69,17 +70,6 @@ const ART_BUDGET: usize = 160;
 /// Twice the grid cell: mip levels both arrangements sample. Smaller magnifies the shelf.
 const ART_CACHE_W: f64 = GRID_W * 2.0;
 const ART_CACHE_H: f64 = GRID_H * 2.0;
-/// How much of a frame poster decoding may spend before it yields to the next one.
-///
-/// A COUNT cannot be right for two machines an order of magnitude apart: two per frame is
-/// nothing on a desktop and a dropped frame on a 2020 TV, where one 600×900 JPEG costs more
-/// than the whole 16 ms budget. A time budget self-tunes — fast hardware fills the shelf in
-/// the same few frames it always did, slow hardware decodes one and gets on with drawing.
-///
-/// Always at least one per frame regardless: a budget already spent must still make progress,
-/// or a slow panel would never finish loading at all.
-pub(super) const ART_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(6);
-
 /// Fit `src` into [`ART_CACHE_W`]×[`ART_CACHE_H`] at `k`. Source aspect; never enlarge.
 ///
 /// A 460×215 header squeezed to 2:3 stretches what the draw already centre-crops.
@@ -107,6 +97,73 @@ fn art_cache_size(src: (i32, i32), k: f64) -> (i32, i32) {
 /// either way the caller still has its encoded bytes and can push those instead.
 pub fn decode_poster_off_thread(bytes: &[u8], k: f64) -> Option<crate::library::DecodedPoster> {
     crate::library::DecodedPoster::new(decode_poster(bytes, k)?)
+}
+
+/// A screen's covers decoded off the thread that draws: one worker, started on first use and
+/// stopped with the screen. A TV spends 15–90 ms on one cover, a dropped frame each on the
+/// render thread, and a screen that only has a cover's bytes must decode it itself.
+#[derive(Default)]
+pub(super) struct ArtDecoder {
+    #[cfg_attr(test, allow(dead_code))]
+    jobs: Option<std::sync::mpsc::Sender<(String, Arc<[u8]>, f64)>>,
+    #[cfg_attr(test, allow(dead_code))]
+    done: Option<std::sync::mpsc::Receiver<(String, Option<crate::library::DecodedPoster>)>>,
+    pending: std::collections::HashSet<String>,
+    /// Tests decode inline so a frame count stays deterministic.
+    #[cfg(test)]
+    ready: Vec<(String, Option<Image>)>,
+}
+
+impl ArtDecoder {
+    /// Decode `bytes` at `k` for `id`, unless it is already on its way.
+    pub(super) fn want(&mut self, id: String, bytes: Arc<[u8]>, k: f64) {
+        if !self.pending.insert(id.clone()) {
+            return;
+        }
+        #[cfg(test)]
+        {
+            self.ready.push((id, decode_poster(&bytes, k)));
+        }
+        #[cfg(not(test))]
+        {
+            let jobs = self.jobs.get_or_insert_with(|| {
+                let (jobs, rx) = std::sync::mpsc::channel::<(String, Arc<[u8]>, f64)>();
+                let (tx, done) = std::sync::mpsc::channel();
+                self.done = Some(done);
+                let _ = std::thread::Builder::new()
+                    .name("pf-console-art".into())
+                    .spawn(move || {
+                        for (id, bytes, k) in rx {
+                            if tx.send((id, decode_poster_off_thread(&bytes, k))).is_err() {
+                                return;
+                            }
+                        }
+                    });
+                jobs
+            });
+            let _ = jobs.send((id, bytes, k));
+        }
+    }
+
+    pub(super) fn pending(&self, id: &str) -> bool {
+        self.pending.contains(id)
+    }
+
+    /// Decodes finished since the last call; `None` for a cover that would not decode.
+    pub(super) fn finished(&mut self) -> Vec<(String, Option<Image>)> {
+        #[cfg(test)]
+        let out: Vec<_> = std::mem::take(&mut self.ready);
+        #[cfg(not(test))]
+        let out: Vec<_> = self.done.as_ref().map_or_else(Vec::new, |rx| {
+            rx.try_iter()
+                .map(|(id, p)| (id, p.map(crate::library::DecodedPoster::into_image)))
+                .collect()
+        });
+        for (id, _) in &out {
+            self.pending.remove(id);
+        }
+        out
+    }
 }
 
 /// Decode here (not at first draw) and bake mips at [`art_cache_size`].
@@ -374,6 +431,8 @@ pub(crate) struct LibraryScreen {
     art: HashMap<String, Image>,
     /// Posters Skia could not decode; asked once, not every frame.
     art_failed: std::collections::HashSet<String>,
+    /// Covers this screen has only the bytes of, decoding off the render thread.
+    decoder: ArtDecoder,
     /// Decode scale. This screen does not republish `k`; a grow cannot re-decode.
     art_k: f64,
     /// Last-draw frame per id. Grid pages the whole library; unstamped covers stay forever.
@@ -434,6 +493,7 @@ impl LibraryScreen {
             bump_vertical: false,
             art: HashMap::new(),
             art_failed: std::collections::HashSet::new(),
+            decoder: ArtDecoder::default(),
             // Design scale. Decode runs at this `k` for the life of the screen.
             art_k: 1.0,
             art_seen: HashMap::new(),
@@ -775,28 +835,32 @@ impl LibraryScreen {
         // Publish the size a host should decode at, so one that can decode off-thread produces
         // exactly what this screen would have cached.
         shared.set_art_scale(k);
-        // Already-decoded posters cost a move, so there is no budget to spend on them.
+        // Already-decoded posters cost a move. One this screen holds stays: a new copy would
+        // only upload the same cover again.
         for (id, poster) in shared.drain_decoded() {
-            self.art.insert(id, poster.into_image());
+            self.art.entry(id).or_insert_with(|| poster.into_image());
         }
-        // What this screen lacks, against the clock rather than a fixed count — see
-        // [`ART_FRAME_BUDGET`]. The deadline is checked AFTER a decode so every frame lands at
-        // least one. The bytes stay in the model, so a cover another screen took, or one this
-        // screen evicted, comes back here.
+        self.adopt_decoded();
+        // What this screen lacks goes to its decoder. The bytes stay in the model, so a cover
+        // another screen took, or one this screen evicted, comes back here.
         let wanted = self.art_wanted();
-        let started = std::time::Instant::now();
-        for (id, bytes) in shared.art_for(wanted.iter().map(String::as_str), 8) {
-            match decode_poster(&bytes, k) {
+        let ask = wanted.iter().filter(|id| !self.decoder.pending(id));
+        for (id, bytes) in shared.art_for(ask.map(String::as_str), 8) {
+            self.decoder.want(id, bytes, k);
+        }
+    }
+
+    /// Covers the decoder finished: kept, or marked undecodable so they are asked once.
+    fn adopt_decoded(&mut self) {
+        for (id, img) in self.decoder.finished() {
+            match img {
                 Some(img) => {
-                    self.art.insert(id, img);
+                    self.art.entry(id).or_insert(img);
                 }
                 None => {
                     tracing::info!(%id, "undecodable poster");
                     self.art_failed.insert(id);
                 }
-            }
-            if started.elapsed() >= ART_FRAME_BUDGET {
-                break;
             }
         }
     }
@@ -3050,6 +3114,30 @@ mod tests {
         let idle = LibraryScreen::new(&host(), 0);
         assert_eq!(idle.desktop_caption(), "Desktop");
         assert_eq!(idle.desktop_intent().title, "Desk");
+    }
+
+    /// A cover one screen took off the decoded queue still reaches a second screen: its bytes
+    /// stay in the model, and the second screen decodes them for itself.
+    #[test]
+    fn a_cover_one_screen_took_reaches_another() {
+        let library = LibraryShared::default();
+        library.set_games(games(&[("Alpha", None)]));
+        let bytes = poster_png(1);
+        library.push_art("g0".into(), bytes.clone());
+        library.push_decoded("g0".into(), decode_poster_off_thread(&bytes, 1.0).unwrap());
+        let mut first = LibraryScreen::new(&host(), 0);
+        let mut second = LibraryScreen::new(&host(), 0);
+        first.sync(&library);
+        assert!(
+            first.art.contains_key("g0"),
+            "the first takes the decoded cover"
+        );
+        second.sync(&library);
+        second.sync(&library);
+        assert!(
+            second.art.contains_key("g0"),
+            "the second decodes the bytes"
+        );
     }
 
     /// A 2:3 poster, PNG-encoded: a two-hue gradient with a pale disc, colour from `seed`.
