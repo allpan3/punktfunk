@@ -541,7 +541,93 @@ pub struct PyroWaveEncoder {
     /// AU being handed out in streamed chunks (`Some` between `first` and `last`).
     /// Encode is synchronous, so the AU is complete before the first chunk leaves.
     chunker: Option<crate::pyrowave_wire::AuChunker>,
+    /// The worker's mapped return buffer: `build_au` writes windows straight into it.
+    au_arena: Option<AuArena>,
+    /// Bytes the last AU put in `au_arena`, until the worker reports them.
+    arena_len: Option<usize>,
     frame_count: u64,
+}
+
+/// The worker's AU return buffer, mapped, so the wire windows are laid out once in the
+/// memfd the host reads instead of in a `Vec` that is copied there. Grows in 1 MiB steps
+/// when a frame's bound outgrows it.
+pub(crate) struct AuArena {
+    file: std::fs::File,
+    ptr: *mut u8,
+    len: usize,
+}
+
+// SAFETY: the mapping is process memory with no thread affinity; the encoder that owns it
+// moves between threads as a whole.
+unsafe impl Send for AuArena {}
+
+impl AuArena {
+    pub(crate) fn new(file: std::fs::File) -> Self {
+        AuArena {
+            file,
+            ptr: std::ptr::null_mut(),
+            len: 0,
+        }
+    }
+
+    fn unmap(&mut self) {
+        if !self.ptr.is_null() {
+            // SAFETY: `ptr`/`len` are exactly what `mmap` returned below.
+            unsafe { libc::munmap(self.ptr as *mut libc::c_void, self.len) };
+            self.ptr = std::ptr::null_mut();
+            self.len = 0;
+        }
+    }
+
+    fn ensure(&mut self, need: usize) -> std::io::Result<()> {
+        if need <= self.len {
+            return Ok(());
+        }
+        let len = need.next_multiple_of(1 << 20);
+        self.file.set_len(len as u64)?;
+        self.unmap();
+        // SAFETY: a fresh shared mapping of the first `len` bytes of our own memfd, which
+        // `set_len` just made at least that long; checked against `MAP_FAILED` before use.
+        let p = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                self.file.as_raw_fd(),
+                0,
+            )
+        };
+        if p == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error());
+        }
+        self.ptr = p as *mut u8;
+        self.len = len;
+        Ok(())
+    }
+
+    /// Lay `packets` out as the wire AU in the mapping; its length.
+    pub(crate) fn build(
+        &mut self,
+        packets: &[(usize, usize)],
+        bitstream: &[u8],
+        wire_chunk: Option<usize>,
+    ) -> Result<usize> {
+        let bound = crate::pyrowave_wire::au_bound(packets, wire_chunk);
+        self.ensure(bound).context("grow the AU return buffer")?;
+        // SAFETY: `ptr` maps `len ≥ bound` writable bytes that only this thread touches until
+        // the host is told the length, and the host reads the memfd with `pread`, not a
+        // mapping of ours.
+        let out = unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) };
+        crate::pyrowave_wire::build_au_into(packets, bitstream, wire_chunk, out)
+            .ok_or_else(|| anyhow::anyhow!("AU larger than its bound {bound}"))
+    }
+}
+
+impl Drop for AuArena {
+    fn drop(&mut self) {
+        self.unmap();
+    }
 }
 
 // SAFETY: encode thread only; Vulkan handles are owned and never shared. Pyrowave
@@ -628,6 +714,18 @@ impl PyroWaveEncoder {
     /// once, naming the right binary.
     pub(crate) fn priority_outcome(&self) -> super::worker::PriorityOutcome {
         self.priority
+    }
+
+    /// Worker only: lay every AU out in `file` (the return buffer the host reads) instead of
+    /// a `Vec`. From then on [`Encoder::poll`] hands out empty frames and
+    /// [`take_arena_len`](Self::take_arena_len) says how many bytes the buffer holds.
+    pub(crate) fn set_au_arena(&mut self, file: std::fs::File) {
+        self.au_arena = Some(AuArena::new(file));
+    }
+
+    /// Bytes the last polled AU put in the arena; `None` off the arena.
+    pub(crate) fn take_arena_len(&mut self) -> Option<usize> {
+        self.arena_len.take()
     }
 
     pub(crate) fn device_name(&self) -> &str {
@@ -1061,6 +1159,8 @@ impl PyroWaveEncoder {
             bitstream: Vec::new(),
             pending: VecDeque::new(),
             chunker: None,
+            au_arena: None,
+            arena_len: None,
             frame_count: 0,
         };
 
@@ -1973,10 +2073,23 @@ impl PyroWaveEncoder {
             }
         }
         let pkts: Vec<(usize, usize)> = packets.iter().map(|p| (p.offset, p.size)).collect();
-        let au = crate::pyrowave_wire::build_au(&pkts, &self.bitstream, fr.wire_chunk);
+        let (au, au_len) = match self.au_arena.as_mut() {
+            // The worker's return buffer: the AU is laid out in place, the frame carries
+            // its length and no bytes.
+            Some(arena) => {
+                let n = arena.build(&pkts, &self.bitstream, fr.wire_chunk)?;
+                self.arena_len = Some(n);
+                (Vec::new(), n)
+            }
+            None => {
+                let au = crate::pyrowave_wire::build_au(&pkts, &self.bitstream, fr.wire_chunk);
+                let n = au.len();
+                (au, n)
+            }
+        };
         if fr.wire_chunk.is_some() {
             let raw: usize = pkts.iter().map(|&(_, s)| s).sum();
-            self.wire_budget.observe(raw, au.len());
+            self.wire_budget.observe(raw, au_len);
         }
         self.frame_count += 1;
         self.pending.push_back(EncodedFrame {
