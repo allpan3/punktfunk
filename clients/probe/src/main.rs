@@ -22,8 +22,8 @@ use punktfunk_core::input::{InputEvent, InputKind};
 use punktfunk_core::packet::FLAG_PROBE;
 use punktfunk_core::quic::{
     endpoint, io, window_loss_ppm, BitrateChanged, CursorRenderMode, DeliveryReport, Hello,
-    LossReport, ProbeRequest, ProbeResult, Reconfigure, Reconfigured, RequestKeyframe, SetBitrate,
-    Start, Welcome,
+    LinkReport, LossReport, ProbeRequest, ProbeResult, Reconfigure, Reconfigured, RequestKeyframe,
+    SetBitrate, Start, Welcome,
 };
 use punktfunk_core::transport::UdpTransport;
 use punktfunk_core::{CompositorPref, Mode, PunktfunkError, Session};
@@ -60,6 +60,9 @@ struct Args {
     /// encoder rate retarget (Phase 3.2) / rebuild fallback. Wiggles the cursor around the switch
     /// so a damage-driven idle desktop actually publishes frames through it.
     rebitrate: Option<(u32, u32)>,
+    /// `--link-kbps N` — send the [`LinkReport`] a real client's bring-up ramp would, so the
+    /// host paces a pinned stream at that link rate. The probe runs no ramp of its own.
+    link_kbps: Option<u32>,
     /// `--pair -` — run the pairing ceremony instead of a session.
     pair: Option<String>,
     /// `--name LABEL` — how the host labels this client when pairing.
@@ -277,6 +280,7 @@ fn parse_args() -> Args {
         pin,
         remode,
         rebitrate,
+        link_kbps: get("--link-kbps").and_then(|s| s.parse().ok()),
         pair: get("--pair").map(|value| {
             if value != "-" {
                 eprintln!("a pairing PIN may not be passed in argv; pipe it to `--pair -`");
@@ -768,6 +772,12 @@ async fn session(args: Args) -> Result<()> {
     // still-open control stream. The stream then carries new-mode AUs (IDR + in-band
     // parameter sets) — ffprobe the --out file to see both resolutions. Mutually exclusive with
     // --speed-test (both own the control stream).
+    if let Some(proven_kbps) = args.link_kbps {
+        io::write_msg(&mut send, &LinkReport { proven_kbps }.encode())
+            .await
+            .map_err(|e| anyhow!("LinkReport write: {e}"))?;
+        tracing::info!(proven_kbps, "sent the link report");
+    }
     if let Some((new_mode, after_secs)) = args.remode {
         let mut rs = send;
         let mut rr = recv;

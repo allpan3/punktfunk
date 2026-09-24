@@ -120,7 +120,7 @@ pub(crate) enum Ramped {
 
 impl Ramped {
     /// The rate the ramp proved the link carries, whichever way it ended.
-    fn proven_kbps(self) -> u32 {
+    pub(crate) fn proven_kbps(self) -> u32 {
         match self {
             Ramped::Wall { delivered_kbps } => delivered_kbps,
             Ramped::NoWall { proven_kbps } => proven_kbps,
@@ -640,10 +640,11 @@ impl CapacityProbe {
         }
     }
 
-    /// A pinned session's ramp, sized by the pin it has to fit: the verdict
-    /// is a wall under `pin × 10/7` or the proof that none exists. `armed` is
-    /// `PUNKTFUNK_ABR_PROBE` plus the host's `HOST_CAP2_RAMP`; an old host
-    /// runs no measurement and keeps the pin it resolved.
+    /// A pinned session's ramp. It climbs to [`PINNED_RAMP_HEADROOM`] times
+    /// the pin: a wall under the pin sizes the pin, and the rate it proves is
+    /// what the host paces the stream at. `armed` is `PUNKTFUNK_ABR_PROBE`
+    /// plus the host's `HOST_CAP2_RAMP`; an old host runs no measurement and
+    /// keeps the pin it resolved.
     ///
     /// No burst follows: a cut-short ramp leaves the pin as it is rather
     /// than costing a started picture a measurement nobody would use.
@@ -656,7 +657,7 @@ impl CapacityProbe {
         CapacityProbe {
             // Never fired: `fire_at` stays `None` for a pinned session.
             target_kbps: 0,
-            ramp: armed.then(|| Ramp::new(ramp_max_kbps(pin_kbps, target_kbps), now)),
+            ramp: armed.then(|| Ramp::new(pinned_ramp_max_kbps(pin_kbps, target_kbps), now)),
             fire_at: None,
             result_by: None,
             active: false,
@@ -912,6 +913,19 @@ fn ramp_max_kbps(stream_cap_kbps: u32, env_kbps: Option<u32>) -> u32 {
     env_kbps.map_or(by_stream, |k| k.min(by_stream))
 }
 
+/// How far past its pin a pinned ramp climbs. The host paces a pinned
+/// stream at the rate the ramp proved, so the proof has to reach the link's
+/// rate, not the stream's: 8× takes a 1440p120 PyroWave pin to 10 GbE in
+/// three more steps.
+const PINNED_RAMP_HEADROOM: u32 = 8;
+
+/// A pinned ramp's ceiling: the pin times [`PINNED_RAMP_HEADROOM`], or
+/// `PUNKTFUNK_ABR_PROBE_KBPS` when it is lower.
+fn pinned_ramp_max_kbps(pin_kbps: u32, env_kbps: Option<u32>) -> u32 {
+    let by_pin = pin_kbps.saturating_mul(PINNED_RAMP_HEADROOM);
+    env_kbps.map_or(by_pin, |k| k.min(by_pin))
+}
+
 /// What the session opens at, given what the ramp proved: half of it, and
 /// never more than a clean picture at this mode wants. The caller floors it.
 ///
@@ -1102,6 +1116,15 @@ mod tests {
             "{:?} went past the pinned maximum",
             rig.asked
         );
+    }
+
+    /// A pinned ramp climbs past the pin: the proof is what the host paces
+    /// the stream at. The env cap still binds.
+    #[test]
+    fn a_pinned_ramp_climbs_to_eight_times_the_pin() {
+        assert_eq!(pinned_ramp_max_kbps(778_000, None), 6_224_000);
+        assert_eq!(pinned_ramp_max_kbps(778_000, Some(320_000)), 320_000);
+        assert_eq!(pinned_ramp_max_kbps(u32::MAX, None), u32::MAX);
     }
 
     /// Video is the end of the ramp, whatever step is in flight: from the

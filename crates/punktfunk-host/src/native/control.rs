@@ -182,6 +182,9 @@ pub(super) struct Task {
     /// This task's adaptive-FEC proposals. The stream loop publishes them to
     /// `fec_target` once the encoder accepts the rate the proposal implies.
     pub(super) fec_requested: Arc<AtomicU8>,
+    /// The rate the client's ramp proved the link carries (kbps); `0` until its
+    /// `LinkReport`. The send loop paces a pinned stream against it.
+    pub(super) link_kbps: Arc<AtomicU32>,
     /// Encode loop drains at its own cadence (`design/phase-locked-capture.md`).
     pub(super) phase_ctl: Arc<super::stream::PhaseCtl>,
     pub(super) reconfig_tx: std::sync::mpsc::Sender<punktfunk_core::Mode>,
@@ -260,6 +263,7 @@ pub(super) async fn run(task: Task) {
         client_packets_received,
         fec_target,
         fec_requested,
+        link_kbps,
         phase_ctl,
         reconfig_tx,
         keyframe_tx,
@@ -439,6 +443,12 @@ pub(super) async fn run(task: Task) {
                             break;
                         }
                     }
+                } else if let Ok(rep) = LinkReport::decode(&msg) {
+                    link_kbps.store(rep.proven_kbps, Ordering::Relaxed);
+                    tracing::info!(
+                        proven_kbps = rep.proven_kbps,
+                        "client's ramp proved the link rate"
+                    );
                 } else if let Ok(rep) = LossReport::decode(&msg) {
                     let unrecovered_run = unrecovered.report(std::time::Instant::now());
                     link.note_loss(rep.loss_ppm, unrecovered_run);

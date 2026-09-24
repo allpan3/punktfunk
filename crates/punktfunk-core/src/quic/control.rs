@@ -93,6 +93,15 @@ pub struct DeliveryReport {
     pub packets_received: u64,
 }
 
+/// `client → host`, once, after the bring-up ramp: the rate the ramp proved
+/// the link carries, kbps. The host paces a pinned stream against it instead
+/// of a multiple of the stream rate. Fire-and-forget; an older host ignores
+/// the unknown type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LinkReport {
+    pub proven_kbps: u32,
+}
+
 /// `client → host` after [`Start`]: retarget encoder bitrate without
 /// reconnecting. Host clamps like [`Hello::bitrate_kbps`] (`0` → default),
 /// answers [`BitrateChanged`], and retargets in place. Automatic-bitrate
@@ -265,6 +274,7 @@ pub const MSG_SHARD_PAYLOAD_ACK: u8 = 0x09;
 /// (same ABR consumer). Not 0x30: it carries a duration, no clock domain.
 pub const MSG_PIPELINE_GAP: u8 = 0x0A;
 pub const MSG_DELIVERY_REPORT: u8 = 0x0B;
+pub const MSG_LINK_REPORT: u8 = 0x0C;
 pub const MSG_PROBE_REQUEST: u8 = 0x20;
 pub const MSG_PROBE_RESULT: u8 = 0x21;
 pub const MSG_CLOCK_PROBE: u8 = 0x30;
@@ -442,6 +452,26 @@ impl DeliveryReport {
         }
         Ok(DeliveryReport {
             packets_received: u64::from_le_bytes(b[5..13].try_into().unwrap()),
+        })
+    }
+}
+
+impl LinkReport {
+    pub fn encode(&self) -> Vec<u8> {
+        // magic[0..4] type[4] proven_kbps[5..9]
+        let mut b = Vec::with_capacity(9);
+        b.extend_from_slice(CTL_MAGIC);
+        b.push(MSG_LINK_REPORT);
+        b.extend_from_slice(&self.proven_kbps.to_le_bytes());
+        b
+    }
+
+    pub fn decode(b: &[u8]) -> Result<LinkReport> {
+        if b.len() != 9 || &b[0..4] != CTL_MAGIC || b[4] != MSG_LINK_REPORT {
+            return Err(PunktfunkError::InvalidArg("bad LinkReport"));
+        }
+        Ok(LinkReport {
+            proven_kbps: u32::from_le_bytes(b[5..9].try_into().unwrap()),
         })
     }
 }
@@ -1360,6 +1390,17 @@ mod tests {
         assert!(RequestKeyframe::decode(&Reconfigure { mode }.encode()).is_err());
         assert!(Reconfigure::decode(&bytes).is_err());
         assert!(RequestKeyframe::decode(&[bytes.as_slice(), &[0]].concat()).is_err());
+    }
+
+    #[test]
+    fn link_report_roundtrip() {
+        for proven_kbps in [1u32, 778_000, u32::MAX] {
+            let r = LinkReport { proven_kbps };
+            assert_eq!(LinkReport::decode(&r.encode()).unwrap(), r);
+        }
+        // Same length as a LossReport: the type byte tells them apart.
+        assert!(LinkReport::decode(&LossReport { loss_ppm: 5 }.encode()).is_err());
+        assert!(LossReport::decode(&LinkReport { proven_kbps: 5 }.encode()).is_err());
     }
 
     #[test]

@@ -120,6 +120,7 @@ impl ControlTask {
                         }
                         CtrlRequest::Loss(r) => r.encode(),
                         CtrlRequest::Delivery(r) => r.encode(),
+                        CtrlRequest::LinkRate(k) => LinkReport { proven_kbps: k }.encode(),
                         CtrlRequest::SetBitrate(k) => SetBitrate { bitrate_kbps: k }.encode(),
                         CtrlRequest::ClockResync => {
                             if clock_rtt_ns.is_none() {

@@ -18,6 +18,8 @@ pub(crate) enum CtrlRequest {
     /// Follows every [`CtrlRequest::Loss`]. `loss_ppm` is 0 for both no loss and no packets;
     /// this count is what separates them.
     Delivery(DeliveryReport),
+    /// Once, after the bring-up ramp: the rate it proved the link carries (kbps).
+    LinkRate(u32),
     /// The pump's [`BitrateController`] sends this (kbps) when bitrate is Automatic.
     SetBitrate(u32),
     /// Pump sends this after the first no-op clock flush; the control task also fires one every

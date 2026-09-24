@@ -616,6 +616,8 @@ impl Client {
                 // report tick stays suppressed for the rest of the session.
                 crate::abr::Action::AbandonProbe => self.probing = false,
                 crate::abr::Action::Delivery(packets) => out.push(Action::Delivery(packets)),
+                // The simulated host has no pacer to hand a link rate to.
+                crate::abr::Action::LinkRate(_) => {}
             }
         }
         if self.ramp_done.is_none() {

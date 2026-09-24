@@ -345,6 +345,9 @@ impl DataPump {
                         let _ = ctrl_tx
                             .try_send(CtrlRequest::Delivery(DeliveryReport { packets_received }));
                     }
+                    Action::LinkRate(kbps) => {
+                        let _ = ctrl_tx.try_send(CtrlRequest::LinkRate(kbps));
+                    }
                     Action::SetBitrate(kbps) => {
                         request_kbps = Some(kbps);
                         if ctrl_tx.try_send(CtrlRequest::SetBitrate(kbps)).is_err() {
