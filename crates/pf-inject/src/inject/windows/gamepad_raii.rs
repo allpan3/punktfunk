@@ -427,6 +427,10 @@ impl PadChannel {
         let drv_proto = self.boot_load(core::mem::offset_of!(PadBootstrap, driver_proto));
         if drv_proto != 0 && drv_proto != GAMEPAD_PROTO_VERSION && !self.warned_proto {
             self.warned_proto = true;
+            crate::note_pad_driver(crate::PadDriverVerdict::ProtocolMismatch {
+                driver_proto: drv_proto,
+                host_proto: GAMEPAD_PROTO_VERSION,
+            });
             tracing::warn!(
                 mailbox = %self.boot_name,
                 driver_proto = drv_proto,
@@ -750,7 +754,14 @@ impl DriverAttach {
         }
     }
 
+    /// For the XUSB pad and the mouse, whose sections carry no driver revision.
     pub(super) fn observe(&mut self, driver_proto: u32) {
+        self.observe_pad(driver_proto, 0);
+    }
+
+    /// `driver_rev` is read after `driver_proto` ([`crate::dualsense_windows::driver_marks`]);
+    /// only the attach tick uses it.
+    pub(super) fn observe_pad(&mut self, driver_proto: u32, driver_rev: u32) {
         match self.state {
             AttachState::Attached => {}
             AttachState::Waiting | AttachState::Warned if driver_proto != 0 => {
@@ -770,10 +781,13 @@ impl DriverAttach {
                         "gamepad driver/host protocol mismatch — update the drivers: punktfunk-host.exe driver install --gamepad"
                     );
                 }
-                self.check_identity();
+                self.check_pad(driver_rev);
                 self.state = AttachState::Attached;
             }
             AttachState::Waiting if self.created.elapsed() >= ATTACH_GRACE => {
+                if self.identity.is_some() {
+                    crate::note_pad_driver(crate::PadDriverVerdict::NotAttached);
+                }
                 self.diagnose();
                 self.state = AttachState::Warned;
             }
@@ -781,27 +795,40 @@ impl DriverAttach {
         }
     }
 
-    /// WARN when the pad's HID collection reports another VID/PID than its hardware id names:
-    /// an older driver that did not know the id and answered as a DualSense.
-    fn check_identity(&self) {
-        let (Some(devtype), Some(id)) = (self.identity, self.instance_id.as_deref()) else {
+    /// Judge a freshly attached pad's driver ([`crate::pad_attach_verdict`]) for the diagnostics
+    /// row, and WARN on an old revision or on a pad that reports another controller's VID/PID
+    /// than its hardware id names (an older driver that did not know the id).
+    fn check_pad(&self, driver_rev: u32) {
+        let Some(devtype) = self.identity else {
             return;
         };
-        let want = pf_driver_proto::gamepad::identity_vid_pid(devtype);
-        let got = channel_proof::hid_vid_pid(id);
-        if got.is_some() && got != want {
-            let hex = |v: Option<(u16, u16)>| {
-                v.map_or("?".into(), |(v, p)| format!("VID_{v:04X}&PID_{p:04X}"))
-            };
-            tracing::warn!(
+        let got = self
+            .instance_id
+            .as_deref()
+            .and_then(channel_proof::hid_vid_pid);
+        let verdict = crate::pad_attach_verdict(devtype, driver_rev, got);
+        let fix = "reinstall the host with its controller drivers";
+        match &verdict {
+            crate::PadDriverVerdict::WrongIdentity { want, got } => tracing::warn!(
                 driver = self.driver,
-                devnode = id,
-                want = %hex(want),
-                got = %hex(got),
-                "virtual pad enumerated as another controller — games see the wrong pad; the \
-                 installed driver predates this host: punktfunk-host.exe driver install --gamepad"
-            );
+                want = %format!("VID_{:04X}&PID_{:04X}", want.0, want.1),
+                got = %format!("VID_{:04X}&PID_{:04X}", got.0, got.1),
+                fix,
+                "virtual pad enumerated as another controller; games see the wrong pad"
+            ),
+            crate::PadDriverVerdict::Stale {
+                driver_rev,
+                host_rev,
+            } => tracing::warn!(
+                driver = self.driver,
+                driver_rev,
+                host_rev,
+                fix,
+                "gamepad driver is older than this host; pads run with its old behaviour"
+            ),
+            _ => {}
         }
+        crate::note_pad_driver(verdict);
     }
 
     /// One-shot WARN: driver-store presence, devnode PnP problem, where to look next.

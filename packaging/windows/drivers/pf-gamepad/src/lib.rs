@@ -699,6 +699,7 @@ const OFF_OUTPUT: usize = core::mem::offset_of!(PadShm, output);
 const OFF_DEVICE_TYPE: usize = core::mem::offset_of!(PadShm, device_type);
 const OFF_DRIVER_PROTO: usize = core::mem::offset_of!(PadShm, driver_proto);
 const OFF_DRIVER_HEARTBEAT: usize = core::mem::offset_of!(PadShm, driver_heartbeat);
+const OFF_DRIVER_REV: usize = core::mem::offset_of!(PadShm, driver_rev);
 const OFF_PAD_INDEX: usize = core::mem::offset_of!(PadShm, pad_index);
 // v2.1/v2.2 output-report ring (see PadShm docs in pf_driver_proto).
 const OFF_OUT_RING_VER: usize = core::mem::offset_of!(PadShm, out_ring_ver);
@@ -1650,10 +1651,11 @@ fn tick(queue: WDFQUEUE) {
                 // detached, no PnP match) reads LAST_DEVTYPE, and this tick is the one place that
                 // always sees the attached section.
                 LAST_DEVTYPE.store(view.read_u8(OFF_DEVICE_TYPE) as u32, Ordering::Relaxed);
-                // Health marks the host watches: driver_proto (attach signal, idempotent) and
-                // driver_heartbeat (+1 per ~8 ms = liveness). Lets the host tell "driver bound and
-                // alive" apart from "driver package missing/failed to bind".
-                view.write_u32(OFF_DRIVER_PROTO, GAMEPAD_PROTO_VERSION);
+                // Health marks the host watches: driver_rev, then driver_proto (the attach signal;
+                // Release, so a host that sees it sees the revision) and driver_heartbeat (+1 per
+                // ~8 ms = liveness). Tells "driver bound and alive" from "package missing".
+                view.write_u32(OFF_DRIVER_REV, pf_driver_proto::gamepad::GAMEPAD_DRIVER_REV);
+                view.store_u32(OFF_DRIVER_PROTO, GAMEPAD_PROTO_VERSION, Ordering::Release);
                 let hb = view.read_u32(OFF_DRIVER_HEARTBEAT).wrapping_add(1);
                 view.write_u32(OFF_DRIVER_HEARTBEAT, hb);
             }

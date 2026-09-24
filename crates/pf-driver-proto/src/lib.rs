@@ -1899,6 +1899,12 @@ pub mod gamepad {
     /// Evidence: `design/gamepad-channel-sealing.md`.
     pub const GAMEPAD_PROTO_VERSION: u32 = 3;
 
+    /// Behaviour revision the driver stamps into [`PadShm::driver_rev`]. The protocol version
+    /// only moves when the layout breaks, so a driver with old behaviour still attaches; the host
+    /// compares this instead and flags an older driver. Bump it with any driver change a game or
+    /// the host depends on. `1`: devnode-index serials, Deck packet numbers, refused unknown ids.
+    pub const GAMEPAD_DRIVER_REV: u32 = 1;
+
     // Channel proof: who to hand the DATA section to. Do not take the duplication target from
     // the mailbox's `driver_pid` — LocalService can spawn a world-executable WUDFHost and publish
     // that pid. Ask the devnode the host created (`SwDeviceCreate` instance id). `pf_xusb` answers
@@ -2208,7 +2214,10 @@ pub mod gamepad {
         /// samples before and after and retries on a write in flight. An old host leaves this 0
         /// (constant even), so a new driver's re-check always passes. Inside the v2 legacy region.
         pub input_gen: u32,
-        pub _reserved1: [u8; 84],
+        /// [`GAMEPAD_DRIVER_REV`], stamped beside `driver_proto`. `0` = a driver older than the
+        /// field. Inside the v2 legacy region, so every map reaches it.
+        pub driver_rev: u32,
+        pub _reserved1: [u8; 80],
         /// Lossless output ring. [`OUT_RING_LEN`] under v2.1, [`OUT_RING_LEN_V22`] under v2.2
         /// (slots 8.. overlay what v2.1 called `_reserved2`, which no shipped binary touched).
         pub out_ring: [OutSlot; OUT_RING_LEN_V22_USIZE],
@@ -2257,6 +2266,7 @@ pub mod gamepad {
         assert!(offset_of!(PadShm, input_gen) == 168);
         assert!(offset_of!(PadShm, input_gen) % 4 == 0);
         assert!(offset_of!(PadShm, input_gen) < PAD_SHM_LEGACY_SIZE);
+        assert!(offset_of!(PadShm, driver_rev) == 172);
         assert!(
             PAD_SHM_LEGACY_SIZE + OUT_RING_LEN_USIZE * size_of::<OutSlot>() <= PAD_SHM_V21_SIZE
         );

@@ -17,7 +17,7 @@
 //! decoded and dropped (`GamepadPref::motion_reaches`).
 
 use super::dualsense_windows::{
-    create_swdevice, publish_input, OutputDrain, SwDeviceProfile, OFF_DEVTYPE, OFF_DRIVER_PROTO,
+    create_swdevice, driver_marks, publish_input, OutputDrain, SwDeviceProfile, OFF_DEVTYPE,
     OFF_INPUT, OFF_OUT_RING_VER, OFF_PAD_INDEX, SHM_MAGIC, SHM_SIZE,
 };
 use super::gamepad_raii::PadChannel;
@@ -252,11 +252,9 @@ impl XboxWinPad {
 
     fn service(&mut self) -> (Option<(u16, u16, u16, u16)>, bool) {
         self.channel.pump();
-        // SAFETY: base points at SHM_SIZE bytes.
-        let proto = unsafe {
-            std::ptr::read_unaligned(self.channel.data_base().add(OFF_DRIVER_PROTO) as *const u32)
-        };
-        self.attach.observe(proto);
+        // SAFETY: the channel's section is live and SHM_SIZE bytes.
+        let (proto, rev) = unsafe { driver_marks(self.channel.data_base()) };
+        self.attach.observe_pad(proto, rev);
         let mut rumble = None;
         let base = self.channel.data_base();
         let seen = &mut self.seen_enable;

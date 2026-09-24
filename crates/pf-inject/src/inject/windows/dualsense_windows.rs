@@ -44,6 +44,25 @@ pub(super) const OFF_DEVTYPE: usize =
     core::mem::offset_of!(pf_driver_proto::gamepad::PadShm, device_type);
 pub(super) const OFF_DRIVER_PROTO: usize =
     core::mem::offset_of!(pf_driver_proto::gamepad::PadShm, driver_proto);
+pub(super) const OFF_DRIVER_REV: usize =
+    core::mem::offset_of!(pf_driver_proto::gamepad::PadShm, driver_rev);
+
+/// `(driver_proto, driver_rev)` from a pad section. The driver stamps the revision first and the
+/// protocol with Release, so a revision read after a nonzero protocol is the driver's.
+///
+/// # Safety
+/// `base` points at a live, mapped [`PadShm`].
+pub(super) unsafe fn driver_marks(base: *mut u8) -> (u32, u32) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    // SAFETY: the caller's contract; both offsets are 4-aligned fields inside the section.
+    unsafe {
+        let proto = (*(base.add(OFF_DRIVER_PROTO) as *const AtomicU32)).load(Ordering::Acquire);
+        (
+            proto,
+            std::ptr::read_volatile(base.add(OFF_DRIVER_REV) as *const u32),
+        )
+    }
+}
 pub(super) const OFF_PAD_INDEX: usize =
     core::mem::offset_of!(pf_driver_proto::gamepad::PadShm, pad_index);
 pub(super) const DEVTYPE_DUALSHOCK4: u8 = pf_driver_proto::gamepad::DEVTYPE_DUALSHOCK4;
@@ -532,11 +551,9 @@ impl DsWinPad {
     pub(super) fn service(&mut self, pad: u8) -> DsFeedback {
         self.channel.pump();
         let mut fb = DsFeedback::default();
-        // SAFETY: base points at SHM_SIZE bytes.
-        let proto = unsafe {
-            std::ptr::read_unaligned(self.channel.data_base().add(OFF_DRIVER_PROTO) as *const u32)
-        };
-        self.attach.observe(proto);
+        // SAFETY: the channel's section is live and SHM_SIZE bytes.
+        let (proto, rev) = unsafe { driver_marks(self.channel.data_base()) };
+        self.attach.observe_pad(proto, rev);
         let base = self.channel.data_base();
         fb.resync = self
             .drain
