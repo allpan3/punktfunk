@@ -2660,8 +2660,11 @@ impl VulkanVideoEncoder {
         let (cursor_pc, rgb_view, imported) = match prefix {
             Ok(v) => v,
             Err(e) => {
-                // RECORDING (never submitted yet); pool allows reset.
+                // RECORDING (never submitted yet); pool allows reset. The reset discards any
+                // cursor upload recorded here, so the slot forgets it had one.
                 let _ = dev.reset_command_buffer(compute_cmd, vk::CommandBufferResetFlags::empty());
+                self.frames[slot].cursor_serial = 0;
+                self.frames[slot].cursor_ready = false;
                 return Err(e);
             }
         };
