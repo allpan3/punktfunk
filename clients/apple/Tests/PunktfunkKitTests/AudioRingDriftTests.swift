@@ -1532,5 +1532,36 @@ final class AudioRingDriftTests: XCTestCase {
         XCTAssertLessThan(ring.stats.bufferedMS, 80, "the backlog must have been trimmed")
         XCTAssertEqual(ring.bufferedSamples % channels, 0, "the trim split a frame")
     }
+
+    /// Closed loop, as `AudioDrain` wires it. Video sits a steady `earlyMS` behind the ring's own
+    /// audio; once the ring is deep enough the offset enters the deadband and must hold there.
+    ///
+    /// Mirrors `sync_steering_settles_instead_of_hunting`.
+    func testSyncSteeringSettlesInsteadOfHunting() {
+        for earlyMS in [40, 60, 100] {
+            let ring = AudioRing(seconds: 1, channels: channels, rateHz: 48_000)
+            var s = AvSync(channels: channels, rateHz: 48_000)
+            let frame = [Float](repeating: 0.5, count: 5 * perMS)
+            var scratch = [Float](repeating: 0, count: 5 * perMS)
+            var before = (sheds: 0, inserts: 0)
+            for step in 0..<24_000 {
+                frame.withUnsafeBufferPointer { ring.write($0.baseAddress!, count: $0.count) }
+                let depth = ring.bufferedSamples
+                let o = AvSync.Observation(
+                    ptsNs: 1_000_000_000, nowLocalNs: 1_000_000_000 + 40 * 1_000_000,
+                    clockOffsetNs: 0, bufferedAhead: depth,
+                    videoE2eNs: Int64(40 + earlyMS) * 1_000_000)
+                if s.observe(o) != nil {
+                    ring.setSyncTarget(s.desiredDepth(currentDepth: depth))
+                }
+                scratch.withUnsafeMutableBufferPointer {
+                    ring.read(into: $0.baseAddress!, count: $0.count)
+                }
+                if step == 12_000 { before = (ring.stats.sheds, ring.stats.inserts) }
+            }
+            XCTAssertEqual(ring.stats.sheds - before.sheds, 0, "\(earlyMS) ms early: sheds")
+            XCTAssertEqual(ring.stats.inserts - before.inserts, 0, "\(earlyMS) ms early: inserts")
+        }
+    }
 }
 #endif

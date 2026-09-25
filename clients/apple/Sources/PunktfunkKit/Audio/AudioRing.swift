@@ -899,6 +899,8 @@ struct AvSync {
     private var observations = 0
     /// Set once an observation lands outside `saneLimitMS`, for reporting.
     private(set) var implausible = false
+    /// Last depth offered outside the deadband; what the deadband keeps asking for.
+    private var held: Int?
 
     /// `channels` is the negotiated interleaved channel count (2/6/8), `rateHz` the negotiated
     /// sample rate — every rate on the lossless ladder, exactly, for the reason `AudioRing.init`
@@ -991,14 +993,19 @@ struct AvSync {
     var offsetMS: Int { Int(offsetAvgNs / 1_000_000) }
 
     /// The ring depth that would place audio with the picture, given where the ring is now.
-    /// `nil` while unsettled or inside the deadband — the caller then leaves the ring alone.
+    /// `nil` while unsettled: the caller runs unsynchronised. Inside the deadband, the last
+    /// request again: a ring that reached its depth stays there, where `nil` would drop it to
+    /// the floor and shed what the insert just built.
     ///
     /// Audio late (offset > 0) means there is too much queued: aim shallower. Audio early means
     /// aim deeper.
-    func desiredDepth(currentDepth: Int) -> Int? {
-        guard settled else { return nil }
+    mutating func desiredDepth(currentDepth: Int) -> Int? {
+        guard settled else {
+            held = nil
+            return nil
+        }
         let offsetMs = offsetAvgNs / 1_000_000
-        guard abs(offsetMs) >= Double(Self.deadbandMS) else { return nil }
+        guard abs(offsetMs) >= Double(Self.deadbandMS) else { return held }
         // One millisecond of samples as a float, so a fractional offset scales smoothly. The
         // division is done on the CONSTANT, not on the product: `x * 96000.0 / 1000.0` rounds twice
         // and can land one ulp — and so one sample — away from the `x * 96.0` every shipped 48 kHz
@@ -1007,7 +1014,8 @@ struct AvSync {
         // 0.23 % short. Mirrors `AvSync::desired_depth`.
         let perMs = Double(audioInterleavedPerSec(rateHz: rateHz, channels: channels)) / 1_000
         let delta = Int(offsetMs * perMs)
-        return max(0, currentDepth - delta)
+        held = max(0, currentDepth - delta)
+        return held
     }
 }
 

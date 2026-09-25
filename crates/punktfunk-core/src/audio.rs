@@ -1334,6 +1334,8 @@ pub struct AvSync {
     offset_avg_ns: f32,
     observations: u32,
     implausible: bool,
+    /// Last depth offered outside the deadband; what the deadband keeps asking for.
+    held: Option<usize>,
 }
 
 /// One measurement for [`AvSync::observe`]. Each field is in the units its source already produces.
@@ -1365,6 +1367,7 @@ impl AvSync {
             offset_avg_ns: 0.0,
             observations: 0,
             implausible: false,
+            held: None,
         }
     }
 
@@ -1419,24 +1422,28 @@ impl AvSync {
     }
 
     /// The ring depth that would place audio with the picture, given where the ring is now.
-    /// `None` while unsettled or inside the deadband — the caller then leaves the policy alone.
+    /// `None` while unsettled: the caller runs unsynchronised. Inside the deadband, the last
+    /// request again: a ring that reached its depth stays there, where `None` would drop it to
+    /// the floor and shed what the insert just built.
     ///
     /// Audio late (offset > 0) means there is too much queued: aim shallower. Audio early means
     /// aim deeper.
-    pub fn desired_depth(&self, current_depth: usize) -> Option<usize> {
+    pub fn desired_depth(&mut self, current_depth: usize) -> Option<usize> {
         if !self.settled() {
+            self.held = None;
             return None;
         }
         let offset_ms = self.offset_avg_ns / 1_000_000.0;
         if offset_ms.abs() < AV_DEADBAND_MS as f32 {
-            return None;
+            return self.held;
         }
         // One millisecond of samples as a float, so a fractional offset scales smoothly.
         // Divide the constant, not the product: `x * 96000.0 / 1000.0` can land one sample off
         // the `x * 96.0` every 48 kHz session computes. This way 44 100 Hz stereo is 88.2, not 88.
         let per_ms = interleaved_per_sec(self.rate_hz, self.channels) as f32 / 1000.0;
         let delta = (offset_ms * per_ms) as i64;
-        Some((current_depth as i64 - delta).max(0) as usize)
+        self.held = Some((current_depth as i64 - delta).max(0) as usize);
+        self.held
     }
 }
 
@@ -2729,6 +2736,48 @@ mod tests {
             target >= want,
             "the target must still be able to serve one callback"
         );
+    }
+
+    /// Closed loop, as every client wires it: observe per packet, hand `desired_depth` to the
+    /// policy. Video sits a steady `early_ms` behind the ring's own audio. Once the ring is deep
+    /// enough the offset enters the deadband; the loop must hold there, not hunt.
+    #[test]
+    fn sync_steering_settles_instead_of_hunting() {
+        let pm = per_ms(2);
+        let want = 5 * pm;
+        for early_ms in [40u64, 60, 100] {
+            let mut p = JitterPolicy::new(JitterTuning::PIPEWIRE, 2);
+            let mut av = AvSync::new(2);
+            let (mut depth, mut sheds, mut inserts, mut trims) = (0usize, 0u32, 0u32, 0u32);
+            for cb in 0..24_000u32 {
+                depth += want;
+                // Video end-to-end is fixed; only the ring moves the audio side.
+                av.observe(AvSyncObservation {
+                    video_e2e_ns: Some((40 + early_ms) * 1_000_000),
+                    ..obs(0, depth, pm)
+                });
+                p.set_sync_target(av.desired_depth(depth));
+                let s = p.step(depth, want);
+                depth -= s.drop_front.min(depth);
+                depth += s.insert_front;
+                // Converging costs a handful of inserts; count only what follows the first minute.
+                if cb >= 12_000 {
+                    sheds += (s.drop_front > 0 && !s.hard_trim) as u32;
+                    trims += s.hard_trim as u32;
+                    inserts += (s.insert_front > 0) as u32;
+                }
+                let short = !s.silence && depth < want;
+                if !s.silence {
+                    depth -= want.min(depth);
+                }
+                p.note_read(short);
+            }
+            assert_eq!(
+                (sheds, trims, inserts),
+                (0, 0, 0),
+                "{early_ms} ms early: still hunting in the second minute (sheds, trims, inserts)"
+            );
+        }
     }
 
     #[test]
