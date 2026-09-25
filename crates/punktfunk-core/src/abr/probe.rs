@@ -262,17 +262,27 @@ struct Ramp {
     history: Vec<RampStep>,
 }
 
-/// What one step proves, kbps: its delivered bytes over the interval they
-/// arrived in, and never more than the step asked for.
+/// What one step proves, kbps of wire: its delivered bytes over the interval
+/// they arrived in, and never more than the step offered.
 ///
 /// The clamp is the whole of what a short step can honestly say. A 5 Mbps
 /// step is a dozen packets; whether the last one lands 6 ms or 15 ms after
 /// the first swings the implied rate 2.5× (rig, every profile), and an
 /// unclamped reading opened sessions on a rate no step ever offered.
+///
+/// What a step offered is its wire when that is more than it asked: filler
+/// frames are small, so parity and headers put a 10 Mbps step on the wire
+/// at ~17 Mbps, and a wall read against the asked rate sat a fifth under
+/// the link.
 fn step_rate_kbps(step: &Step, r: &ProbeReport) -> u32 {
     let us = u64::from(r.client_interval_us.max(1));
-    let rate = (r.delivered_bytes.saturating_mul(8_000) / us) as u32;
-    rate.min(step.target_kbps)
+    let rate = r.delivered_bytes.saturating_mul(8_000) / us;
+    // The host reports packets, not their size; what arrived carries it.
+    let per_packet = r.delivered_bytes / r.delivered_packets.max(1);
+    let wire =
+        (u64::from(r.wire_packets_sent) * per_packet).saturating_mul(8_000) / step.asked_us.max(1);
+    let offered = wire.max(u64::from(step.target_kbps));
+    rate.min(offered).min(u64::from(u32::MAX)) as u32
 }
 
 /// Did the link refuse what was offered? The legacy burst's version of the
@@ -1327,13 +1337,14 @@ mod tests {
     /// one step alone must never open a session above the 20 000 it would
     /// have opened at with no measurement at all.
     #[test]
-    fn a_step_cannot_prove_more_than_it_asked_for() {
+    fn a_step_cannot_prove_more_than_it_offered() {
         let mut rig = Rig::new(46_656, None);
         let (target, duration_ms) = rig.p.poll(rig.now, 0, 0).expect("the first step");
         assert_eq!(target, RAMP_START_KBPS);
-        // The rig's own numbers: a 5 Mbps step's bytes, all of them, in 6 ms.
+        // The rig's own numbers: a 5 Mbps step's 24 wire packets, all of them,
+        // in 6 ms. Filler parity puts 11 120 kbps of it on the wire.
         let r = ProbeReport {
-            delivered_bytes: 15_624,
+            delivered_bytes: 34_752,
             delivered_packets: 24,
             window_ms: 6,
             host_duration_ms: duration_ms,
@@ -1354,13 +1365,49 @@ mod tests {
             panic!("one step, cut short by video, proves no wall")
         };
         assert_eq!(
-            proven_kbps, RAMP_START_KBPS,
-            "20 Mbps of arithmetic from a 5 Mbps step"
+            proven_kbps, 11_120,
+            "the wire the step offered, not 46 Mbps of arithmetic from its 6 ms"
         );
         assert!(
             ramp_start_kbps(proven_kbps, 46_656) < 20_000,
             "a one-step ramp must not open a session above the unmeasured rate"
         );
+    }
+
+    /// A wall is what the link carried of the step's wire. The rig's tunnel
+    /// (12.5 Mbit) refused a 10 Mbps step whose filler put 16.7 Mbps on the
+    /// wire, twice, delivering 35 of 36 packets in 34 ms each time: the link
+    /// carried 11.9 Mbps, and a wall read as the asked 10 Mbps sat a fifth low.
+    #[test]
+    fn a_wall_is_the_wire_the_link_carried() {
+        let mut rig = Rig::new(93_312, None);
+        let report = |packets: u64, sent: u32, bytes: u64, us: u32, asked: u32| ProbeReport {
+            delivered_bytes: bytes,
+            delivered_packets: packets,
+            window_ms: us / 1_000,
+            host_duration_ms: 25,
+            client_interval_ms: us / 1_000,
+            client_interval_us: us,
+            host_bytes_sent: u64::from(asked) * 25 / 8,
+            wire_packets_sent: sent,
+            send_dropped: 0,
+        };
+        let (first, _) = rig.p.poll(rig.now, 0, 0).expect("the first step");
+        let at = rig.at(20);
+        rig.p.on_result(report(24, 24, 34_752, 20_000, first), at);
+        let at = rig.at(RAMP_DRAIN_MS + 1);
+        let (second, _) = rig.p.poll(at, 0, 0).expect("the second step");
+        assert_eq!(second, 10_000);
+        for _ in 0..2 {
+            let at = rig.at(34);
+            rig.p.on_result(report(35, 36, 50_680, 34_000, second), at);
+            let at = rig.at(RAMP_DRAIN_MS + 1);
+            rig.p.poll(at, 0, 0);
+        }
+        let Some(Ramped::Wall { delivered_kbps }) = rig.p.take_ramped(rig.now) else {
+            panic!("refused twice is a wall")
+        };
+        assert_eq!(delivered_kbps, 11_924, "not the asked 10 000");
     }
 
     /// A ramp cut short by video hands the job to the legacy burst: it leaves
