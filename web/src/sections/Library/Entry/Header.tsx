@@ -33,6 +33,26 @@ export interface EntryHeaderProps {
 	error?: string | null;
 }
 
+/** The hero banner, dimmed into the page behind the header. Gone when it fails to load. */
+const Backdrop: FC<{ src: string | null | undefined }> = ({ src }) => {
+	const [failed, setFailed] = useState(false);
+	if (!src || failed) return null;
+	return (
+		<div
+			aria-hidden
+			className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-56 overflow-hidden rounded-xl"
+		>
+			<img
+				src={src}
+				alt=""
+				className="size-full object-cover opacity-30"
+				onError={() => setFailed(true)}
+			/>
+			<div className="absolute inset-0 bg-gradient-to-b from-background/40 to-background" />
+		</div>
+	);
+};
+
 /** Portrait, then whatever art there is, then the brand mark. */
 const Poster: FC<{ entry: OperatorGameEntry | null }> = ({ entry }) => {
 	const [failed, setFailed] = useState<Record<string, boolean>>({});
@@ -40,7 +60,7 @@ const Poster: FC<{ entry: OperatorGameEntry | null }> = ({ entry }) => {
 		(u): u is string => !!u && !failed[u],
 	);
 	return (
-		<div className="flex aspect-[2/3] w-20 shrink-0 items-center justify-center overflow-hidden rounded-md bg-muted text-muted-foreground shadow-sm @md:w-28">
+		<div className="flex aspect-[2/3] w-24 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-muted text-muted-foreground shadow-lg ring-1 ring-border @md:w-36">
 			{src ? (
 				<img
 					src={src}
@@ -76,8 +96,10 @@ export const EntryHeader: FC<EntryHeaderProps> = ({
 }) => {
 	const hidden = entry?.hidden === true;
 	const creating = entry === null;
+	const blocked = !dirty || saving || !title.trim() || (gated && !password);
 	return (
-		<div className="@container flex flex-col gap-4">
+		<div className="@container relative flex flex-col gap-4">
+			<Backdrop src={entry?.art.hero} />
 			<Link
 				to="/library"
 				className="inline-flex w-fit items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
@@ -135,11 +157,7 @@ export const EntryHeader: FC<EntryHeaderProps> = ({
 						</Button>
 					)}
 					{onSave && (
-						<Button
-							size="sm"
-							disabled={!dirty || saving || !title.trim()}
-							onClick={onSave}
-						>
+						<Button size="sm" disabled={blocked} onClick={onSave}>
 							{creating ? m.library_create() : m.library_save()}
 						</Button>
 					)}
@@ -174,6 +192,20 @@ export const EntryHeader: FC<EntryHeaderProps> = ({
 				>
 					{error}
 				</p>
+			)}
+			{/* Phones: the header's Save scrolls away on a long tab, so a dirty page keeps one in
+			    reach above the bottom nav. */}
+			{onSave && dirty && (
+				<div className="fixed inset-x-4 bottom-20 z-30 flex items-center justify-between gap-3 rounded-xl border bg-card/95 px-4 py-3 shadow-lg backdrop-blur sm:hidden">
+					<span className="text-sm text-muted-foreground">
+						{gated && !password
+							? m.library_entry_password_first()
+							: m.library_entry_unsaved()}
+					</span>
+					<Button size="sm" disabled={blocked} onClick={onSave}>
+						{creating ? m.library_create() : m.library_save()}
+					</Button>
+				</div>
 			)}
 		</div>
 	);

@@ -396,6 +396,8 @@
 	"library_entry_leave_body": "Your changes to this title will be lost.",
 	"library_entry_leave_confirm": "Leave",
 	"library_entry_saved": "Saved.",
+	"library_entry_unsaved": "Unsaved changes",
+	"library_entry_password_first": "Enter your console password above",
 	"library_entry_no_details": "Its source sent no details for this title.",
 	"library_entry_art_failed": "Couldn't load this image",
 	"library_entry_art_after_save": "Shown after saving",
