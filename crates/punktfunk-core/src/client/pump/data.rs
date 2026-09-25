@@ -783,7 +783,7 @@ mod tests {
         // Hold the sender so the task does not exit on a closed channel.
         let (_task_ctrl_tx, task_ctrl_rx) = tokio::sync::mpsc::channel::<CtrlRequest>(8);
         let (clip_event_tx, _clip_event_rx) = std::sync::mpsc::sync_channel(8);
-        let (cursor_shape_tx, _cursor_shape_rx) = std::sync::mpsc::sync_channel(8);
+        let (cursor_shape_tx, _cursor_shape_rx) = crate::client::planes::shape_queue();
         let (access_tx, _access_rx) = std::sync::mpsc::sync_channel(8);
         tokio::spawn(
             super::super::control_task::ControlTask {

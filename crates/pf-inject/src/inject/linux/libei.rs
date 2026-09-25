@@ -424,14 +424,16 @@ async fn connect_socket_file(file: &std::path::Path) -> Result<(UnixStream, Opti
 /// 1. [`AbsoluteAnchor::mapping_id`] — protocol key correlating a region with a stream.
 /// 2. Anchor origin — two outputs can share a size, never a top-left. A mirrored
 ///    physical monitor's region is not the client's size (`design/per-monitor-portal-capture.md`).
-/// 3. Streamed mode size — right for a client-sized virtual output, ambiguous once
-///    two heads share a mode.
+/// 3. The streamed head's mode (`extent`, [`crate::stream_extent`]), then the event's own
+///    `w`×`h` — ambiguous once two heads share a mode. The event's size alone is the
+///    client's rect: a GameStream window the size of the operator's monitor lands there.
 /// 4. `first()`.
 ///
 /// An unmatched anchor falls through: the region set is the truth. The caller logs
 /// the miss ([`anchor_missed`]).
 fn region_for_mode<'a>(
     regions: &'a [reis::event::Region],
+    extent: Option<(u16, u16)>,
     w: f32,
     h: f32,
     anchor: Option<&AbsoluteAnchor>,
@@ -452,13 +454,18 @@ fn region_for_mode<'a>(
             }
         }
     }
-    regions
-        .iter()
-        .find(|r| r.width as f32 == w && r.height as f32 == h)
-        // Display scale shrinks the EI region to logical pixels (Mutter: 1280×800
-        // at 1.5 → 853×533). Exact size then misses; without this rung we take
-        // `regions.first()` — the wrong monitor whenever another region sorts first.
-        .or_else(|| regions.iter().find(|r| scaled_region_match(r, w, h)))
+    let by_size = |w: f32, h: f32| {
+        regions
+            .iter()
+            .find(|r| r.width as f32 == w && r.height as f32 == h)
+            // Display scale shrinks the EI region to logical pixels (Mutter: 1280×800
+            // at 1.5 → 853×533). Exact size then misses; without this rung we take
+            // `regions.first()` — the wrong monitor whenever another region sorts first.
+            .or_else(|| regions.iter().find(|r| scaled_region_match(r, w, h)))
+    };
+    extent
+        .and_then(|(ew, eh)| by_size(f32::from(ew), f32::from(eh)))
+        .or_else(|| by_size(w, h))
         .or_else(|| regions.first())
 }
 
@@ -951,8 +958,8 @@ impl EiState {
                         // region. `sane_region` rejects gamescope's INT32_MAX "raw"
                         // region (a center tap would become x≈1e9). Else output hint,
                         // then raw client pixels.
-                        let nx = (ev.x as f32 / w).clamp(0.0, 1.0);
-                        let ny = (ev.y as f32 / h).clamp(0.0, 1.0);
+                        let nx = (ev.x as f32 / w).clamp(0.0, crate::ABS_EDGE);
+                        let ny = (ev.y as f32 / h).clamp(0.0, crate::ABS_EDGE);
                         let anchor = crate::absolute_anchor();
                         if let Some(a) = anchor
                             .as_ref()
@@ -960,23 +967,25 @@ impl EiState {
                         {
                             warn_anchor_miss(a, slot.regions());
                         }
-                        let (x, y) = match region_for_mode(slot.regions(), w, h, anchor.as_ref())
-                            .filter(|r| sane_region(r))
-                        {
-                            Some(region) => {
-                                note_abs_region(region, anchor.as_ref());
-                                (
-                                    region.x as f32 + nx * region.width as f32,
-                                    region.y as f32 + ny * region.height as f32,
-                                )
-                            }
-                            // Degenerate/absent region: scale into the relay-file
-                            // output hint; raw client pixels as last resort.
-                            None => match self.output_hint {
-                                Some((ow, oh)) => (nx * ow as f32, ny * oh as f32),
-                                None => (ev.x as f32, ev.y as f32),
-                            },
-                        };
+                        let extent = crate::stream_extent();
+                        let (x, y) =
+                            match region_for_mode(slot.regions(), extent, w, h, anchor.as_ref())
+                                .filter(|r| sane_region(r))
+                            {
+                                Some(region) => {
+                                    note_abs_region(region, anchor.as_ref());
+                                    (
+                                        region.x as f32 + nx * region.width as f32,
+                                        region.y as f32 + ny * region.height as f32,
+                                    )
+                                }
+                                // Degenerate/absent region: scale into the relay-file
+                                // output hint; raw client pixels as last resort.
+                                None => match self.output_hint {
+                                    Some((ow, oh)) => (nx * ow as f32, ny * oh as f32),
+                                    None => (ev.x as f32, ev.y as f32),
+                                },
+                            };
                         p.motion_absolute(x, y);
                     }
                     _ => emitted = false,
@@ -1029,26 +1038,28 @@ impl EiState {
                 let h = (ev.flags & 0xffff) as f32;
                 match slot.interface::<ei::Touchscreen>() {
                     Some(t) if w > 0.0 && h > 0.0 => {
-                        let nx = (ev.x as f32 / w).clamp(0.0, 1.0);
-                        let ny = (ev.y as f32 / h).clamp(0.0, 1.0);
+                        let nx = (ev.x as f32 / w).clamp(0.0, crate::ABS_EDGE);
+                        let ny = (ev.y as f32 / h).clamp(0.0, crate::ABS_EDGE);
                         // Same region ladder as MouseMoveAbs so touch and pointer
                         // land on the same monitor.
                         let anchor = crate::absolute_anchor();
-                        let (x, y) = match region_for_mode(slot.regions(), w, h, anchor.as_ref())
-                            .filter(|r| sane_region(r))
-                        {
-                            Some(region) => {
-                                note_abs_region(region, anchor.as_ref());
-                                (
-                                    region.x as f32 + nx * region.width as f32,
-                                    region.y as f32 + ny * region.height as f32,
-                                )
-                            }
-                            None => match self.output_hint {
-                                Some((ow, oh)) => (nx * ow as f32, ny * oh as f32),
-                                None => (ev.x as f32, ev.y as f32),
-                            },
-                        };
+                        let extent = crate::stream_extent();
+                        let (x, y) =
+                            match region_for_mode(slot.regions(), extent, w, h, anchor.as_ref())
+                                .filter(|r| sane_region(r))
+                            {
+                                Some(region) => {
+                                    note_abs_region(region, anchor.as_ref());
+                                    (
+                                        region.x as f32 + nx * region.width as f32,
+                                        region.y as f32 + ny * region.height as f32,
+                                    )
+                                }
+                                None => match self.output_hint {
+                                    Some((ow, oh)) => (nx * ow as f32, ny * oh as f32),
+                                    None => (ev.x as f32, ev.y as f32),
+                                },
+                            };
                         if ev.kind == InputKind::TouchDown {
                             t.down(ev.code, x, y);
                         } else {
@@ -1130,12 +1141,29 @@ mod tests {
             origin: Some((1920, 0)),
             mapping_id: None,
         };
-        let picked = region_for_mode(&regions, 1920.0, 1080.0, Some(&anchor)).unwrap();
+        let picked = region_for_mode(&regions, None, 1920.0, 1080.0, Some(&anchor)).unwrap();
         assert_eq!((picked.x, picked.y), (1920, 0));
         // No anchor takes the first same-sized region — required for the
         // client-sized virtual-output path.
-        let picked = region_for_mode(&regions, 1920.0, 1080.0, None).unwrap();
+        let picked = region_for_mode(&regions, None, 1920.0, 1080.0, None).unwrap();
         assert_eq!((picked.x, picked.y), (0, 0));
+    }
+
+    /// A GameStream client sends its own window rect, which can be the operator's monitor size.
+    /// The streamed head's mode picks first; the event's size is the fallback.
+    #[test]
+    fn the_streamed_mode_outranks_the_client_rect() {
+        let regions = [
+            region(0, 0, 1920, 1080, None),    // the operator's monitor
+            region(1920, 0, 3840, 2160, None), // the streamed head
+        ];
+        let picked = region_for_mode(&regions, Some((3840, 2160)), 1920.0, 1080.0, None).unwrap();
+        assert_eq!(picked.x, 1920);
+        let picked = region_for_mode(&regions, None, 1920.0, 1080.0, None).unwrap();
+        assert_eq!(picked.x, 0);
+        // A published mode no region matches falls back to the event's size.
+        let picked = region_for_mode(&regions, Some((1280, 720)), 3840.0, 2160.0, None).unwrap();
+        assert_eq!(picked.x, 1920);
     }
 
     /// `mapping_id` outranks origin: a stale/rounded origin must not override
@@ -1150,7 +1178,7 @@ mod tests {
             origin: Some((0, 0)),
             mapping_id: Some("head-b".into()),
         };
-        let picked = region_for_mode(&regions, 1920.0, 1080.0, Some(&anchor)).unwrap();
+        let picked = region_for_mode(&regions, None, 1920.0, 1080.0, Some(&anchor)).unwrap();
         assert_eq!(picked.mapping_id.as_deref(), Some("head-b"));
     }
 
@@ -1163,20 +1191,20 @@ mod tests {
             region(1462, 0, 1920, 1080, None), // physical
             region(3382, 0, 853, 533, None),   // 1280×800 at 1.5
         ];
-        let picked = region_for_mode(&regions, 1280.0, 800.0, None).unwrap();
+        let picked = region_for_mode(&regions, None, 1280.0, 800.0, None).unwrap();
         assert_eq!((picked.width, picked.height), (853, 533));
         let regions = [
             region(0, 0, 1920, 1080, None),
             region(1920, 0, 640, 400, None),
         ];
-        let picked = region_for_mode(&regions, 1280.0, 800.0, None).unwrap();
+        let picked = region_for_mode(&regions, None, 1280.0, 800.0, None).unwrap();
         assert_eq!((picked.width, picked.height), (640, 400));
         // Wrong aspect is not a consistent scale — fallback stays `regions.first()`.
         let regions = [
             region(0, 0, 1000, 1000, None),
             region(1000, 0, 640, 200, None),
         ];
-        let picked = region_for_mode(&regions, 1280.0, 800.0, None).unwrap();
+        let picked = region_for_mode(&regions, None, 1280.0, 800.0, None).unwrap();
         assert_eq!((picked.width, picked.height), (1000, 1000));
     }
 
@@ -1191,7 +1219,7 @@ mod tests {
             origin: Some((1920, 0)),
             mapping_id: None,
         };
-        let picked = region_for_mode(&regions, 1280.0, 720.0, Some(&anchor)).unwrap();
+        let picked = region_for_mode(&regions, None, 1280.0, 720.0, Some(&anchor)).unwrap();
         assert_eq!((picked.width, picked.height), (3840, 2160));
     }
 
@@ -1204,7 +1232,7 @@ mod tests {
             mapping_id: None,
         };
         assert!(anchor_missed(&regions, Some(&anchor)));
-        let picked = region_for_mode(&regions, 1920.0, 1080.0, Some(&anchor)).unwrap();
+        let picked = region_for_mode(&regions, None, 1920.0, 1080.0, Some(&anchor)).unwrap();
         assert_eq!((picked.x, picked.y), (0, 0), "fell back to the size match");
         let ok = AbsoluteAnchor {
             origin: Some((0, 0)),
@@ -1223,7 +1251,7 @@ mod tests {
             mapping_id: None,
         };
         assert!(anchor_missed(&regions, Some(&anchor)));
-        let picked = region_for_mode(&regions, 1920.0, 1080.0, Some(&anchor)).unwrap();
+        let picked = region_for_mode(&regions, None, 1920.0, 1080.0, Some(&anchor)).unwrap();
         assert_eq!((picked.x, picked.y), (0, 0));
     }
 

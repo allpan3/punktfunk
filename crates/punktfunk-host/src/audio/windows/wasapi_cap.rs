@@ -195,6 +195,43 @@ fn live_captures() -> std::sync::MutexGuard<'static, usize> {
     LIVE_CAPTURES.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// A loopback capture is running, so the parked defaults are its to manage.
+pub(crate) fn capture_live() -> bool {
+    *live_captures() > 0
+}
+
+/// One [`LIVE_CAPTURES`] slot, with the voice pins it owns. Drop runs on every exit, a panic
+/// included: a leaked count would keep the parked defaults until the host restarts.
+struct LiveCapture {
+    /// Outlives every reopen: the pins stay while the capture re-plans, and go at the end.
+    voice: voice_route::VoiceRoute,
+}
+
+impl LiveCapture {
+    fn new() -> LiveCapture {
+        *live_captures() += 1;
+        LiveCapture {
+            voice: voice_route::VoiceRoute::default(),
+        }
+    }
+}
+
+impl Drop for LiveCapture {
+    /// Last capture out: voice apps back first, then both parked defaults (no-op if never
+    /// parked, or if the operator moved them), then the sink's speaker layout. Held across the
+    /// restore so a capture starting now parks after it, not before.
+    fn drop(&mut self) {
+        let mut live = live_captures();
+        *live -= 1;
+        if *live == 0 {
+            self.voice.clear();
+            audio_control::restore_default_playback();
+            audio_control::restore_default_recording();
+            audio_control::restore_endpoint_channels();
+        }
+    }
+}
+
 /// Packet-less stretch after which `DATA_DISCONTINUITY` is idle-resume, not a hole.
 /// Classic loopback delivers nothing while nothing renders, then flags the resume packet;
 /// scoring that flag always would charge every notification on a silent host. ~10 ms engine
@@ -221,7 +258,7 @@ fn capture_thread(
     // Must wake on the engine event every ~10 ms or the loopback buffer wraps. Same MMCSS +
     // `THREAD_PRIORITY_HIGHEST` boost as the paced sender; a no-op if refused.
     pf_frame::thread_qos::boost_thread_priority(true);
-    *live_captures() += 1;
+    let mut live = LiveCapture::new();
     // Each `capture_once` is one open + inner loop. First open gets [`FIRST_OPEN_ATTEMPTS`]
     // tries before `open()` surfaces Err; the native plane then retries the whole open.
     let mut ready = Some(ready);
@@ -231,8 +268,6 @@ fn capture_thread(
     let mut backoff = REOPEN_BACKOFF_START;
     // Plan is pure in the endpoint set: log the unsatisfiable diagnosis once per fingerprint.
     let mut unsat_logged: Option<u64> = None;
-    // Outlives every reopen: the pins stay while the capture re-plans, and go at the end.
-    let mut voice = voice_route::VoiceRoute::default();
     while !stop.load(Ordering::Relaxed) {
         let attempt = Instant::now();
         match capture_once(
@@ -244,7 +279,7 @@ fn capture_thread(
             mode,
             &active,
             &opened_rate,
-            &mut voice,
+            &mut live.voice,
         ) {
             Ok(Next::Stopped) => break,
             Ok(Next::Reopen(m)) => {
@@ -274,7 +309,6 @@ fn capture_thread(
                 }
             }
             Err(e) => {
-                mode = TargetMode::Assert;
                 if let Some(unsat) = e.downcast_ref::<PlanUnsatisfiable>() {
                     // Same endpoints → same verdict. Wait on the fingerprint; a wiring retry
                     // would IPolicyConfig-stomp an operator recording-default change.
@@ -298,6 +332,12 @@ fn capture_thread(
                         backoff = REOPEN_BACKOFF_START;
                     }
                     failures += 1;
+                    // Follow keeps following the output the operator chose: one invalidated
+                    // stream (a Bluetooth profile switch) must not take the default back. A
+                    // second miss in a row re-plans.
+                    if failures > 1 {
+                        mode = TargetMode::Assert;
+                    }
                     if failures.is_power_of_two() {
                         tracing::warn!(error = %format!("{e:#}"), count = failures,
                             backoff_secs = backoff.as_secs(),
@@ -314,17 +354,6 @@ fn capture_thread(
                 }
             }
         }
-    }
-    // Last capture out: voice apps back first, then both parked defaults (no-op if never
-    // parked, or if the operator moved them), then the sink's speaker layout. Held across the
-    // restore so a capture starting now parks after it, not before.
-    let mut live = live_captures();
-    *live -= 1;
-    if *live == 0 {
-        voice.clear();
-        audio_control::restore_default_playback();
-        audio_control::restore_default_recording();
-        audio_control::restore_endpoint_channels();
     }
     Ok(())
 }
@@ -717,6 +746,10 @@ fn capture_once(
                     let info = capture_client
                         .read_from_device_to_deque(&mut bytes)
                         .context("read loopback")?;
+                    // WASAPI: a SILENT packet's data is not defined; it is silence.
+                    if info.flags.silent {
+                        bytes.range_mut(before..).for_each(|b| *b = 0);
+                    }
                     let now = Instant::now();
                     // Before the stamp moves: discontinuity on the first packet after a quiet
                     // stretch is idle-resume, not a hole in anything that was playing.

@@ -323,6 +323,12 @@ public final class SessionAudio {
                 try? session.setPreferredOutputNumberOfChannels(wireChannels)
             }
             try session.setActive(true)
+            // Apple validates the channel ask against the ACTIVE route's maximum, so the ask
+            // above can come back as 2. Ask again, clamped: an 8-channel wire on a 5.1 AVR gets 6.
+            let reachable = min(wireChannels, session.maximumOutputNumberOfChannels)
+            if reachable > 2, session.outputNumberOfChannels < reachable {
+                try? session.setPreferredOutputNumberOfChannels(reachable)
+            }
             // What we were actually GRANTED, not what we asked for. All three are best-effort, and
             // the ring's behaviour depends on the quantum it really gets — without this, a report of
             // audio jitter arrives with no way to tell a 10 ms session from a 5 ms or a 23 ms one,
@@ -1061,6 +1067,16 @@ public final class SessionAudio {
     /// graph — the mixer's conversion is the correct fallback; somebody just has to say it
     /// happened.
     private func noteOutputFormat(_ engine: AVAudioEngine, wireRateHz: Int) {
+        // What the device adds behind the ring; A/V sync counts it as audio already queued.
+        #if os(macOS)
+        let latency = engine.outputNode.presentationLatency
+        #else
+        let latency = AVAudioSession.sharedInstance().outputLatency
+        #endif
+        stateLock.lock()
+        let ring = self.ring
+        stateLock.unlock()
+        ring?.noteOutputLatency(ns: Int64(max(0, latency) * 1_000_000_000))
         let outFormat = engine.outputNode.outputFormat(forBus: 0)
         let deviceRate = Int(outFormat.sampleRate)
         // 0 = the node has no device yet (a start that is about to fail) — nothing to compare.

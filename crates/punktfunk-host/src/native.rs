@@ -1985,6 +1985,7 @@ pub(crate) async fn run_admitted(
         let n = &*counters_dp;
         // Per-class counts; one warn on the first drop; totals at end-of-stream.
         let denied = GrantDrops::new();
+        let mic_source = crate::audio::mic_source_id();
         // Full queue: drop, never block (would stall mic + this reader). Disconnected ends the loop.
         let offer = |tx: &std::sync::mpsc::SyncSender<ClientInput>, item: ClientInput| match tx
             .try_send(item)
@@ -2009,6 +2010,7 @@ pub(crate) async fn run_admitted(
                 n.input_mic.fetch_add(1, Ordering::Relaxed);
                 // Bounded `try_send`: never block this loop. seq + pts ride for de-jitter.
                 let _ = mic_tx.try_send(crate::audio::MicFrame {
+                    source: mic_source,
                     seq,
                     pts_ns: pts,
                     opus: opus.to_vec(),
@@ -2122,6 +2124,12 @@ pub(crate) async fn run_admitted(
             },
         )
     };
+
+    // `CLIENT_CAP_KEEP_HOST_AUDIO`: taken before the audio thread spawns, which opens
+    // capture straight away and reads this to pick its topology. RAII.
+    let _keep_host_audio = (hello.client_caps & punktfunk_core::quic::CLIENT_CAP_KEEP_HOST_AUDIO
+        != 0)
+        .then(crate::audio::capture_policy::keep_host_audio_guard);
 
     // Not for the two frame-arithmetic sources: their clients want nothing else on the wire,
     // and the rig's budget carries the audio reservation without a capture behind it.
@@ -2304,10 +2312,6 @@ pub(crate) async fn run_admitted(
         (!cmds.is_empty())
             .then(|| tokio::task::block_in_place(|| crate::hooks::run_prep(&cmds, &env)))
     });
-    // `CLIENT_CAP_KEEP_HOST_AUDIO`: hold the wiring override before capture opens. RAII.
-    let _keep_host_audio = (hello.client_caps & punktfunk_core::quic::CLIENT_CAP_KEEP_HOST_AUDIO
-        != 0)
-        .then(crate::audio::capture_policy::keep_host_audio_guard);
     // Welcome/acks/HUD speak wire budget. Encoder opens get the derived video rate (`EncDerive`).
     // PyroWave: budget == encoder rate (bpp pin).
     let bitrate_kbps = welcome.bitrate_kbps;

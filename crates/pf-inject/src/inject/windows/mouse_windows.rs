@@ -183,9 +183,9 @@ pub(crate) fn hid_kick(rect: (i32, i32, i32, i32), bounds: (i32, i32, i32, i32))
     true
 }
 
-/// Park at `rect` center, dwell one composition interval, wiggle ~2 px, restore.
-/// 35 ms is load-bearing: DWM samples at the next vsync, and the driver's 8 ms
-/// report timer coalesces back-to-back writes. Restore via `GetCursorPos` is
+/// Park at `rect` center (or where the pointer already is on it), dwell one composition
+/// interval, wiggle ~2 px, restore. 35 ms is load-bearing: DWM samples at the next vsync, and
+/// the driver's 8 ms report timer coalesces back-to-back writes. Restore via `GetCursorPos` is
 /// best-effort — a wrong-session host sees the wrong pointer and leaves it at center.
 fn perform_kick(m: &mut VirtualMouse, aim: KickAim) {
     let (bx, by, bw, bh) = aim.bounds;
@@ -197,18 +197,24 @@ fn perform_kick(m: &mut VirtualMouse, aim: KickAim) {
         bounds = ?aim.bounds,
         "HID compose kick — parking the pointer on the target display (display wake + damage)"
     );
-    let map = |px: i32, py: i32| -> (u16, u16) {
-        let nx = ((px - bx).clamp(0, bw - 1) as i64 * 0x7FFF) / i64::from(bw - 1).max(1);
-        let ny = ((py - by).clamp(0, bh - 1) as i64 * 0x7FFF) / i64::from(bh - 1).max(1);
-        (nx as u16, ny as u16)
+    // Rounded, so the restore lands on the pixel it read rather than creeping up-left.
+    let scale = |v: i32, extent: i32| {
+        let span = i64::from(extent - 1).max(1);
+        ((i64::from(v.clamp(0, extent - 1)) * 0x7FFF + span / 2) / span) as u16
     };
+    let map = |px: i32, py: i32| -> (u16, u16) { (scale(px - bx, bw), scale(py - by, bh)) };
     let mut p = POINT::default();
     // SAFETY: plain FFI; `p` is a valid out-param for this synchronous call.
     let orig = unsafe { GetCursorPos(&mut p) }
         .is_ok()
         .then_some((p.x, p.y));
     let (rx, ry, rw, rh) = aim.rect;
-    let (cx, cy) = map(rx + rw / 2, ry + rh / 2);
+    // Already on the target: wiggle where it is, so the pointer the client sees does not jump.
+    let on_target = orig.filter(|&(x, y)| x >= rx && y >= ry && x < rx + rw && y < ry + rh);
+    let (cx, cy) = match on_target {
+        Some((x, y)) => map(x, y),
+        None => map(rx + rw / 2, ry + rh / 2),
+    };
     // ~2 desktop pixels in HID units, at least 1 — the wiggle must actually move the pointer.
     let dx = ((2 * 0x7FFF) / bw.max(1)).max(1) as u16;
     m.send_report(0, cx, cy, 0, 0);

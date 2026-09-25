@@ -395,11 +395,17 @@ pub fn apply_audio_policy(sessions: AudioSessions, launcher: &str) -> AudioPolic
             muted.push(s.id);
         }
     }
-    *AUDIO_POLICY.lock().unwrap() = Some(AudioPolicy {
+    let mut live = AUDIO_POLICY.lock().unwrap();
+    // Replacing a live policy inherits what it muted: the first lease to end lifts both.
+    if let Some(prev) = live.take() {
+        muted.extend(prev.muted);
+    }
+    *live = Some(AudioPolicy {
         sessions,
         launcher: launcher.to_owned(),
         muted,
     });
+    drop(live);
     tracing::info!(policy = ?sessions, launcher, "title audio policy applied");
     AudioPolicyGuard(())
 }
@@ -1800,6 +1806,24 @@ pub(crate) mod tests {
             owner.muted.load(Ordering::SeqCst),
             "the operator's mute outlives the policy"
         );
+    }
+
+    /// A second lease replaces the first; the first to end lifts both, so nothing the
+    /// replaced policy muted stays muted with no policy left to lift it.
+    #[test]
+    fn a_replaced_policy_mute_still_lifts() {
+        let _registry = registry_lock();
+        let (_owner, _o) = fake_joiner("eeeeeeeeeeee", false);
+        let (_joiner, joiner) = fake_joiner("ffffffffffff", true);
+        let first = apply_audio_policy(AudioSessions::Launcher, "eeeeeeeeeeee");
+        assert!(joiner.muted.load(Ordering::SeqCst));
+        let second = apply_audio_policy(AudioSessions::All, "eeeeeeeeeeee");
+        drop(first);
+        assert!(
+            !joiner.muted.load(Ordering::SeqCst),
+            "the first lease ending lifts what either policy muted"
+        );
+        drop(second);
     }
 
     /// Unpair revokes a live session by the 12-hex fingerprint prefix

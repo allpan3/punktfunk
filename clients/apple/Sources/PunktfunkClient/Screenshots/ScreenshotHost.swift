@@ -46,7 +46,7 @@ struct ScreenshotHostView: View {
 
     init(scene: ShotScene) {
         self.scene = scene
-        // Pin the palette for the capture. The aurora screens read the LIVE `uiPalette` default,
+        // Pin the palette for the capture. The console reads the LIVE `uiPalette` default,
         // and a reused Simulator (or a dev Mac) carries whatever was last picked there — the
         // Apple TV set once shipped out on a sunset palette that a test device had persisted.
         // Idempotent, and only ever runs in shot mode (this view exists behind that gate).
@@ -54,27 +54,9 @@ struct ScreenshotHostView: View {
             ProcessInfo.processInfo.environment["PUNKTFUNK_SHOT_PALETTE"] ?? "violet",
             forKey: DefaultsKey.uiPalette)
     }
-    #if os(iOS)
-    @Environment(\.horizontalSizeClass) private var hSizeClass
-    @Environment(\.verticalSizeClass) private var vSizeClass
-    #endif
-
-    /// The gamepad UI's form-metric tier, published here for the same reason ContentView does it:
-    /// this harness mounts those screens DIRECTLY, with no ContentView in the tree, so without it
-    /// an iPad capture renders every gamepad screen at iPhone scale — a capture that doesn't look
-    /// like the app.
-    private var gamepadMetrics: GamepadFormMetrics {
-        #if os(iOS)
-        .forWindow(h: hSizeClass, v: vSizeClass)
-        #else
-        .platformDefault
-        #endif
-    }
-
     var body: some View {
         scene.make()
             .environment(\.colorScheme, scene.colorScheme)
-            .environment(\.gamepadMetrics, gamepadMetrics)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             // The scene keeps its safe area, so the HUD clears the Dynamic Island; the streamed
             // frame ignores it itself. Black matches the dark iOS window. tvOS and macOS keep the

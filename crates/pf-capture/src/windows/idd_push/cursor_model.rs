@@ -35,8 +35,15 @@ impl IddPushCapturer {
         self.cursor_shared.as_mut().and_then(|c| c.read())
     }
 
+    /// The forward flag the driver should hold now: down while the secure desktop is up, down
+    /// while the driver composites, up while the client draws.
+    pub(super) fn driver_forward(&self) -> bool {
+        !self.secure_active && !self.composite_cursor
+    }
+
     /// UAC/Winlogon use the software-cursor path; a declared IddCx hardware cursor
-    /// blocks it. Stand the declare down on the secure edge; restore on dismissal.
+    /// blocks it. Stand the declare down on the secure edge; on dismissal restore the
+    /// model the session runs, which may be the driver compositing.
     /// Must run every tick, including while frames are stalled.
     pub(super) fn poll_secure_desktop(&mut self) {
         let Some(fwd) = self.cursor_forward.as_ref() else {
@@ -72,7 +79,7 @@ impl IddPushCapturer {
             // Only the session that runs the cursor channel. Forced-composite never
             // wanted the declare; leaving desired-state off stops per-assign re-declares.
             if self.cursor_shared.is_some() {
-                if let Err(e) = fwd(true) {
+                if let Err(e) = fwd(self.driver_forward()) {
                     tracing::warn!(
                         "secure-desktop cursor-forward re-enable failed (client-drawn cursor \
                          may double with a composited one): {e:#}"

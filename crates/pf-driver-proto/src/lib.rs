@@ -2751,8 +2751,8 @@ pub mod cursor {
     pub const CURSOR_TYPE_ALPHA: u32 = 2;
 
     /// Section header; shape pixels follow at [`CURSOR_SHAPE_OFFSET`]. `x`/`y` are the shape's
-    /// top-left in desktop coordinates (IddCx `IDARG_OUT_QUERY_HWCURSOR::X/Y` — position −
-    /// hotspot, can be negative); both readers subtract the host-stamped `origin_*`.
+    /// top-left on this monitor (IddCx `IDARG_OUT_QUERY_HWCURSOR::X/Y` — position − hotspot,
+    /// negative past its top-left edge); both readers take them as they are.
     /// `shape_id` bumps on every shape set. Pixels are 32-bpp rows at `pitch` (BGRA for
     /// ALPHA; color+mask for MASKED_COLOR); [`shape_rgba`] converts them on either side.
     #[repr(C)]
@@ -2771,7 +2771,8 @@ pub mod cursor {
         pub pitch: u32,
         pub hot_x: u32,
         pub hot_y: u32,
-        /// Host-stamped before the magic: the monitor's top-left on the desktop.
+        /// Always 0 from this host. An older driver subtracts it from `x`/`y`, and IddCx
+        /// positions are already monitor-relative, so zero keeps that driver right.
         pub origin_x: i32,
         pub origin_y: i32,
         /// Host-stamped `f32` bits: where the HDR desktop puts SDR white (1.0 = 80 nits), for

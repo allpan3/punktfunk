@@ -39,7 +39,7 @@ internal fun StatsOverlay(lines: List<HudLine>, modifier: Modifier = Modifier) {
     }
 }
 
-private fun roleColor(role: Int): Color = when (role) {
+internal fun roleColor(role: Int): Color = when (role) {
     1 -> Color(0xFFB0D0FF)
     2 -> Color(0xFF9AA6B8)
     3 -> Color(0xFFFFD9A0)

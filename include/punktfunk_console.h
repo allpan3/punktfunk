@@ -60,6 +60,17 @@
 // `{}` for Home, `{"library": HostRow}` for a shelf — re-roots on the next frame.
 #define PUNKTFUNK_CONSOLE_PUSH_NAVIGATE 15
 
+// `{"id", "title", "message", "choices": [..]}` — a question over the top screen; the
+// answer comes back as the `PromptAnswer` command.
+#define PUNKTFUNK_CONSOLE_PUSH_PROMPT 16
+
+// `[{"heading", "text"}]` — what this app bundles, for the Licences screen. The answer to
+// the `LoadLicenses` command.
+#define PUNKTFUNK_CONSOLE_PUSH_LICENSES 17
+
+// `{"held": [..], "axes": [[name, v]]}` — the pad's reading while the `PadTest` command is on.
+#define PUNKTFUNK_CONSOLE_PUSH_PAD_TEST 18
+
 // One console. Opaque to C.
 typedef struct PunktfunkConsole PunktfunkConsole;
 
@@ -181,7 +192,12 @@ char *punktfunk_console_next_event(const PunktfunkConsole *c);
 // `c` is live.
 char *punktfunk_console_drain_cmds(const PunktfunkConsole *c);
 
-// Free a string from `punktfunk_console_next_event` or `punktfunk_console_drain_cmds`.
+// The console's background palettes in cycle order, as `[{"id", "name"}]`: what a native
+// picker offers for `ui_palette`. Free with `punktfunk_console_string_free`.
+char *punktfunk_console_palettes(void);
+
+// Free a string from `punktfunk_console_next_event`, `punktfunk_console_drain_cmds` or
+// `punktfunk_console_palettes`.
 //
 // # Safety
 // `s` is NULL or one of those strings, freed once.

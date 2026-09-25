@@ -30,6 +30,10 @@ const MAX_CONCEAL_FRAMES: u32 = 5;
 /// window; anything needing more is treated as loss.
 const HOLD_MAX: Duration = Duration::from_millis(30);
 
+/// A frame further behind what already played than a reorder or duplicate explains: the
+/// client restarted its capture at seq 0. That is a new stream, not late audio.
+const RESTART_BEHIND: u32 = 8;
+
 /// Arrival gaps above this are talk-spurt pauses (DTX, mute), not network jitter — folding
 /// them into the estimate would balloon the target after every pause.
 const PAUSE_GAP: Duration = Duration::from_millis(250);
@@ -123,7 +127,12 @@ impl MicDejitter {
             self.release_held_in_order(out);
         } else if delta > u32::MAX / 2 {
             // wrapping_sub > MAX/2: duplicate or older than already-played.
-            self.late_drops += 1;
+            if expected.wrapping_sub(frame.seq) > RESTART_BEHIND {
+                self.reset_stream();
+                self.accept(now, frame, out);
+            } else {
+                self.late_drops += 1;
+            }
         } else if let Some(held_seq) = self.held.as_ref().map(|(_, h)| h.seq) {
             if held_seq == frame.seq {
                 self.late_drops += 1; // duplicate of the held frame
@@ -286,10 +295,30 @@ mod tests {
 
     fn f(seq: u32) -> MicFrame {
         MicFrame {
+            source: 1,
             seq,
             pts_ns: u64::from(seq) * 20_000_000,
             opus: vec![1],
         }
+    }
+
+    /// A client that restarts its capture starts again at seq 0. That is a new stream, played at
+    /// once; a frame a couple behind is still a late duplicate.
+    #[test]
+    fn a_restarted_uplink_plays_instead_of_reading_as_late() {
+        let t = Instant::now();
+        let mut dj = MicDejitter::new();
+        let mut out = Vec::new();
+        for s in 0..500 {
+            dj.ingest(t, f(s), &mut out);
+        }
+        out.clear();
+        dj.ingest(t, f(498), &mut out);
+        assert!(out.is_empty(), "two behind is a duplicate");
+        for s in 0..3 {
+            dj.ingest(t, f(s), &mut out);
+        }
+        assert_eq!(seqs(&out), vec![0, 1, 2]);
     }
 
     /// Delivery shape: frame seqs as-is, concealment as -1.

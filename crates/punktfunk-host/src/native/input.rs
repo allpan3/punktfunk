@@ -883,14 +883,8 @@ pub(super) fn input_thread(
     } else {
         std::time::Duration::from_millis(500)
     };
-    // Injector is host-lifetime: a press left dangling stays latched in the
-    // compositor (Mutter keeps the implicit grab). Matching ups go out at session
-    // end. HashSet, capped at `MAX_HELD`, so a flood of never-released codes
-    // cannot grow this thread's state; codes past the cap are not auto-released.
-    const MAX_HELD: usize = 256;
-    let mut held_buttons: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    let mut held_keys: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    let mut held_touch: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    // Injector is host-lifetime: matching ups for whatever is still held go out at session end.
+    let mut held = crate::inject::held::HeldInput::default();
     let mut pen = PenSession::new();
     loop {
         // A reconnect or steal sets `stop` while this connection is still open and
@@ -1093,29 +1087,7 @@ pub(super) fn input_thread(
                     }
                     _ => {
                         // Track press/release so a mid-press disconnect can be undone below.
-                        match ev.kind {
-                            InputKind::MouseButtonDown if held_buttons.len() < MAX_HELD => {
-                                held_buttons.insert(ev.code);
-                            }
-                            InputKind::MouseButtonUp => {
-                                held_buttons.remove(&ev.code);
-                            }
-                            InputKind::KeyDown if held_keys.len() < MAX_HELD => {
-                                held_keys.insert(ev.code);
-                            }
-                            InputKind::KeyUp => {
-                                held_keys.remove(&ev.code);
-                            }
-                            // A held contact is re-injected every 40 ms on purpose, which
-                            // defeats Windows' own staleness lift — so only an Up ends it.
-                            InputKind::TouchDown if held_touch.len() < MAX_HELD => {
-                                held_touch.insert(ev.code);
-                            }
-                            InputKind::TouchUp => {
-                                held_touch.remove(&ev.code);
-                            }
-                            _ => {}
-                        }
+                        held.note(&ev);
                         let mut ev = ev;
                         reframe_input(
                             &mut ev,
@@ -1226,45 +1198,15 @@ pub(super) fn input_thread(
     pen.release_all();
     // Injector (and Mutter's implicit grab) outlives this session. Matching ups
     // here, keyed off the session — that is where a client vanishes mid-press.
-    if !held_buttons.is_empty() || !held_keys.is_empty() || !held_touch.is_empty() {
+    let ups = held.release();
+    if !ups.is_empty() {
         tracing::debug!(
-            buttons = held_buttons.len(),
-            keys = held_keys.len(),
-            touch = held_touch.len(),
+            count = ups.len(),
             "input: releasing held buttons/keys/contacts at session end"
         );
     }
-    for code in held_buttons {
-        let _ = inj_tx.send(InputEvent {
-            kind: InputKind::MouseButtonUp,
-            _pad: [0; 3],
-            code,
-            x: 0,
-            y: 0,
-            flags: 0,
-        });
-    }
-    for code in held_keys {
-        let _ = inj_tx.send(InputEvent {
-            kind: InputKind::KeyUp,
-            _pad: [0; 3],
-            code,
-            x: 0,
-            y: 0,
-            flags: 0,
-        });
-    }
-    // The touch device is host-lifetime and its refresher keeps re-injecting whatever is held,
-    // so a client that vanishes mid-touch leaves a finger down for every later session.
-    for code in held_touch {
-        let _ = inj_tx.send(InputEvent {
-            kind: InputKind::TouchUp,
-            _pad: [0; 3],
-            code,
-            x: 0,
-            y: 0,
-            flags: 0,
-        });
+    for ev in ups {
+        let _ = inj_tx.send(ev);
     }
     // Slots back first: the join below can sit ~5 s on a quiet endpoint, and the
     // session that preempted this one claims after 1.5 s.

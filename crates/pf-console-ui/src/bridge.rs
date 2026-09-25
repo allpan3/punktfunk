@@ -22,6 +22,13 @@ pub struct CreateOptions {
     /// gates the console-off settings row. Absent means don't offer it.
     #[serde(default)]
     pub fallback_ui: bool,
+    /// A TV. Absent means a handheld or a desktop.
+    #[serde(default)]
+    pub tv: bool,
+    /// The host's own keyboard types into every field (`edit_text` tells it which), so the
+    /// console never draws its tray: an Apple TV's, where iPhone typing works.
+    #[serde(default)]
+    pub system_keyboard: bool,
     /// Whether a real AV1 decoder exists, as the host's codec list answers it. Absent means
     /// don't claim the device lacks it, so the codec row stays unmarked.
     #[serde(default = "yes")]
@@ -66,7 +73,8 @@ impl CreateOptions {
         store.set_known_hosts(self.known_hosts);
         let opts = ConsoleOptions {
             device_name: self.device_name,
-            deck: false,
+            deck: self.system_keyboard,
+            tv: self.tv,
             fallback_ui: self.fallback_ui,
             pyrowave_ok: self.pyrowave_ok,
             av1_ok: self.av1_ok,
@@ -90,20 +98,25 @@ pub struct EntryJson {
     /// wins if a caller sends both — a shelf is the safe half of the pair.
     #[serde(default)]
     stream: Option<HostRow>,
+    /// The row's Pair screen over Home. Either shelf key above wins over it.
+    #[serde(default)]
+    pair: Option<HostRow>,
 }
 
 impl EntryJson {
     pub fn into_entry(self) -> ConsoleEntry {
-        match (self.library, self.stream) {
-            (Some(h), _) => ConsoleEntry::Library(Box::new(h)),
-            (None, Some(h)) => ConsoleEntry::Stream(Box::new(h)),
-            (None, None) => ConsoleEntry::Home,
+        match (self.library, self.stream, self.pair) {
+            (Some(h), _, _) => ConsoleEntry::Library(Box::new(h)),
+            (None, Some(h), _) => ConsoleEntry::Stream(Box::new(h)),
+            (None, None, Some(h)) => ConsoleEntry::Pair(Box::new(h)),
+            (None, None, None) => ConsoleEntry::Home,
         }
     }
 }
 
 /// The connected controllers: `{"label": "DualSense", "pref": 1, "pads": [{name, key, pref,
-/// steam_virtual, battery: {percent, charging} | null, detail, forwarded, rumble}]}`.
+/// steam_virtual, battery: {percent, charging} | null, detail, forwarded, rumble}], "others":
+/// [{name, kind, detail}]}`.
 #[derive(serde::Deserialize)]
 pub struct PadsJson {
     #[serde(default)]
@@ -113,6 +126,9 @@ pub struct PadsJson {
     pref: Option<u8>,
     #[serde(default)]
     pads: Vec<PadJson>,
+    /// Keyboards, mice and the like, for [`crate::ConsoleShared::set_other_devices`].
+    #[serde(default)]
+    others: Vec<crate::OtherDevice>,
 }
 
 #[derive(serde::Deserialize)]
@@ -143,6 +159,10 @@ struct BatteryJson {
 pub type Pads = (Option<String>, Option<GamepadPref>, Vec<PadInfo>);
 
 impl PadsJson {
+    pub fn take_others(&mut self) -> Vec<crate::OtherDevice> {
+        std::mem::take(&mut self.others)
+    }
+
     pub fn into_pads(self) -> Pads {
         let pads = self
             .pads
@@ -190,6 +210,8 @@ pub enum Event {
     Action(OverlayAction),
     Pulse(MenuPulse),
     Editing(bool),
+    /// The field an `Editing(true)` opens, raised just before it.
+    EditField(crate::screens::EditField),
     /// What the console's focus now reads as. Raised only when it changes; the host hands it
     /// to the screen reader.
     Announce(String),
@@ -215,6 +237,10 @@ impl Event {
                 }
             ),
             Event::Editing(e) => format!("{{\"editing\":{e}}}"),
+            Event::EditField(f) => format!(
+                "{{\"edit_text\":{}}}",
+                serde_json::to_string(f).unwrap_or_else(|_| "null".into())
+            ),
             Event::Announce(text) => format!(
                 "{{\"announce\":{}}}",
                 serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into())
@@ -257,6 +283,9 @@ impl Published {
         let editing = console.editing();
         if editing != self.was_editing {
             self.was_editing = editing;
+            if let Some(field) = editing.then(|| console.edit_field()).flatten() {
+                emit(Event::EditField(field));
+            }
             emit(Event::Editing(editing));
         }
         let announce = console.focus_announcement();
@@ -287,6 +316,32 @@ mod tests {
         let (opts, entry, _) = o.into_console(Platform::Android);
         assert!(matches!(entry, ConsoleEntry::Home));
         assert_eq!(opts.gpu_cache_bytes, 16 << 20);
+    }
+
+    #[test]
+    fn a_pair_key_enters_on_the_pair_screen() {
+        let row = r#"{"key": "aa", "name": "Desk", "addr": "10.0.0.5", "port": 47989,
+            "fp_hex": "", "paired": false, "saved": true, "online": true, "mgmt_port": 47990,
+            "can_wake": false, "last_used": null, "os": "", "pin": null, "bound_preset": null}"#;
+        let pair: EntryJson = serde_json::from_str(&format!(r#"{{"pair": {row}}}"#)).unwrap();
+        assert!(matches!(pair.into_entry(), ConsoleEntry::Pair(_)));
+        let both: EntryJson =
+            serde_json::from_str(&format!(r#"{{"library": {row}, "pair": {row}}}"#)).unwrap();
+        assert!(matches!(both.into_entry(), ConsoleEntry::Library(_)));
+    }
+
+    /// The field a host's own keyboard types into, as the host reads it.
+    #[test]
+    fn an_opened_field_reads_with_its_label_and_text() {
+        let field = crate::screens::EditField {
+            label: "PIN".into(),
+            text: "12".into(),
+            digits: true,
+        };
+        assert_eq!(
+            Event::EditField(field).to_json(),
+            r#"{"edit_text":{"label":"PIN","text":"12","digits":true}}"#
+        );
     }
 
     #[test]

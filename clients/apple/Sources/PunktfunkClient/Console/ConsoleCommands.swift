@@ -18,6 +18,7 @@ extension ConsoleModel {
                 switch name {
                 case "CancelWake": waker.cancel()
                 case "Probe": Task { await store.refreshReachability(discovery: discovery) }
+                case "LoadLicenses": pushLicenses()
                 default: break
                 }
                 continue
@@ -53,6 +54,14 @@ extension ConsoleModel {
                 addr: a["addr"] as? String ?? "", port: port(a["port"]))
         case "ForgetHost":
             if let host = host(key: a["key"] as? String ?? "") { store.remove(host) }
+        case "SavePreset":
+            savePreset(
+                id: a["id"] as? String ?? "", name: a["name"] as? String ?? "",
+                overrides: a["overrides"] as? [String: Any] ?? [:])
+        case "DeletePreset":
+            presets.delete(a["id"] as? String ?? "")
+        case "UnpairHost":
+            if let host = host(key: a["key"] as? String ?? "") { store.forgetIdentity(host) }
         case "Wake":
             wake(key: a["key"] as? String ?? "", thenConnect: a["then_connect"] as? Bool ?? false)
         case "SetPin":
@@ -72,10 +81,12 @@ extension ConsoleModel {
             hostAction(
                 fp: a["fp_hex"] as? String ?? "", id: a["action_id"] as? String ?? "",
                 label: a["label"] as? String ?? "")
-        case "OpenPlatformScreen":
-            platformScreen = a["id"] as? String
         case "PadAction":
             padAction(a["action"] as? String ?? "", key: a["pad_key"] as? String ?? "")
+        case "PadTest":
+            padTest(a["on"] as? Bool ?? false)
+        case "PromptAnswer":
+            answerPrompt(id: a["id"] as? String ?? "", choice: a["choice"] as? Int)
         case "SpeedTest":
             speedTest(
                 key: a["key"] as? String ?? "", addr: a["addr"] as? String ?? "",
@@ -86,6 +97,30 @@ extension ConsoleModel {
     }
 
     private func port(_ value: Any?) -> UInt16 { UInt16(value as? Int ?? 0) }
+
+    /// A preset the console's editor saved whole, merged onto this app's copy of it.
+    private func savePreset(id: String, name: String, overrides: [String: Any]) {
+        guard !id.isEmpty else { return }
+        var preset = presets.preset(id: id) ?? StreamPreset(name: name, id: id)
+        preset.name = name
+        preset.overrides = ConsoleJSON.overlay(overrides, over: preset.overrides)
+        presets.put(preset)
+    }
+
+    /// What this app bundles beside the console's own texts, for its Licences screen.
+    private func pushLicenses() {
+        let sections: [[String: String]] = [
+            ["heading": "Swift packages", "text": Licenses.swiftPackages],
+            [
+                "heading": "Third-party software",
+                "text": Licenses.thirdPartyIntro + "\n\n" + Licenses.thirdPartyNotices,
+            ],
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: sections),
+            let json = String(data: data, encoding: .utf8)
+        else { return }
+        bridge.push(.licenses, json)
+    }
 
     /// The console's link test: one probe burst over a second connect, each phase pushed back
     /// as `SpeedPhase`. The console raised the takeover itself and owns clearing it. 720p60, as
@@ -164,6 +199,16 @@ extension ConsoleModel {
     /// runs, then what the host answers. `refreshOnly` asks about running titles alone.
     func fetchLibrary(addr: String, mgmt: UInt16, fp: String, refreshOnly: Bool) {
         guard let host = host(fp: fp, addr: addr, port: 0) else { return }
+        // The demo host serves no management API; its shelf is built in.
+        if DemoMode.isDemo(host) {
+            bridge.push(.libraryRunning, ConsoleJSON.runningGames([]))
+            if refreshOnly { return }
+            bridge.push(.libraryBegin, "{}")
+            bridge.push(.libraryGames, ConsoleJSON.libraryGames(DemoMode.games))
+            bridge.push(.libraryPhase, "\"Ready\"")
+            pushArt(DemoMode.games, from: DemoMode.art)
+            return
+        }
         guard let identity = (try? ClientIdentityStore.shared.load())?.identity else {
             bridge.push(
                 .libraryPhase,
@@ -221,6 +266,11 @@ extension ConsoleModel {
             address: host.address, port: mgmt, certPEM: identity.certPEM,
             keyPEM: identity.keyPEM, hostFingerprint: host.pinnedSHA256)
         else { return }
+        pushArt(games, from: loader)
+    }
+
+    /// Each title's first poster that loads, in the order the touch grid takes them.
+    private func pushArt(_ games: [GameEntry], from loader: any LibraryArtSource) {
         artTask?.cancel()
         artTask = Task { [weak self] in
             for game in games {

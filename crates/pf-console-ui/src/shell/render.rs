@@ -83,7 +83,7 @@ impl Shell {
         crate::theme::set_ink(self.ink);
         // Same publish-once contract as ink. Also a local: `LayerEnv` mut-borrows
         // `settings`, so the transition arms cannot read the field.
-        let reduce = self.settings.reduce_motion;
+        let reduce = self.reduce_motion();
         crate::theme::set_reduce_motion(reduce);
         crate::theme::set_reduced_ui(crate::screens::settings::reduce_ui_res(
             &self.settings,
@@ -92,6 +92,9 @@ impl Shell {
         ));
         self.pads = pads.to_vec();
         self.glyphs = glyph_style(self.input_source, pad_pref, self.platform);
+        if let Some(Screen::InputTest(test)) = self.stack.last_mut() {
+            test.pref = pad_pref;
+        }
         // The chip names the connected pad, rebuilt only when it changes; with none there
         // is nothing to say. `PadInfo` has no `PartialEq` in its crate.
         if self.chip.as_deref() != pad {
@@ -188,6 +191,7 @@ impl Shell {
             screen: self.screen,
             pads: &self.pads,
             deck: self.deck,
+            tv: self.tv,
             fallback_ui: self.fallback_ui,
             pyrowave_ok: self.pyrowave_ok,
             av1_ok: self.av1_ok,
@@ -434,6 +438,7 @@ struct LayerEnv<'a> {
     screen: Option<crate::shell::DeviceScreen>,
     pads: &'a [PadInfo],
     deck: bool,
+    tv: bool,
     fallback_ui: bool,
     pyrowave_ok: bool,
     av1_ok: bool,
@@ -510,6 +515,7 @@ impl LayerEnv<'_> {
             screen: self.screen,
             pads: self.pads,
             deck: self.deck,
+            tv: self.tv,
             fallback_ui: self.fallback_ui,
             pyrowave_ok: self.pyrowave_ok,
             av1_ok: self.av1_ok,

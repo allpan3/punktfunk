@@ -46,7 +46,7 @@ or run `punktfunk-client --browse --fullscreen`.
 
 A WinUI 3 app for x64 and Arm64 with hardware decode (Vulkan Video or D3D11VA), HDR, WASAPI audio
 and SDL3 controllers. **Punktfunk Console** in the Start menu is the controller interface for a TV or
-HTPC.
+HTPC, on x64; the Arm64 build has no console yet.
 
 ## Android app (phone + Android TV)
 
@@ -57,6 +57,13 @@ Plug a **DualSense**, **DualSense Edge** or **DualShock 4** in by **USB** and al
 the host then gets rumble, adaptive triggers, the lightbar and gyro. Over Bluetooth the pad works as
 an ordinary gamepad. **Settings → Controllers → DualSense / DualShock passthrough (USB)** turns
 this off.
+
+On a handheld with a second, smaller screen below the first (an Ayn Thor, a Retroid Pocket with the
+Dual Screen add-on) or a foldable half-opened like a laptop, the stream takes the top screen. The
+lower one has tabs for **Stats**, **Actions** (the buttons of the
+[quick-action dial](/docs/input#the-quick-action-dial)), **Trackpad** and **Controller** (the
+[virtual controller](/docs/input#virtual-controller)). There is nothing to set. If the lower screen stays dark while you stream, end the stream and
+[send your logs](/docs/report-an-issue): they record the screens your device reported.
 
 ## webOS (LG TV) — community
 

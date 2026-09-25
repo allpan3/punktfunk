@@ -453,10 +453,12 @@ json_pusher!(
 /// `NativeBridge.nativeConsoleSetPads(handle, padsJson)` — the connected controllers for the
 /// chip, the settings rows and the controllers screen: `{"label": "DualSense", "pref": 1,
 /// "pads": [{name, key, pref, steam_virtual, battery: {percent, charging} | null, detail,
-/// forwarded, rumble}]}`.
+/// forwarded, rumble}], "others": [{name, kind, detail}]}`.
     Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetPads,
     PadsJson,
     |h, p| {
+        let mut p = p;
+        h.handles.console.set_other_devices(p.take_others());
         let (label, pref, pads) = p.into_pads();
         h.shared.send(Cmd::Pads { label, pref, pads })
     }
@@ -584,6 +586,22 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleLibr
         }
     })
 }
+
+json_pusher!(
+/// `NativeBridge.nativeConsoleSetPadTest(handle, json)` — `{"held": [..], "axes": [[name, v]]}`,
+/// the pad's reading while `ConsoleCmd::PadTest` is on.
+    Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetPadTest,
+    pf_console_ui::PadTestState,
+    |h, v| h.handles.console.set_pad_test(v)
+);
+
+json_pusher!(
+/// `NativeBridge.nativeConsoleSetLicenses(handle, json)` — `[{"heading", "text"}]`, what this app
+/// bundles; the answer to `ConsoleCmd::LoadLicenses`.
+    Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetLicenses,
+    Vec<pf_console_ui::LicenseSection>,
+    |h, v| h.handles.console.set_licenses(v)
+);
 
 json_pusher!(
 /// `NativeBridge.nativeConsoleLibraryPhase(handle, json)` — `"Loading"`, `"Empty"`, `"Ready"`,

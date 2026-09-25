@@ -674,9 +674,12 @@ struct Slot {
     /// Log-once: this path runs at the pad's sensor rate.
     motion_unreachable_logged: bool,
     gesture: SelectGesture,
-    /// bit0 = haptics, bit1 = speaker. Nonzero only for tier-A; bit0 also suppresses wire rumble.
+    /// bit0 = haptics, bit1 = speaker. Nonzero only for tier-A; bit0 also suppresses wire rumble
+    /// while haptics frames arrive.
     audio_caps: u8,
     rumble_suppressed_logged: bool,
+    /// A wire rumble went out since the coils were last armed; SDL's rumble bits mute them.
+    coils_muted: bool,
     /// Raw passthrough for a Steam Controller 2 declared as one.
     sc2: Option<crate::sc2_capture::Sc2Capture>,
     /// The host sent raw writes, so its `0x80` reports own the motors and wire rumble is skipped.
@@ -709,6 +712,7 @@ impl Slot {
             gesture: SelectGesture::default(),
             audio_caps: 0,
             rumble_suppressed_logged: false,
+            coils_muted: false,
             sc2: None,
             raw_rumble: false,
         }
@@ -1105,9 +1109,9 @@ impl Worker {
                 if slot.audio_caps != 0 {
                     if slot.audio_caps & 0x01 != 0 {
                         // SDL rumble sets ucEnableBits1 0x01|0x02, muting the 0xD1 coils.
-                        // Clear those bits once; render_feedback suppresses wire rumble so
-                        // SDL never re-arms them. Fails if hid-playstation owns the HID link
-                        // — that driver asserts the same bit on every FF update.
+                        // Clear those bits at open; render_feedback clears them again when
+                        // haptics resume after a rumble. Fails if hid-playstation owns the HID
+                        // link — that driver asserts the same bit on every FF update.
                         if let Err(e) = slot.pad.send_effect(&Ds5Feedback::audio_haptics_packet()) {
                             tracing::info!(
                                 index,
@@ -1197,6 +1201,7 @@ impl Worker {
         let slot = self.slots.remove(i);
         if slot.audio_caps != 0 {
             crate::pad_audio::unregister_tier_a(slot.index);
+            crate::pad_audio::clear_haptics_liveness(slot.index);
         }
         tracing::info!(
             id = slot.id,
@@ -2044,17 +2049,29 @@ impl Worker {
 
     /// Single consumer of rumble + HID output. Engine commands are already effective;
     /// this worker applies them verbatim. A raw SC2 hands its motors to the host's raw writes.
+    /// A tier-A pad's coils go to whichever of wire rumble and haptics audio is arriving.
     fn render_feedback(&mut self) {
         let Some(connector) = self.attached.clone() else {
             return;
         };
+        // Haptics resumed after a rumble muted the coils: arm them again.
+        for slot in &mut self.slots {
+            if slot.coils_muted && crate::pad_audio::haptics_live(slot.index) {
+                slot.coils_muted = false;
+                if let Err(e) = slot.pad.send_effect(&Ds5Feedback::audio_haptics_packet()) {
+                    tracing::debug!(pad = slot.index, error = %e, "audio-haptics re-arm");
+                }
+            }
+        }
         while let Ok(cmd) = connector.next_rumble_command(Duration::ZERO) {
             if let Some(slot) = self.slots.iter_mut().find(|s| s.index as u16 == cmd.pad) {
                 if slot.raw_rumble {
                     continue;
                 }
-                // SDL rumble sets ucEnableBits1 0x01|0x02, muting the 0xD1 coils.
-                if slot.audio_caps & 0x01 != 0 {
+                // SDL rumble sets ucEnableBits1 0x01|0x02, muting the 0xD1 coils. A title that
+                // renders no haptics audio sends no frames, so it keeps its rumble.
+                let haptics = slot.audio_caps & 0x01 != 0;
+                if haptics && crate::pad_audio::haptics_live(slot.index) {
                     if !slot.rumble_suppressed_logged {
                         slot.rumble_suppressed_logged = true;
                         tracing::info!(
@@ -2064,6 +2081,7 @@ impl Worker {
                     }
                     continue;
                 }
+                slot.coils_muted |= haptics;
                 Self::issue_rumble(slot, cmd.low, cmd.high, cmd.backstop_ms);
             }
         }

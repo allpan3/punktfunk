@@ -101,6 +101,9 @@ object NativeBridge {
         standard: Int,
     )
 
+    /** One `pf.display` line in the log ring above, as written: the displays and fold features. */
+    external fun nativeLogDisplay(line: String)
+
     /**
      * The machine token of the most recent failed [nativeConnect]/[nativePair], cleared on read
      * (`""` when none) — call right after a `0` handle / `""` fingerprint. A typed host rejection
@@ -803,6 +806,12 @@ object NativeBridge {
 
     /** A one-shot toast from a service worker. */
     external fun nativeConsoleNotice(handle: Long, text: String)
+
+    /** `[{"heading", "text"}]`: what this app bundles, for the console's Licences screen. */
+    external fun nativeConsoleSetLicenses(handle: Long, json: String)
+
+    /** `{"held": [..], "axes": [[name, v]]}`: the pad's reading while the input test is on. */
+    external fun nativeConsoleSetPadTest(handle: Long, json: String)
 
     /** A library fetch is starting for the shelf on screen (bumps the epoch, sets Loading). */
     external fun nativeConsoleLibraryBegin(handle: Long)

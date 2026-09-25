@@ -10,13 +10,18 @@ pub(crate) mod card_menu;
 pub(crate) mod collections;
 pub(crate) mod grants;
 pub(crate) mod home;
+pub(crate) mod input_test;
 pub(crate) mod library;
+pub(crate) mod licenses;
 
 pub(crate) mod pair;
 pub(crate) mod palette;
 pub(crate) mod pin_hosts;
 pub(crate) mod players;
+pub(crate) mod preset;
+pub(crate) mod prompt;
 pub(crate) mod ring_editor;
+pub(crate) mod search;
 pub(crate) mod settings;
 pub(crate) mod shortcut_editor;
 
@@ -52,6 +57,8 @@ pub struct Ctx<'a> {
     pub pads: &'a [PadInfo],
     /// Steam Deck: never draw our keyboard — Steam's types via SDL text input.
     pub deck: bool,
+    /// A TV: no clipboard to copy to, no phone sensors ([`crate::shell::ConsoleOptions::tv`]).
+    pub tv: bool,
     /// Host has a fallback UI ([`crate::shell::ConsoleOptions::fallback_ui`]); gates the
     /// console-off row.
     pub fallback_ui: bool,
@@ -65,6 +72,26 @@ pub struct Ctx<'a> {
     pub device_name: &'a str,
     /// Shell clock in seconds (spinners, pulses).
     pub t: f64,
+}
+
+/// The text field a screen has open, for a host whose own keyboard types into it
+/// (an Apple TV's, where iPhone typing and dictation live).
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct EditField {
+    pub label: String,
+    pub text: String,
+    /// Digits only: a PIN, a port, a bitrate.
+    pub digits: bool,
+}
+
+impl EditField {
+    fn new(label: &str, text: &str, digits: bool) -> Option<EditField> {
+        Some(EditField {
+            label: label.into(),
+            text: text.into(),
+            digits,
+        })
+    }
 }
 
 /// Session the shell turns into `OverlayAction::Launch` plus the connecting overlay.
@@ -177,6 +204,20 @@ pub(crate) enum Screen {
     Palette(palette::PaletteScreen),
     /// Controller grants and tests. Raised by the Controllers tab's last card.
     Grants(grants::GrantsScreen),
+    /// A question the app asks through the console ([`prompt::Prompt`]).
+    Prompt(prompt::PromptScreen),
+    /// Open-source licences. Raised by the About section.
+    Licenses(licenses::LicensesScreen),
+    /// A title search over one host's shelf. Raised by the shelf's Search pill.
+    Search(search::SearchScreen),
+    /// A preset's menu: edit, rename, pin, delete. Raised by its Presets row.
+    PresetMenu(preset::PresetMenu),
+    /// A preset's name, new or renamed.
+    PresetName(preset::PresetName),
+    /// A preset's settings over the global ones.
+    PresetEdit(preset::PresetEdit),
+    /// The live controller test. Raised by the Controllers tab's Test card.
+    InputTest(input_test::InputTestScreen),
 }
 
 impl Screen {
@@ -211,6 +252,13 @@ impl Screen {
             Screen::Customize(s) => s.menu(ev, ctx, fx),
             Screen::Palette(s) => s.menu(ev, ctx, fx),
             Screen::Grants(s) => s.menu(ev, ctx, fx),
+            Screen::Prompt(s) => s.menu(ev, ctx, fx),
+            Screen::Licenses(s) => s.menu(ev, ctx, fx),
+            Screen::Search(s) => s.menu(ev, ctx, fx),
+            Screen::PresetMenu(s) => s.menu(ev, ctx, fx),
+            Screen::PresetName(s) => s.menu(ev, ctx, fx),
+            Screen::PresetEdit(s) => s.menu(ev, ctx, fx),
+            Screen::InputTest(s) => s.menu(ev, ctx, fx),
         }
     }
 
@@ -237,6 +285,11 @@ impl Screen {
             Screen::Customize(s) => s.list.dip(),
             Screen::Palette(s) => s.press(),
             Screen::Grants(s) => s.list.dip(),
+            Screen::Prompt(s) => s.list.dip(),
+            Screen::Search(s) => s.list.dip(),
+            Screen::PresetMenu(s) => s.list.dip(),
+            Screen::PresetName(s) => s.list.dip(),
+            Screen::PresetEdit(s) => s.list.dip(),
             _ => {}
         }
     }
@@ -257,11 +310,17 @@ impl Screen {
             Screen::Customize(s) => s.list.pan(p),
             Screen::Palette(s) => s.pan(p),
             Screen::Grants(s) => s.list.pan(p),
+            Screen::Prompt(s) => s.list.pan(p),
+            Screen::Licenses(s) => s.pan(p),
+            Screen::Search(s) => s.list.pan(p),
+            Screen::PresetMenu(s) => s.list.pan(p),
+            Screen::PresetName(s) => s.list.pan(p),
+            Screen::PresetEdit(s) => s.list.pan(p),
             Screen::ShortcutEditor(s) => s.pan_list().is_some_and(|l| l.pan(p)),
             Screen::RingEditor(s) => s.pan_list().pan(p),
             Screen::Library(s) => s.pan(p),
             Screen::Home(s) => s.pan(p),
-            Screen::Collections(_) | Screen::Players(_) => false,
+            Screen::Collections(_) | Screen::Players(_) | Screen::InputTest(_) => false,
         }
     }
 
@@ -285,6 +344,13 @@ impl Screen {
             Screen::Customize(s) => s.pointer(p, ctx, fx),
             Screen::Palette(s) => s.pointer(p, ctx, fx),
             Screen::Grants(s) => s.pointer(p, ctx, fx),
+            Screen::Prompt(s) => s.pointer(p, ctx, fx),
+            Screen::Licenses(s) => s.pointer(p, ctx, fx),
+            Screen::Search(s) => s.pointer(p, ctx, fx),
+            Screen::PresetMenu(s) => s.pointer(p, ctx, fx),
+            Screen::PresetName(s) => s.pointer(p, ctx, fx),
+            Screen::PresetEdit(s) => s.pointer(p, ctx, fx),
+            Screen::InputTest(_) => true,
         }
     }
 
@@ -294,6 +360,8 @@ impl Screen {
             Screen::AddHost(s) => s.text_input(text),
             Screen::ShortcutEditor(s) => s.text_input(text),
             Screen::Pair(s) => s.text_input(text),
+            Screen::Search(s) => s.text_input(text),
+            Screen::PresetName(s) => s.text_input(text),
             Screen::Settings(s) => s.text_input(text),
             _ => {}
         }
@@ -306,6 +374,8 @@ impl Screen {
             Screen::AddHost(s) => s.edit_key(key),
             Screen::ShortcutEditor(s) => s.edit_key(key),
             Screen::Pair(s) => s.edit_key(key),
+            Screen::Search(s) => s.edit_key(key),
+            Screen::PresetName(s) => s.edit_key(key),
             Screen::Settings(s) => s.edit_key(key, ctx),
             _ => false,
         }
@@ -317,8 +387,23 @@ impl Screen {
             Screen::AddHost(s) => s.editing(),
             Screen::ShortcutEditor(s) => s.editing(),
             Screen::Pair(s) => s.editing(),
+            Screen::Search(s) => s.editing(),
+            Screen::PresetName(s) => s.editing(),
             Screen::Settings(s) => s.editing(),
             _ => false,
+        }
+    }
+
+    /// The field [`Self::editing`] has open.
+    pub(crate) fn edit_field(&self) -> Option<EditField> {
+        match self {
+            Screen::AddHost(s) => s.edit_field(),
+            Screen::ShortcutEditor(s) => s.edit_field(),
+            Screen::Pair(s) => s.edit_field(),
+            Screen::Settings(s) => s.edit_field(),
+            Screen::Search(s) => s.edit_field(),
+            Screen::PresetName(s) => s.edit_field(),
+            _ => None,
         }
     }
 
@@ -380,6 +465,13 @@ impl Screen {
             Screen::Customize(_) => "Customize".into(),
             Screen::Palette(_) => "Background".into(),
             Screen::Grants(_) => "Controller access".into(),
+            Screen::Prompt(s) => s.title(),
+            Screen::Licenses(_) => "Open-source licences".into(),
+            Screen::Search(s) => s.title(),
+            Screen::PresetMenu(s) => s.title(),
+            Screen::PresetName(s) => s.title(),
+            Screen::PresetEdit(s) => s.title(),
+            Screen::InputTest(_) => "Controller test".into(),
         }
     }
 
@@ -393,6 +485,7 @@ impl Screen {
             Screen::Customize(s) => s.announcement(ctx),
             Screen::Palette(s) => s.announcement(ctx),
             Screen::Grants(s) => s.announcement(),
+            Screen::Prompt(s) => s.announcement(),
             Screen::Settings(s) => s.announcement(ctx),
             Screen::Players(s) => s.announcement(ctx),
             _ => None,
@@ -416,6 +509,13 @@ impl Screen {
             Screen::Customize(s) => s.hints(ctx),
             Screen::Palette(s) => s.hints(ctx),
             Screen::Grants(s) => s.hints(ctx),
+            Screen::Prompt(s) => s.hints(ctx),
+            Screen::Licenses(s) => s.hints(ctx),
+            Screen::Search(s) => s.hints(ctx),
+            Screen::PresetMenu(s) => s.hints(ctx),
+            Screen::PresetName(s) => s.hints(ctx),
+            Screen::PresetEdit(s) => s.hints(ctx),
+            Screen::InputTest(s) => s.hints(ctx),
         }
     }
 
@@ -449,6 +549,13 @@ impl Screen {
             Screen::Customize(s) => s.render(canvas, rect, k, dt, fonts, ctx),
             Screen::Palette(s) => s.render(canvas, rect, k, dt, fonts, ctx),
             Screen::Grants(s) => s.render(canvas, rect, k, dt, fonts, ctx),
+            Screen::Prompt(s) => s.render(canvas, rect, k, dt, fonts, ctx),
+            Screen::Licenses(s) => s.render(canvas, rect, k, dt, fonts, ctx),
+            Screen::Search(s) => s.render(canvas, rect, k, dt, fonts, ctx),
+            Screen::PresetMenu(s) => s.render(canvas, rect, k, dt, fonts, ctx),
+            Screen::PresetName(s) => s.render(canvas, rect, k, dt, fonts, ctx),
+            Screen::PresetEdit(s) => s.render(canvas, rect, k, dt, fonts, ctx),
+            Screen::InputTest(s) => s.render(canvas, rect, k, dt, fonts, ctx),
         }
     }
 }
