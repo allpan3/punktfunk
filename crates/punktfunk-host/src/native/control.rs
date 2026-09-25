@@ -103,6 +103,36 @@ fn is_ramp_step(req: &ProbeRequest, ramp_open: bool) -> bool {
     ramp_open && req.duration_ms <= super::stream::RAMP_STEP_MAX_MS
 }
 
+/// One speed-test burst per 10 s. Each burst is already clamped (5 s, 10 Gbps);
+/// without a count cap a client can pause video and pin the uplink.
+///
+/// A ramp step neither waits on the spacing nor starts it: a ramp cut short
+/// by the first frame asks for its burst two seconds later, and that burst is
+/// the only measurement the session gets.
+#[derive(Default)]
+struct ProbeSpacing {
+    last: Option<std::time::Instant>,
+}
+
+impl ProbeSpacing {
+    const INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// Whether to serve this request.
+    fn admit(&mut self, now: std::time::Instant, ramping: bool) -> bool {
+        if ramping {
+            return true;
+        }
+        if self
+            .last
+            .is_some_and(|t| now.duration_since(t) < Self::INTERVAL)
+        {
+            return false;
+        }
+        self.last = Some(now);
+        true
+    }
+}
+
 /// A PyroWave session's pin against `SetBitrate` asks.
 ///
 /// Every ask is refused with the pin — except one: an Automatic client's
@@ -325,10 +355,7 @@ pub(super) async fn run(task: Task) {
     // coalesces a resize drag; 500 ms is half the client's 1 s self-limit.
     const MIN_SWITCH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
     let mut last_accepted_switch: Option<std::time::Instant> = None;
-    // One probe per 10 s. Each probe is already clamped (5 s, 10 Gbps);
-    // without a count cap a client can pause video and pin the uplink.
-    const MIN_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
-    let mut last_probe: Option<std::time::Instant> = None;
+    let mut probe_spacing = ProbeSpacing::default();
     // An RFI ask is a frame parity could not repair; the LossReport that
     // closes the window carries only what parity did repair.
     let mut unrecovered = UnrecoveredRun::default();
@@ -581,18 +608,19 @@ pub(super) async fn run(task: Task) {
                     );
                     let _ = shard_ack_tx.send(ack.shard_payload);
                 } else if let Ok(req) = ProbeRequest::decode(&msg) {
-                    let now = std::time::Instant::now();
                     let ramping = is_ramp_step(&req, ramp_open.load(Ordering::SeqCst));
-                    if !ramping
-                        && last_probe.is_some_and(|t| now.duration_since(t) < MIN_PROBE_INTERVAL)
-                    {
+                    if !probe_spacing.admit(std::time::Instant::now(), ramping) {
                         tracing::warn!(
                             target_kbps = req.target_kbps,
                             "speed-test probe rejected (rate-limited)"
                         );
+                        // The client holds its reports until a probe is answered.
+                        let declined = super::stream::declined();
+                        if io::write_msg(&mut ctrl_send, &declined.encode()).await.is_err() {
+                            break;
+                        }
                         continue;
                     }
-                    last_probe = Some(now);
                     tracing::info!(
                         target_kbps = req.target_kbps,
                         duration_ms = req.duration_ms,
@@ -1179,6 +1207,23 @@ mod tests {
         ));
         assert!(!is_ramp_step(&req(800), true));
         assert!(!is_ramp_step(&req(25), false));
+    }
+
+    /// A ramp cut short by the first frame asks for its burst two seconds
+    /// later. The steps before it must not have started the spacing, or that
+    /// burst is refused and the session gets no measurement at all.
+    #[test]
+    fn ramp_steps_leave_the_spacing_to_the_burst_after_them() {
+        let t0 = std::time::Instant::now();
+        let at = |ms| t0 + std::time::Duration::from_millis(ms);
+        let mut spacing = ProbeSpacing::default();
+        for ms in [0, 40, 80, 120] {
+            assert!(spacing.admit(at(ms), true), "a ramp step is always served");
+        }
+        assert!(spacing.admit(at(2_120), false), "the burst after the ramp");
+        assert!(!spacing.admit(at(5_000), false), "spaced from that burst");
+        assert!(spacing.admit(at(5_010), true), "a ramp step still is not");
+        assert!(spacing.admit(at(12_121), false), "ten seconds on");
     }
 
     /// The ramp's verdict ask — lower than the pin, inside the bring-up

@@ -172,6 +172,8 @@ pub enum RampStepEnd {
     ReachedMax { proven_kbps: u32 },
     /// The report never arrived, so nothing judged it.
     NoReport,
+    /// The host answered without sending: nothing will drain.
+    Declined,
 }
 
 /// What the ramp came to, for a test that pins its arithmetic.
@@ -471,7 +473,17 @@ impl Ramp {
     /// Fold a report into the step in flight. Reports repeat: the pump
     /// re-presents the probe state every iteration, and the bytes keep
     /// growing while the receive buffer drains.
+    ///
+    /// A step the host declined put nothing on the wire, so there is no drain
+    /// to wait for: it ends the ramp on the report, not on the step's deadline.
     fn on_report(&mut self, r: ProbeReport, now: Instant) {
+        if r.host_duration_ms == 0 && r.host_bytes_sent == 0 {
+            if let Some(step) = self.step.take() {
+                self.note(&step, Some(&r), RampStepEnd::Declined, now);
+                self.no_wall();
+            }
+            return;
+        }
         let Some(step) = self.step.as_mut() else {
             return;
         };
@@ -1157,6 +1169,29 @@ mod tests {
             rig.p.take_ramped(rig.now),
             Some(Ramped::NoWall { proven_kbps: 0 }),
             "nothing was measured, and nothing is claimed"
+        );
+    }
+
+    /// A step the host declined ends the ramp when the answer lands, with what
+    /// the steps before it proved — not 1.5 s later on the step's deadline.
+    #[test]
+    fn a_declined_step_ends_the_ramp_at_once() {
+        let mut rig = Rig::new(1_000_000, None);
+        assert_eq!(rig.step(1_000_000, u32::MAX), None);
+        rig.pending.take().expect("a second step went out");
+        let at = rig.at(5);
+        rig.p.on_result(ProbeReport::default(), at);
+        let Some(Ramped::NoWall { proven_kbps }) = rig.p.take_ramped(at) else {
+            panic!("a declined step ends the ramp with what it had")
+        };
+        assert!(proven_kbps >= 4_000, "step one still counts: {proven_kbps}");
+        assert!(
+            rig.p.ramp_cut_short(),
+            "nothing above step one was measured"
+        );
+        assert_eq!(
+            rig.p.ramp_steps().last().map(|s| s.end),
+            Some(RampStepEnd::Declined)
         );
     }
 
