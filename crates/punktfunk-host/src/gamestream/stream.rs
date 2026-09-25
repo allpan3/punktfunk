@@ -525,10 +525,12 @@ fn run(
                 ),
             )
         });
-        // Re-detect the live compositor so a Desktop↔Game switch is followed in place.
-        // WxH is locked at ANNOUNCE — a resolution change cannot follow mid-stream.
-        let rebuild =
-            || open_gs_virtual_source(cfg, app, target.as_ref(), &life.quit).map(|(c, _, _)| c);
+        // Re-detect the live compositor so a Desktop↔Game switch is followed in place, with its
+        // own cursor blend. WxH is locked at ANNOUNCE — a resolution change cannot follow.
+        let rebuild = || {
+            open_gs_virtual_source(cfg, app, target.as_ref(), &life.quit)
+                .map(|(c, comp, route)| (c, gs_cursor_blend(comp, route.as_ref(), &cfg)))
+        };
         return stream_body(
             &mut capturer,
             Some(&rebuild),
@@ -1198,6 +1200,9 @@ fn keyframe_coalesce_window(frame_interval: Duration) -> Duration {
     (frame_interval * 2).max(Duration::from_millis(100))
 }
 
+/// Re-opens the virtual source on capture loss: the new capturer and its `cursor_blend`.
+type GsRebuild<'a> = &'a dyn Fn() -> Result<(Box<dyn Capturer>, bool)>;
+
 /// Encode loop over a borrowed capturer. Send is a dedicated thread so a send spike cannot
 /// stall capture/encode.
 #[allow(clippy::too_many_arguments)]
@@ -1205,9 +1210,9 @@ fn stream_body(
     // `&mut Box` so a capture-loss rebuild can swap the capturer in place.
     capturer: &mut Box<dyn Capturer>,
     // Virtual-display: re-open on capture loss. `None` for portal/synthetic — propagate.
-    rebuild: Option<&dyn Fn() -> Result<Box<dyn Capturer>>>,
+    rebuild: Option<GsRebuild<'_>>,
     // Encoder composites cursor bitmaps. `false` = pointer is embedded (or absent).
-    cursor_blend: bool,
+    mut cursor_blend: bool,
     sock: &UdpSocket,
     cfg: StreamConfig,
     running: &Arc<AtomicBool>,
@@ -1256,7 +1261,7 @@ fn stream_body(
     // with Moonlight across in-place rebuilds (an internal counter would desync).
     let mut au_seq: u32 = 0;
     let mut enc_inflight: u32 = 0;
-    let plan = gs_session_plan(&cfg, cursor_blend);
+    let mut plan = gs_session_plan(&cfg, cursor_blend);
     let mut enc = gs_open_encoder(
         &plan,
         &**capturer,
@@ -1429,7 +1434,11 @@ fn stream_body(
                     let _probe = (loss_at.elapsed() < PROBE_HOLDOFF)
                         .then(crate::vdisplay::rebuild_probe_scope);
                     match rebuild() {
-                        Ok(c) => break c,
+                        Ok((c, blend)) => {
+                            cursor_blend = blend;
+                            plan = gs_session_plan(&cfg, blend);
+                            break c;
+                        }
                         Err(e2) => {
                             if !running.load(Ordering::SeqCst) || Instant::now() >= rebuild_deadline
                             {
