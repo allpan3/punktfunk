@@ -131,6 +131,10 @@ const DELIVERY_REF_WINDOWS: u32 = 4;
 /// what a clean window delivers depends on the content's fill and the parity
 /// floor, not only on the link.
 const DELIVERY_SHORT_PCT: u32 = 90;
+/// A source that produced under a quarter of the frames the delivery norm was
+/// taught at went still: its wire rate says nothing about the link. A quarter
+/// keeps a game's slow scene, at half its usual frames, a judged window.
+const STILL_FRAMES_DIV: u64 = 4;
 /// Two delivered rates this close are the same wall (±1/5). Wider than the
 /// decode cap's ±1/8 because a wall is a moving physical thing — Wi-Fi and a
 /// cell both wander further than that inside a minute.
@@ -237,6 +241,11 @@ pub(crate) struct BitrateController {
     /// both move with the rate.
     delivery_sum_kbps: u64,
     delivery_windows: u32,
+    /// New-content frames those windows carried, summed beside them.
+    delivery_frames: u64,
+    /// Frames a window carried the last time a norm formed (`0` = never).
+    /// Kept across rate moves: how often the source draws is not the rate's.
+    frames_norm: u64,
     /// The standing cap came from a measurement, which holds 30 % back by
     /// design. Its early lifts are that margin coming back, not a wall that
     /// moved, so they must not retire it.
@@ -361,6 +370,8 @@ impl BitrateController {
             link_mark_kbps: 0,
             delivery_sum_kbps: 0,
             delivery_windows: 0,
+            delivery_frames: 0,
+            frames_norm: 0,
             link_cap_measured: false,
             link_evidence: false,
             link_lifted: false,
@@ -847,6 +858,7 @@ impl BitrateController {
         self.idle_windows = 0;
         // A frame of the new mode is a different size on the wire.
         self.forget_rate_norms();
+        self.frames_norm = 0;
     }
 
     /// Decide whether this 750 ms window should ask for a new encoder rate.
@@ -876,6 +888,7 @@ impl BitrateController {
             draining,
             self.link_vouches_for(w),
             self.lift_probing(),
+            self.source_went_still(w),
         );
         self.last_reason = v.reason;
         self.note_activity(w.activity, v.quiet);
@@ -1060,8 +1073,12 @@ impl BitrateController {
     /// does the queue behind it. The delay's last value is kept anyway: the
     /// drain guard needs a mark to wait for.
     fn forget_rate_norms(&mut self) {
+        if self.delivery_windows >= DELIVERY_REF_WINDOWS {
+            self.frames_norm = self.delivery_frames / u64::from(self.delivery_windows);
+        }
         self.delivery_sum_kbps = 0;
         self.delivery_windows = 0;
+        self.delivery_frames = 0;
         if self.delay_windows > 0 {
             self.delay_norm_us = self.delay_sum_us / i64::from(self.delay_windows);
         }
@@ -1077,26 +1094,49 @@ impl BitrateController {
     }
 
     /// One clean window's delivered wire rate. Stillness teaches nothing: a
-    /// repeat-marked or empty window is not this rate's norm, which is the
-    /// same exclusion the climb makes.
+    /// repeat-marked, empty or still window is not this rate's norm, which is
+    /// the same exclusion the climb makes.
     fn note_delivery(&mut self, w: &WindowSample) {
-        if w.activity.quiet() {
+        if w.activity.quiet() || self.source_went_still(w) {
             return;
         }
         self.delivery_sum_kbps += u64::from(w.actual_kbps);
         self.delivery_windows += 1;
+        if let WindowActivity::Active(n) = w.activity {
+            self.delivery_frames += u64::from(n);
+        }
         if let Some(d) = w.delay {
             self.delay_sum_us += d.mean_us;
             self.delay_windows += 1;
         }
     }
 
+    /// Did the source produce under a quarter of the frames it was last seen
+    /// producing? Lost frames count as produced: the link, not the source,
+    /// took them. A source never seen busy is never still — the first window
+    /// of video is partial, not quiet.
+    fn source_went_still(&self, w: &WindowSample) -> bool {
+        let WindowActivity::Active(n) = w.activity else {
+            return false;
+        };
+        let norm = if self.delivery_windows >= DELIVERY_REF_WINDOWS {
+            self.delivery_frames / u64::from(self.delivery_windows)
+        } else {
+            self.frames_norm
+        };
+        (u64::from(n) + w.dropped) * STILL_FRAMES_DIV < norm
+    }
+
     /// Did the link hand over less than the rate it was running at?
     ///
     /// The climb's own bar, prorated by the frames that arrived: content that
     /// never filled the target is not the link falling short, and reading it
-    /// as one would land the rate on a still picture.
+    /// as one would land the rate on a still picture. A source that went still
+    /// is never short unless a queue is holding its frames.
     fn short_of_offered(&self, w: &WindowSample, owd_bad: bool) -> bool {
+        if !owd_bad && self.source_went_still(w) {
+            return false;
+        }
         if let Some(reference) = self.delivery_reference() {
             return u64::from(w.actual_kbps) * 100
                 < u64::from(reference) * u64::from(DELIVERY_SHORT_PCT);
