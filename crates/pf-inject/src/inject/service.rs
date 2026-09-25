@@ -55,15 +55,38 @@ const INJECTOR_REOPEN_BACKOFF: std::time::Duration = std::time::Duration::from_s
 /// session end for a pin). `pin` is the gamescope relay ([`InjectorService::start_at`]); `None`
 /// follows [`default_backend`]. Each wake drains the backlog and [`coalesce`]s motion so a slow
 /// backend cannot queue stale relative-mouse/scroll; buttons, keys, and absolute moves stay ordered.
+/// While the injector holds a deadline, the wait ends there too and runs its `on_deadline`.
 fn injector_service_thread(
     rx: std::sync::mpsc::Receiver<InputEvent>,
     pin: Option<std::path::PathBuf>,
 ) {
+    use std::sync::mpsc::RecvTimeoutError;
     let mut injector: Option<Box<dyn InputInjector>> = None;
     let mut open_backend: Option<Backend> = None;
     let mut last_failed: Option<std::time::Instant> = None;
     let mut warped_gen = crate::aim_gen();
-    while let Ok(first) = rx.recv() {
+    loop {
+        let first = match injector.as_ref().and_then(|i| i.deadline()) {
+            Some(due) => {
+                match rx.recv_timeout(due.saturating_duration_since(std::time::Instant::now())) {
+                    Ok(ev) => ev,
+                    Err(RecvTimeoutError::Timeout) => {
+                        if let Some(Err(e)) = injector.as_mut().map(|i| i.on_deadline()) {
+                            tracing::warn!(error = %format!("{e:#}"), "inject failed — reopening injector");
+                            injector = None;
+                            open_backend = None;
+                            last_failed = Some(std::time::Instant::now());
+                        }
+                        continue;
+                    }
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            None => match rx.recv() {
+                Ok(ev) => ev,
+                Err(_) => break,
+            },
+        };
         let mut batch = vec![first];
         while let Ok(ev) = rx.try_recv() {
             batch.push(ev);

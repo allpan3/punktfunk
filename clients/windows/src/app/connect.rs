@@ -361,16 +361,12 @@ fn connect_spawn(
     }
 }
 
-/// "Open console UI": run the gamepad library (`punktfunk-session --browse`) for a
-/// PAIRED host in the session window. The shell yields exactly like a stream — hidden on
-/// the library window's `ready`, restored when the child exits (launched titles stream
-/// in that same window, so the whole couch round-trip happens without the shell).
-/// `target = None` opens the console's own host view (discovery, pairing, settings) — the
-/// couch entry point that isn't tied to one host; `Some` opens straight into that host's
-/// library.
+/// "Open console UI": run the console (`punktfunk-session --browse`) in the session window.
+/// The shell yields exactly like a stream — hidden on the console window's `ready`, restored
+/// when the child exits (launched titles stream in that same window, so the whole couch
+/// round-trip happens without the shell).
 pub(crate) fn open_console(
     ctx: &Arc<AppCtx>,
-    target: Option<Target>,
     set_screen: &AsyncSetState<Screen>,
     set_status: &AsyncSetState<String>,
 ) {
@@ -378,47 +374,38 @@ pub(crate) fn open_console(
     *ctx.shared.session.lock().unwrap() = child.clone();
     *ctx.shared.stats.lock().unwrap() = None;
     ctx.shared.browse.store(true, Ordering::SeqCst);
-    if let Some(t) = target.clone() {
-        *ctx.shared.target.lock().unwrap() = t;
-    }
     let fullscreen = ctx.settings.lock().unwrap().fullscreen_on_stream;
     set_status.call(String::new());
     set_screen.call(Screen::Connecting);
 
     let shared = ctx.shared.clone();
     let (ss, st) = (set_screen.clone(), set_status.clone());
-    let addr_port = target.as_ref().map(|t| (t.addr.clone(), t.port));
-    let spawned = crate::spawn::spawn_browse(
-        addr_port.as_ref().map(|(a, p)| (a.as_str(), *p)),
-        fullscreen,
-        child,
-        move |event| {
-            use crate::spawn::SpawnEvent;
-            match event {
-                SpawnEvent::Ready => {
-                    // The library window presented — the shell yields (same one-visible-
-                    // window rule as a stream).
-                    crate::shell_window::hide();
-                    ss.call(Screen::Stream);
-                }
-                SpawnEvent::Stats(s) => *shared.stats.lock().unwrap() = Some(*s),
-                SpawnEvent::Exited { error, ended, code } => {
-                    crate::shell_window::restore();
-                    // Quit from the library (B / closing the window) returns silently;
-                    // a failed start surfaces its error line, or the exit code when it
-                    // died without producing one.
-                    st.call(
-                        error
-                            .map(|(msg, _)| msg)
-                            .or(ended)
-                            .or_else(|| crate::spawn::silent_exit_banner(code))
-                            .unwrap_or_default(),
-                    );
-                    ss.call(Screen::Hosts);
-                }
+    let spawned = crate::spawn::spawn_browse(fullscreen, child, move |event| {
+        use crate::spawn::SpawnEvent;
+        match event {
+            SpawnEvent::Ready => {
+                // The library window presented — the shell yields (same one-visible-
+                // window rule as a stream).
+                crate::shell_window::hide();
+                ss.call(Screen::Stream);
             }
-        },
-    );
+            SpawnEvent::Stats(s) => *shared.stats.lock().unwrap() = Some(*s),
+            SpawnEvent::Exited { error, ended, code } => {
+                crate::shell_window::restore();
+                // Quit from the library (B / closing the window) returns silently;
+                // a failed start surfaces its error line, or the exit code when it
+                // died without producing one.
+                st.call(
+                    error
+                        .map(|(msg, _)| msg)
+                        .or(ended)
+                        .or_else(|| crate::spawn::silent_exit_banner(code))
+                        .unwrap_or_default(),
+                );
+                ss.call(Screen::Hosts);
+            }
+        }
+    });
     if let Err(e) = spawned {
         set_status.call(e);
         set_screen.call(Screen::Hosts);

@@ -92,8 +92,8 @@ pub use self::rumble::{ActuatorQuirks, RumbleCommand};
 use self::control::{CtrlRequest, Negotiated};
 use self::frame_channel::{DecodeLatAcc, FrameChannel, FramePop};
 use self::planes::{
-    RumbleUpdate, AUDIO_QUEUE, CLIP_EVENT_QUEUE, CURSOR_SHAPE_QUEUE, CURSOR_STATE_QUEUE,
-    HDR_META_QUEUE, HIDOUT_QUEUE, HOST_TIMING_QUEUE, PAD_AUDIO_QUEUE, RUMBLE_QUEUE,
+    RumbleUpdate, AUDIO_QUEUE, CLIP_EVENT_QUEUE, CURSOR_STATE_QUEUE, HDR_META_QUEUE, HIDOUT_QUEUE,
+    HOST_TIMING_QUEUE, PAD_AUDIO_QUEUE, RUMBLE_QUEUE,
 };
 use self::probe::ProbeState;
 use self::pump::run_pump;
@@ -267,7 +267,7 @@ pub struct NativeClient {
     /// an older host never sends any.
     host_timing: Mutex<Receiver<crate::quic::HostTiming>>,
     /// Control-stream shapes. Empty unless [`quic::CLIENT_CAP_CURSOR`] met [`quic::HOST_CAP_CURSOR`].
-    cursor_shape: Mutex<Receiver<crate::quic::CursorShape>>,
+    cursor_shape: self::planes::ShapeReceiver,
     /// Per-frame cursor state (`0xD0`). Same negotiation gate as shapes.
     cursor_state: Mutex<Receiver<crate::quic::CursorState>>,
     /// Wake-up plane for [`NativeClient::next_access_update`]. Truth is `access_grants` /
@@ -708,8 +708,7 @@ impl NativeClient {
         let (clip_event_tx, clip_event_rx) =
             std::sync::mpsc::sync_channel::<ClipEventCore>(CLIP_EVENT_QUEUE);
         let (clip_cmd_tx, clip_cmd_rx) = tokio::sync::mpsc::unbounded_channel::<ClipCommand>();
-        let (cursor_shape_tx, cursor_shape_rx) =
-            std::sync::mpsc::sync_channel::<crate::quic::CursorShape>(CURSOR_SHAPE_QUEUE);
+        let (cursor_shape_tx, cursor_shape_rx) = self::planes::shape_queue();
         let (cursor_state_tx, cursor_state_rx) =
             std::sync::mpsc::sync_channel::<crate::quic::CursorState>(CURSOR_STATE_QUEUE);
         let (access_tx, access_rx) =
@@ -910,7 +909,7 @@ impl NativeClient {
             scroll_invert,
             hdr_meta: Mutex::new(hdr_meta_rx),
             host_timing: Mutex::new(host_timing_rx),
-            cursor_shape: Mutex::new(cursor_shape_rx),
+            cursor_shape: cursor_shape_rx,
             cursor_state: Mutex::new(cursor_state_rx),
             access: Mutex::new(access_rx),
             audio_mute,
@@ -1577,7 +1576,7 @@ impl NativeClient {
     /// [`NativeClient::next_cursor_state`] references it. Empty unless
     /// [`crate::quic::CLIENT_CAP_CURSOR`] was advertised against a capable host.
     pub fn next_cursor_shape(&self, timeout: Duration) -> Result<crate::quic::CursorShape> {
-        match self.cursor_shape.lock().unwrap().recv_timeout(timeout) {
+        match self.cursor_shape.recv_timeout(timeout) {
             Ok(s) => Ok(s),
             Err(RecvTimeoutError::Timeout) => Err(PunktfunkError::NoFrame),
             Err(RecvTimeoutError::Disconnected) => Err(PunktfunkError::Closed),

@@ -138,6 +138,19 @@ public enum ConsoleJSON {
         return string(["library": row])
     }
 
+    /// `{"pair": HostRow}`: the console's Pair screen for this host, over Home.
+    public static func pairEntry(_ host: StoredHost, presets: [StreamPreset]) -> String {
+        string([
+            "pair": row(
+                host, advert: nil, online: true, presets: presets, hostActions: [:], running: [:]),
+        ])
+    }
+
+    /// A question the console asks in place of a system alert; `choices` lead with the default.
+    public static func prompt(id: String, title: String, message: String, choices: [String]) -> String {
+        string(["id": id, "title": title, "message": message, "choices": choices])
+    }
+
     /// `KnownHosts` — what the console needs to build a `punktfunk://` link.
     public static func knownHosts(_ saved: [StoredHost]) -> String {
         string([
@@ -152,6 +165,61 @@ public enum ConsoleJSON {
                 ]
             }
         ])
+    }
+
+    /// One connected controller as the Players tab shows it.
+    public struct Pad {
+        public var name: String
+        /// Stable across a refresh: the rumble test names the pad by it.
+        public var key: String
+        /// The virtual-pad type's wire byte, which picks the card's glyph family.
+        public var pref: UInt32
+        public var detail: String
+        public var forwarded: Bool
+        public var rumble: Bool
+        /// 0...1, nil when the pad reports none.
+        public var battery: Float?
+        public var charging: Bool
+
+        public init(_ c: GamepadManager.DiscoveredController, forwarded: Bool) {
+            self.init(
+                name: c.name, key: c.id, pref: c.kind.rawValue, detail: c.productCategory,
+                forwarded: forwarded, rumble: c.hasHaptics, battery: c.batteryLevel,
+                charging: c.isCharging)
+        }
+
+        public init(
+            name: String, key: String, pref: UInt32, detail: String, forwarded: Bool,
+            rumble: Bool, battery: Float?, charging: Bool
+        ) {
+            (self.name, self.key, self.pref, self.detail) = (name, key, pref, detail)
+            (self.forwarded, self.rumble, self.battery, self.charging) =
+                (forwarded, rumble, battery, charging)
+        }
+    }
+
+    /// The pads push: the legend's pad and its glyph family, then every pad, then the inputs
+    /// that are not pads (`kind` is `keyboard`, `mouse` or `remote`).
+    public static func pads(
+        _ pads: [Pad], active: Pad?, others: [(name: String, kind: String)] = []
+    ) -> String {
+        var doc: [String: Any] = [
+            "pads": pads.map { pad -> [String: Any] in
+                [
+                    "name": pad.name, "key": pad.key, "pref": pad.pref, "detail": pad.detail,
+                    "forwarded": pad.forwarded, "rumble": pad.rumble,
+                    "battery": pad.battery.map {
+                        ["percent": Int(($0 * 100).rounded()), "charging": pad.charging]
+                    } as Any? ?? NSNull(),
+                ]
+            }
+        ]
+        doc["others"] = others.map { ["name": $0.name, "kind": $0.kind] }
+        if let active {
+            doc["label"] = active.name
+            doc["pref"] = active.pref
+        }
+        return string(doc)
     }
 
     /// The catalog with each preset's overrides, so a settings row can say when a host's bound
@@ -169,6 +237,9 @@ public enum ConsoleJSON {
         var j: [String: Any] = [:]
         j["width"] = o.width
         j["height"] = o.height
+        j["match_window"] = o.matchWindow
+        j["compositor"] = o.compositor.map(ConsoleSettings.compositorName)
+        j["gamepad"] = o.gamepadType.map(ConsoleSettings.padTypeName)
         j["refresh_hz"] = o.refreshHz
         j["bitrate_kbps"] = o.bitrateKbps
         j["render_scale"] = o.renderScale
@@ -197,6 +268,33 @@ public enum ConsoleJSON {
         j["vsync"] = o.vsync
         j["allow_vrr"] = o.allowVRR
         return j.compactMapValues { $0 }
+    }
+
+    /// The keys `overrides(_:)` sends: exactly the ones a console save sets or clears.
+    private static let consoleKeys: Set<String> = [
+        "width", "height", "match_window", "compositor", "gamepad", "refresh_hz", "bitrate_kbps",
+        "render_scale", "video_fit", "codec", "hdr_enabled", "enable_444", "ten_bit_sdr",
+        "audio_channels", "audio_format", "mic_enabled", "echo_cancel", "keep_host_audio",
+        "touch_mode", "mouse_mode", "invert_scroll", "overlay_actions", "inhibit_shortcuts",
+        "gamepad_forwarding", "system_buttons", "guide_gesture", "stats_verbosity",
+        "fullscreen_on_stream", "present_priority", "smooth_buffer", "vsync", "allow_vrr",
+    ]
+
+    /// The console's saved overlay over `base`: every key the console edits comes from it,
+    /// set or cleared, and every override only this app knows stays.
+    public static func overlay(_ console: [String: Any], over base: SettingsOverlay) -> SettingsOverlay {
+        guard let data = try? JSONEncoder().encode(base),
+            var j = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return base }
+        for key in consoleKeys { j[key] = nil }
+        for (key, value) in console where consoleKeys.contains(key) { j[key] = value }
+        // The console names these two; this app's overlay stores the wire number.
+        j["compositor"] = (console["compositor"] as? String).flatMap(ConsoleSettings.compositorTag)
+        j["gamepad"] = (console["gamepad"] as? String).flatMap(ConsoleSettings.padTypeTag)
+        guard let merged = try? JSONSerialization.data(withJSONObject: j.compactMapValues { $0 }),
+            let overlay = try? JSONDecoder().decode(SettingsOverlay.self, from: merged)
+        else { return base }
+        return overlay
     }
 
     // MARK: - wake and pair

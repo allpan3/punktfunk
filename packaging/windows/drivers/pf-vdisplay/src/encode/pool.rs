@@ -192,7 +192,8 @@ impl Pool {
     /// encoder, so the wait is one pass on the shared immediate context, which this pass would
     /// serialise on through the D3D11 runtime lock anyway. With no free slot the oldest queued
     /// frame is recycled ([`wire::offer_slot`]), so the encoder always reads the freshest
-    /// composed picture; that recycle is the only counted drop. Under [`bypass_enabled`] there
+    /// composed picture; that recycle is the only counted drop. While the cursor is armed the
+    /// converter kinds keep the RGB copy for a later blend. Under [`bypass_enabled`] there
     /// is no pass: the surface itself becomes the encoder's input and only one may be out at a
     /// time.
     pub fn offer(&self, device: &Direct3DDevice, tex: &ID3D11Texture2D, qpc: u64) -> Offer {
@@ -245,9 +246,11 @@ impl Pool {
                 }
                 None => return self.drop_one(),
             };
-            let blend = self.cursor.blends();
+            // Keep a clean plate whenever the blend could turn on: a flip over a still desktop
+            // has no other picture to draw the pointer onto.
+            let plate = self.cursor.blends() || self.cursor.armed();
             let passed =
-                bridge::<d3d::ID3D11Texture2D>(tex).and_then(|src| st.targets.pass(&src, i, blend));
+                bridge::<d3d::ID3D11Texture2D>(tex).and_then(|src| st.targets.pass(&src, i, plate));
             if passed.is_err() {
                 st.free.push(i);
                 return self.drop_one();
@@ -299,24 +302,26 @@ impl Pool {
     ///
     /// Yields nothing unless the slot is idle and no composed frame is queued
     /// ([`wire::republish_slot`]), and moves it out of `free` so no drain pass can overwrite
-    /// the pixels the encoder is about to read. A blended pointer is re-drawn by `frame`, so
-    /// the last blend is lifted off the slot first or the old pointer stays under the new one.
+    /// the pixels the encoder is about to read. The last blend is lifted off the slot first:
+    /// `frame` re-draws a blended pointer, and one the client took back must not ride the
+    /// keyframe. Only a blend needs the plate; without one a slot with none is clean already.
     /// QPC 0: the drive stamps the re-encode with now, not the stale present time.
     pub fn republish(&self) -> Option<(usize, u64, u64)> {
         let mut st = lock(&self.state);
         let (slot, _, seq) = st.stash?;
         let queued = st.full.len();
         wire::republish_slot(Some(slot), queued, &st.free)?;
+        let restored = st.targets.restore_under(slot);
         if self.cursor.blends() {
-            st.targets.restore_under(slot).ok()?;
+            restored.ok()?;
         }
         st.free.retain(|&s| s != slot);
         st.encoding.push(slot);
         Some((slot, 0, seq))
     }
 
-    /// A blended pointer moved since the encode thread last looked AND the stash can be
-    /// re-encoded now — a peek that leaves the mark, so the drive loop can rate-limit to the
+    /// The pointer or its render model changed since the encode thread last looked AND the
+    /// stash can be re-encoded now — a peek that leaves the mark, so the drive loop can rate-limit to the
     /// refresh. A stash whose access unit is still owed is not pending: the loop parks on that
     /// AU instead of spinning on a timer, and the move is picked up once the slot comes back.
     pub fn cursor_pending(&self) -> bool {
@@ -329,9 +334,10 @@ impl Pool {
         })
     }
 
-    /// Re-encode the stash with the pointer where it is NOW. DWM excludes the hardware cursor and
-    /// composes only on damage, so a cursor move over a still desktop yields no frame; this makes
-    /// the move itself the frame. The clean plate is re-blended (never the last blend again), the
+    /// Re-encode the stash with the pointer where it is NOW, or without it once the client draws
+    /// it. DWM excludes the hardware cursor and composes only on damage, so a cursor move over a
+    /// still desktop yields no frame; this makes the move itself the frame. The clean plate is
+    /// re-blended (never the last blend again), the
     /// slot is taken like [`Self::republish`], and the source counter advances so the move reads
     /// as real progress. `None` unless a move is pending, a plate exists, the slot is idle and no
     /// composed frame is queued — a queued frame carries the current pointer itself.
@@ -360,6 +366,11 @@ impl Pool {
             dbglog!("[pf-vd] cursor: re-encode on pointer move (no compose) slot={slot} seq={seq}");
         }
         Some((slot, qpc_now(), seq))
+    }
+
+    /// A cursor-only re-encode was dropped: mark the pointer changed so it is tried again.
+    pub fn cursor_changed(&self) {
+        self.cursor.mark_dirty();
     }
 
     /// Hand a slot back, whether its AU was published or it was skipped. In bypass this is

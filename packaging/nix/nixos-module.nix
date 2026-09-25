@@ -770,9 +770,9 @@ in
         serviceConfig = {
           Type = "simple";
           ExecStart = "${cfg.scripting.package}/bin/punktfunk-scripting";
-          # `+` runs outside the namespace: the mandatory plugin-run bind needs the directory before
-          # the host's first start has created it.
-          ExecStartPre = "+${pkgs.coreutils}/bin/mkdir -p -m 0700 %h/.config/punktfunk/plugin-run";
+          # `+` runs outside the namespace: the plugin-run and plugin-state binds need both
+          # directories, and inside the read-only home nothing can create them.
+          ExecStartPre = "+${pkgs.coreutils}/bin/mkdir -p -m 0700 %h/.config/punktfunk/plugin-run %h/.config/punktfunk/plugin-state";
           Restart = "on-failure";
           RestartSec = 2;
           # Deliver SIGTERM to the runner (it orchestrates the structural shutdown of its unit

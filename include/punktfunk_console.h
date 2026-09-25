@@ -60,6 +60,17 @@
 // `{}` for Home, `{"library": HostRow}` for a shelf — re-roots on the next frame.
 #define PUNKTFUNK_CONSOLE_PUSH_NAVIGATE 15
 
+// `{"id", "title", "message", "choices": [..]}` — a question over the top screen; the
+// answer comes back as the `PromptAnswer` command.
+#define PUNKTFUNK_CONSOLE_PUSH_PROMPT 16
+
+// `[{"heading", "text"}]` — what this app bundles, for the Licences screen. The answer to
+// the `LoadLicenses` command.
+#define PUNKTFUNK_CONSOLE_PUSH_LICENSES 17
+
+// `{"held": [..], "axes": [[name, v]]}` — the pad's reading while the `PadTest` command is on.
+#define PUNKTFUNK_CONSOLE_PUSH_PAD_TEST 18
+
 // One console. Opaque to C.
 typedef struct PunktfunkConsole PunktfunkConsole;
 
@@ -92,7 +103,7 @@ PunktfunkConsole *punktfunk_console_new(const char *options_json,
 // `c` is NULL or from `punktfunk_console_new`, and is not used again.
 void punktfunk_console_free(PunktfunkConsole *c);
 
-// Draw one frame into `mtl_texture` (BGRA8, `width`×`height`) and submit it to the queue.
+// Draw one frame into `mtl_texture` (BGR10A2 or BGRA8, `width`×`height`) and submit it to the queue.
 // `scale` is design units per pixel; `0` takes the shell's own formula. `false` = nothing
 // drawn (idle, or the texture could not be wrapped): present nothing.
 //
@@ -107,8 +118,9 @@ bool punktfunk_console_frame(const PunktfunkConsole *c,
                              double scale);
 
 // A discrete menu event: 0..3 move up/down/left/right, 4 confirm, 5 back, 6 secondary (Y),
-// 7 tertiary (X), 8 jump back (L1), 9 jump forward (R1). `source` 1 = a pad (its glyphs),
-// 0 = a remote or keyboard. `false` = Back at the root: the press is the system's.
+// 7 tertiary (X), 8 jump back (L1), 9 jump forward (R1), 10/11 a remote's OK down/up (acts
+// on release, held it is the card's menu). `source` 1 = a pad (its glyphs), 0 = a remote or
+// keyboard. `false` = Back at the root: the press is the system's.
 //
 // # Safety
 // `c` is live.
@@ -180,7 +192,12 @@ char *punktfunk_console_next_event(const PunktfunkConsole *c);
 // `c` is live.
 char *punktfunk_console_drain_cmds(const PunktfunkConsole *c);
 
-// Free a string from `punktfunk_console_next_event` or `punktfunk_console_drain_cmds`.
+// The console's background palettes in cycle order, as `[{"id", "name"}]`: what a native
+// picker offers for `ui_palette`. Free with `punktfunk_console_string_free`.
+char *punktfunk_console_palettes(void);
+
+// Free a string from `punktfunk_console_next_event`, `punktfunk_console_drain_cmds` or
+// `punktfunk_console_palettes`.
 //
 // # Safety
 // `s` is NULL or one of those strings, freed once.

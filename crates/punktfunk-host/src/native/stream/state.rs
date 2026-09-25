@@ -128,6 +128,9 @@ pub(super) struct StreamState {
     pub(super) interval: std::time::Duration,
     pub(super) cur_node_id: u32,
     pub(super) cur_display_gen: Option<u64>,
+    /// The live output's metadata for a capture-only rebuild (`on_capture_lost`).
+    #[cfg(target_os = "linux")]
+    pub(super) lease: Option<super::pipeline::OutputLease>,
     /// Source can change format/size with no client Reconfigure; in-place encoder reset cannot follow.
     pub(super) enc_src: (pf_frame::PixelFormat, u32, u32),
     /// The mode a rebuild reopens at: the client's latest ask, or the source's delivered size.
@@ -185,6 +188,13 @@ pub(super) struct StreamState {
     /// is about that retarget. What a pipeline opened at is the build's own
     /// business (`Pipeline::bitrate_kbps`), and is not re-litigated here.
     pub(super) retargeted: bool,
+    /// A FEC proposal an asynchronous encoder was asked to make room for: the
+    /// parity and the encoder rate it implies, kbps. Parity waits for the
+    /// encoder to settle.
+    pub(super) fec_pending: Option<(u8, u32)>,
+    /// The proposal a hold was last logged for, so a refusal the control task
+    /// re-proposes every window logs once.
+    pub(super) fec_hold_logged: u8,
     pub(super) cadence_degraded: Arc<AtomicBool>,
     pub(super) cadence_behind_score: Arc<AtomicU32>,
     pub(super) client_packets_received: Arc<AtomicU32>,
@@ -231,7 +241,8 @@ impl StreamState {
         self.enc_derive(self.fec_target.load(Ordering::Relaxed))
     }
 
-    /// Swap the built pipeline in and forget every owed AU. The caller retires the old lease,
+    /// Swap the built pipeline in and forget every owed AU and the last forwarded cursor shape:
+    /// a new capturer numbers its shapes from 1 again. The caller retires the old lease,
     /// re-arms the IDR clock, and re-reads `enc_src` as its path requires.
     pub(super) fn adopt_pipeline(&mut self, p: Pipeline) {
         // A ceiling was learned from the encoder this one replaces. It survives
@@ -246,13 +257,21 @@ impl StreamState {
                 .clear();
         }
         self.retargeted = false;
+        self.fec_pending = None;
         self.adopt_reframe(p.reframe);
         self.capturer = p.capturer;
+        if let Some(fwd) = self.cursor_fwd.as_mut() {
+            *fwd = super::super::cursor_fwd::CursorForwarder::new();
+        }
         self.enc = p.enc;
         self.frame = p.frame;
         self.interval = p.interval;
         self.cur_node_id = p.node_id;
         self.cur_display_gen = p.display_gen;
+        #[cfg(target_os = "linux")]
+        {
+            self.lease = p.lease;
+        }
         self.inflight.clear();
         self.last_au_at = std::time::Instant::now();
         self.encoder_resets = 0;
@@ -314,6 +333,7 @@ impl StreamState {
                 ctx.compositor,
                 ctx.codec,
                 ctx.bit_depth,
+                ctx.hdr,
                 ctx.gamescope_route.as_ref(),
             ),
             ctx.cursor_forward,
@@ -368,6 +388,7 @@ impl StreamState {
             gap_tx,
             fec_target,
             fec_requested,
+            link_kbps,
             conn,
             timing_conn,
             phase,
@@ -549,6 +570,8 @@ impl StreamState {
             display_gen: cur_display_gen,
             bitrate_kbps: built_bitrate,
             reframe,
+            #[cfg(target_os = "linux")]
+            lease,
         } = pipe;
         *frame_map.lock().unwrap_or_else(|e| e.into_inner()) = reframe;
         let enc_src = (frame.format, frame.width, frame.height);
@@ -892,6 +915,8 @@ impl StreamState {
             codec: plan.codec.label(),
             client: client_label.clone(),
             bitrate_kbps: live_bitrate.clone(),
+            link_kbps,
+            link_paced: budget_identity,
             bringup: bringup.clone(),
             wire_sock,
             driver_dropped: driver_dropped.clone(),
@@ -987,6 +1012,8 @@ impl StreamState {
             live_bitrate,
             encoder_ceiling,
             retargeted: false,
+            fec_pending: None,
+            fec_hold_logged: 0,
             cadence_degraded,
             cadence_behind_score,
             client_packets_received,
@@ -1028,6 +1055,8 @@ impl StreamState {
             interval,
             cur_node_id,
             cur_display_gen,
+            #[cfg(target_os = "linux")]
+            lease,
             enc_src,
             cur_mode: mode,
             bitrate_kbps,

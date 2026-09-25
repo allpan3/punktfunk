@@ -355,6 +355,7 @@ fn is_management_cli(args: &[String]) -> bool {
         | Some("tray")
         // Loopback API client; `watch` is long-lived — do not take GPU clocks or the DXGI hook.
         | Some("ctl")
+        | Some("settings")
         | Some("openapi")
         | Some("library")
         | Some("detect-conflicts")
@@ -452,6 +453,7 @@ fn real_main() -> Result<()> {
             Ok(())
         }
         Some("ctl") => ctl::main(&args[1..]),
+        Some("settings") => settings_cli(&args[1..]),
         Some("plugins") => plugins::main(&args[1..]),
         Some("openapi") => {
             print!("{}", mgmt::openapi_json());
@@ -630,7 +632,7 @@ fn real_main() -> Result<()> {
                             serve_ramp: !args.iter().any(|a| a == "--no-ramp"),
                         }),
                         None => {
-                            bail!("--content takes steady, idle-then-motion or frame-driven:<fps>")
+                            bail!("--content takes steady, idle-then-motion, frame-driven:<fps> or motion-then-still:<fps>")
                         }
                     }
                 }
@@ -681,6 +683,23 @@ fn real_main() -> Result<()> {
             None => bail!("unknown command '{other}' (try --help)"),
         },
     }
+}
+
+/// `settings set <id> <value>` writes the console's settings store without a running host, so an
+/// installer's choice stays the console's to change. The value is JSON (`true`, `30`; `null`
+/// clears), else a bare string.
+fn settings_cli(args: &[String]) -> Result<()> {
+    let [verb, id, raw] = args else {
+        bail!("usage: punktfunk-host settings set <id> <value>");
+    };
+    if verb != "set" {
+        bail!("unknown settings verb '{verb}' (try: set)");
+    }
+    let value = serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::from(raw.as_str()));
+    let patch = serde_json::Map::from_iter([(id.clone(), value.clone())]);
+    pf_host_config::save(&patch).context("save host settings")?;
+    println!("{id}={value} → {}", pf_host_config::store_path().display());
+    Ok(())
 }
 
 /// Native plane + management API always run. `--gamestream` is trusted-LAN only.
@@ -767,13 +786,15 @@ fn parse_serve(args: &[String]) -> Result<(mgmt::Options, native::NativeServe, b
     }
     // Mint only if the runner is installed — otherwise a second admin-adjacent credential sits
     // on disk for a subsystem that is not running. Scope: `plugin_may_access`, not pairing/hooks.
-    if crate::plugins::runtime_status().installed {
+    let runner = crate::plugins::runtime_status();
+    if runner.installed {
         opts.plugin_token = Some(crate::mgmt_token::load_or_generate_plugin()?);
         // One token per installed plugin, so the API can tell them apart: a plugin may write its
         // own registration and its own provider, and no other's.
         opts.plugin_tokens = crate::mgmt_token::load_or_generate_per_plugin()?;
         // An upgrade or a hand-edited grants file may have changed what the runner must see.
         crate::plugins::converge_runner_roots();
+        crate::plugins::converge_runner_acls(&runner);
     }
     // Default all-interfaces so paired clients browse over mTLS. Admin stays loopback in
     // `require_auth`. Packaged units ship a fixed ExecStart — `host.env` is the upgrade-safe pin;
@@ -994,6 +1015,8 @@ USAGE:
     punktfunk-host ctl <VERB>                 operator control over the local management API —
                                               pairing, devices, sessions, `watch` (line-JSON for a
                                               shell widget); `ctl --help` for the verb list
+    punktfunk-host settings set <ID> <VALUE>  write one console setting to host-settings.json;
+                                              restart the host to apply it
     punktfunk-host plugins <CMD>              install/run host plugins (add, remove, list, enable,
                                               disable, status) — `plugins --help` for details
     punktfunk-host tray <CMD>                 status-tray lifecycle (start, stop, status) — Windows;
@@ -1019,8 +1042,8 @@ SERVE OPTIONS:
                                  RTSP, ENet control, _nvstream mDNS). OFF by default — they carry
                                  inherent on-path weaknesses (plain-HTTP pairing + legacy GCM nonce
                                  reuse, security-review #5/#9); enable only on a TRUSTED LAN.
-                                 Also PUNKTFUNK_GAMESTREAM=1 in host.env (how a packaged install
-                                 opts in — the shipped units run native-only)
+                                 The flag locks the console's GameStream setting; an install sets
+                                 that setting instead (`settings set gamestream true`)
     --native                     no-op (the native punktfunk/1 plane always runs in `serve` now)
     --native-port <PORT>         native QUIC port (or PUNKTFUNK_NATIVE_PORT in host.env, which
                                  this flag overrides). Default 9777. Clients follow via mDNS, and
@@ -1042,9 +1065,10 @@ PUNKTFUNK1-HOST OPTIONS:
                                  test frames, frames sized from the live Automatic rate, or a
                                  virtual display + NVENC (default: synthetic). synthetic-abr
                                  needs no display and no GPU
-    --content <SCRIPT>           what synthetic-abr encodes: steady, idle-then-motion, or
-                                 frame-driven:<fps> for a source slower than the session
-                                 (default: steady)
+    --content <SCRIPT>           what synthetic-abr encodes: steady, idle-then-motion,
+                                 frame-driven:<fps> for a source slower than the session, or
+                                 motion-then-still:<fps> for a minute of motion, then <fps>
+                                 new frames a second among repeats (default: steady)
     --fill <PCT>                 share of each frame's bit allowance synthetic-abr fills,
                                  1-100 (default: 100)
     --recovery-ms <MS>           how long synthetic-abr takes to answer a keyframe request.

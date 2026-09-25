@@ -49,12 +49,26 @@ pub fn chroma_idc(chroma: ChromaFormat) -> u8 {
 
 /// Wire volume ([`punktfunk_core::quic::HdrMeta`]) → the encoders'
 /// [`pf_frame::HdrMeta`]. Same seven fields; both types are foreign here, so
-/// a field copy stands in for `From`.
+/// a field copy stands in for `From`. A client panel that reports zero primaries,
+/// white point or peak keeps the generic HDR10 value there: a 0-nit mastering
+/// display tone-maps to black.
 pub fn hdr_meta_from_wire(m: punktfunk_core::quic::HdrMeta) -> pf_frame::HdrMeta {
+    let g = pf_frame::hdr::generic_hdr10();
     pf_frame::HdrMeta {
-        display_primaries: m.display_primaries,
-        white_point: m.white_point,
-        max_display_mastering_luminance: m.max_display_mastering_luminance,
+        display_primaries: if m.display_primaries == [[0; 2]; 3] {
+            g.display_primaries
+        } else {
+            m.display_primaries
+        },
+        white_point: if m.white_point == [0; 2] {
+            g.white_point
+        } else {
+            m.white_point
+        },
+        max_display_mastering_luminance: match m.max_display_mastering_luminance {
+            0 => g.max_display_mastering_luminance,
+            v => v,
+        },
         min_display_mastering_luminance: m.min_display_mastering_luminance,
         max_cll: m.max_cll,
         max_fall: m.max_fall,
@@ -302,6 +316,9 @@ impl Encoder for TrackedEncoder {
     fn bitrate_retarget_is_synchronous(&self) -> bool {
         self.inner.bitrate_retarget_is_synchronous()
     }
+    fn retarget_settled(&self) -> bool {
+        self.inner.retarget_settled()
+    }
     fn applied_bitrate_bps(&self) -> Option<u64> {
         self.inner.applied_bitrate_bps()
     }
@@ -367,25 +384,11 @@ fn open_video_backend_linux(
     // so the stream does not die. `format`/`bit_depth`/`chroma` are VAAPI-only
     // — Vulkan imports the dmabuf and does its own CSC.
     let open_amd_intel = || -> Result<(Box<dyn Encoder>, &'static str)> {
-        // HDR keeps Vulkan when the device probe says yes (same profile query
-        // the open makes). Gamescope has no embedded cursor — CSC blend is the
-        // only pointer path. A `no` goes to VAAPI here, not a failed open.
+        // Vulkan when the device probe says yes (same profile query the open makes). Gamescope
+        // has no embedded cursor — CSC blend is the only pointer path. A `no` goes to VAAPI here,
+        // not a failed open. Vulkan gets `bit_depth`; the rule only picks the arm.
         #[cfg(feature = "vulkan-encode")]
-        let is_hdr = format.is_hdr();
-        // 10-bit SDR (8-bit capture, depth 10). HEVC stays on VAAPI (Main10 under BT.709); AV1 has
-        // no VAAPI path, so it takes Vulkan with the depth forced (Vulkan gets `bit_depth`) and the
-        // BT.709 colour axis (`rgb2yuv10_709.comp`).
-        #[cfg(feature = "vulkan-encode")]
-        let sdr10 = bit_depth == 10 && !is_hdr;
-        // Depth Vulkan opens at: HDR-10, or AV1 10-bit SDR; else 8-bit.
-        #[cfg(feature = "vulkan-encode")]
-        let vk_ten_bit = bit_depth == 10 && (is_hdr || codec == Codec::Av1);
-        #[cfg(feature = "vulkan-encode")]
-        if !(sdr10 && codec == Codec::H265)
-            && matches!(codec, Codec::H265 | Codec::Av1)
-            && vulkan_encode_enabled()
-            && vulkan_encode_available_at(codec, vk_ten_bit)
-        {
+        if amd_intel_opens_vulkan(codec, bit_depth == 10, format.is_hdr()) {
             match vulkan_video::VulkanVideoEncoder::open(
                 codec,
                 format,
@@ -756,37 +759,60 @@ pub fn linux_hdr_cuda_ok() -> bool {
 /// the compositor must embed the pointer.
 ///
 /// `cuda_planned` is the caller's CUDA-payload prediction; `ten_bit` the
-/// negotiated depth. A CPU payload is uploaded, and never blended.
-/// 10-bit keeps Vulkan Video only where the device advertises that profile
-/// (`vulkan_encode_available_at`, the same query the open makes).
+/// negotiated depth and `hdr` the colour verdict. A CPU payload is uploaded, and
+/// never blended. The AMD/Intel arm asks [`amd_intel_opens_vulkan`], the rule the
+/// open takes, so the prediction names the encoder the session gets.
 #[cfg(target_os = "linux")]
-pub fn cursor_blend_capable(codec: Codec, cuda_planned: bool, ten_bit: bool) -> bool {
+pub fn cursor_blend_capable(codec: Codec, cuda_planned: bool, ten_bit: bool, hdr: bool) -> bool {
     // Negotiated PyroWave is selected before the pref; its CSC composites the cursor.
     if codec == Codec::PyroWave {
         return true;
     }
     let direct_nvenc = cfg!(feature = "nvenc");
-    let vulkan_csc = {
-        // Compute-CSC arm (the one that blends). Probe last: it opens a Vulkan instance.
-        #[cfg(feature = "vulkan-encode")]
-        {
-            // Same as `open_amd_intel`, depth included, so prediction and open agree.
-            matches!(codec, Codec::H265 | Codec::Av1)
-                && vulkan_encode_enabled()
-                && vulkan_encode_available_at(codec, ten_bit)
-        }
-        #[cfg(not(feature = "vulkan-encode"))]
-        {
-            let _ = ten_bit; // the depth only ever narrows the Vulkan arm
-            false
-        }
-    };
     let backend = resolve_linux_backend(
         pf_host_config::config().encoder_pref.as_str(),
         linux_auto_is_vaapi,
         cuda_planned,
     );
+    let vulkan_csc = {
+        // Compute-CSC arm (the one that blends). Probe last: it opens a Vulkan instance.
+        #[cfg(feature = "vulkan-encode")]
+        {
+            if matches!(backend, Some(LinuxBackend::AmdIntel)) {
+                amd_intel_opens_vulkan(codec, ten_bit, hdr)
+            } else {
+                // An explicit Vulkan pref opens Vulkan at the negotiated depth.
+                matches!(codec, Codec::H265 | Codec::Av1)
+                    && vulkan_encode_enabled()
+                    && vulkan_encode_available_at(codec, ten_bit)
+            }
+        }
+        #[cfg(not(feature = "vulkan-encode"))]
+        {
+            let _ = (ten_bit, hdr); // they only ever narrow the Vulkan arm
+            false
+        }
+    };
     cursor_blend_capable_for(backend, cuda_planned, direct_nvenc, vulkan_csc)
+}
+
+/// The depth the AMD/Intel arm asks Vulkan Video for, or `None` when it goes straight to VAAPI.
+/// HEVC and AV1 take Vulkan at the negotiated depth, HDR or SDR alike: 10-bit SDR is HEVC Main10
+/// or AV1 10-bit under BT.709 through `rgb2yuv10_709.comp`. H.264 has no Vulkan path. The
+/// colour verdict rides along for the callers that already carry it; the depth is the rule.
+#[cfg(all(target_os = "linux", feature = "vulkan-encode"))]
+fn amd_intel_vulkan_depth(codec: Codec, ten_bit: bool, _hdr: bool) -> Option<bool> {
+    match codec {
+        Codec::H265 | Codec::Av1 => Some(ten_bit),
+        _ => None,
+    }
+}
+
+/// Whether `open_amd_intel` tries Vulkan Video. The open and the cursor prediction both read it.
+#[cfg(all(target_os = "linux", feature = "vulkan-encode"))]
+fn amd_intel_opens_vulkan(codec: Codec, ten_bit: bool, hdr: bool) -> bool {
+    amd_intel_vulkan_depth(codec, ten_bit, hdr)
+        .is_some_and(|ten| vulkan_encode_enabled() && vulkan_encode_available_at(codec, ten))
 }
 
 /// Dispatch-mirroring core of [`cursor_blend_capable`], device-free for tests.
@@ -977,17 +1003,13 @@ pub fn linux_capture_modifiers(codec: Codec, fourcc: u32, bit_depth: u8, hdr: bo
     if codec == Codec::PyroWave {
         return Vec::new();
     }
-    // Same Vulkan arm as `open_amd_intel`, depth included: 10-bit SDR HEVC stays
-    // on VAAPI, so its capture answers come from the libva probe below.
+    // The rule `open_amd_intel` takes, so the capture answers come from the encoder that opens.
     #[cfg(not(feature = "vulkan-encode"))]
     let _ = (bit_depth, hdr);
     #[cfg(feature = "vulkan-encode")]
     let ten_bit = bit_depth >= 10;
     #[cfg(feature = "vulkan-encode")]
-    let vulkan_lane = !(ten_bit && !hdr && codec == Codec::H265)
-        && matches!(codec, Codec::H265 | Codec::Av1)
-        && vulkan_encode_enabled()
-        && vulkan_encode_available_at(codec, ten_bit);
+    let vulkan_lane = amd_intel_opens_vulkan(codec, ten_bit, hdr);
     #[cfg(not(feature = "vulkan-encode"))]
     let vulkan_lane = false;
     if vulkan_lane {
@@ -1526,10 +1548,10 @@ pub fn backend_carries_sdr10(codec: Codec) -> bool {
     if codec == Codec::PyroWave {
         return cfg!(feature = "pyrowave");
     }
-    // Direct NVENC (HEVC + AV1) widens 8→10 from packed RGB. On AMD/Intel, VAAPI carries HEVC
-    // Main10 under BT.709, and Vulkan Video carries AV1 10-bit SDR (`rgb2yuv10_709.comp`) where the
-    // device offers a 10-bit AV1 profile. The encoder degrades a planar surface to 8-bit if some
-    // path delivers one.
+    // Direct NVENC (HEVC + AV1) widens 8→10 from packed RGB. On AMD/Intel, Vulkan Video carries
+    // HEVC Main10 and AV1 10-bit SDR (`rgb2yuv10_709.comp`) where the device offers the 10-bit
+    // profile, and VAAPI carries HEVC Main10 under BT.709 as the fallback. The encoder degrades a
+    // planar surface to 8-bit if some path delivers one.
     match linux_resolved_backend() {
         LinuxBackend::Nvenc => cfg!(feature = "nvenc"),
         LinuxBackend::AmdIntel => {
@@ -1836,6 +1858,24 @@ mod tests {
         );
     }
 
+    /// A panel that reports no volume must not master the stream at 0 nits.
+    #[test]
+    fn hdr_meta_from_wire_fills_an_unreported_volume() {
+        let g = pf_frame::hdr::generic_hdr10();
+        let frame = hdr_meta_from_wire(punktfunk_core::quic::HdrMeta {
+            max_cll: 700,
+            ..Default::default()
+        });
+        assert_eq!(frame.display_primaries, g.display_primaries);
+        assert_eq!(frame.white_point, g.white_point);
+        assert_eq!(
+            frame.max_display_mastering_luminance,
+            g.max_display_mastering_luminance
+        );
+        assert_eq!(frame.min_display_mastering_luminance, 0);
+        assert_eq!((frame.max_cll, frame.max_fall), (700, 0));
+    }
+
     /// [`TerminalEncoderError`] must stay downcastable through `context` layers.
     /// A `format!`/stringify on any layer would break the reset ladder.
     #[test]
@@ -1941,6 +1981,23 @@ mod tests {
         assert!(cursor_blend_capable_for(Some(Vulkan), false, false, true));
         assert!(!cursor_blend_capable_for(Some(Software), false, true, true));
         assert!(!cursor_blend_capable_for(None, false, true, true));
+    }
+
+    #[cfg(all(target_os = "linux", feature = "vulkan-encode"))]
+    #[test]
+    fn amd_intel_hevc_takes_vulkan_at_either_depth() {
+        assert_eq!(
+            amd_intel_vulkan_depth(Codec::H265, true, false),
+            Some(true),
+            "HEVC 10-bit SDR opens Vulkan Main10 like AV1 — and predicts the blend it gets"
+        );
+        assert_eq!(amd_intel_vulkan_depth(Codec::H265, true, true), Some(true));
+        assert_eq!(
+            amd_intel_vulkan_depth(Codec::H265, false, false),
+            Some(false)
+        );
+        assert_eq!(amd_intel_vulkan_depth(Codec::Av1, true, false), Some(true));
+        assert_eq!(amd_intel_vulkan_depth(Codec::H264, false, false), None);
     }
 
     /// Every `Encoder` method must be forwarded by `TrackedEncoder`. An

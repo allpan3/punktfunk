@@ -110,6 +110,12 @@ pub(super) fn grant(_dir: &std::path::Path, _write: bool) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn revoke(_dir: &std::path::Path) -> Result<()> {
+    Ok(())
+}
+
+pub(super) fn converge_runner_acls(_status: &RuntimeStatus) {}
+
 /// Lifts a mask left by [`disable`] first; a no-op when there is none.
 #[cfg(target_os = "linux")]
 pub(super) fn enable() -> Result<()> {
@@ -133,6 +139,12 @@ pub(super) fn disable() -> Result<()> {
     Ok(())
 }
 
+/// Shown while systemd keeps restarting a runner that dies at start — "switched off" would send
+/// the operator to a switch that is already on.
+#[cfg(target_os = "linux")]
+const RUNNER_FAILING: &str =
+    "The plugin runner keeps failing to start. Troubleshooting → Plugins shows why.";
+
 #[cfg(target_os = "linux")]
 pub(super) fn runtime_status() -> RuntimeStatus {
     let enabled_raw = systemctl_output(&["is-enabled", UNIT]);
@@ -141,16 +153,21 @@ pub(super) fn runtime_status() -> RuntimeStatus {
     // is the other half of "can we install plugins".
     let unit_known = enabled_raw.as_deref().is_some_and(|s| s != "not-found");
     let installed = unit_known || runner_command().is_ok();
+    let failing = active == "failed"
+        || systemctl_output(&["show", UNIT, "-p", "SubState", "--value"]).as_deref()
+            == Some("auto-restart");
     RuntimeStatus {
         installed,
         enabled: enabled_raw.as_deref() == Some("enabled"),
         running: active == "active",
         unit: UNIT,
         principal: None,
-        detail: if installed {
-            String::new()
-        } else {
+        detail: if !installed {
             RUNNER_MISSING.into()
+        } else if failing {
+            RUNNER_FAILING.into()
+        } else {
+            String::new()
         },
     }
 }
@@ -200,6 +217,23 @@ fn systemctl_output(args: &[&str]) -> Option<String> {
     }
 }
 
+/// Is `PUNKTFUNK_PLUGIN_SANDBOX` off in the runner unit's own environment? The host's
+/// environment says nothing about it: the runner reads only what its unit sets.
+#[cfg(target_os = "linux")]
+pub(super) fn runner_sandbox_off() -> bool {
+    systemctl_output(&["show", UNIT, "-p", "Environment", "--value"]).is_some_and(|env| {
+        env.split_whitespace().any(|kv| {
+            kv.strip_prefix("PUNKTFUNK_PLUGIN_SANDBOX=")
+                .is_some_and(|v| matches!(v.trim_matches('"'), "0" | "off" | "false"))
+        })
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn runner_sandbox_off() -> bool {
+    false
+}
+
 #[cfg(target_os = "linux")]
 pub(super) fn restart_runtime() -> Result<()> {
     run_systemctl(&["restart", UNIT])
@@ -221,12 +255,13 @@ pub(super) fn converge_runner_roots(
         .unwrap_or_else(|| home.join(".config"));
     let dir = config.join(format!("systemd/user/{UNIT}.service.d"));
     let path = dir.join(ROOTS_DROPIN);
-    let body = render_roots(roots, home);
+    let body = render_roots(roots, &hidden_roots(home));
     if std::fs::read_to_string(&path).is_ok_and(|old| old == body) {
         return Ok(false);
     }
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    let tmp = dir.join(format!("{ROOTS_DROPIN}.tmp"));
+    // Per process: a CLI grant and the serving host may converge at the same moment.
+    let tmp = dir.join(format!("{ROOTS_DROPIN}.{}.tmp", std::process::id()));
     std::fs::write(&tmp, &body).with_context(|| format!("write {}", tmp.display()))?;
     std::fs::rename(&tmp, &path).with_context(|| format!("replace {}", path.display()))?;
     run_systemctl(&["daemon-reload"])?;
@@ -234,11 +269,30 @@ pub(super) fn converge_runner_roots(
     Ok(true)
 }
 
-/// One self-bind per root the unit would otherwise hide or keep read-only; a read outside the
-/// home is visible already. A `src:dst` pair fails the unit's `+` ExecStartPre. systemd drops a
-/// bind whose path holds a quote, and a control character would end the line: left out.
+/// What `ProtectHome` hides: `/home` and `/root` (not just this `home`), each also as it
+/// resolves. Roots are canonical, and on Fedora Atomic `/home` is a link to `/var/home`.
 #[cfg(any(test, target_os = "linux"))]
-fn render_roots(roots: &[access::RunnerRoot], home: &std::path::Path) -> String {
+fn hidden_roots(home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for p in [
+        home,
+        std::path::Path::new("/home"),
+        std::path::Path::new("/root"),
+    ] {
+        out.push(p.to_path_buf());
+        if let Ok(real) = p.canonicalize() {
+            out.push(real);
+        }
+    }
+    out
+}
+
+/// One self-bind per root the unit would otherwise hide or keep read-only; a read anywhere
+/// outside `hidden` is visible already. A `src:dst` pair fails the unit's `+` ExecStartPre.
+/// systemd drops a bind whose path holds a quote, and a control character would end the line:
+/// left out.
+#[cfg(any(test, target_os = "linux"))]
+fn render_roots(roots: &[access::RunnerRoot], hidden: &[std::path::PathBuf]) -> String {
     let mut out = String::from(
         "# Written by punktfunk-host from plugin manifests and folder grants. Edits are replaced.\n[Service]\n",
     );
@@ -257,7 +311,7 @@ fn render_roots(roots: &[access::RunnerRoot], home: &std::path::Path) -> String 
             );
             continue;
         }
-        let key = match (r.path.starts_with(home), r.write) {
+        let key = match (hidden.iter().any(|h| r.path.starts_with(h)), r.write) {
             (true, true) => "BindPaths",
             (true, false) => "BindReadOnlyPaths",
             (false, true) => "ReadWritePaths",
@@ -446,8 +500,9 @@ mod tests {
                 root("/h/saves", true),
                 root("/mnt/games", false),
                 root("/mnt/out", true),
+                root("/home/other/Games", false),
             ],
-            Path::new("/h"),
+            &hidden_roots(Path::new("/h")),
         );
         let lines: Vec<&str> = body.lines().skip(2).collect();
         assert_eq!(
@@ -457,6 +512,8 @@ mod tests {
                 r#"BindReadOnlyPaths="-/h/My 100%% Games:x\\y""#,
                 r#"BindPaths="-/h/saves""#,
                 r#"ReadWritePaths="-/mnt/out""#,
+                // ProtectHome hides every home, not only the operator's.
+                r#"BindReadOnlyPaths="-/home/other/Games""#,
             ]
         );
         assert!(body.starts_with("# Written by punktfunk-host"));
@@ -471,8 +528,29 @@ mod tests {
                 root("/h/a\"b", false),
                 root("/h/x\nExecStartPre=+/bin/sh", false),
             ],
-            Path::new("/h"),
+            &hidden_roots(Path::new("/h")),
         );
         assert_eq!(body.lines().count(), 2, "{body}");
+    }
+
+    /// Fedora Atomic: `$HOME` is spelled under `/home`, a link to `/var/home`, and every root
+    /// arrives canonical. Such a root is hidden all the same, so it gets its bind.
+    #[test]
+    fn a_home_behind_a_link_still_gets_its_binds() {
+        let tmp = std::env::temp_dir().join(format!("pf-roots-link-{}", std::process::id()));
+        let real_home = tmp.join("var/home/u");
+        std::fs::create_dir_all(real_home.join(".local/share/Steam")).unwrap();
+        std::os::unix::fs::symlink(tmp.join("var/home"), tmp.join("home")).unwrap();
+        let steam = real_home.canonicalize().unwrap().join(".local/share/Steam");
+        let body = render_roots(
+            &[root(steam.to_str().unwrap(), false)],
+            &hidden_roots(&tmp.join("home/u")),
+        );
+        std::fs::remove_dir_all(&tmp).unwrap();
+        assert_eq!(
+            body.lines().nth(2),
+            Some(format!("BindReadOnlyPaths=\"-{}\"", steam.display()).as_str()),
+            "{body}"
+        );
     }
 }

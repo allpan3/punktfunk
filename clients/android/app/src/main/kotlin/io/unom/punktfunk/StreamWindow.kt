@@ -76,16 +76,24 @@ internal class StreamWindow(
      * active mode, `render=` what this app is allowed: `mode=120 render=60` is a per-uid
      * frame-rate override, `mode=60` a real mode switch. The native presenter cannot tell the two
      * apart — its period reads 16.6 ms either way — and neither shows in `pf.present`.
+     *
+     * A display arriving or leaving writes the whole list to the log ring instead ([logDisplays]).
      */
     private val displayListener = object : DisplayManager.DisplayListener {
-        override fun onDisplayAdded(displayId: Int) {}
-        override fun onDisplayRemoved(displayId: Int) {}
+        override fun onDisplayAdded(displayId: Int) = logDisplays("added $displayId")
+        override fun onDisplayRemoved(displayId: Int) = logDisplays("removed $displayId")
         override fun onDisplayChanged(displayId: Int) = logPanel("changed")
     }
 
     private fun logPanel(why: String) {
         val d = activity?.display ?: return
         Log.i("pf.display", "panel $why mode=${d.mode.refreshRate} render=${d.refreshRate}")
+    }
+
+    /** Every display, into the "Send logs" bundle: which dual-screen shape this device reports. */
+    private fun logDisplays(why: String) {
+        val dm = displayManager ?: return
+        runCatching { NativeBridge.nativeLogDisplay("displays $why: ${describeDisplays(context, dm)}") }
     }
 
     /**
@@ -203,6 +211,7 @@ internal class StreamWindow(
         }
         displayManager?.registerDisplayListener(displayListener, null)
         logPanel("pinned")
+        logDisplays("at start")
     }
 
     /** Put every prior value back, in the order the stream took them. */

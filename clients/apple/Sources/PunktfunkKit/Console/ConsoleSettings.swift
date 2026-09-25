@@ -141,10 +141,20 @@ public enum ConsoleSettings {
         .bool("allow_vrr", DefaultsKey.allowVRR, true),
         .string("ui_palette", DefaultsKey.uiPalette, "violet"),
         .string("library_sort", DefaultsKey.librarySort, ""),
-        .string("library_view", DefaultsKey.libraryView, LibraryArrangement.shelf.stored),
+        .string("library_sections", DefaultsKey.librarySections, ""),
+        // Unset stays unset: the console's own default is the Games tab's grid.
+        .string("library_view", DefaultsKey.libraryView, ""),
         .bool("library_collections", DefaultsKey.libraryCollections, false),
         .string("start_in", DefaultsKey.startIn, StartIn.hosts.stored),
         .bool("auto_wake", DefaultsKey.autoWake, true),
+        // The console's own off switch lands on the touch, TV or Mac UI.
+        .bool("gamepad_ui_enabled", DefaultsKey.gamepadUIEnabled, true),
+        .bool("background_keep_alive", DefaultsKey.backgroundKeepAlive, false),
+        .int("background_timeout_minutes", DefaultsKey.backgroundTimeoutMinutes, 10),
+        .string("hud_placement", DefaultsKey.hudPlacement, "topTrailing"),
+        .string("host_sort", DefaultsKey.hostSort, "added"),
+        .string("host_grouping", DefaultsKey.hostGrouping, "none"),
+        .string("gamepad_ui_mode", DefaultsKey.gamepadUIMode, GamepadUIEnvironment.modeWhenConnected),
         // `Settings::extra` (flattened, so plain top-level keys). The `android.` prefix is
         // where these were first written; the console reads the same names here.
         .bool("android.rumble_on_phone", DefaultsKey.rumbleOnDevice, false),
@@ -163,16 +173,16 @@ public enum ConsoleSettings {
         (6, "steamdeck"),
     ]
 
-    private static func compositorName(_ tag: Int) -> String {
+    static func compositorName(_ tag: Int) -> String {
         compositors.first { $0.0 == tag }?.1 ?? "auto"
     }
-    private static func compositorTag(_ name: String) -> Int? {
+    static func compositorTag(_ name: String) -> Int? {
         compositors.first { $0.1 == name }?.0
     }
-    private static func padTypeName(_ tag: Int) -> String {
+    static func padTypeName(_ tag: Int) -> String {
         padTypes.first { $0.0 == tag }?.1 ?? "auto"
     }
-    private static func padTypeTag(_ name: String) -> Int? {
+    static func padTypeTag(_ name: String) -> Int? {
         padTypes.first { $0.1 == name }?.0
     }
 }

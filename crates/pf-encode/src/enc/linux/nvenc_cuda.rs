@@ -1876,7 +1876,8 @@ impl NvencCudaEncoder {
     }
 
     /// The slot layout a raw dmabuf session encodes: YUV444 for a 4:4:4 session, NVENC's
-    /// packed 10-bit for an HDR capture, else NV12 (`PUNKTFUNK_NV12`) or packed ARGB.
+    /// packed 10-bit for an HDR capture, else NV12 (`PUNKTFUNK_NV12`) or packed ARGB. A 10-bit
+    /// SDR session keeps packed ARGB: NVENC widens only packed RGB to 10 bits.
     fn raw_buffer_format(&self, fmt: pf_frame::PixelFormat) -> nv::NV_ENC_BUFFER_FORMAT {
         use nv::NV_ENC_BUFFER_FORMAT as F;
         if self.chroma_444 {
@@ -1885,7 +1886,9 @@ impl NvencCudaEncoder {
         match fmt {
             pf_frame::PixelFormat::X2Rgb10 => F::NV_ENC_BUFFER_FORMAT_ARGB10,
             pf_frame::PixelFormat::X2Bgr10 => F::NV_ENC_BUFFER_FORMAT_ABGR10,
-            _ if pf_zerocopy::nv12_enabled() => F::NV_ENC_BUFFER_FORMAT_NV12,
+            _ if pf_zerocopy::nv12_enabled() && self.depth_asked < 10 => {
+                F::NV_ENC_BUFFER_FORMAT_NV12
+            }
             _ => F::NV_ENC_BUFFER_FORMAT_ARGB,
         }
     }

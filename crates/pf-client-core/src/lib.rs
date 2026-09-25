@@ -141,6 +141,9 @@ pub mod gamescope;
 // Gamescope overlay-owns-controller signal. SDL's focus gate cannot provide it in Gaming Mode; this drives the gamepad input mask.
 #[cfg(all(feature = "desktop", target_os = "linux"))]
 pub mod overlay_focus;
+// The desktop's reduce-motion switch, for the console to follow.
+#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
+pub mod os_prefs;
 // Omarchy theme (state-dir file + palette). GTK recolour and the session follow-system palette both build from it.
 #[cfg(all(feature = "desktop", target_os = "linux"))]
 pub mod omarchy;

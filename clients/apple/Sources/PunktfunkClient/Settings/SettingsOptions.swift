@@ -1,6 +1,6 @@
 // The option lists every settings surface renders from — one source of truth shared by the
-// touch/desktop SettingsView (Pickers), the tvOS pushed selection rows, and the gamepad settings
-// screen (GamepadSettingsView's left/right cycling). Pure data + small pure helpers; anything that
+// touch/desktop SettingsView (Pickers) and the tvOS pushed selection rows. Pure data + small pure
+// helpers; anything that
 // reads live view state (e.g. the bitrate slider mapping) stays on SettingsView.
 
 #if os(macOS)

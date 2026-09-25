@@ -134,6 +134,66 @@ impl WireBudget {
     }
 }
 
+/// Where [`build_au`] writes: a growing `Vec`, or a fixed slice for the worker's mapped
+/// return buffer. Each write reports whether it fit.
+trait AuSink {
+    fn len(&self) -> usize;
+    fn put(&mut self, bytes: &[u8]) -> bool;
+    /// Zero-fill up to `to`.
+    fn pad_to(&mut self, to: usize) -> bool;
+    fn patch(&mut self, at: usize, bytes: &[u8]);
+}
+
+impl AuSink for Vec<u8> {
+    fn len(&self) -> usize {
+        Vec::len(self)
+    }
+    fn put(&mut self, bytes: &[u8]) -> bool {
+        self.extend_from_slice(bytes);
+        true
+    }
+    fn pad_to(&mut self, to: usize) -> bool {
+        self.resize(to.max(Vec::len(self)), 0);
+        true
+    }
+    fn patch(&mut self, at: usize, bytes: &[u8]) {
+        self[at..at + bytes.len()].copy_from_slice(bytes);
+    }
+}
+
+/// A slice with a write cursor.
+struct SliceSink<'a> {
+    buf: &'a mut [u8],
+    len: usize,
+}
+
+impl AuSink for SliceSink<'_> {
+    fn len(&self) -> usize {
+        self.len
+    }
+    fn put(&mut self, bytes: &[u8]) -> bool {
+        let end = self.len + bytes.len();
+        if end > self.buf.len() {
+            return false;
+        }
+        self.buf[self.len..end].copy_from_slice(bytes);
+        self.len = end;
+        true
+    }
+    fn pad_to(&mut self, to: usize) -> bool {
+        let to = to.max(self.len);
+        if to > self.buf.len() {
+            return false;
+        }
+        self.buf[self.len..to].fill(0);
+        self.len = to;
+        true
+    }
+    fn patch(&mut self, at: usize, bytes: &[u8]) {
+        self.buf[at..at + bytes.len()].copy_from_slice(bytes);
+    }
+}
+
 /// Frame `packets` (offset, size into `bitstream`) into the wire AU.
 /// `None` copies the single dense packet; `Some(chunk)` emits whole `chunk`-sized windows.
 pub fn build_au(
@@ -145,14 +205,61 @@ pub fn build_au(
         let (off, size) = packets[0];
         return bitstream[off..off + size].to_vec();
     };
-    let payload_max = chunk - WINDOW_PREFIX;
     let mut au: Vec<u8> = Vec::with_capacity((packets.len() + 1) * chunk);
+    let fit = build_windows(packets, bitstream, chunk, &mut au);
+    debug_assert!(fit, "a Vec sink never runs out");
+    au
+}
+
+/// [`build_au`] into `out`: the AU's length, or `None` when `out` is shorter than
+/// [`au_bound`] says it may need to be.
+pub fn build_au_into(
+    packets: &[(usize, usize)],
+    bitstream: &[u8],
+    wire_chunk: Option<usize>,
+    out: &mut [u8],
+) -> Option<usize> {
+    let Some(chunk) = wire_chunk else {
+        let (off, size) = packets[0];
+        let dst = out.get_mut(..size)?;
+        dst.copy_from_slice(&bitstream[off..off + size]);
+        return Some(size);
+    };
+    let mut sink = SliceSink { buf: out, len: 0 };
+    build_windows(packets, bitstream, chunk, &mut sink).then_some(sink.len)
+}
+
+/// Bytes [`build_au`] can need for `packets`: every packet opens at most one window, an
+/// oversized one a window per fragment.
+pub fn au_bound(packets: &[(usize, usize)], wire_chunk: Option<usize>) -> usize {
+    let Some(chunk) = wire_chunk else {
+        return packets.first().map_or(0, |&(_, s)| s);
+    };
+    let payload_max = chunk.saturating_sub(WINDOW_PREFIX).max(1);
+    packets
+        .iter()
+        .map(|&(_, s)| s.div_ceil(payload_max).max(1))
+        .sum::<usize>()
+        * chunk
+}
+
+/// The windowed layout, for either sink. `false` = the sink ran out.
+fn build_windows<S: AuSink>(
+    packets: &[(usize, usize)],
+    bitstream: &[u8],
+    chunk: usize,
+    au: &mut S,
+) -> bool {
+    let payload_max = chunk - WINDOW_PREFIX;
     let mut open: Option<(usize, usize)> = None;
-    let close = |au: &mut Vec<u8>, open: &mut Option<(usize, usize)>, chunk: usize| {
-        if let Some((start, used)) = open.take() {
-            au[start..start + 2].copy_from_slice(&(used as u16).to_le_bytes());
-            au[start + 2..start + 4].copy_from_slice(&WIN_PACKED.to_le_bytes());
-            au.resize(start + chunk, 0);
+    let close = |au: &mut S, open: &mut Option<(usize, usize)>| -> bool {
+        match open.take() {
+            Some((start, used)) => {
+                au.patch(start, &(used as u16).to_le_bytes());
+                au.patch(start + 2, &WIN_PACKED.to_le_bytes());
+                au.pad_to(start + chunk)
+            }
+            None => true,
         }
     };
     for &(off, size) in packets {
@@ -160,18 +267,26 @@ pub fn build_au(
         if size <= payload_max {
             let fits = open.is_some_and(|(_, used)| used + size <= payload_max);
             if !fits {
-                close(&mut au, &mut open, chunk);
+                if !close(au, &mut open) {
+                    return false;
+                }
                 let start = au.len();
-                au.resize(start + WINDOW_PREFIX, 0);
+                if !au.pad_to(start + WINDOW_PREFIX) {
+                    return false;
+                }
                 open = Some((start, 0));
             }
-            au.extend_from_slice(bytes);
+            if !au.put(bytes) {
+                return false;
+            }
             if let Some((_, used)) = open.as_mut() {
                 *used += size;
             }
         } else {
             // Oversized atomic packet: a FRAG chain of full windows, never packed.
-            close(&mut au, &mut open, chunk);
+            if !close(au, &mut open) {
+                return false;
+            }
             let mut o = 0usize;
             while o < size {
                 let take = (size - o).min(payload_max);
@@ -183,17 +298,19 @@ pub fn build_au(
                     WIN_FRAG_CONT
                 };
                 let start = au.len();
-                au.resize(start + WINDOW_PREFIX, 0);
-                au[start..start + 2].copy_from_slice(&(take as u16).to_le_bytes());
-                au[start + 2..start + 4].copy_from_slice(&kind.to_le_bytes());
-                au.extend_from_slice(&bytes[o..o + take]);
-                au.resize(start + chunk, 0);
+                if !au.pad_to(start + WINDOW_PREFIX) {
+                    return false;
+                }
+                au.patch(start, &(take as u16).to_le_bytes());
+                au.patch(start + 2, &kind.to_le_bytes());
+                if !au.put(&bytes[o..o + take]) || !au.pad_to(start + chunk) {
+                    return false;
+                }
                 o += take;
             }
         }
     }
-    close(&mut au, &mut open, chunk);
-    au
+    close(au, &mut open)
 }
 
 /// Per-chunk target (~3–4 chunks at 400 Mb/s 60 fps, ~833 KB).
@@ -389,6 +506,33 @@ mod tests {
         let chunk = 64; // payload_max = 60
         let au = build_au(&[(0, 500)], &bs, Some(chunk));
         assert_eq!(walk(&au, chunk), bs[0..500]);
+    }
+
+    /// The slice target lays out the same AU as the `Vec`, inside [`au_bound`], and says so
+    /// when it cannot.
+    #[test]
+    fn slice_target_matches_the_vec_inside_the_bound() {
+        let bs: Vec<u8> = (0..2000u32).map(|i| (i * 7) as u8).collect();
+        type Case = (&'static [(usize, usize)], Option<usize>);
+        let cases: [Case; 4] = [
+            (
+                &[(0, 20), (20, 20), (40, 100), (140, 500), (640, 3)],
+                Some(64),
+            ),
+            (&[(0, 500)], Some(64)),
+            (&[(0, 1), (1, 1), (2, 1)], Some(1408)),
+            (&[(10, 50)], None),
+        ];
+        for (packets, chunk) in cases {
+            let want = build_au(packets, &bs, chunk);
+            let bound = au_bound(packets, chunk);
+            assert!(want.len() <= bound, "{} > bound {bound}", want.len());
+            let mut out = vec![0xAAu8; bound];
+            let n = build_au_into(packets, &bs, chunk, &mut out).expect("fits the bound");
+            assert_eq!(&out[..n], &want[..]);
+            let mut short = vec![0u8; want.len().saturating_sub(1)];
+            assert_eq!(build_au_into(packets, &bs, chunk, &mut short), None);
+        }
     }
 
     #[test]

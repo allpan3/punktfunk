@@ -33,6 +33,7 @@ use pf_client_core::video::{DecodeHealth, DecodedFrame, DecodedImage};
 use punktfunk_core::client::NativeClient;
 use punktfunk_core::config::{CompositorPref, Mode};
 use punktfunk_core::hud::{self, HudLine, StatsSnapshot};
+use punktfunk_core::quic::HdrMeta;
 use punktfunk_core::video_fit::{self, VideoFit};
 use sdl3::event::{DisplayEvent, Event, WindowEvent};
 use sdl3::keyboard::Mod;
@@ -116,26 +117,34 @@ pub enum ActionOutcome {
 /// One `--connect` stream; returns when it ends.
 pub fn run_session<F>(opts: SessionOpts, build_params: F) -> Result<Outcome>
 where
-    F: FnOnce(&GamepadService, Mode, Arc<AtomicBool>, Option<VulkanDecodeDevice>) -> SessionParams,
+    F: FnOnce(
+        &GamepadService,
+        Mode,
+        Option<HdrMeta>,
+        Arc<AtomicBool>,
+        Option<VulkanDecodeDevice>,
+    ) -> SessionParams,
 {
     let mut build = Some(build_params);
     run_inner(
         opts,
-        ModeCtl::Single(Box::new(move |gp, native, fs, vk| {
-            (build.take().expect("single build runs once"))(gp, native, fs, vk)
+        ModeCtl::Single(Box::new(move |gp, native, hdr, fs, vk| {
+            (build.take().expect("single build runs once"))(gp, native, hdr, fs, vk)
         })),
     )
     .map(|o| o.expect("single mode always yields an outcome"))
 }
 
 /// Console library idles between streams. `on_action` gets every overlay action plus what
-/// a launch needs: gamepad service, native display mode, a fresh `force_software` flag.
+/// a launch needs: gamepad service, native display mode, the window display's HDR volume
+/// ([`window_display_hdr`]), a fresh `force_software` flag.
 pub fn run_browse<F>(opts: SessionOpts, on_action: F) -> Result<()>
 where
     F: FnMut(
         OverlayAction,
         &GamepadService,
         Mode,
+        Option<HdrMeta>,
         Arc<AtomicBool>,
         Option<VulkanDecodeDevice>,
     ) -> ActionOutcome,
@@ -149,7 +158,13 @@ where
 
 /// Params builder for the one single-mode session (called once, after setup).
 type BuildParams<'a> = Box<
-    dyn FnMut(&GamepadService, Mode, Arc<AtomicBool>, Option<VulkanDecodeDevice>) -> SessionParams
+    dyn FnMut(
+            &GamepadService,
+            Mode,
+            Option<HdrMeta>,
+            Arc<AtomicBool>,
+            Option<VulkanDecodeDevice>,
+        ) -> SessionParams
         + 'a,
 >;
 type OnAction<'a> = Box<
@@ -157,6 +172,7 @@ type OnAction<'a> = Box<
             OverlayAction,
             &GamepadService,
             Mode,
+            Option<HdrMeta>,
             Arc<AtomicBool>,
             Option<VulkanDecodeDevice>,
         ) -> ActionOutcome
@@ -294,6 +310,13 @@ struct StreamState {
     cursor_chan: Option<crate::cursor::CursorChannel>,
     /// Auto-flip fires on changes only, so it never fights a user who chorded away.
     last_hint: Option<bool>,
+    /// When `last_hint` last changed; the flip waits out [`HINT_SETTLE`] from here.
+    hint_since: std::time::Instant,
+    /// When the user last moved the mouse; the local cursor follows host-driven motion only
+    /// after [`FOLLOW_HOST_AFTER`] of stillness.
+    last_user_motion: std::time::Instant,
+    /// Motion events before this are the echo of a follow-warp.
+    warp_echo_until: std::time::Instant,
     /// User flipped the model manually. The standing hint stops driving until the
     /// host's intent next changes (a fresh hint edge clears this and applies).
     hint_override: bool,
@@ -359,6 +382,9 @@ impl StreamState {
             session_notice: None,
             touch_mouse: crate::touch::SteamTouchMouse::new(in_gamescope()),
             last_hint: None,
+            hint_since: std::time::Instant::now(),
+            last_user_motion: std::time::Instant::now(),
+            warp_echo_until: std::time::Instant::now(),
             hint_override: false,
             sent_client_draws: None,
             force_software,
@@ -698,6 +724,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
             let mut params = build(
                 &gamepad,
                 native,
+                window_display_hdr(&window),
                 force_software.clone(),
                 presenter.vulkan_decode(),
             );
@@ -807,9 +834,9 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                         // always lifts its half.
                         focus_lost = false;
                         // An auto-release (Alt-Tab) undoes itself; a chord release stays
-                        // until the user opts in.
+                        // until the user opts in. With the ring up the grab waits for its close.
                         if let Some(cap) = stream.as_mut().and_then(|s| s.capture.as_mut()) {
-                            if cap.should_reengage() && cap.engage() {
+                            if cap.should_reengage() && cap.engage() && !ring_was_open {
                                 apply_capture(
                                     &mut window,
                                     &mouse,
@@ -1027,6 +1054,10 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                 } => {
                     if let Some(st) = stream.as_mut() {
                         let video = st.last_video;
+                        // The echo of our own follow-warp is not the user moving.
+                        if Instant::now() >= st.warp_echo_until {
+                            st.last_user_motion = Instant::now();
+                        }
                         if let Some(cap) = st.capture.as_mut() {
                             if cap.desktop() {
                                 // Desktop model: window position through the placement.
@@ -1233,13 +1264,12 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
         // Drain forwarded cursor shape/state and drive the local OS cursor — only
         // meaningful in the desktop mouse model (capture's relative lock hides it).
         if let Some(st) = stream.as_mut() {
-            // Host-framebuffer px → cursor-surface px: the placement scale times the
-            // content scale the backend does not already apply ([`cursor_density`]). SDL
-            // shows a custom cursor at ~1:1 physical pixels, so without density a 200 %
-            // client draws ours at half native size. Stretch keeps the shape undistorted.
+            // Host-framebuffer px → cursor-surface px: the placement scale (physical px per
+            // host px) over what the backend scales a cursor by itself, so the pointer is the
+            // size it has in the picture, as on Apple. Stretch keeps the shape undistorted.
             let cursor_scale = st.last_video.map_or(1.0, |video| {
                 let p = video_fit::place(opts.video_fit, window.size_in_pixels(), video);
-                p.scale_x.min(p.scale_y) as f32 * cursor_density(&window)
+                p.scale_x.min(p.scale_y) as f32 / cursor_surface_scale(&window)
             });
             if let (Some(chan), Some(c)) = (st.cursor_chan.as_mut(), st.connector.as_ref()) {
                 let desktop_active = st
@@ -1247,12 +1277,16 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                     .as_ref()
                     .is_some_and(|cap| cap.captured() && cap.desktop());
                 chan.pump(c, &mouse, desktop_active, cursor_scale);
-                // Tell the host who renders the pointer when the local model changes.
-                // The host may composite only while we hold a grabbed, hidden pointer —
-                // a released window cursor over a host-composited one reads as a frozen
-                // duplicate. Released counts as "we draw it".
+                // We draw the pointer while released (a released cursor over a composited one is
+                // a frozen twin), in desktop mode, or relative on the host's hint: only the state
+                // it keeps forwarding can clear the hint. Without the pointer grant the host
+                // pointer is someone else's, so the host draws it.
+                let hint_relative = !st.hint_override && st.last_hint == Some(true);
                 let client_draws = match st.capture.as_ref() {
-                    Some(cap) => !cap.captured() || cap.desktop(),
+                    Some(cap) => {
+                        (!cap.captured() || cap.desktop() || hint_relative)
+                            && cap.grants() & punktfunk_core::quic::GRANT_POINTER != 0
+                    }
                     None => true,
                 };
                 if chan.negotiated() && st.sent_client_draws != Some(client_draws) {
@@ -1262,18 +1296,27 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
             }
             // Host-driven mode flip: `relative_hint` set = run captured relative; clear
             // = return to absolute. Edge-triggered so a manual chord is not fought: the
-            // override latch holds until the host's intent next changes.
+            // override latch holds until the host's intent next changes. The hint must hold
+            // [`HINT_SETTLE`] with no button down (Windows hides the pointer for a click or a
+            // keystroke), and a grab needs the pointer over this window.
             let hint_state = st.cursor_chan.as_ref().and_then(|ch| ch.state());
             if let Some(hs) = hint_state {
                 let hint = hs.relative_hint();
                 if st.last_hint != Some(hint) {
                     st.last_hint = Some(hint);
                     st.hint_override = false;
+                    st.hint_since = std::time::Instant::now();
                 }
-                if !st.hint_override {
+                if !st.hint_override && st.hint_since.elapsed() >= HINT_SETTLE {
                     let video = st.last_video;
+                    let over_us = !hint || mouse.focused_window_id() == Some(window.id());
                     if let Some(cap) = st.capture.as_mut() {
-                        if cap.captured() && cap.set_desktop(!hint) {
+                        if cap.captured()
+                            && !cap.buttons_held()
+                            && over_us
+                            && !ring_was_open
+                            && cap.set_desktop(!hint)
+                        {
                             apply_capture(
                                 &mut window,
                                 &mouse,
@@ -1302,6 +1345,35 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                                 "host cursor hint: mouse model flipped"
                             );
                         }
+                    }
+                }
+                // Something else moved the pointer we draw (controller mouse, a trackpad
+                // gesture, an app warping it): once the user's own mouse has been still for
+                // longer than a round trip, the local cursor goes where the host put it.
+                let over_us = mouse.focused_window_id() == Some(window.id());
+                let still = st.last_user_motion.elapsed() >= FOLLOW_HOST_AFTER;
+                if let (Some(cap), Some(video)) = (st.capture.as_mut(), st.last_video) {
+                    let drifted = cap.last_abs().is_some_and(|(x, y)| {
+                        (x - hs.x).abs() > FOLLOW_SLACK_PX || (y - hs.y).abs() > FOLLOW_SLACK_PX
+                    });
+                    if cap.captured()
+                        && cap.desktop()
+                        && hs.visible()
+                        && over_us
+                        && still
+                        && drifted
+                    {
+                        let (wx, wy) = content_to_window(
+                            opts.video_fit,
+                            window.size(),
+                            window.size_in_pixels(),
+                            video,
+                            hs.x,
+                            hs.y,
+                        );
+                        st.warp_echo_until = Instant::now() + WARP_ECHO;
+                        mouse.warp_mouse_in_window(&window, wx, wy);
+                        cap.followed_host((hs.x, hs.y));
                     }
                 }
             }
@@ -1446,6 +1518,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                             action,
                             &gamepad,
                             native,
+                            window_display_hdr(&window),
                             force_software.clone(),
                             presenter.vulkan_decode(),
                         ) {
@@ -1612,7 +1685,8 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                     if let Some(cap) = st.capture.as_mut() {
                         cap.set_grants(access.grants);
                         if cap.captured() {
-                            if cap.can_capture() {
+                            // With the ring up the pointer stays the ring's; its close re-applies.
+                            if cap.can_capture() && !ring_was_open {
                                 apply_capture(
                                     &mut window,
                                     &mouse,
@@ -1621,7 +1695,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                                     inhibit_shortcuts,
                                     cap.grants(),
                                 );
-                            } else {
+                            } else if !cap.can_capture() {
                                 cap.release(false);
                                 apply_capture(
                                     &mut window,
@@ -1889,6 +1963,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
             let ctx = FrameCtx {
                 width: pw,
                 height: ph,
+                ten_bit: presenter.ten_bit(),
                 // Re-read per frame: dragging to a second monitor with a different scale
                 // updates this.
                 scale: overlay_scale(window.display_scale(), osd_scale_pref),
@@ -2438,6 +2513,18 @@ fn native_mode(w: i32, h: i32, pixel_density: f32, refresh_rate: f32) -> Mode {
         width: px(w),
         height: px(h),
         refresh_hz: refresh_rate.round().max(0.0) as u32,
+    }
+}
+
+/// The HDR volume of the display the window is on now, read per launch, so a console
+/// moved to a TV asks for the TV's HDR. `None` for an SDR display, and off Windows.
+fn window_display_hdr(window: &sdl3::video::Window) -> Option<HdrMeta> {
+    #[cfg(windows)]
+    return pf_client_core::video_d3d11::display_hdr_volume(crate::win32::window_monitor(window));
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+        None
     }
 }
 
@@ -3175,23 +3262,19 @@ fn content_to_window(
     (lx as f32, ly as f32)
 }
 
-/// Content scale to build the forwarded cursor bitmap at, 1.0 where the backend
-/// scales the cursor surface itself.
+/// The scale the backend applies to a custom cursor surface on its own. Wayland applies the
+/// display scale: SDL hands the compositor the bitmap's pixel size as a surface-local viewport
+/// destination. X11 and Windows show the surface at 1:1 physical pixels.
 ///
-/// Wayland is that exception: SDL hands the compositor the bitmap's pixel size as a
-/// viewport DESTINATION, which is surface-local, so the display scale is applied
-/// once already — folding it in here squares it (2.25× at 150 %). X11, Windows and
-/// macOS present the surface at ~1:1 physical pixels and need it.
-///
-/// `SDL_GetWindowDisplayScale` returns `0.0` when it cannot resolve the display; a 0
-/// would collapse the cursor to nothing.
-fn cursor_density(window: &sdl3::video::Window) -> f32 {
-    if window.subsystem().current_video_driver() == "wayland" {
+/// `SDL_GetWindowDisplayScale` returns `0.0` when it cannot resolve the display; dividing by 0
+/// would blow the cursor up to nothing usable.
+fn cursor_surface_scale(window: &sdl3::video::Window) -> f32 {
+    if window.subsystem().current_video_driver() != "wayland" {
         return 1.0;
     }
-    let density = window.display_scale();
-    if density.is_finite() && density > 0.0 {
-        density
+    let scale = window.display_scale();
+    if scale.is_finite() && scale > 0.0 {
+        scale
     } else {
         1.0
     }
@@ -3218,6 +3301,20 @@ fn overlay_scale(display_scale: f32, pref: f32) -> f32 {
 
 /// How long an access toast holds the pill slot. The chip keeps the standing truth.
 const ACCESS_NOTICE_S: u64 = 6;
+
+/// How long the host's relative hint must hold before the mouse model follows it: longer
+/// than the hide Windows does for a click, short against a game grabbing the pointer.
+const HINT_SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Mouse stillness before the local cursor follows host-driven motion: past a round trip, so
+/// the host's echo of the user's own motion is never mistaken for someone else's.
+const FOLLOW_HOST_AFTER: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How long motion events after a follow-warp are its echo, not the user.
+const WARP_ECHO: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Rounding between window and frame pixels; a smaller difference is the same spot.
+const FOLLOW_SLACK_PX: i32 = 2;
 
 /// Capture hints (`ui_stream` parity — the words the user reads while released).
 const HINT_KEYBOARD: &str = "Click the stream to capture input · Ctrl+Alt+Shift+Q releases · \

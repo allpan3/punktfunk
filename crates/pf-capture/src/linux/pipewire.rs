@@ -97,9 +97,10 @@ impl UserData {
     }
 
     /// Withhold this buffer from the producer until the returned hold drops.
-    /// `None` (pool too shallow, or `PUNKTFUNK_ZEROCOPY_HOLD=0`) requeues at `.process` return —
-    /// the producer may then rewrite the dmabuf while encode still reads it, so the raw
-    /// passthrough publishes only under `Some` and treats `None` as a CPU fallback.
+    /// `None` requeues at `.process` return — the producer may then rewrite the dmabuf while
+    /// encode still reads it, so no lane publishes a raw frame under `None`: a transient
+    /// shortage drops the arrival, a pool that can never hold (`holds_possible` false) takes
+    /// the lane's own fallback.
     /// Every hold out with an untaken frame in the slot: that frame gives its hold to this one.
     /// A buffer the book already lists was re-sent by the producer: no hold, and the capture is
     /// flagged for a rebuild.
@@ -112,6 +113,11 @@ impl UserData {
             return None;
         }
         let buf = pw_buf as usize;
+        // A hold the encoder dropped during this `.process` (the fence wait above is where it
+        // lands) is still in the book until the loop services the wake — after this callback.
+        // Requeue it now, so the arrival spends a budget that is current.
+        // SAFETY: `stream` is the stream whose `.process` is running on this loop thread.
+        unsafe { self.defer.drain(stream) };
         // PipeWire below 1.6 (no `node.reliable`) lets the producer reclaim a buffer before this
         // side marked it busy, then send it again. Its frame is fresh; the earlier hold's read may
         // be torn. Re-held under a new generation, the stale hold's release is a no-op
@@ -134,10 +140,11 @@ impl UserData {
                 tracing::warn!(
                     pool_depth = pool_live,
                     reserve = HOLD_POOL_RESERVE,
+                    holds_possible = holds_possible(true, pool_live),
                     "zero-copy: the producer's buffer pool cannot spare a buffer to hold across \
-                     the encode — falling back to the immediate requeue, which the producer may \
-                     rewrite mid-encode (torn/discolored frames under load); PUNKTFUNK_FORCE_SHM=1 \
-                     trades CPU for a race-free capture if artifacts appear"
+                     the encode — while holds are possible at all this arrival is dropped and \
+                     the slot keeps its frame (held_drops= on the provenance line); a pool that \
+                     can never hold takes the CPU copy instead"
                 );
             }
             return None;
@@ -460,7 +467,9 @@ pub(super) enum PassthroughFallback {
     DupFailed,
     /// A linear pitch off 64 bytes: iHD imports it at a rounded pitch and the picture shears.
     UnalignedPitch,
-    /// The pool could not spare a deferred-requeue hold, so the raw frame is unsafe to publish.
+    /// This pool can never spare a deferred-requeue hold (depth ≤ reserve, or
+    /// `PUNKTFUNK_ZEROCOPY_HOLD=0`), so no raw frame is safe to publish. A transient shortage
+    /// on a pool that can hold never gets here: `.process` drops that arrival (`held_drops`).
     NoHold,
 }
 
@@ -486,7 +495,7 @@ impl PassthroughFallback {
                 "the dmabuf's pitch is not a multiple of 64 bytes"
             }
             PassthroughFallback::NoHold => {
-                "the producer pool could not spare a deferred-requeue hold"
+                "this producer pool can never spare a deferred-requeue hold"
             }
         }
     }
@@ -515,7 +524,9 @@ impl PassthroughFallback {
                  rounded — this width streams through the CPU copy instead of the raw import"
             }
             PassthroughFallback::NoHold => {
-                "the frame stays on the CPU copy path rather than letting the producer rewrite a DMA-BUF the encoder still reads"
+                "the pool is at or below the reserve, or PUNKTFUNK_ZEROCOPY_HOLD=0 — every frame \
+                 takes the CPU copy rather than letting the producer rewrite a DMA-BUF the \
+                 encoder still reads"
             }
         }
     }
@@ -933,8 +944,14 @@ impl HoldBook {
 /// Shared by the loop thread ([`HoldBook`] ops) and [`BufferHold`] guards on the encode thread.
 struct DeferredRequeue {
     book: std::sync::Mutex<HoldBook>,
-    /// Wakes the loop to requeue `(buffer, generation)`. Send failure = the loop is gone.
-    tx: pw::channel::Sender<(usize, u64)>,
+    /// Releases dropped on any thread, `(buffer, generation)`, until the loop thread requeues
+    /// them: the wake callback does, and so does `try_defer` before it gives an arrival up.
+    /// The book alone would count a hold the encoder already let go until the loop got round
+    /// to the wake — on a pool of 4 that is the second and last hold, and the arrival that
+    /// finds it still out pays the full-frame CPU copy.
+    pending: std::sync::Mutex<Vec<(usize, u64)>>,
+    /// Wakes the loop to drain `pending`. Send failure = the loop is gone.
+    wake: pw::channel::Sender<()>,
     logged_active: std::sync::atomic::AtomicBool,
     logged_shallow: std::sync::atomic::AtomicBool,
 }
@@ -962,10 +979,46 @@ impl DeferredRequeue {
         }
         requeue
     }
+
+    /// Requeue every release parked since the last drain. Returns how many buffers rejoined.
+    ///
+    /// # Safety
+    /// As [`release`](Self::release).
+    unsafe fn drain(&self, stream: *mut pw::sys::pw_stream) -> usize {
+        self.drain_with(|buf| {
+            // SAFETY: `drain_with` hands over only buffers the book still listed under the
+            // dropping hold's generation (see `release`); the caller's contract is `release`'s.
+            let _ =
+                unsafe { pw::sys::pw_stream_queue_buffer(stream, buf as *mut pw::sys::pw_buffer) };
+        })
+    }
+
+    /// Complete every parked release in the book; `requeue` gets each buffer that was still
+    /// withheld under its hold's generation (a purged or re-held one is skipped).
+    fn drain_with(&self, mut requeue: impl FnMut(usize)) -> usize {
+        let pending = self
+            .pending
+            .lock()
+            .map(|mut p| std::mem::take(&mut *p))
+            .unwrap_or_default();
+        let mut rejoined = 0;
+        for (buf, generation) in pending {
+            let owned = self
+                .book
+                .lock()
+                .map(|mut b| b.complete(buf, generation))
+                .unwrap_or(false);
+            if owned {
+                requeue(buf);
+                rejoined += 1;
+            }
+        }
+        rejoined
+    }
 }
 
-/// Releases its buffer to the producer when the last clone drops. Send-only from the dropping
-/// thread; `pw_stream_queue_buffer` runs in the requeue channel's loop-thread callback.
+/// Releases its buffer to the producer when the last clone drops. Park-and-wake only from the
+/// dropping thread; `pw_stream_queue_buffer` runs on the loop thread ([`DeferredRequeue::drain`]).
 struct BufferHold {
     defer: std::sync::Arc<DeferredRequeue>,
     buf: usize,
@@ -974,7 +1027,10 @@ struct BufferHold {
 
 impl Drop for BufferHold {
     fn drop(&mut self) {
-        let _ = self.defer.tx.send((self.buf, self.generation));
+        if let Ok(mut p) = self.defer.pending.lock() {
+            p.push((self.buf, self.generation));
+        }
+        let _ = self.defer.wake.send(());
     }
 }
 
@@ -1337,6 +1393,15 @@ fn consume_frame(
             let Some(hold) = ud.try_defer(pw_buf, stream) else {
                 // SAFETY: `dup` is ours and was not published.
                 unsafe { libc::close(dup) };
+                // A shortage, not a broken frame: drop it as the import lane does — the slot
+                // keeps its frame, the next arrival takes the hold that comes back. The CPU
+                // copy on this thread starves the requeues that would end the shortage; a
+                // tiled rebuild asks KWin for a new output each time (#1443 never settled).
+                // Only a pool that can never hold falls through, or nothing would stream.
+                if holds_possible(zerocopy_hold_enabled(), ud.pool.live) {
+                    ud.held_drops += 1;
+                    return;
+                }
                 break 'passthrough PassthroughFallback::NoHold;
             };
             ud.publish(CapturedFrame {
@@ -1617,9 +1682,12 @@ fn consume_frame(
     for y in 0..h {
         tight[y * row..y * row + row].copy_from_slice(&region[y * stride..y * stride + row]);
     }
-    // Blit the latched pointer (no-op when hidden or not packed RGB). The producer's hardware
-    // cursor plane stays out of the captured buffer.
-    composite_cursor(&mut tight, w, h, fmt, &ud.cursor);
+    // Blit the latched pointer (no-op when hidden or not packed RGB) unless the host places it:
+    // a baked copy would double the forwarded or blended one. The producer's hardware cursor
+    // plane stays out of the captured buffer.
+    if !ud.signals.host_places_cursor.load(Ordering::Relaxed) {
+        composite_cursor(&mut tight, w, h, fmt, &ud.cursor);
+    }
     let frame = CapturedFrame {
         provenance: Default::default(),
         width: w as u32,
@@ -1860,12 +1928,14 @@ pub fn pipewire_thread(
         );
     }
 
-    // Holds on published frames release through this channel from whichever thread drops last;
-    // the receiver (attached after the stream exists) is the only place a withheld buffer rejoins.
-    let (requeue_tx, requeue_rx) = pw::channel::channel::<(usize, u64)>();
+    // Holds on published frames park their release from whichever thread drops last and wake
+    // this channel; a withheld buffer rejoins only on the loop thread — the receiver (attached
+    // after the stream exists) or `try_defer` drains the parked releases.
+    let (requeue_tx, requeue_rx) = pw::channel::channel::<()>();
     let defer = std::sync::Arc::new(DeferredRequeue {
         book: std::sync::Mutex::new(HoldBook::default()),
-        tx: requeue_tx,
+        pending: std::sync::Mutex::new(Vec::new()),
+        wake: requeue_tx,
         logged_active: std::sync::atomic::AtomicBool::new(false),
         logged_shallow: std::sync::atomic::AtomicBool::new(false),
     });
@@ -2038,9 +2108,9 @@ pub fn pipewire_thread(
             }
         })
         .process(|stream, ud| {
-            // Latest-frame-only: Mutter bursts, older queued buffers are stale. Drain, requeue
-            // older, keep newest. Dequeue/requeue stay outside `catch_unwind` — a panic inside
-            // would strand `newest` and shrink the fixed pool until capture wedged.
+            // Latest-frame-only: Mutter bursts, older queued buffers are stale. Drain, read the
+            // older ones' cursor meta, requeue them, keep newest. Dequeue/requeue stay outside
+            // `catch_unwind` — a panic inside would strand `newest` and shrink the fixed pool.
 
             // SAFETY: `stream` is the live stream PipeWire passes into this `.process` callback on the
             // loop thread; `dequeue_raw_buffer` returns a stream-owned `*mut pw_buffer` or null
@@ -2055,6 +2125,14 @@ pub fn pipewire_thread(
                 let next = unsafe { stream.dequeue_raw_buffer() };
                 if next.is_null() {
                     break;
+                }
+                // A new cursor bitmap rides only the buffer of the shape change; read it before
+                // the stale pixels go back. Not while gated: that meta is in the doomed size.
+                if ud.expect_dims.is_none() {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        // SAFETY: `newest` is dequeued and not yet requeued, as below.
+                        update_cursor_meta(&mut ud.cursor, unsafe { (*newest).buffer });
+                    }));
                 }
                 // SAFETY: `newest` was dequeued from this stream and not yet requeued; we immediately
                 // overwrite it, so the requeued pointer is never touched again.
@@ -2257,15 +2335,15 @@ pub fn pipewire_thread(
         .register()
         .context("register stream listener")?;
 
-    // A `BufferHold` dropping on any thread only sends; this loop-thread callback is where a
-    // withheld buffer rejoins.
+    // A `BufferHold` dropping on any thread only parks and wakes; this loop-thread callback
+    // (or `try_defer`, whichever runs first) is where a withheld buffer rejoins.
     let defer_cb = defer.clone();
     let stream_ptr = stream.as_raw_ptr() as usize;
-    let _requeue_attach = requeue_rx.attach(mainloop.loop_(), move |(buf, generation)| {
+    let _requeue_attach = requeue_rx.attach(mainloop.loop_(), move |()| {
         // SAFETY: the loop thread dispatches this. The stream outlives this attached receiver
         // (declared after it, dropped before it), and the loop stops dispatching once `run()`
         // returns.
-        unsafe { defer_cb.release(stream_ptr as *mut pw::sys::pw_stream, buf, generation) };
+        unsafe { defer_cb.drain(stream_ptr as *mut pw::sys::pw_stream) };
     });
 
     // `PUNKTFUNK_PW_FIXED_POD="WxH"`: one fixed format, to bisect against a producer's EnumFormat.
@@ -3809,5 +3887,51 @@ mod tests {
             "re-hold within cap"
         );
         assert_eq!(b.out.len(), 1);
+    }
+
+    /// KWin's pool of 4: the host's frame and the one it just replaced are both out, the
+    /// replaced one's hold already dropped on the encode thread. Before the loop services that
+    /// wake the book still counts it, and the arrival would take the CPU copy. `try_defer`
+    /// drains the parked release first, so the arrival holds — and the wake callback that runs
+    /// later finds nothing left to requeue.
+    #[test]
+    fn an_arrival_drains_a_release_the_loop_has_not_serviced() {
+        use super::{BufferHold, DeferredRequeue};
+        let pool = crate::KWIN_POOL_MAX as u32;
+        let (wake, _rx) = pipewire::channel::channel::<()>();
+        let defer = std::sync::Arc::new(DeferredRequeue {
+            book: std::sync::Mutex::new(HoldBook::default()),
+            pending: std::sync::Mutex::new(Vec::new()),
+            wake,
+            logged_active: std::sync::atomic::AtomicBool::new(false),
+            logged_shallow: std::sync::atomic::AtomicBool::new(false),
+        });
+        let hold = |buf: usize| {
+            let generation = defer.book.lock().unwrap().try_hold(buf, pool).unwrap();
+            BufferHold {
+                defer: defer.clone(),
+                buf,
+                generation,
+            }
+        };
+        let replaced = hold(0x1000);
+        let _current = hold(0x2000);
+        drop(replaced); // the encode thread let it go; the loop has not run its wake yet
+        assert!(
+            defer.book.lock().unwrap().try_hold(0x3000, pool).is_none(),
+            "the book still counts the dropped hold"
+        );
+        let mut requeued = Vec::new();
+        assert_eq!(defer.drain_with(|buf| requeued.push(buf)), 1);
+        assert_eq!(requeued, vec![0x1000], "the dropped hold's buffer rejoins");
+        assert!(
+            defer.book.lock().unwrap().try_hold(0x3000, pool).is_some(),
+            "the arrival now holds"
+        );
+        assert_eq!(
+            defer.drain_with(|_| panic!("nothing left to requeue")),
+            0,
+            "the late wake is a no-op"
+        );
     }
 }

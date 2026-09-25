@@ -127,6 +127,9 @@ pub struct VulkanDecodeDevice {
     pub d3d11_import: bool,
     /// Presenter enabled Linux dma-buf import. Always `false` off Linux.
     pub dmabuf_import: bool,
+    /// The presenter's VAAPI node decodes AV1 where its Vulkan does not
+    /// (`video::vaapi_av1_decodable`). Always `false` off Linux.
+    pub vaapi_av1_decode: bool,
     /// Presenter can import RGB10A2 and offers an HDR10 swapchain, so D3D11VA
     /// emits PQ pass-through instead of tonemapping to sRGB. Always `false` off Windows.
     pub d3d11_hdr10: bool,

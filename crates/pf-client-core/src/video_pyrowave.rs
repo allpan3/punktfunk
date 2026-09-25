@@ -214,6 +214,9 @@ pub struct PyroWavePlanarFrame {
     pub width: u32,
     pub height: u32,
     pub color: ColorDesc,
+    /// R16 planes of MSB-packed 10-bit codes, else R8. Follows the session's depth, not its
+    /// transfer: a Linux host sends 10-bit SDR.
+    pub ten_bit: bool,
     /// Independently decodable — always a clean re-anchor.
     pub keyframe: bool,
 }
@@ -929,6 +932,7 @@ impl PyroWaveDecoder {
             width: w,
             height: h,
             color: self.color,
+            ten_bit: self.hdr16,
             keyframe: true,
         }))
     }

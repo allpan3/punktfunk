@@ -101,6 +101,9 @@ object NativeBridge {
         standard: Int,
     )
 
+    /** One `pf.display` line in the log ring above, as written: the displays and fold features. */
+    external fun nativeLogDisplay(line: String)
+
     /**
      * The machine token of the most recent failed [nativeConnect]/[nativePair], cleared on read
      * (`""` when none) — call right after a `0` handle / `""` fingerprint. A typed host rejection
@@ -737,8 +740,9 @@ object NativeBridge {
 
     /**
      * A discrete menu event: 0..3 move up/down/left/right, 4 confirm, 5 back, 6 secondary (Y),
-     * 7 tertiary (X), 8 jump back (L1), 9 jump forward (R1). For input that is already an event on
-     * this side (a TV remote's D-pad keys, the touch legend).
+     * 7 tertiary (X), 8 jump back (L1), 9 jump forward (R1), 10/11 a remote's OK down/up (acts on
+     * release; held, it opens the card's menu). For input that is already an event on this side
+     * (a TV remote's D-pad keys, the touch legend).
      */
     external fun nativeConsoleMenu(handle: Long, event: Int)
 
@@ -802,6 +806,12 @@ object NativeBridge {
 
     /** A one-shot toast from a service worker. */
     external fun nativeConsoleNotice(handle: Long, text: String)
+
+    /** `[{"heading", "text"}]`: what this app bundles, for the console's Licences screen. */
+    external fun nativeConsoleSetLicenses(handle: Long, json: String)
+
+    /** `{"held": [..], "axes": [[name, v]]}`: the pad's reading while the input test is on. */
+    external fun nativeConsoleSetPadTest(handle: Long, json: String)
 
     /** A library fetch is starting for the shelf on screen (bumps the epoch, sets Loading). */
     external fun nativeConsoleLibraryBegin(handle: Long)

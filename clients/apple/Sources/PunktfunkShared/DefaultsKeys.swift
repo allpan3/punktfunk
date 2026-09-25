@@ -37,12 +37,8 @@ public enum DefaultsKey {
     public static let gamepadID = "punktfunk.gamepadID"
     /// The `PunktfunkConnection.GamepadType` raw value of the last controller that was actually
     /// attached — written by `GamepadManager` whenever one becomes active, never cleared on
-    /// disconnect. It exists so the gamepad UI's button legends keep speaking the pad the user
-    /// owns: the live controller's own `sfSymbolsName` is authoritative while it's connected, but
-    /// the moment it sleeps or disconnects there is nothing left to ask, and the legends used to
-    /// snap back to generic letter glyphs (i.e. Xbox) under a DualSense user's hands. Also what
-    /// makes the legends right at all under `gamepadUIMode == "always"`, where the console UI is
-    /// up with no pad attached by design. See `GamepadGlyphs`.
+    /// disconnect, so a button legend keeps speaking the pad the user owns once it sleeps or
+    /// disconnects. See `GamepadGlyphs`.
     public static let lastGamepadKind = "punktfunk.lastGamepadKind"
     /// Forward this device's controllers to the host at all (default true). Off is for a
     /// couch whose controller reaches the host another way — USB passthrough such as
@@ -245,8 +241,8 @@ public enum DefaultsKey {
     /// unknown value reads as host order. Presentation only — a device preference, never part of
     /// a stream preset. Written by the library's sort/view bar and by the Collections screen.
     public static let librarySort = "punktfunk.librarySort"
-    /// Which arrangement the gamepad library opens in — a `LibraryArrangement` stored value
-    /// (`"shelf"` = the coverflow, the default; `"grid"`). The cross-client `library_view` key;
+    /// Which arrangement the console's library opens in — a `LibraryArrangement` stored value
+    /// (`"shelf"`, the default; `"grid"`). The cross-client `library_view` key;
     /// unknown reads as shelf. Presentation only. One key, two surfaces: the library's bar and the
     /// Interface settings row both write it.
     public static let libraryView = "punktfunk.libraryView"
@@ -294,8 +290,7 @@ public enum DefaultsKey {
     /// The stats overlay's vocabulary: false (default) shows the figures Moonlight's overlay also
     /// shows, true the Advanced capture-to-glass view. Device-wide; a preset never carries it.
     public static let advancedStats = "punktfunk.advancedStats"
-    /// iOS/iPadOS/macOS: switch the host list, settings and game library to a controller-friendly
-    /// layout (the console launcher, gamepad-navigable settings, a coverflow-style library).
+    /// iOS/iPadOS/macOS: front the console instead of the touch/desktop layouts.
     /// On by default; WHEN it takes over is `gamepadUIMode`. See `GamepadUIEnvironment.isActive`.
     public static let gamepadUIEnabled = "punktfunk.gamepadUIEnabled"
     /// When `gamepadUIEnabled` actually takes over: `"connected"` (the default — only while a
@@ -305,13 +300,10 @@ public enum DefaultsKey {
     /// settings rows hide it when the switch is off. Anything unrecognized reads as
     /// `"connected"`. A device preference, never part of a stream preset.
     public static let gamepadUIMode = "punktfunk.gamepadUIMode"
-    /// Which colour family the gamepad UI's living backdrop drifts through — a
-    /// `GamepadPalette` id ("violet" = the brand default, then "oled"/"nebula"/"abyss"/"ember"/
-    /// "moss"/"graphite", then the pale ones). The cross-client `ui_palette` key: the desktop
-    /// console and the Android client carry the same table under the same names. Presentation
-    /// only, so it is a device preference and never part of a stream preset. An unknown value
-    /// reads as the default rather than failing — a newer client may have shipped a palette this
-    /// build doesn't know.
+    /// The console's backdrop palette — the cross-client `ui_palette` key, an id from the
+    /// console's own table (`ConsoleBridge.palettes`). A device preference, never part of a
+    /// stream preset. An unknown value reads as the default: a newer client may have shipped a
+    /// palette this build doesn't know.
     public static let uiPalette = "punktfunk.uiPalette"
     /// iPhone: ALSO play the rumble the host addresses to controller 1 (wire pad 0) on this
     /// device's own Taptic Engine — for phone-clip pads that ship without rumble motors, where
@@ -352,8 +344,8 @@ extension Notification.Name {
     /// menus) — it exists so the menu item is honest whenever it CAN fire, and as the shortcut's
     /// discoverable menu-bar surface.
     public static let punktfunkReleaseCapture = Notification.Name("io.unom.punktfunk.release-capture")
-    /// The quick-action ring's Keyboard slot: summon the stream view's soft keyboard (iOS).
-    public static let punktfunkShowSoftKeyboard = Notification.Name("io.unom.punktfunk.show-soft-keyboard")
+    /// The quick-action ring's Keyboard slot: show the stream view's soft keyboard, or hide it (iOS).
+    public static let punktfunkToggleSoftKeyboard = Notification.Name("io.unom.punktfunk.toggle-soft-keyboard")
     /// Asks a session to advance its stats tier; `object` is its connection, nil for every session.
     /// Posted by `StatsVerbosity.requestCycle`. The stored default does not move.
     public static let punktfunkStatsCycled = Notification.Name("io.unom.punktfunk.stats-cycled")

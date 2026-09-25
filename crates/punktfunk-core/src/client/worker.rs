@@ -67,7 +67,7 @@ pub(crate) struct WorkerArgs {
     pub(crate) scroll_invert: Arc<AtomicBool>,
     pub(crate) hdr_meta_tx: SyncSender<HdrMeta>,
     pub(crate) host_timing_tx: SyncSender<crate::quic::HostTiming>,
-    pub(crate) cursor_shape_tx: SyncSender<crate::quic::CursorShape>,
+    pub(crate) cursor_shape_tx: super::planes::ShapeSender,
     pub(crate) cursor_state_tx: SyncSender<crate::quic::CursorState>,
     pub(crate) input_rx: tokio::sync::mpsc::UnboundedReceiver<InputEvent>,
     pub(crate) mic_rx: tokio::sync::mpsc::Receiver<(u32, u64, Vec<u8>)>,

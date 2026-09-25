@@ -68,11 +68,11 @@ final class ConsoleABITests: XCTestCase {
     func testRootIsWhereBackLeaves() throws {
         let texture = try offscreen(width: 320, height: 180)
         XCTAssertTrue(punktfunk_console_at_root(console))
-        // X opens Settings from Home, so Back then has somewhere to go.
-        XCTAssertTrue(punktfunk_console_menu(console, 7, 1))
+        // With no hosts, focus starts on Add Host; OK opens it, so Back has somewhere to go.
+        XCTAssertTrue(punktfunk_console_menu(console, 4, 1))
         draw(texture, frames: 20)
         XCTAssertFalse(punktfunk_console_at_root(console), "a pushed screen is not the root")
-        // Backing out can take more than one press — the tab strip claims the first — so what
+        // Backing out can take more than one press — a field may claim the first — so what
         // matters is that Back stays the console's until it is home again.
         for _ in 0..<4 where !punktfunk_console_at_root(console) {
             XCTAssertTrue(punktfunk_console_menu(console, 5, 1), "Back is the console's here")

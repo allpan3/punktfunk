@@ -59,7 +59,9 @@ struct ContentView: View {
     /// name, its address, or the `host=` recovery parameter — instead of by its stable record id.
     /// Anything that can open a URL can guess "Gaming PC", so the link's action waits for this
     /// confirmation; a link that names the id (every shortcut this app emits) still runs on its own.
-    private struct DeepLinkConfirm {
+    struct DeepLinkConfirm {
+        /// Which question an answer belongs to: a newer link replaces the one on screen.
+        let id = UUID()
         let host: StoredHost
         let launch: String?
         let preset: PresetSelection
@@ -78,16 +80,12 @@ struct ContentView: View {
         }
     }
     @State private var deepLinkConfirm: DeepLinkConfirm?
+    /// The console could not be built on this device (`ConsoleHomeView.onFailed`).
+    @State private var consoleFailed = false
     #if os(iOS)
     /// Owns the Live Activity for the running session (Lock Screen / Dynamic Island). Driven from
     /// the session model's published state below; iPhone/iPad only.
     @State private var liveActivity = SessionActivityController()
-    /// The window's bottom safe-area inset (the home-indicator strip), reported by
-    /// DisplayBottomInsetProbe from UIKit's own callbacks and published as
-    /// `\.displayBottomInset` for the screens that pin a legend to the display's corner. Held
-    /// HERE and read through the environment because asking UIKit for it during a body severs
-    /// the asking view's updates on device (see the probe).
-    @State private var displayBottomInset: CGFloat = 0
     #endif
     @State private var pairingTarget: StoredHost?
     /// A fresh `pair=required`/unknown host the user tapped: drives the choice between no-PIN
@@ -150,8 +148,8 @@ struct ContentView: View {
     #if !os(macOS)
     @State private var showSettings = false
     #endif
-    // A connected controller (+ the Settings toggle) swaps the whole home screen for
-    // GamepadHomeView instead of retrofitting HomeView's touch/desktop UI — see `home` below.
+    // A connected controller (+ the Settings toggle) swaps the whole home screen for the console
+    // (ConsoleHomeView) instead of retrofitting HomeView's touch/desktop UI — see `home` below.
     // On tvOS the same screens are focus-engine-driven, so the Siri Remote keeps working;
     // with no (extended) controller attached tvOS falls back to HomeView as before.
     @ObservedObject private var gamepadManager = GamepadManager.shared
@@ -187,23 +185,7 @@ struct ContentView: View {
     /// scenePhase drives the keep-alive: use THIS, not the willResignActive observers — resign-active
     /// also fires for Control Center / app-switcher peeks, where the disconnect timer must not start.
     @Environment(\.scenePhase) private var scenePhase
-    #if os(iOS)
-    @Environment(\.horizontalSizeClass) private var hSizeClass
-    @Environment(\.verticalSizeClass) private var vSizeClass
-    #endif
 
-    /// The gamepad UI's form-metric tier for this window, published from HERE — the app's root.
-    /// A screen that applies `gamepadPaletteInk` itself sits ABOVE its own copy of the environment,
-    /// so its `@Environment` resolves against its parent; publishing at the root is what makes
-    /// every one of them (including the ones presented as sheets and covers, which inherit the
-    /// environment) read its own window's tier instead of the bare default.
-    private var gamepadMetrics: GamepadFormMetrics {
-        #if os(iOS)
-        .forWindow(h: hSizeClass, v: vSizeClass)
-        #else
-        .platformDefault
-        #endif
-    }
     /// While the console fronts the app and no stream is up, the console draws every screen:
     /// connect, wake, pairing, the approval wait, a failed dial. The app's own alerts and sheets
     /// would be a second interface over it — and on a TV, a focus trap the pad cannot reach. Once
@@ -212,10 +194,12 @@ struct ContentView: View {
         gamepadUIActive && (model.phase == .idle || model.phase == .connecting)
     }
 
+    /// A console that could not be built hands the screen back to this app's own UI.
     private var gamepadUIActive: Bool {
-        GamepadUIEnvironment.isActive(
-            gamepadConnected: gamepadManager.uiPadConnected, enabledSetting: gamepadUIEnabled,
-            mode: gamepadUIMode)
+        !consoleFailed
+            && GamepadUIEnvironment.isActive(
+                gamepadConnected: gamepadManager.uiPadConnected, enabledSetting: gamepadUIEnabled,
+                mode: gamepadUIMode)
     }
 
     // The body is split in two — `driven` (the screen plus its lifecycle drivers and sheets) and
@@ -300,36 +284,6 @@ struct ContentView: View {
     }
 
     private var driven: some View {
-        drivenBase
-            .environment(\.gamepadMetrics, gamepadMetrics)
-            #if os(iOS)
-            .environment(\.displayBottomInset, displayBottomInset)
-            // The probe is UIKit's, not any screen's: mounted once here as a background so the
-            // legend-pinning screens can READ the inset from the environment without ever asking
-            // UIKit during their own body (which severs their updates — see the probe).
-            .background {
-                DisplayBottomInsetProbe { displayBottomInset = $0 }
-            }
-            #endif
-            #if os(iOS) || os(macOS)
-            // The console's own modal, over WHICHEVER screen is up. Not attached to `home`, which
-            // renders only while `model.connection == nil`: a connection exists through the
-            // pair-required and approval handshakes, which is precisely when these prompts fire.
-            // It sits above the connect takeover too — the delegated-approval wait is raised
-            // DURING a dial and owns the only Cancel for it. (The takeover draws nothing in that
-            // state: `connectingOverlayName` is nil while `awaitingApproval` is set, so the two
-            // never poll the pad at once.)
-            .overlay {
-                if let prompt = consolePrompt {
-                    GamepadPromptView(prompt: prompt)
-                        .gamepadPaletteInk()
-                        .transition(.opacity)
-                }
-            }
-            #endif
-    }
-
-    private var drivenBase: some View {
         Group {
             // The stream view's structural identity MUST be stable across the
             // awaiting-trust → streaming transition: recreating it restarts the pump,
@@ -599,41 +553,11 @@ struct ContentView: View {
         // (the "Pair with PIN instead" path disconnects first — the host's accept loop
         // is sequential, a pairing connection would queue behind the live session).
         #if !os(tvOS)
-        // macOS presents BOTH pairing UIs from here, picking by mode (the console UI's screen is
-        // gamepad-navigable; PairSheet's Form is not). iOS hides this sheet in gamepad mode
-        // instead — there the pair screen is one of the shell's in-place layers, exactly like
-        // settings and add-host (see `touchPairingTarget`).
+        // The touch UI's pairing sheet. The console pairs on its own screen, so the sheet hides
+        // while the console owns the screen (see `touchPairingTarget`).
         .sheet(item: touchPairingTarget) { host in
-            #if os(macOS)
-            if gamepadUIActive {
-                GamepadPairView(host: host, onPaired: { handlePaired(host, fingerprint: $0) })
-                    .frame(width: 660, height: 620)
-            } else {
-                PairSheet(host: host) { fingerprint in handlePaired(host, fingerprint: fingerprint) }
-            }
-            #else
             PairSheet(host: host) { fingerprint in handlePaired(host, fingerprint: fingerprint) }
-            #endif
         }
-        // The library is a full-screen presentation, not a sheet: on iPad a sheet is a centered page
-        // card, but the gamepad coverflow is meant to be an immersive, full-bleed screen (and the
-        // launcher behind it stops consuming the controller — see GamepadHomeView's `isActive`).
-        // macOS has no `fullScreenCover`, so it keeps the sheet there — with an explicit size: a
-        // macOS sheet takes its content's IDEAL size, and both library layouts are geometry-driven
-        // (the coverflow is a GeometryReader, ideal ≈ zero), so without a frame it collapses to a
-        // tiny panel.
-        #if os(macOS)
-        .sheet(item: macLibrarySheet) { shelf in
-            NavigationStack {
-                LibraryView(
-                    store: store, target: shelf, onLaunch: { launchTitle(shelf, $0) },
-                    onConnect: { connectFromShelf(shelf) })
-            }
-            .frame(minWidth: 940, minHeight: 620)
-            // The stack draws the title, outside LibraryView's own ink (see the tvOS cover).
-            .gamepadPaletteInk()
-        }
-        #endif
         #endif
     }
 
@@ -643,122 +567,16 @@ struct ContentView: View {
 
     private var deepLinkNoticePresented: Binding<Bool> {
         Binding(
-            get: { deepLinkNotice != nil && !consolePromptShowing && !consoleOwnsScreen },
+            get: { deepLinkNotice != nil && !consoleOwnsScreen },
             set: { if !$0 { deepLinkNotice = nil } })
     }
 
+    /// Down while the console is up: it asks the same question in a way a pad can answer.
     private var deepLinkConfirmPresented: Binding<Bool> {
         Binding(
-            get: { deepLinkConfirm != nil && !consolePromptShowing },
+            get: { deepLinkConfirm != nil && !consoleOwnsScreen },
             set: { if !$0 { deepLinkConfirm = nil } })
     }
-
-    /// True while the console prompt owns the modal state (see `consolePrompt`). Always false on
-    /// tvOS, whose alerts the focus engine drives natively.
-    private var consolePromptShowing: Bool {
-        #if os(iOS) || os(macOS)
-        consolePrompt != nil
-        #else
-        false
-        #endif
-    }
-
-    #if os(iOS) || os(macOS)
-    /// The modal state the console UI should present ITSELF, as a pad-navigable prompt, instead of
-    /// letting a system alert take it. `.alert`/`.confirmationDialog` are UIKit/AppKit surfaces a
-    /// controller cannot navigate, and these are not incidental prompts: "Pairing required" is the
-    /// FIRST thing an unpaired host shows, "Connection failed" strands the console UI behind a
-    /// modal only a finger can dismiss, and "Waiting for approval" owns the only Cancel for a
-    /// connect that may never complete. One at a time, most-urgent first — a system alert stack
-    /// would layer these, but a console shows one screen.
-    ///
-    /// Gated on not STREAMING, not on `model.connection == nil`: a connection object exists well
-    /// before a stream does, through exactly the handshakes these prompts belong to. Streaming is
-    /// the one case that must stay with the system alert — there the pad belongs to
-    /// `GamepadCapture` and is being forwarded to the host.
-    private var consolePrompt: GamepadPrompt? {
-        // Nothing while the console owns the screen: its Home opens the pair screen on an
-        // unpaired host, and its connect card narrates the approval wait.
-        guard gamepadUIActive, !consoleOwnsScreen, model.phase != .streaming else { return nil }
-        if let req = approvalChoice {
-            return GamepadPrompt(
-                id: "pairing-required",
-                title: "Pairing required",
-                message: "\(req.host.displayName) requires pairing. Request access and approve "
-                    + "this device in the host's web console (port 47992 → Pairing) — no PIN "
-                    + "needed. Or pair with the 4-digit PIN it can display.",
-                actions: [
-                    // The follow-on presentation is deferred a tick exactly as the system dialog
-                    // does it, so this prompt is fully torn down before the next screen mounts —
-                    // two controller pollers overlapping for a frame is how one A press reaches
-                    // both.
-                    GamepadPromptAction(id: "request", title: "Request Access", isPrimary: true) {
-                        approvalChoice = nil
-                        DispatchQueue.main.async { requestAccess(req) }
-                    },
-                    GamepadPromptAction(id: "pin", title: "Pair with PIN…") {
-                        approvalChoice = nil
-                        DispatchQueue.main.async { pairingTarget = req.host }
-                    },
-                    GamepadPromptAction(id: "cancel", title: "Cancel", isCancel: true) {
-                        approvalChoice = nil
-                    },
-                ])
-        }
-        if let req = awaitingApproval {
-            return GamepadPrompt(
-                id: "awaiting-approval",
-                title: "Waiting for approval",
-                message: "Approve \u{201C}\(localDeviceName)\u{201D} in \(req.host.displayName)'s "
-                    + "web console (port 47992 → Pairing). This device connects automatically "
-                    + "once you approve it — no need to reconnect.",
-                actions: [
-                    GamepadPromptAction(id: "cancel", title: "Cancel", isCancel: true) {
-                        awaitingApproval = nil
-                        model.disconnect()
-                    },
-                ],
-                busy: true)
-        }
-        if connectionErrorReady {
-            return GamepadPrompt(
-                id: "connection-failed",
-                title: "Connection failed",
-                message: model.errorMessage ?? "",
-                actions: [
-                    GamepadPromptAction(id: "ok", title: "OK", isCancel: true) {
-                        model.errorMessage = nil
-                    },
-                ])
-        }
-        if let confirm = deepLinkConfirm {
-            return GamepadPrompt(
-                id: "link-confirm",
-                title: "Open this link?",
-                message: confirm.message,
-                actions: [
-                    GamepadPromptAction(id: "go", title: confirm.actionTitle, isPrimary: true) {
-                        runDeepLinkConfirm(confirm)
-                    },
-                    GamepadPromptAction(id: "cancel", title: "Cancel", isCancel: true) {
-                        deepLinkConfirm = nil
-                    },
-                ])
-        }
-        if let notice = deepLinkNotice {
-            return GamepadPrompt(
-                id: "cant-open",
-                title: "Can't open",
-                message: notice,
-                actions: [
-                    GamepadPromptAction(id: "ok", title: "OK", isCancel: true) {
-                        deepLinkNotice = nil
-                    },
-                ])
-        }
-        return nil
-    }
-    #endif
 
     #if os(iOS) || os(tvOS)
     /// In the touch and TV UIs a shelf is a tab, not a presentation: a written `libraryTarget`
@@ -774,17 +592,12 @@ struct ContentView: View {
 
     #if os(macOS)
     /// On the Mac a shelf is the Library row's pick, not a presentation: a written `libraryTarget`
-    /// becomes that pick, selects the row and clears. Gamepad mode keeps its sheet
-    /// (`macLibrarySheet`).
+    /// becomes that pick, selects the row and clears. In gamepad mode the console takes it.
     private func showShelfInSidebar() {
         guard !gamepadUIActive, let shelf = libraryTarget else { return }
         libraryShelfID = shelf.id
         macDestination = .library
         libraryTarget = nil
-    }
-
-    private var macLibrarySheet: Binding<LibraryTarget?> {
-        Binding(get: { gamepadUIActive ? libraryTarget : nil }, set: { libraryTarget = $0 })
     }
 
     /// Run a host window's pending request here, unless another main window took it first. A
@@ -834,18 +647,18 @@ struct ContentView: View {
 
     private var approvalChoicePresented: Binding<Bool> {
         Binding(
-            get: { approvalChoice != nil && !consolePromptShowing && !consoleOwnsScreen },
+            get: { approvalChoice != nil && !consoleOwnsScreen },
             set: { if !$0 { approvalChoice = nil } })
     }
 
     private var awaitingApprovalPresented: Binding<Bool> {
         Binding(
-            get: { awaitingApproval != nil && !consolePromptShowing && !consoleOwnsScreen },
+            get: { awaitingApproval != nil && !consoleOwnsScreen },
             set: { if !$0 { awaitingApproval = nil } })
     }
 
-    /// Whether the "Connection failed" state is ready to be shown at all — shared by the system
-    /// alert and the console prompt so the two can never disagree about the macOS deferral below.
+    /// Whether the "Connection failed" alert is ready to be shown at all (see the macOS
+    /// deferral below).
     private var connectionErrorReady: Bool {
         guard model.errorMessage != nil else { return false }
         #if os(macOS)
@@ -861,7 +674,7 @@ struct ContentView: View {
 
     private var connectionErrorPresented: Binding<Bool> {
         Binding(
-            get: { connectionErrorReady && !consolePromptShowing && !consoleOwnsScreen },
+            get: { connectionErrorReady && !consoleOwnsScreen },
             set: { if !$0 { model.errorMessage = nil } })
     }
 
@@ -998,11 +811,7 @@ struct ContentView: View {
                     ConnectOverlay(
                         connectingHostName: connectingOverlayName,
                         waker: waker,
-                        gamepadUI: gamepadUIActive,
                         onCancelConnect: { model.disconnect() })
-                        // The takeover mounts OUTSIDE the gamepad screens (it covers the whole
-                        // home), so it publishes the palette's ink itself rather than inheriting it.
-                        .gamepadPaletteInk()
                 }
             }
     }
@@ -1061,9 +870,11 @@ struct ContentView: View {
     private var console: some View {
         ConsoleHomeView(
             store: store, model: model, discovery: discovery, waker: waker,
-            entry: $libraryTarget, notice: $deepLinkNotice,
-            suspended: deepLinkConfirm != nil, onPaired: handlePaired,
+            entry: $libraryTarget, notice: $deepLinkNotice, pairing: $pairingTarget,
+            linkConfirm: $deepLinkConfirm, runLink: runDeepLinkConfirm,
+            onFailed: { consoleFailed = true }, onPaired: handlePaired,
             connect: { connect($0, preset: $1) }, connectDiscovered: connectDiscovered,
+            requestAccess: consoleRequestAccess, requestAccessDiscovered: requestAccessDiscovered,
             launchTitle: launchTitle, connectShelf: connectFromShelf,
             wakeOnly: { wakeOnly($0) })
     }
@@ -1477,7 +1288,7 @@ struct ContentView: View {
                 let i = order.firstIndex(of: TouchInputMode.current(conn.settings)) ?? 0
                 TouchInputMode.sessionOverride = order[(i + 1) % order.count]
             },
-            keyboard: { NotificationCenter.default.post(name: .punktfunkShowSoftKeyboard, object: nil) },
+            keyboard: { NotificationCenter.default.post(name: .punktfunkToggleSoftKeyboard, object: nil) },
             stats: { [model] in model.statsVerbosity },
             cycleStats: { [model] in model.cycleStats() },
             micAvailable: { [model] in model.micAvailable },
@@ -1744,12 +1555,7 @@ struct ContentView: View {
     /// inside `connect`.)
     private func connectDiscovered(_ d: DiscoveredHost) {
         guard !model.isBusy else { return }
-        let host = StoredHost(
-            name: d.name, address: d.host, port: d.port,
-            mgmtPort: d.mgmtPort,
-            macAddresses: d.macAddresses.isEmpty ? nil : d.macAddresses,
-            osChain: d.osChain.isEmpty ? nil : d.osChain)
-        store.add(host)
+        let host = save(d)
         if d.allowsTofu {
             connect(host, allowTofu: true)
         } else {
@@ -1757,6 +1563,33 @@ struct ContentView: View {
             approvalChoice = ApprovalRequest(
                 host: host, advertisedFingerprint: pinFingerprint(d.fingerprintHex))
         }
+    }
+
+    /// A discovered host as a saved record, so a session has a stored identity to pin.
+    private func save(_ d: DiscoveredHost) -> StoredHost {
+        let host = StoredHost(
+            name: d.name, address: d.host, port: d.port,
+            mgmtPort: d.mgmtPort,
+            macAddresses: d.macAddresses.isEmpty ? nil : d.macAddresses,
+            osChain: d.osChain.isEmpty ? nil : d.osChain)
+        store.add(host)
+        return host
+    }
+
+    /// The console Pair screen's "Request access" on a saved host: keep its pin, else take
+    /// the one its advert carries.
+    private func consoleRequestAccess(_ host: StoredHost) {
+        requestAccess(
+            ApprovalRequest(
+                host: host,
+                advertisedFingerprint: host.pinnedSHA256 ?? advertisedFingerprint(for: host)))
+    }
+
+    /// The same on a host the console only saw advertised: saved first, as a tap on it would.
+    private func requestAccessDiscovered(_ d: DiscoveredHost) {
+        guard !model.isBusy else { return }
+        requestAccess(
+            ApprovalRequest(host: save(d), advertisedFingerprint: pinFingerprint(d.fingerprintHex)))
     }
 
     /// Pairing ceremony succeeded — pin the host and connect. The guard backstops a stale

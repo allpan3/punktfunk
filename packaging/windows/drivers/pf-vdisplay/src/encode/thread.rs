@@ -46,11 +46,15 @@ pub fn fail_reply(status: u32, (error, name): Fail) -> SetEncodeReply {
     reply
 }
 
-/// `pf_frame::HdrMeta` from its 28 `repr(C)` bytes.
-pub fn hdr_meta(bytes: &[u8; 28]) -> HdrMeta {
+/// `pf_frame::HdrMeta` from its 28 `repr(C)` bytes. All zero is the host's `None`: no mastering
+/// volume, never a 0-nit one.
+pub fn hdr_meta(bytes: &[u8; 28]) -> Option<HdrMeta> {
+    if bytes.iter().all(|&b| b == 0) {
+        return None;
+    }
     // SAFETY: `HdrMeta` is `repr(C)`, 28 bytes of plain integers with no invalid bit pattern;
     // `read_unaligned` copies them out of the request's byte array.
-    unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<HdrMeta>()) }
+    Some(unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<HdrMeta>()) })
 }
 
 /// The request's `open` spec for backend `backend` of its list. The input comes from
@@ -113,7 +117,7 @@ fn open_listed(
                     enc.set_wire_chunking(req.wire_chunk_bytes as usize);
                 }
                 if req.hdr == 1 {
-                    enc.set_hdr_meta(Some(hdr_meta(&req.hdr_meta)));
+                    enc.set_hdr_meta(hdr_meta(&req.hdr_meta));
                 }
                 let applied = enc.applied_bitrate_bps().unwrap_or(spec.bitrate_bps);
                 let mut reply = fail_reply(

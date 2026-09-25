@@ -380,8 +380,11 @@ public final class MetalWaveletDecoder {
     private var nextSlot = 0
     /// One permit per ring slot — see the wait in `decode`.
     private let ringSlots = DispatchSemaphore(value: MetalWaveletDecoder.ringDepth)
-    /// The ring's plane format facts (from the last SOF): PQ ⇒ 16-bit UNORM planes.
+    /// The ring's plane format facts (from the last SOF): 10-bit ⇒ 16-bit UNORM planes.
     private var hdr16 = false
+    /// The session's negotiated depth. The header has no depth bit, and a Linux host sends
+    /// 10-bit SDR, so PQ alone does not decide the plane depth.
+    private let tenBit: Bool
 
     /// The current geometry (from the last SOF that built the resources) — the pump reports
     /// decoded-size changes to the resize overlay from this. PUMP THREAD.
@@ -389,10 +392,12 @@ public final class MetalWaveletDecoder {
         layout.map { ($0.width, $0.height) }
     }
 
-    /// The pump thread owns `decode`; everything mutable is confined to it.
-    init?(device: MTLDevice, queue: MTLCommandQueue) {
+    /// The pump thread owns `decode`; everything mutable is confined to it. `tenBit` is the
+    /// session's negotiated depth (`connection.bitDepth >= 10`).
+    init?(device: MTLDevice, queue: MTLCommandQueue, tenBit: Bool = false) {
         self.device = device
         self.queue = queue
+        self.tenBit = tenBit
         do {
             let lib = try device.makeLibrary(source: waveletShaderSource, options: nil)
             guard let dequantFn = lib.makeFunction(name: "wavelet_dequant") else { return nil }
@@ -440,9 +445,10 @@ public final class MetalWaveletDecoder {
                 au: au, chunkAligned: chunkAligned, windowSize: windowSize)
         else { return false }
 
+        let wide = tenBit || frame.pq
         if layout?.width != frame.layout.width || layout?.height != frame.layout.height
-            || layout?.chroma444 != frame.layout.chroma444 || hdr16 != frame.pq {
-            guard rebuild(layout: frame.layout, hdr16: frame.pq) else { return false }
+            || layout?.chroma444 != frame.layout.chroma444 || hdr16 != wide {
+            guard rebuild(layout: frame.layout, hdr16: wide) else { return false }
         }
         guard let layout, !slots.isEmpty else { return false }
 
@@ -559,8 +565,7 @@ public final class MetalWaveletDecoder {
 
         let planes = WaveletPlanes(
             y: slot.y, cb: slot.cb, cr: slot.cr,
-            csc: CscRows.rows(
-                frame.cscSignal, depth: frame.pq ? 10 : 8, msbPacked: frame.pq),
+            csc: CscRows.rows(frame.cscSignal, depth: wide ? 10 : 8, msbPacked: wide),
             pq: frame.pq)
         let slotReleased = ringSlots // captured directly: the handler must not retain the decoder
         cmd.addCompletedHandler { buffer in

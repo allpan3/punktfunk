@@ -106,6 +106,9 @@ struct CaptureSignals {
     /// Overlay from every buffer's `SPA_META_Cursor`, including cursor-only
     /// buffers that never become frames. Gamescope XFixes publishes here too.
     cursor_live: Arc<std::sync::Mutex<Option<pf_frame::CursorOverlay>>>,
+    /// The host forwards or blends [`Self::cursor_live`] itself, so the CPU copy must not
+    /// bake the pointer into its pixels as well. Set by [`Capturer::set_cursor_forward`].
+    host_places_cursor: Arc<AtomicBool>,
     /// Packed `(w << 32) | h`; `0` until `param_changed`. Gamescope cursor
     /// maps root-space into frame space (`-w/-h` vs `-W/-H` are independent).
     frame_size: Arc<std::sync::atomic::AtomicU64>,
@@ -143,6 +146,7 @@ impl CaptureSignals {
             hdr_negotiated: Arc::new(AtomicBool::new(false)),
             gpu_dmabuf_offer: Arc::new(AtomicBool::new(false)),
             cursor_live: Arc::new(std::sync::Mutex::new(None)),
+            host_places_cursor: Arc::new(AtomicBool::new(false)),
             frame_size: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             importer: Arc::new(std::sync::Mutex::new(None)),
             has_importer: Arc::new(AtomicBool::new(false)),
@@ -189,8 +193,9 @@ pub struct PortalCapturer {
     /// the next pipeline builds.
     join: Option<thread::JoinHandle<()>>,
     /// Virtual output; its `Drop` releases the compositor output. `None` on
-    /// the portal path (the portal thread closes its session).
-    _keepalive: Option<Box<dyn Send>>,
+    /// the portal path (the portal thread closes its session), or once a
+    /// capture-only rebuild took it back (`take_keepalive`).
+    keepalive: Option<Box<dyn Send>>,
     /// Portal-thread teardown. `None` on the virtual-output path. Its `Drop`
     /// ends the compositor's screencast.
     _portal: Option<PortalSession>,
@@ -413,7 +418,7 @@ impl PwHandles {
             node_id,
             quit: Some(self.quit),
             join: Some(self.join),
-            _keepalive: keepalive,
+            keepalive,
             _portal: portal,
             _gs_cursor: None,
         }
@@ -532,6 +537,14 @@ impl Capturer for PortalCapturer {
             .and_then(|slot| slot.clone())
     }
 
+    fn set_cursor_forward(&mut self, _on: bool) {
+        // Either way the host places the pointer from `cursor()`: forwarded, or on the frame
+        // for the encoder blend.
+        self.signals
+            .host_places_cursor
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
     fn attach_gamescope_cursor(&mut self, targets: crate::GamescopeCursorTargets) {
         // Gamescope paints no `SPA_META_Cursor`. Idempotent: do not `spawn`
         // before dropping the old source (two publishers, or a `None` spawn
@@ -581,13 +594,19 @@ impl Capturer for PortalCapturer {
         }
     }
 
+    /// Only the virtual-output path holds one; the portal thread owns its own session.
+    fn take_keepalive(&mut self) -> Option<Box<dyn Send>> {
+        self.keepalive.take()
+    }
+
     fn try_latest(&mut self) -> Result<Option<CapturedFrame>> {
         if self.signals.broken.load(Ordering::Relaxed) {
             return Err(anyhow!(
                 "zero-copy GPU import lost (node {}): the import worker died or tiled imports \
                  failed repeatedly — rebuilding capture",
                 self.node_id
-            ));
+            )
+            .context(super::DisplayStillAlive));
         }
         // Drain wakeup edges first — stale ones must not make the next
         // `wait_arrival` return early. `Disconnected` is a dead thread;

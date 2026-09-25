@@ -238,7 +238,10 @@ fn probe_sink(keep: bool) -> Result<()> {
     // Tone through the DEFAULT device (`None`), loopback on the parked sink —
     // the product routing, not a direct open of the minted endpoint.
     audio_control::set_default_endpoint(&ep).context("park the default playback on the sink")?;
-    let (peak, hz) = tone_while(&None, 5, 440.0, || loopback_peak(&ep, 3))??;
+    let measured = tone_while(&None, 5, 440.0, || loopback_peak(&ep, 3));
+    // The operator's devices come back whatever the tone did.
+    restore_defaults(prev_render, prev_capture);
+    let (peak, hz) = measured??;
     println!(
         "audio-probe sink: loopback peak over 3s = {peak:.4}, tone 440 Hz read back as {hz:.0} Hz"
     );
@@ -256,7 +259,6 @@ fn probe_sink(keep: bool) -> Result<()> {
         );
     }
 
-    restore_defaults(prev_render, prev_capture);
     if keep {
         println!("audio-probe sink: --keep — devnode {inst} left in place");
     } else {

@@ -1,5 +1,5 @@
-//! Swapchain presenter: every decode lane writes one device-local RGBA image, then a
-//! `vkCmdBlitImage` composite placed by `punktfunk_core::video_fit`.
+//! Swapchain presenter: every decode lane writes one device-local [`VIDEO_FORMAT`] image,
+//! then a `vkCmdBlitImage` composite placed by `punktfunk_core::video_fit`.
 //!
 //! CPU frames stage tightly-packed I420 into three R8 images (`CpuPlanes`) and share
 //! the planar CSC pass (`csc.rs`, `csc_rows`) with PyroWave. Linux dmabuf imports NV12
@@ -37,6 +37,10 @@ pub use setup::{list_adapters, probe_decode, AdapterDecode, PresentPref};
 /// be newer, but entry points above 1.3 were never promised. Overlay renderers size
 /// their tables from [`crate::overlay::SharedDevice::api_version`], not the loader.
 pub const INSTANCE_API_VERSION: u32 = vk::API_VERSION_1_3;
+
+/// The video intermediate every lane's CSC writes, for every stream: PQ in 8 bits bands, and
+/// a 10-bit SDR stream would lose the gradients it pays for. Same 32 bpp as RGBA8.
+const VIDEO_FORMAT: vk::Format = vk::Format::A2B10G10R10_UNORM_PACK32;
 
 /// Clamp behind [`Presenter::overlay_api_version`], split out so tests can prove it
 /// without a device: min(declared, loader), and a loader that cannot answer is 1.0.
@@ -204,7 +208,6 @@ pub struct Presenter {
     /// Latest ST.2086/CLL metadata (0xCE plane). Pushed while HDR10 is live; until the
     /// first datagram, a generic HDR10 baseline is pushed instead.
     hdr_meta: Option<punktfunk_core::quic::HdrMeta>,
-    video_format: vk::Format,
     present_mode: vk::PresentModeKHR,
     swapchain: vk::SwapchainKHR,
     images: Vec<vk::Image>,

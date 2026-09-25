@@ -14,7 +14,8 @@ use pf_console_ui::bridge::{
 use pf_console_ui::console::FrameCost;
 use pf_console_ui::{
     Console, ConsoleEntry, ConsoleHandles, HostRow, InputSource, Insets, Key, LibraryGame,
-    LibraryPhase, PairPhase, Platform, SnapshotStore, SpeedPhase, Stale, Viewport, WakeStatus,
+    LibraryPhase, LicenseSection, PadTestState, PairPhase, Platform, Prompt, SnapshotStore,
+    SpeedPhase, Stale, Viewport, WakeStatus,
 };
 use skia_safe::gpu::{self, mtl, DirectContext, SurfaceOrigin};
 use skia_safe::ColorType;
@@ -72,6 +73,14 @@ pub const PUNKTFUNK_CONSOLE_PUSH_KNOWN_HOSTS: u8 = 13;
 pub const PUNKTFUNK_CONSOLE_PUSH_PADS: u8 = 14;
 /// `{}` for Home, `{"library": HostRow}` for a shelf — re-roots on the next frame.
 pub const PUNKTFUNK_CONSOLE_PUSH_NAVIGATE: u8 = 15;
+/// `{"id", "title", "message", "choices": [..]}` — a question over the top screen; the
+/// answer comes back as the `PromptAnswer` command.
+pub const PUNKTFUNK_CONSOLE_PUSH_PROMPT: u8 = 16;
+/// `[{"heading", "text"}]` — what this app bundles, for the Licences screen. The answer to
+/// the `LoadLicenses` command.
+pub const PUNKTFUNK_CONSOLE_PUSH_LICENSES: u8 = 17;
+/// `{"held": [..], "axes": [[name, v]]}` — the pad's reading while the `PadTest` command is on.
+pub const PUNKTFUNK_CONSOLE_PUSH_PAD_TEST: u8 = 18;
 
 /// One console. Opaque to C.
 pub struct PunktfunkConsole {
@@ -83,6 +92,7 @@ pub struct PunktfunkConsole {
     /// Pushed from any thread, read by the next frame.
     pads: Mutex<Pads>,
     navigate: Mutex<Option<ConsoleEntry>>,
+    prompt: Mutex<Option<Prompt>>,
 }
 
 struct Shell {
@@ -92,6 +102,9 @@ struct Shell {
     cost: FrameCost,
     /// When the last frame was drawn, and at what size.
     drawn: Option<(Instant, u32, u32)>,
+    /// The colour type the layer's texture last wrapped as. Swift owns the format; Skia
+    /// refuses a mismatch, so a refused wrap flips to the other once and sticks.
+    color_type: ColorType,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -200,12 +213,14 @@ pub unsafe extern "C" fn punktfunk_console_new(
                 published,
                 cost: FrameCost::default(),
                 drawn: None,
+                color_type: ColorType::BGRA1010102,
             }),
             handles,
             store,
             events: Mutex::new(VecDeque::new()),
             pads: Mutex::new((None, None, Vec::new())),
             navigate: Mutex::new(None),
+            prompt: Mutex::new(None),
         }))
     })
 }
@@ -230,7 +245,7 @@ pub unsafe extern "C" fn punktfunk_console_free(c: *mut PunktfunkConsole) {
     })
 }
 
-/// Draw one frame into `mtl_texture` (BGRA8, `width`×`height`) and submit it to the queue.
+/// Draw one frame into `mtl_texture` (BGR10A2 or BGRA8, `width`×`height`) and submit it to the queue.
 /// `scale` is design units per pixel; `0` takes the shell's own formula. `false` = nothing
 /// drawn (idle, or the texture could not be wrapped): present nothing.
 ///
@@ -260,6 +275,9 @@ pub unsafe extern "C" fn punktfunk_console_frame(
         if let Some(entry) = lock(&c.navigate).take() {
             shell.console.navigate(entry);
         }
+        if let Some(prompt) = lock(&c.prompt).take() {
+            shell.console.prompt(prompt);
+        }
         let now = Instant::now();
         if let Some((at, w, h)) = shell.drawn {
             if shell.console.idle() && now - at < IDLE_FRAME && (w, h) == (width, height) {
@@ -270,14 +288,26 @@ pub unsafe extern "C" fn punktfunk_console_frame(
         // the render target lives.
         let info = unsafe { mtl::TextureInfo::new(mtl_texture as _) };
         let target = gpu::backend_render_targets::make_mtl((width as i32, height as i32), &info);
-        let Some(mut surface) = gpu::surfaces::wrap_backend_render_target(
-            &mut shell.context,
-            &target,
-            SurfaceOrigin::TopLeft,
-            ColorType::BGRA8888,
-            None,
-            None,
-        ) else {
+        let other = |ct| match ct {
+            ColorType::BGRA1010102 => ColorType::BGRA8888,
+            _ => ColorType::BGRA1010102,
+        };
+        let mut wrapped = None;
+        for ct in [shell.color_type, other(shell.color_type)] {
+            wrapped = gpu::surfaces::wrap_backend_render_target(
+                &mut shell.context,
+                &target,
+                SurfaceOrigin::TopLeft,
+                ct,
+                None,
+                None,
+            );
+            if wrapped.is_some() {
+                shell.color_type = ct;
+                break;
+            }
+        }
+        let Some(mut surface) = wrapped else {
             tracing::error!("console: Skia could not wrap the {width}×{height} texture");
             return false;
         };
@@ -327,8 +357,9 @@ pub unsafe extern "C" fn punktfunk_console_frame(
 }
 
 /// A discrete menu event: 0..3 move up/down/left/right, 4 confirm, 5 back, 6 secondary (Y),
-/// 7 tertiary (X), 8 jump back (L1), 9 jump forward (R1). `source` 1 = a pad (its glyphs),
-/// 0 = a remote or keyboard. `false` = Back at the root: the press is the system's.
+/// 7 tertiary (X), 8 jump back (L1), 9 jump forward (R1), 10/11 a remote's OK down/up (acts
+/// on release, held it is the card's menu). `source` 1 = a pad (its glyphs), 0 = a remote or
+/// keyboard. `false` = Back at the root: the press is the system's.
 ///
 /// # Safety
 /// `c` is live.
@@ -350,6 +381,7 @@ pub unsafe extern "C" fn punktfunk_console_menu(
             7 => MenuEvent::Tertiary,
             8 => MenuEvent::JumpBack,
             9 => MenuEvent::JumpForward,
+            10 | 11 => MenuEvent::Confirm,
             _ => return true,
         };
         let source = if source == 1 {
@@ -364,7 +396,11 @@ pub unsafe extern "C" fn punktfunk_console_menu(
         let Some(mut shell) = c.shell() else {
             return true;
         };
-        if let Some(p) = shell.console.menu(ev, source) {
+        let pulse = match event {
+            10 | 11 => shell.console.ok(event == 10, source),
+            _ => shell.console.menu(ev, source),
+        };
+        if let Some(p) = pulse {
             lock(&c.events).push_back(Event::Pulse(p));
         }
         !c.publish(&mut shell)
@@ -592,11 +628,21 @@ pub unsafe extern "C" fn punktfunk_console_push(
             PUNKTFUNK_CONSOLE_PUSH_PRESETS => json::<Vec<PresetJson>>(text)
                 .map(|v| c.store.set_presets(v.into_iter().map(Into::into).collect())),
             PUNKTFUNK_CONSOLE_PUSH_KNOWN_HOSTS => json(text).map(|v| c.store.set_known_hosts(v)),
-            PUNKTFUNK_CONSOLE_PUSH_PADS => {
-                json::<PadsJson>(text).map(|v| *lock(&c.pads) = v.into_pads())
-            }
+            PUNKTFUNK_CONSOLE_PUSH_PADS => json::<PadsJson>(text).map(|mut v| {
+                c.handles.console.set_other_devices(v.take_others());
+                *lock(&c.pads) = v.into_pads();
+            }),
             PUNKTFUNK_CONSOLE_PUSH_NAVIGATE => {
                 json::<EntryJson>(text).map(|v| *lock(&c.navigate) = Some(v.into_entry()))
+            }
+            PUNKTFUNK_CONSOLE_PUSH_PROMPT => {
+                json::<Prompt>(text).map(|v| *lock(&c.prompt) = Some(v))
+            }
+            PUNKTFUNK_CONSOLE_PUSH_LICENSES => {
+                json::<Vec<LicenseSection>>(text).map(|v| c.handles.console.set_licenses(v))
+            }
+            PUNKTFUNK_CONSOLE_PUSH_PAD_TEST => {
+                json::<PadTestState>(text).map(|v| c.handles.console.set_pad_test(v))
             }
             _ => {
                 tracing::error!("console: unknown push kind {kind}");
@@ -666,7 +712,20 @@ pub unsafe extern "C" fn punktfunk_console_drain_cmds(c: *const PunktfunkConsole
     })
 }
 
-/// Free a string from `punktfunk_console_next_event` or `punktfunk_console_drain_cmds`.
+/// The console's background palettes in cycle order, as `[{"id", "name"}]`: what a native
+/// picker offers for `ui_palette`. Free with `punktfunk_console_string_free`.
+#[unsafe(no_mangle)]
+pub extern "C" fn punktfunk_console_palettes() -> *mut c_char {
+    guard(std::ptr::null_mut(), || {
+        let list: Vec<_> = (pf_console_ui::library::PALETTES.iter())
+            .map(|p| serde_json::json!({ "id": p.id, "name": p.name }))
+            .collect();
+        out_string(serde_json::Value::from(list).to_string())
+    })
+}
+
+/// Free a string from `punktfunk_console_next_event`, `punktfunk_console_drain_cmds` or
+/// `punktfunk_console_palettes`.
 ///
 /// # Safety
 /// `s` is NULL or one of those strings, freed once.

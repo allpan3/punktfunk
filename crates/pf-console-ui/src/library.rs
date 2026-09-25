@@ -5,34 +5,39 @@
 //! ported from the GTK launcher and tested here. Geometry, the 4×4 card transform, and
 //! the mesh-gradient palettes sit alongside.
 //!
-//! Rendering is `skia_overlay`. Palette ids and the derived 16-cell meshes are pinned by
-//! `clients/shared/console-vectors.json`, and by `GamepadPalette.kt` / `.swift`.
+//! Rendering is `skia_overlay`. [`PALETTES`] is the one palette table; native pickers read
+//! its ids and names over their bridge.
 
 use skia_safe::{ConditionallySend, Image};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 // --- Geometry (GTK launcher / Apple coverflow parity) ---
 
-/// 2:3 covers. Sized so the focused poster, detail panel and hint bar fit 1280×800 with air.
-pub const POSTER_W: f64 = 220.0;
-pub const POSTER_H: f64 = 330.0;
-pub const FOCUS_GAP: f64 = 230.0;
-/// Center-to-center between successive side cards; tighter than projected width so they overlap.
-pub const SIDE_SPACING: f64 = 104.0;
-pub const VISIBLE_RANGE: f64 = 5.5;
+/// The shelf's largest 2:3 cover, design units. The height fits the field between
+/// [`SHELF_COVER_MIN`] and this, as the Apple coverflow's does.
+pub const POSTER_W: f64 = 240.0;
+pub const POSTER_H: f64 = 360.0;
+pub const SHELF_COVER_MIN: f64 = 140.0;
+/// Air between two covers on the shelf, and a cover's corner, design units.
+pub const SHELF_SPACING: f64 = 34.0;
+pub const SHELF_CORNER: f64 = 16.0;
+/// One step off focus a cover keeps `1 − RECEDE_SCALE` of its size and `1 − RECEDE_FADE`
+/// of its opacity, turned [`ROTATE_DEG`].
 pub const RECEDE_SCALE: f64 = 0.24;
-/// Side-card yaw about its own vertical axis; inner edge recedes behind the focus.
+pub const RECEDE_FADE: f64 = 0.38;
+/// Side-cover yaw about the edge facing focus; the outer edge swings toward the eye.
 pub const ROTATE_DEG: f64 = 38.0;
-/// Perspective depth for the tilt, px (CSS `perspective()` semantics).
+/// The shelf's eye sits `cover height / SHELF_EYE` away (SwiftUI's perspective 0.55).
+pub const SHELF_EYE: f64 = 0.55;
+/// Perspective depth for the launch hold's tilt, px (CSS `perspective()` semantics).
 pub const PERSPECTIVE: f64 = 800.0;
-/// Recede-veil max opacity — overlap separator, not distance. Washes toward `theme::shade`.
-pub const RECEDE_DIM: f64 = 0.10;
-/// Refused-move recoil, px against the push.
-pub const BUMP_PX: f64 = 16.0;
+/// Refused-move recoil: the kick against the push, design units/s. A velocity, not a
+/// displacement, so the list eases out and springs back rather than jumping.
+pub const BUMP_V: f64 = 380.0;
 /// Mount entrance ([`crate::anim::Entrance`]): arrival scale, rise (design units), yaw. Shared with the home carousel.
-pub const ENTER_SCALE: f64 = 0.74;
-pub const ENTER_RISE: f64 = 34.0;
+pub const ENTER_SCALE: f64 = 0.96;
+pub const ENTER_RISE: f64 = 12.0;
 pub const ENTER_TURN_DEG: f64 = 62.0;
 pub const JUMP: i32 = 5;
 
@@ -40,9 +45,10 @@ pub const JUMP: i32 = 5;
 /// Cursor chase: ζ ≈ 0.85 — settles in ~0.3 s with a whisker of overshoot.
 pub const SPRING_K: f64 = 200.0;
 pub const SPRING_C: f64 = 24.0;
-/// Boundary recoil: stiffer and more underdamped (ζ ≈ 0.55) — one visible wobble.
-pub const BUMP_K: f64 = 600.0;
-pub const BUMP_C: f64 = 27.0;
+/// Boundary recoil: soft and underdamped (ζ ≈ 0.4) — a rubbery bounce, two visible
+/// wobbles, ~0.5 s to rest.
+pub const BUMP_K: f64 = 260.0;
+pub const BUMP_C: f64 = 13.0;
 
 fn spring_step(pos: f64, vel: f64, target: f64, k: f64, c: f64, dt: f64) -> (f64, f64) {
     let vel = vel + (k * (target - pos) - c * vel) * dt;
@@ -92,17 +98,17 @@ pub fn step_cursor(cursor: i32, len: usize, delta: i32, clamp: bool) -> StepResu
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum LibraryView {
-    #[default]
     Shelf,
+    #[default]
     Grid,
 }
 
 impl LibraryView {
-    /// Persisted `library_view`. Unknown → [`LibraryView::Shelf`] (a newer client's name).
+    /// Persisted `library_view`. Unset or unknown (a newer client's name) is the grid.
     pub fn parse(s: &str) -> LibraryView {
         match s {
-            "grid" => LibraryView::Grid,
-            _ => LibraryView::Shelf,
+            "shelf" => LibraryView::Shelf,
+            _ => LibraryView::Grid,
         }
     }
 
@@ -299,6 +305,41 @@ pub fn card_matrix(
     core::array::from_fn(|i| m[i] as f32)
 }
 
+/// A shelf cover's transform, card-local (0..w, 0..h) to screen: scaled about its centre,
+/// then turned `angle_deg` about its vertical edge at `pivot_x` (0 or `w`, the side facing
+/// focus) with the eye `depth` px away. A positive turn swings the left edge toward the eye.
+pub fn shelf_matrix(
+    (cx, cy): (f64, f64),
+    (w, h): (f64, f64),
+    scale: f64,
+    angle_deg: f64,
+    pivot_x: f64,
+    depth: f64,
+) -> [f64; 16] {
+    let place = translate(cx - w / 2.0, cy - h / 2.0);
+    let turn = mat_mul(
+        &mat_mul(
+            &mat_mul(&translate(pivot_x, h / 2.0), &perspective(depth)),
+            &rotate_y(angle_deg.to_radians()),
+        ),
+        &translate(-pivot_x, -h / 2.0),
+    );
+    let grow = mat_mul(
+        &mat_mul(&translate(w / 2.0, h / 2.0), &scale_xy(scale)),
+        &translate(-w / 2.0, -h / 2.0),
+    );
+    mat_mul(&mat_mul(&place, &turn), &grow)
+}
+
+/// Card-local `(x, y)` through `m` to screen, perspective divide included.
+pub fn project(m: &[f64; 16], x: f64, y: f64) -> (f64, f64) {
+    let w = m[12] * x + m[13] * y + m[15];
+    (
+        (m[0] * x + m[1] * y + m[3]) / w,
+        (m[4] * x + m[5] * y + m[7]) / w,
+    )
+}
+
 fn translate(x: f64, y: f64) -> [f64; 16] {
     let mut m = identity();
     m[3] = x;
@@ -370,28 +411,19 @@ pub const MESH_COLORS: [(f64, f64, f64); 16] = [
     (0.075, 0.060, 0.160),
 ];
 
-/// Four interior control points; the 12 boundary points stay pinned (a drifting edge exposes black).
-/// Each row is `(base_ux, base_uy, amplitude, speed_x, speed_y, phase)` in UV / rad·s⁻¹ —
-/// Swift `meshPoints(at:)` `wob()`. Periods ~90–130 s, out of phase so the warp does not loop.
-pub const MESH_INTERIOR: [(f64, f64, f64, f64, f64, f64); 4] = [
-    (0.333, 0.333, 0.11, 0.049, 0.063, 0.4),
-    (0.667, 0.333, 0.10, 0.055, 0.052, 2.1),
-    (0.333, 0.667, 0.10, 0.058, 0.049, 3.6),
-    (0.667, 0.667, 0.12, 0.047, 0.061, 5.0),
-];
-
 // --- Background palettes -------------------------------------------------------------------
 
 /// One background colour family.
 ///
 /// `stops` is several distinct hues, not one hue at several brightnesses. The 4×4 mesh
 /// samples that ramp diagonally with [`CELL_RAMP`]. [`Palette::accent`] is the focus wash;
-/// [`Palette::light`] flips ink ([`crate::theme::Ink`]). Apple and Android tables share these ids.
+/// [`Palette::light`] flips ink ([`crate::theme::Ink`]).
 pub struct Palette {
     /// The stored `ui_palette` value (see `trust::Settings::ui_palette`).
     pub id: &'static str,
     pub name: &'static str,
-    /// Colour ramp, dark end first. `None` = [`MESH_COLORS`] verbatim.
+    /// Colour ramp, dark end first: the field's gradient ([`field_sksl`]) and the mesh.
+    /// `None` = [`MESH_COLORS`] verbatim for the mesh and [`VIOLET_FIELD`] for the field.
     pub stops: Option<&'static [(f64, f64, f64)]>,
     /// The field's ground — what the corners settle onto and what the calm mix lifts toward.
     pub ground: (f64, f64, f64),
@@ -402,63 +434,41 @@ pub struct Palette {
 
 /// Per-cell ramp offset on top of the diagonal `0.5·(x + y)`. Nudges stop a pure diagonal from banding.
 #[rustfmt::skip]
-const CELL_RAMP: [f64; 16] = [
+pub(crate) const CELL_RAMP: [f64; 16] = [
      0.10, -0.06,  0.04, -0.12,
     -0.08,  0.14, -0.10,  0.06,
      0.06, -0.12,  0.16, -0.04,
     -0.10,  0.08, -0.06,  0.12,
 ];
 
-/// Brand default, six dark fields, then six pale. Dark → light is cycle order.
-/// Adding a row here is not enough: Apple and Android tables must gain the same `ui_palette` id.
+/// Brand default, 19 more dark fields, then 16 pale. Dark → light is cycle order. An `id` is a
+/// stored `ui_palette` value: renaming one orphans saved choices.
 #[rustfmt::skip]
-pub const PALETTES: [Palette; 13] = [
+pub const PALETTES: [Palette; 36] = [
     // --- dark fields (white ink) ---
     Palette {
+        // The brand default: a bright periwinkle field with lavender pools, still white ink.
         id: "violet", name: "Violet", stops: None,
-        ground: (0.075, 0.060, 0.160), accent: (0.525, 0.471, 0.961), light: false,
+        ground: (0.510, 0.470, 0.960), accent: (0.525, 0.471, 0.961), light: false,
     },
     Palette {
         // First two stops are (0,0,0): OLED pixels off, not dark grey. Ground is black so calm lifts to nothing.
         // Id stays `"oled"` — stored `ui_palette` key; renaming orphans saved choices.
         id: "oled", name: "Eclipse",
         stops: Some(&[
-            (0.000, 0.000, 0.000), (0.000, 0.000, 0.000), (0.010, 0.020, 0.100),
-            (0.045, 0.016, 0.115), (0.120, 0.024, 0.130),
+            (0.00, 0.00, 0.00), (0.00, 0.00, 0.00), (0.01, 0.02, 0.10),
+            (0.045, 0.016, 0.115), (0.12, 0.024, 0.13),
         ]),
-        ground: (0.0, 0.0, 0.0), accent: (0.525, 0.471, 0.961), light: false,
+        ground: (0.000, 0.000, 0.000), accent: (0.525, 0.471, 0.961), light: false,
     },
     Palette {
-        id: "nebula", name: "Nebula",
+        // Nothing at all: every pixel off. The accent is the only colour on it.
+        id: "void", name: "Void",
         stops: Some(&[
-            (0.07, 0.05, 0.20), (0.26, 0.14, 0.54), (0.52, 0.20, 0.72),
-            (0.82, 0.26, 0.62), (0.98, 0.46, 0.68),
+            (0.00, 0.00, 0.00), (0.00, 0.00, 0.00), (0.00, 0.00, 0.00),
+            (0.00, 0.00, 0.00), (0.00, 0.00, 0.00),
         ]),
-        ground: (0.055, 0.040, 0.135), accent: (0.95, 0.42, 0.72), light: false,
-    },
-    Palette {
-        id: "abyss", name: "Abyss",
-        stops: Some(&[
-            (0.02, 0.10, 0.17), (0.04, 0.28, 0.42), (0.07, 0.46, 0.63),
-            (0.16, 0.38, 0.78), (0.26, 0.22, 0.58),
-        ]),
-        ground: (0.018, 0.070, 0.130), accent: (0.26, 0.76, 0.92), light: false,
-    },
-    Palette {
-        id: "ember", name: "Ember",
-        stops: Some(&[
-            (0.16, 0.03, 0.10), (0.45, 0.06, 0.12), (0.72, 0.18, 0.06),
-            (0.90, 0.42, 0.08), (0.95, 0.68, 0.18),
-        ]),
-        ground: (0.090, 0.035, 0.040), accent: (0.98, 0.62, 0.26), light: false,
-    },
-    Palette {
-        id: "moss", name: "Moss",
-        stops: Some(&[
-            (0.03, 0.11, 0.09), (0.06, 0.27, 0.20), (0.09, 0.45, 0.31),
-            (0.28, 0.61, 0.28), (0.58, 0.77, 0.31),
-        ]),
-        ground: (0.025, 0.085, 0.070), accent: (0.48, 0.86, 0.46), light: false,
+        ground: (0.000, 0.000, 0.000), accent: (0.525, 0.471, 0.961), light: false,
     },
     Palette {
         id: "graphite", name: "Graphite",
@@ -468,54 +478,294 @@ pub const PALETTES: [Palette; 13] = [
         ]),
         ground: (0.055, 0.055, 0.070), accent: (0.78, 0.80, 0.86), light: false,
     },
+    Palette {
+        // Cool neutral: blue-grey warming to stone at the top.
+        id: "slate", name: "Slate",
+        stops: Some(&[
+            (0.06, 0.08, 0.11), (0.14, 0.18, 0.24), (0.24, 0.30, 0.38),
+            (0.40, 0.44, 0.48), (0.60, 0.58, 0.52),
+        ]),
+        ground: (0.060, 0.080, 0.110), accent: (0.60, 0.80, 1.00), light: false,
+    },
+    Palette {
+        // Indigo shadow, cobalt body, a teal break.
+        id: "midnight", name: "Midnight",
+        stops: Some(&[
+            (0.05, 0.02, 0.16), (0.05, 0.11, 0.36), (0.08, 0.24, 0.60),
+            (0.14, 0.42, 0.80), (0.36, 0.76, 0.86),
+        ]),
+        ground: (0.030, 0.050, 0.160), accent: (0.40, 0.72, 1.00), light: false,
+    },
+    Palette {
+        // Ultraviolet into an electric blue and cyan.
+        id: "electric", name: "Electric",
+        stops: Some(&[
+            (0.02, 0.00, 0.10), (0.14, 0.02, 0.50), (0.30, 0.10, 0.95),
+            (0.10, 0.45, 1.00), (0.20, 0.90, 1.00),
+        ]),
+        ground: (0.020, 0.000, 0.100), accent: (0.45, 0.85, 1.00), light: false,
+    },
+    Palette {
+        // Deep water rising through teal to foam.
+        id: "ocean", name: "Ocean",
+        stops: Some(&[
+            (0.01, 0.05, 0.14), (0.02, 0.18, 0.40), (0.02, 0.40, 0.62),
+            (0.05, 0.66, 0.72), (0.55, 0.92, 0.80),
+        ]),
+        ground: (0.010, 0.050, 0.140), accent: (0.45, 0.95, 0.90), light: false,
+    },
+    Palette {
+        // Deep teal into green, then a violet curtain.
+        id: "aurora", name: "Aurora",
+        stops: Some(&[
+            (0.02, 0.07, 0.11), (0.03, 0.24, 0.28), (0.05, 0.46, 0.40),
+            (0.14, 0.60, 0.72), (0.44, 0.42, 0.86),
+        ]),
+        ground: (0.020, 0.070, 0.110), accent: (0.36, 0.90, 0.78), light: false,
+    },
+    Palette {
+        // Deep water into jade and a leaf-green lift.
+        id: "jade", name: "Jade",
+        stops: Some(&[
+            (0.02, 0.07, 0.10), (0.03, 0.22, 0.19), (0.05, 0.40, 0.34),
+            (0.16, 0.58, 0.46), (0.60, 0.84, 0.52),
+        ]),
+        ground: (0.020, 0.070, 0.100), accent: (0.52, 0.90, 0.62), light: false,
+    },
+    Palette {
+        // Saturated green, forest floor to lime.
+        id: "emerald", name: "Emerald",
+        stops: Some(&[
+            (0.01, 0.07, 0.04), (0.02, 0.26, 0.12), (0.04, 0.50, 0.22),
+            (0.16, 0.74, 0.34), (0.60, 0.92, 0.40),
+        ]),
+        ground: (0.010, 0.070, 0.040), accent: (0.55, 1.00, 0.55), light: false,
+    },
+    Palette {
+        // Plum shadow, crimson body, a coral edge.
+        id: "crimson", name: "Crimson",
+        stops: Some(&[
+            (0.10, 0.02, 0.10), (0.34, 0.03, 0.12), (0.62, 0.06, 0.20),
+            (0.86, 0.20, 0.28), (0.98, 0.52, 0.32),
+        ]),
+        ground: (0.080, 0.020, 0.060), accent: (1.00, 0.42, 0.42), light: false,
+    },
+    Palette {
+        // Violet shadow under a hot pink-red.
+        id: "ruby", name: "Ruby",
+        stops: Some(&[
+            (0.06, 0.00, 0.20), (0.40, 0.02, 0.16), (0.80, 0.06, 0.30),
+            (1.00, 0.28, 0.48), (1.00, 0.62, 0.56),
+        ]),
+        ground: (0.080, 0.000, 0.060), accent: (1.00, 0.50, 0.62), light: false,
+    },
+    Palette {
+        // Black rock, red heat, a yellow glow.
+        id: "lava", name: "Lava",
+        stops: Some(&[
+            (0.06, 0.01, 0.02), (0.42, 0.02, 0.04), (0.86, 0.12, 0.02),
+            (1.00, 0.45, 0.02), (1.00, 0.85, 0.20),
+        ]),
+        ground: (0.060, 0.010, 0.020), accent: (1.00, 0.72, 0.20), light: false,
+    },
+    Palette {
+        // Bronze shadow under copper, a verdigris lift.
+        id: "copper", name: "Copper",
+        stops: Some(&[
+            (0.08, 0.05, 0.04), (0.36, 0.15, 0.08), (0.66, 0.32, 0.14),
+            (0.85, 0.56, 0.26), (0.50, 0.78, 0.62),
+        ]),
+        ground: (0.070, 0.050, 0.040), accent: (1.00, 0.70, 0.36), light: false,
+    },
+    Palette {
+        // Wine shadow into amber and gold.
+        id: "amber", name: "Amber",
+        stops: Some(&[
+            (0.10, 0.02, 0.10), (0.36, 0.16, 0.02), (0.66, 0.36, 0.04),
+            (0.88, 0.58, 0.08), (0.92, 0.86, 0.36),
+        ]),
+        ground: (0.100, 0.040, 0.020), accent: (1.00, 0.80, 0.30), light: false,
+    },
+    Palette {
+        // Indigo through mauve to a peach horizon.
+        id: "dusk", name: "Dusk",
+        stops: Some(&[
+            (0.08, 0.04, 0.14), (0.26, 0.10, 0.34), (0.50, 0.20, 0.48),
+            (0.78, 0.38, 0.50), (0.96, 0.62, 0.48),
+        ]),
+        ground: (0.070, 0.040, 0.120), accent: (1.00, 0.62, 0.56), light: false,
+    },
+    Palette {
+        // Purple climbing to orchid and pink.
+        id: "grape", name: "Grape",
+        stops: Some(&[
+            (0.08, 0.02, 0.16), (0.28, 0.06, 0.48), (0.52, 0.14, 0.78),
+            (0.78, 0.30, 0.92), (1.00, 0.55, 0.80),
+        ]),
+        ground: (0.080, 0.020, 0.160), accent: (0.85, 0.55, 1.00), light: false,
+    },
+    Palette {
+        // Magenta, electric blue and a lime flash on black.
+        id: "neon", name: "Neon",
+        stops: Some(&[
+            (0.05, 0.00, 0.12), (0.40, 0.00, 0.60), (0.90, 0.05, 0.55),
+            (0.15, 0.35, 0.95), (0.30, 0.95, 0.55),
+        ]),
+        ground: (0.050, 0.000, 0.120), accent: (0.40, 1.00, 0.70), light: false,
+    },
+    Palette {
+        // Teal shade, orange sun, a pink bloom.
+        id: "tropic", name: "Tropic",
+        stops: Some(&[
+            (0.02, 0.10, 0.12), (0.02, 0.42, 0.42), (0.95, 0.45, 0.10),
+            (0.98, 0.20, 0.45), (0.40, 0.10, 0.55),
+        ]),
+        ground: (0.020, 0.080, 0.100), accent: (1.00, 0.60, 0.30), light: false,
+    },
     // --- pale fields (dark ink) ---
     Palette {
-        id: "holo", name: "Holo",
+        // Near-white: warm cream, cool blue and a rose tint in turn.
+        id: "paper", name: "Paper",
         stops: Some(&[
-            (0.99, 0.72, 0.90), (0.80, 0.60, 0.98), (0.58, 0.62, 0.99),
-            (0.55, 0.86, 0.98), (0.94, 0.98, 1.00),
+            (0.99, 0.95, 0.88), (0.91, 0.94, 0.98), (0.98, 0.91, 0.94),
+            (0.99, 0.97, 0.89), (0.90, 0.94, 0.99),
         ]),
-        ground: (0.96, 0.92, 0.99), accent: (0.42, 0.28, 0.86), light: true,
+        ground: (0.970, 0.960, 0.940), accent: (0.42, 0.30, 0.28), light: true,
     },
     Palette {
-        id: "sunset", name: "Sunset",
+        // Pale blue through periwinkle to a mint edge.
+        id: "sky", name: "Sky",
         stops: Some(&[
-            (0.55, 0.45, 0.92), (0.86, 0.31, 0.66), (0.97, 0.26, 0.34),
-            (0.99, 0.51, 0.18), (1.00, 0.80, 0.22),
+            (0.76, 0.87, 1.00), (0.62, 0.78, 0.99), (0.72, 0.76, 0.99),
+            (0.84, 0.82, 1.00), (0.86, 0.98, 0.96),
         ]),
-        ground: (0.98, 0.74, 0.34), accent: (0.64, 0.13, 0.44), light: true,
+        ground: (0.920, 0.950, 1.000), accent: (0.12, 0.30, 0.62), light: true,
     },
     Palette {
-        id: "bloom", name: "Bloom",
+        // Saturated sky blue cooling into violet.
+        id: "glacier", name: "Glacier",
         stops: Some(&[
-            (1.00, 0.86, 0.72), (0.99, 0.73, 0.79), (0.95, 0.65, 0.89),
-            (0.82, 0.68, 0.96), (0.73, 0.79, 0.99),
+            (0.45, 0.70, 1.00), (0.60, 0.80, 1.00), (0.75, 0.85, 1.00),
+            (0.85, 0.80, 1.00), (0.95, 0.85, 1.00),
         ]),
-        ground: (0.99, 0.90, 0.89), accent: (0.72, 0.24, 0.55), light: true,
+        ground: (0.780, 0.880, 1.000), accent: (0.10, 0.20, 0.55), light: true,
     },
     Palette {
-        id: "dawn", name: "Dawn",
+        // Lavender and periwinkle, warming to a pink bloom.
+        id: "lilac", name: "Lilac",
         stops: Some(&[
-            (1.00, 0.92, 0.70), (1.00, 0.80, 0.62), (0.99, 0.66, 0.62),
-            (0.90, 0.62, 0.78), (0.77, 0.69, 0.95),
+            (0.84, 0.76, 0.99), (0.74, 0.70, 0.99), (0.88, 0.74, 0.98),
+            (0.98, 0.82, 0.94), (0.96, 0.94, 1.00),
         ]),
-        ground: (1.00, 0.93, 0.82), accent: (0.82, 0.33, 0.28), light: true,
+        ground: (0.950, 0.920, 0.990), accent: (0.44, 0.24, 0.66), light: true,
     },
     Palette {
-        id: "mint", name: "Mint",
+        // Vivid purple and periwinkle, a pink edge.
+        id: "iris", name: "Iris",
         stops: Some(&[
-            (0.82, 0.98, 0.90), (0.62, 0.94, 0.88), (0.55, 0.88, 0.95),
-            (0.63, 0.82, 0.99), (0.82, 0.87, 1.00),
+            (0.60, 0.35, 0.95), (0.55, 0.50, 1.00), (0.65, 0.65, 1.00),
+            (0.85, 0.60, 0.98), (1.00, 0.70, 0.90),
         ]),
-        ground: (0.90, 0.98, 0.96), accent: (0.04, 0.42, 0.40), light: true,
+        ground: (0.800, 0.720, 1.000), accent: (0.25, 0.05, 0.55), light: true,
     },
     Palette {
-        id: "opal", name: "Opal",
+        // Hot pink cooling into a baby blue.
+        id: "bubblegum", name: "Bubblegum",
         stops: Some(&[
-            (0.98, 0.92, 0.96), (0.87, 0.93, 0.99), (0.91, 0.99, 0.95),
-            (0.99, 0.96, 0.88), (0.94, 0.90, 0.99),
+            (1.00, 0.50, 0.80), (1.00, 0.62, 0.85), (0.92, 0.70, 0.95),
+            (0.70, 0.75, 1.00), (0.60, 0.85, 1.00),
         ]),
-        ground: (0.97, 0.96, 0.99), accent: (0.36, 0.32, 0.44), light: true,
+        ground: (1.000, 0.780, 0.900), accent: (0.55, 0.05, 0.35), light: true,
+    },
+    Palette {
+        // Pink into coral, fading to a warm cream.
+        id: "coral", name: "Coral",
+        stops: Some(&[
+            (1.00, 0.58, 0.62), (1.00, 0.68, 0.56), (1.00, 0.80, 0.64),
+            (0.99, 0.88, 0.72), (1.00, 0.96, 0.80),
+        ]),
+        ground: (1.000, 0.900, 0.800), accent: (0.68, 0.14, 0.22), light: true,
+    },
+    Palette {
+        // Hot pink into orange, fully saturated.
+        id: "flamingo", name: "Flamingo",
+        stops: Some(&[
+            (1.00, 0.30, 0.60), (1.00, 0.42, 0.55), (1.00, 0.55, 0.45),
+            (1.00, 0.70, 0.45), (1.00, 0.85, 0.60),
+        ]),
+        ground: (1.000, 0.720, 0.660), accent: (0.50, 0.00, 0.20), light: true,
+    },
+    Palette {
+        // Pink into peach and apricot.
+        id: "peach", name: "Peach",
+        stops: Some(&[
+            (1.00, 0.45, 0.60), (1.00, 0.60, 0.44), (1.00, 0.72, 0.52),
+            (1.00, 0.82, 0.58), (0.98, 0.92, 0.72),
+        ]),
+        ground: (1.000, 0.820, 0.660), accent: (0.60, 0.16, 0.10), light: true,
+    },
+    Palette {
+        // Pink, peach, lime and sky in one bag.
+        id: "candy", name: "Candy",
+        stops: Some(&[
+            (1.00, 0.40, 0.70), (1.00, 0.55, 0.60), (1.00, 0.75, 0.40),
+            (0.80, 0.90, 0.50), (0.55, 0.85, 0.95),
+        ]),
+        ground: (1.000, 0.800, 0.750), accent: (0.55, 0.05, 0.30), light: true,
+    },
+    Palette {
+        // Lemon through lime to a pale green.
+        id: "lemon", name: "Lemon",
+        stops: Some(&[
+            (1.00, 0.86, 0.44), (0.98, 0.96, 0.56), (0.70, 0.94, 0.64),
+            (0.84, 0.97, 0.78), (0.98, 0.99, 0.90),
+        ]),
+        ground: (1.000, 0.980, 0.860), accent: (0.30, 0.36, 0.08), light: true,
+    },
+    Palette {
+        // Orange into a full yellow and a green edge.
+        id: "sunflower", name: "Sunflower",
+        stops: Some(&[
+            (1.00, 0.60, 0.10), (1.00, 0.75, 0.10), (1.00, 0.88, 0.20),
+            (0.95, 0.95, 0.40), (0.75, 0.92, 0.60),
+        ]),
+        ground: (1.000, 0.880, 0.400), accent: (0.40, 0.22, 0.00), light: true,
+    },
+    Palette {
+        // Orange, lemon and lime scoops.
+        id: "sherbet", name: "Sherbet",
+        stops: Some(&[
+            (1.00, 0.55, 0.25), (1.00, 0.72, 0.30), (1.00, 0.90, 0.40),
+            (0.85, 0.95, 0.50), (0.60, 0.92, 0.70),
+        ]),
+        ground: (1.000, 0.850, 0.600), accent: (0.45, 0.18, 0.02), light: true,
+    },
+    Palette {
+        // Sage into pale olive and cream.
+        id: "sage", name: "Sage",
+        stops: Some(&[
+            (0.72, 0.84, 0.70), (0.80, 0.90, 0.76), (0.90, 0.94, 0.80),
+            (0.96, 0.96, 0.84), (0.99, 0.97, 0.90),
+        ]),
+        ground: (0.940, 0.960, 0.900), accent: (0.18, 0.36, 0.24), light: true,
+    },
+    Palette {
+        // Grass green into a warm yellow.
+        id: "meadow", name: "Meadow",
+        stops: Some(&[
+            (0.30, 0.80, 0.40), (0.55, 0.90, 0.40), (0.80, 0.95, 0.45),
+            (0.95, 0.95, 0.55), (1.00, 0.90, 0.65),
+        ]),
+        ground: (0.850, 0.950, 0.600), accent: (0.10, 0.35, 0.12), light: true,
+    },
+    Palette {
+        // Turquoise water into a pale green shore.
+        id: "lagoon", name: "Lagoon",
+        stops: Some(&[
+            (0.20, 0.75, 0.80), (0.35, 0.85, 0.85), (0.55, 0.92, 0.80),
+            (0.70, 0.95, 0.70), (0.92, 0.98, 0.75),
+        ]),
+        ground: (0.750, 0.950, 0.900), accent: (0.02, 0.30, 0.35), light: true,
     },
 ];
 
@@ -524,7 +774,7 @@ pub fn palette(id: &str) -> &'static Palette {
     PALETTES.iter().find(|p| p.id == id).unwrap_or(&PALETTES[0])
 }
 
-/// Sample a ramp at `t` ∈ [0, 1], linear between neighbouring stops. Swift and Kotlin copies must match.
+/// Sample a ramp at `t` ∈ [0, 1], linear between neighbouring stops.
 pub fn ramp(stops: &[(f64, f64, f64)], t: f64) -> (f64, f64, f64) {
     match stops.len() {
         0 => (0.0, 0.0, 0.0),
@@ -550,12 +800,6 @@ impl Palette {
         };
         mesh_colors_of(stops)
     }
-
-    /// Four blob colours for Android's mesh approximation, spread across the ramp.
-    pub fn blob_colors(&self) -> [(f64, f64, f64); 4] {
-        let stops = self.stops.unwrap_or(&VIOLET_BLOBS);
-        core::array::from_fn(|i| ramp(stops, 0.15 + 0.25 * i as f64))
-    }
 }
 
 /// 16 mesh cells from any 5-stop ramp, including the runtime OS field (`shell::build_mesh_os`).
@@ -566,87 +810,318 @@ pub(crate) fn mesh_colors_of(stops: &[(f64, f64, f64)]) -> [(f64, f64, f64); 16]
     })
 }
 
-/// Pre-palette Android / legacy-Apple blob colours, so `violet` stays bit-identical there.
-const VIOLET_BLOBS: [(f64, f64, f64); 5] = [
-    (0.53, 0.47, 0.96),
-    (0.24, 0.20, 0.72),
-    (0.62, 0.30, 0.80),
-    (0.22, 0.38, 0.86),
-    (0.53, 0.47, 0.96),
-];
+/// The brand default's field ramp: the mockup's lavender → periwinkle → magenta.
+pub const VIOLET_FIELD: [(f64, f64, f64); 3] =
+    [(0.80, 0.60, 0.98), (0.47, 0.44, 1.00), (0.98, 0.12, 0.62)];
 
-/// Mesh gradient as SkSL: palette and motion baked in; resolution, time and calm are uniforms.
-///
-/// Bicubic 16-colour blend (SwiftUI `MeshGradient(smoothsColors: true)`). Interior points
-/// drive a bounded domain warp; then ±8° / ~5 min hue sway, elliptical vignette, vertical scrim
-/// — Swift `composite(at:)`.
+/// An sRGB colour in OKLab, as the field's gradient mixes it.
+fn oklab((r, g, b): (f64, f64, f64)) -> (f64, f64, f64) {
+    let lin = |c: f64| {
+        let v = c.max(0.0);
+        if v < 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let (r, g, b) = (lin(r), lin(g), lin(b));
+    let l = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b)
+        .max(0.0)
+        .cbrt();
+    let m = (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b)
+        .max(0.0)
+        .cbrt();
+    let s = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b)
+        .max(0.0)
+        .cbrt();
+    (
+        0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+        1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+        0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+    )
+}
+
+/// The field's clock rates: the sphere turns at `t · ROT`, its surface morphs at `t · MORPH`.
+const ROT: f64 = 0.03;
+const MORPH: f64 = 0.9;
+
+/// What the field's time alone decides, for its uniform block: the three rows of the
+/// world-to-sphere rotation, then the primary and warp drift, each a `float4` with `w` unused.
+/// Once a render on the CPU instead of once a pixel on the GPU.
+pub fn field_motion(t: f64) -> [f32; 20] {
+    type V = [f64; 3];
+    let norm = |v: V| {
+        let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        [v[0] / l, v[1] / l, v[2] / l]
+    };
+    let wrap = |ph: f64| ph - (ph / std::f64::consts::TAU).floor() * std::f64::consts::TAU;
+    let rotate = |p: V, a: V, angle: f64| {
+        let (c, s) = (angle.cos(), angle.sin());
+        let d = a[0] * p[0] + a[1] * p[1] + a[2] * p[2];
+        let x = [
+            a[1] * p[2] - a[2] * p[1],
+            a[2] * p[0] - a[0] * p[2],
+            a[0] * p[1] - a[1] * p[0],
+        ];
+        [0, 1, 2].map(|i| p[i] * c + x[i] * s + a[i] * d * (1.0 - c))
+    };
+    let rt = t * ROT;
+    let unorient = |p: V| {
+        let (c, s) = (0.24f64.cos(), 0.24f64.sin());
+        let o = [p[0], c * p[1] - s * p[2], s * p[1] + c * p[2]];
+        let o = rotate(o, norm([0.58, -0.69, 0.43]), -wrap(rt * 0.1732051));
+        let o = rotate(o, norm([-0.71, 0.29, 0.64]), -wrap(rt * 0.2236068));
+        rotate(o, norm([0.36, 0.81, 0.46]), -wrap(rt * 0.287))
+    };
+    let cols = [
+        unorient([1.0, 0.0, 0.0]),
+        unorient([0.0, 1.0, 0.0]),
+        unorient([0.0, 0.0, 1.0]),
+    ];
+    let mt = t * MORPH;
+    let curved = |rates: V, phases: V| {
+        [
+            wrap(mt * rates[0] + phases[0]).sin(),
+            wrap(mt * rates[1] + phases[1]).sin(),
+            wrap(mt * rates[2] + phases[2]).cos(),
+        ]
+    };
+    let drift = |a: V, ka: f64, b: V, kb: f64, c: V, kc: f64| {
+        let (a, b) = (norm(a), norm(b));
+        [0, 1, 2].map(|i| a[i] * mt * ka + b[i] * mt * kb + c[i] * kc)
+    };
+    let primary = drift(
+        [0.73, -0.41, 0.55],
+        0.105,
+        [-0.28, 0.91, 0.31],
+        0.023,
+        curved([0.071, 0.043, 0.029], [0.0, 1.73, 4.11]),
+        0.16,
+    );
+    let warp = drift(
+        [-0.46, 0.38, 0.80],
+        0.137,
+        [0.84, 0.51, -0.18],
+        0.031,
+        curved([0.089, 0.053, 0.034], [2.21, 5.07, 0.83]),
+        0.12,
+    );
+    let mut out = [0.0f32; 20];
+    for row in 0..3 {
+        for (col, c) in cols.iter().enumerate() {
+            out[row * 4 + col] = c[row] as f32;
+        }
+    }
+    for i in 0..3 {
+        out[12 + i] = primary[i] as f32;
+        out[16 + i] = warp[i] as f32;
+    }
+    out
+}
+
+/// The camera the field is seen through, from the surface's aspect: `(focal length,
+/// sphere scale)`. The Figma shader's cover-zoom rule at its 72 % zoom, so the noise
+/// sphere fills any glass the same way it fills the mockup's frame.
+pub fn field_camera(aspect: f64) -> (f64, f64) {
+    let diagonal = (1.0 + aspect * aspect).sqrt();
+    let (safe, cam, base_f) = (0.72, 3.0, 1.73);
+    let target_f = base_f * 4.0;
+    let required = cam * diagonal / (target_f * target_f + diagonal * diagonal).sqrt();
+    let scale = (required / safe).max(0.82);
+    let conservative = (cam - 0.001).min(scale * safe);
+    let depth = (cam * cam - conservative * conservative).max(0.0001).sqrt();
+    let min_cover = (diagonal * depth / (base_f * conservative) * 1.12).clamp(0.5, 10.0);
+    let minimum = (min_cover * 0.65).clamp(0.5, 10.0);
+    let zoom = (minimum * (10.0 / minimum).powf(0.72)).clamp(minimum, 10.0);
+    (base_f * zoom, scale)
+}
+
+/// The field as SkSL: the Figma Community "Moving gradient" shader's maths, per pixel
+/// (figma.com/community/shader/1676361123401176242; its author and licence belong in the
+/// clients' third-party notices). Its vertex
+/// stage displaced a sphere by a Perlin height field and coloured each point by that
+/// height through an OKLab gradient; here a pixel's view ray meets the sphere, the hit's
+/// direction gives the height, the sphere is re-sized by it and hit once more, and the
+/// second height picks the colour. Detail 3.33, intensity 4.29, flow 0.26, twist 0.04 and
+/// speed 12 % are the mockup's; morph runs at a quarter of its 3.74, which read too fast on
+/// a phone. `stops` are the gradient, even spaced.
 ///
 /// `u_tc.y` is the calm mix (0 launcher, 1 form): flatten toward `u_lift` so a screen
-/// crossfade never jumps the field. Motion speed is unchanged.
-pub fn mesh_sksl(colors: &[(f64, f64, f64); 16]) -> String {
-    let c = |i: usize| {
-        let (r, g, b) = colors[i];
-        format!("float3({r}, {g}, {b})")
+/// crossfade never jumps the field. `u_cam` is [`field_camera`].
+pub fn field_sksl(ground: (f64, f64, f64), stops: &[(f64, f64, f64)]) -> String {
+    let rgb = |c: (f64, f64, f64)| {
+        let (l, a, b) = oklab(c);
+        format!("float3({l}, {a}, {b})")
     };
-    // Interior domain-warp, matching Swift `wob()`: x = sin(t·sx+ph), y = cos(t·sy+ph·1.3).
-    // Weight-normalised average, so |warp| ≤ max|amp|.
-    let mut warp = String::new();
-    for (bx, by, amp, sx, sy, ph) in MESH_INTERIOR {
-        warp.push_str(&format!(
-            "    q = uv - float2({bx}, {by});\n\
-                 ww = exp(-dot(q, q) / (2.0 * 0.30 * 0.30));\n\
-                 d = float2({amp} * sin(tt * {sx} + {ph}), \
-                            {amp} * cos(tt * {sy} + {ph} * 1.3));\n\
-                 wsum += d * ww; wtot += ww;\n",
-        ));
+    let n = stops.len().max(2);
+    let stops: Vec<(f64, f64, f64)> = if stops.len() < 2 {
+        vec![ground, ground]
+    } else {
+        stops.to_vec()
+    };
+    // One segment per pair of stops, picked by an if-chain: a two-stop ramp is one bare segment.
+    let mut segs = String::new();
+    for i in 0..n - 1 {
+        let (a, b) = (rgb(stops[i]), rgb(stops[i + 1]));
+        let seg = format!("a = {a}; b = {b}; f = x - {i}.0;");
+        segs.push_str(&if n == 2 {
+            format!("    {seg}\n")
+        } else if i == 0 {
+            format!("    if (x < 1.0) {{ {seg} }}\n")
+        } else if i == n - 2 {
+            format!("    else {{ {seg} }}\n")
+        } else {
+            format!("    else if (x < {}.0) {{ {seg} }}\n", i + 1)
+        });
     }
     format!(
         "uniform float2 u_res;\n\
          // x = seconds since the shell started, y = the calm mix (0 launcher, 1 form).\n\
          uniform float2 u_tc;\n\
-         // rgb = the palette's corner colour scaled for the calm lift; a is unused (float4\n\
-         // so the uniform block stays 16-byte aligned under any packing rule).\n\
+         // rgb = the palette's ground scaled for the calm lift; a is unused (float4 so\n\
+         // the uniform block stays 16-byte aligned under any packing rule).\n\
          uniform float4 u_lift;\n\
          // rgb = what the vignette and scrims tend toward (black under a dark palette, white\n\
          // under a pale one — darkening a pastel field would strand the dark text on it), and\n\
          // a = how hard. A pale field needs far less: mixing toward white at the dark field's\n\
          // strength bleaches the chroma straight out of the gradient.\n\
          uniform float4 u_scrim;\n\
+         // x = focal length, y = sphere scale (`field_camera`), z = passes over the sphere\n\
+         // (1 = the plain sphere's height, 2 = re-hit at that height: the displaced surface).\n\
+         uniform float4 u_cam;\n\
+         // The sphere's turn (rows of the world-to-sphere rotation) and its drift at this\n\
+         // instant: xyz of each, from `field_motion`, so no pixel pays for time alone.\n\
+         uniform float4 u_rot0;\n\
+         uniform float4 u_rot1;\n\
+         uniform float4 u_rot2;\n\
+         uniform float4 u_mot;\n\
+         uniform float4 u_wmot;\n\
          \n\
-         // Cubic-Bézier basis over four control values — the smooth 4-point blend per axis.\n\
-         float bz(float t, float a, float b, float c, float d) {{\n\
-         \x20   float u = 1.0 - t;\n\
-         \x20   return u*u*u*a + 3.0*u*u*t*b + 3.0*u*t*t*c + t*t*t*d;\n\
+         const float DETAIL = 3.33;\n\
+         const float INTENSITY = 4.29;\n\
+         const float TWIST = 0.04;\n\
+         const float WARP = 0.26;\n\
+         \n\
+         float3 hash33(float3 p) {{\n\
+         \x20   float3 q = float3(dot(p, float3(127.1, 311.7, 74.7)),\n\
+         \x20                     dot(p, float3(269.5, 183.3, 246.1)),\n\
+         \x20                     dot(p, float3(113.5, 271.9, 124.6)));\n\
+         \x20   return fract(sin(q) * 43758.5453) * 2.0 - 1.0;\n\
          }}\n\
-         float3 bz3(float t, float3 a, float3 b, float3 c, float3 d) {{\n\
-         \x20   return float3(bz(t, a.r, b.r, c.r, d.r), bz(t, a.g, b.g, c.g, d.g), \
-                              bz(t, a.b, b.b, c.b, d.b));\n\
+         float3 smoother(float3 t) {{ return t * t * t * (t * (t * 6.0 - 15.0) + 10.0); }}\n\
+         float gradDot(float3 cell, float3 off, float3 local) {{\n\
+         \x20   return dot(hash33(cell + off), local - off);\n\
          }}\n\
-         // Hue rotation about the grey axis (Rodrigues) — the ±8° warm/cool sway.\n\
-         float3 hue(float3 col, float a) {{\n\
-         \x20   float3 k = float3(0.5773503);\n\
-         \x20   float cs = cos(a); float sn = sin(a);\n\
-         \x20   return col*cs + cross(k, col)*sn + k*dot(k, col)*(1.0 - cs);\n\
+         float perlin3(float3 p) {{\n\
+         \x20   float3 cell = floor(p); float3 local = fract(p); float3 w = smoother(local);\n\
+         \x20   float n000 = gradDot(cell, float3(0.0, 0.0, 0.0), local);\n\
+         \x20   float n100 = gradDot(cell, float3(1.0, 0.0, 0.0), local);\n\
+         \x20   float n010 = gradDot(cell, float3(0.0, 1.0, 0.0), local);\n\
+         \x20   float n110 = gradDot(cell, float3(1.0, 1.0, 0.0), local);\n\
+         \x20   float n001 = gradDot(cell, float3(0.0, 0.0, 1.0), local);\n\
+         \x20   float n101 = gradDot(cell, float3(1.0, 0.0, 1.0), local);\n\
+         \x20   float n011 = gradDot(cell, float3(0.0, 1.0, 1.0), local);\n\
+         \x20   float n111 = gradDot(cell, float3(1.0, 1.0, 1.0), local);\n\
+         \x20   float nx00 = mix(n000, n100, w.x); float nx10 = mix(n010, n110, w.x);\n\
+         \x20   float nx01 = mix(n001, n101, w.x); float nx11 = mix(n011, n111, w.x);\n\
+         \x20   return mix(mix(nx00, nx10, w.y), mix(nx01, nx11, w.y), w.z) * 1.1547;\n\
          }}\n\
+         float3 rotateOctave(float3 p) {{\n\
+         \x20   return float3(0.80 * p.y + 0.60 * p.z,\n\
+         \x20                 -0.80 * p.x + 0.36 * p.y - 0.48 * p.z,\n\
+         \x20                 -0.60 * p.x - 0.48 * p.y + 0.64 * p.z);\n\
+         }}\n\
+         float fbm(float3 p) {{\n\
+         \x20   float3 q = p; float total = 0.0; float amp = 1.0; float weight = 0.0;\n\
+         \x20   for (int i = 0; i < 3; i++) {{\n\
+         \x20       total += perlin3(q) * amp; weight += amp;\n\
+         \x20       q = rotateOctave(q) * 2.02 + float3(3.7, 1.9, 6.3);\n\
+         \x20       amp *= 0.48;\n\
+         \x20   }}\n\
+         \x20   return total / max(weight, 0.0001);\n\
+         }}\n\
+         float3 warpVector(float3 p) {{\n\
+         \x20   return float3(perlin3(p), perlin3(p + float3(5.2, 1.3, 2.8)),\n\
+         \x20                 perlin3(p + float3(1.7, 9.2, 4.4)));\n\
+         }}\n\
+         float heightField(float3 dir) {{\n\
+         \x20   float frequency = mix(1.05, 3.4, clamp(DETAIL / 5.0, 0.0, 1.0));\n\
+         \x20   float3 p = dir * frequency + float3(1.7, 3.1, 5.3) + u_mot.xyz;\n\
+         \x20   float3 warp = warpVector(p * 0.55 + u_wmot.xyz * 0.42 + float3(0.7, -1.1, 0.4)) * WARP;\n\
+         \x20   return fbm(p + warp);\n\
+         }}\n\
+         float3 rotateAxis(float3 p, float3 axis, float angle) {{\n\
+         \x20   float c = cos(angle); float s = sin(angle);\n\
+         \x20   return p * c + cross(axis, p) * s + axis * dot(axis, p) * (1.0 - c);\n\
+         }}\n\
+         float torsion(float3 dir) {{\n\
+         \x20   float axial = clamp(dot(dir, normalize(float3(-0.68, 0.54, 0.49))), -1.0, 1.0);\n\
+         \x20   return axial * (1.5 - 0.5 * axial * axial) * TWIST;\n\
+         }}\n\
+         float3 linearToSrgb(float3 c) {{\n\
+         \x20   float3 v = max(c, float3(0.0));\n\
+         \x20   return mix(v * 12.92, 1.055 * pow(v, float3(1.0 / 2.4)) - 0.055, step(float3(0.0031308), v));\n\
+         }}\n\
+         float3 oklabToLinear(float3 c) {{\n\
+         \x20   float lc = c.x + 0.3963377774 * c.y + 0.2158037573 * c.z;\n\
+         \x20   float mc = c.x - 0.1055613458 * c.y - 0.0638541728 * c.z;\n\
+         \x20   float sc = c.x - 0.0894841775 * c.y - 1.2914855480 * c.z;\n\
+         \x20   float l = lc * lc * lc; float m = mc * mc * mc; float s = sc * sc * sc;\n\
+         \x20   return float3(4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,\n\
+         \x20                 -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,\n\
+         \x20                 -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s);\n\
+         }}\n\
+         // The gradient's stops, even spaced and already in OKLab, blended with a smoothstep.\n\
+         float3 gradientAt(float t) {{\n\
+         \x20   float x = clamp(t, 0.0, 1.0) * {last}.0;\n\
+         \x20   float3 a; float3 b; float f;\n\
+         {segs}\
+         \x20   f = f * f * (3.0 - 2.0 * f);\n\
+         \x20   return linearToSrgb(oklabToLinear(mix(a, b, f)));\n\
+         }}\n\
+         float spread(float raw) {{ return clamp((raw - 0.5) * 3.0 + 0.5, 0.0, 1.0); }}\n\
          \n\
          half4 main(float2 xy) {{\n\
-         \x20   float tt = u_tc.x; float calm = u_tc.y;\n\
+         \x20   float calm = u_tc.y;\n\
+         \x20   float aspect = u_res.x / u_res.y;\n\
          \x20   float2 uv = xy / u_res;\n\
-         \x20   // Interior control points wander → bounded domain warp (pools follow them).\n\
-         \x20   float2 wsum = float2(0.0); float wtot = 0.0; float2 q; float ww; float2 d;\n\
-         {warp}\
-         \x20   uv = clamp(uv - wsum / (wtot + 1e-4), 0.0, 1.0);\n\
+         \x20   // The pixel's ray, in the camera's frame: origin, looking down -z at a sphere\n\
+         \x20   // three units away. Focal length and scale are the cover-zoom's.\n\
+         \x20   float2 ndc = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);\n\
+         \x20   float3 rd = normalize(float3(ndc.x * aspect / u_cam.x, ndc.y / u_cam.x, -1.0));\n\
+         \x20   float3 sc = float3(0.0, 0.0, -3.0);\n\
+         \x20   float scale = u_cam.y;\n\
+         \x20   float disp = 0.30 * INTENSITY;\n\
+         \x20   float3 twistAxis = normalize(float3(-0.68, 0.54, 0.49));\n\
+         \x20   float radius = scale;\n\
+         \x20   float h = 0.0; bool seen = false;\n\
+         \x20   // Two passes: the plain sphere's hit names a height, the sphere re-sized by it\n\
+         \x20   // is hit again — the displaced surface, near enough, without the mesh.\n\
+         \x20   for (int i = 0; i < 2; i++) {{\n\
+         \x20       if (float(i) >= u_cam.z) {{ break; }}\n\
+         \x20       float mid = dot(rd, sc);\n\
+         \x20       float disc = mid * mid - dot(sc, sc) + radius * radius;\n\
+         \x20       if (disc < 0.0) {{ break; }}\n\
+         \x20       float3 obj = (rd * (mid - sqrt(disc)) - sc) / scale;\n\
+         \x20       float3 base = float3(dot(u_rot0.xyz, obj), dot(u_rot1.xyz, obj), dot(u_rot2.xyz, obj));\n\
+         \x20       float3 dir = normalize(base);\n\
+         \x20       dir = normalize(rotateAxis(base, twistAxis, -torsion(dir)));\n\
+         \x20       h = heightField(dir);\n\
+         \x20       seen = true;\n\
+         \x20       radius = scale * max(1.0 + h * disp, 0.72);\n\
+         \x20   }}\n\
+         \x20   float3 col;\n\
+         \x20   if (seen) {{\n\
+         \x20       col = gradientAt(spread(h * 0.5 + 0.5));\n\
+         \x20   }} else {{\n\
+         \x20       // Past the sphere: the same gradient along a fixed diagonal.\n\
+         \x20       float2 axis = normalize(float2(0.62 * aspect, 0.78));\n\
+         \x20       float2 centered = float2((uv.x - 0.5) * aspect, uv.y - 0.5);\n\
+         \x20       float extent = abs(axis.x) * aspect * 0.5 + abs(axis.y) * 0.5;\n\
+         \x20       col = gradientAt(dot(centered, axis) / max(extent * 2.0, 0.0001) + 0.5);\n\
+         \x20   }}\n\
          \n\
-         \x20   // Bicubic blend of the 16 mesh colours: cubic-Bézier in x per row, then in y.\n\
-         \x20   float3 r0 = bz3(uv.x, {c0}, {c1}, {c2}, {c3});\n\
-         \x20   float3 r1 = bz3(uv.x, {c4}, {c5}, {c6}, {c7});\n\
-         \x20   float3 r2 = bz3(uv.x, {c8}, {c9}, {c10}, {c11});\n\
-         \x20   float3 r3 = bz3(uv.x, {c12}, {c13}, {c14}, {c15});\n\
-         \x20   float3 col = bz3(uv.y, r0, r1, r2, r3);\n\
-         \n\
-         \x20   col = hue(col, sin(tt * 0.021) * 0.1396263);\n\
-         \n\
-         \x20   // Calm: flatten the field toward its own corner colour — the pools dim and the\n\
+         \x20   // Calm: flatten the field toward its own ground — the pools dim and the\n\
          \x20   // corners lift, so a form screen keeps real colour under its glass rows while\n\
          \x20   // losing the launcher's contrast. Motion is untouched (see the doc comment).\n\
          \x20   col = mix(col, col * 0.60 + u_lift.rgb, calm);\n\
@@ -654,13 +1129,13 @@ pub fn mesh_sksl(colors: &[(f64, f64, f64); 16]) -> String {
          \x20   // Elliptical vignette: clear at r=0.25 → black·0.42 at r=1.15 (aspect-fit ellipse).\n\
          \x20   // Halved under calm: a launcher's cards sit in the pooled centre, but a form\n\
          \x20   // screen's rows run out toward the edges, where crushing to black just eats them.\n\
-         \x20   float2 e = (xy / u_res - 0.5) * 2.0;\n\
+         \x20   float2 e = (uv - 0.5) * 2.0;\n\
          \x20   float vig = clamp((length(e) - 0.25) / 0.90, 0.0, 1.0)\n\
          \x20             * mix(0.42, 0.21, calm) * u_scrim.a;\n\
          \x20   col = mix(col, u_scrim.rgb, vig);\n\
          \n\
          \x20   // Vertical legibility scrim: black 0.38/0.06/0.08/0.40 at 0/0.32/0.68/1.\n\
-         \x20   float v = xy.y / u_res.y;\n\
+         \x20   float v = uv.y;\n\
          \x20   float s = v < 0.32 ? mix(0.38, 0.06, v / 0.32)\n\
          \x20           : v < 0.68 ? mix(0.06, 0.08, (v - 0.32) / 0.36)\n\
          \x20           : mix(0.08, 0.40, (v - 0.68) / 0.32);\n\
@@ -668,13 +1143,9 @@ pub fn mesh_sksl(colors: &[(f64, f64, f64); 16]) -> String {
          \n\
          \x20   return half4(half3(col), 1.0);\n\
          }}\n",
-        c0 = c(0), c1 = c(1), c2 = c(2), c3 = c(3),
-        c4 = c(4), c5 = c(5), c6 = c(6), c7 = c(7),
-        c8 = c(8), c9 = c(9), c10 = c(10), c11 = c(11),
-        c12 = c(12), c13 = c(13), c14 = c(14), c15 = c(15),
+        last = n - 1,
     )
 }
-
 // --- The shared binary↔overlay model ------------------------------------------------------
 
 #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -782,10 +1253,12 @@ struct Shared {
     games: Vec<LibraryGame>,
     /// Disk cache vs live host. Live [`LibraryShared::set_games`] resets this to [`Stale::No`].
     stale: Stale,
-    /// Fetched poster bytes the renderer hasn't decoded yet (id, encoded image).
-    art_in: VecDeque<(String, Vec<u8>)>,
+    /// Every poster fetched for this epoch, encoded, by title id. Kept for the fetch, not
+    /// queued: whichever screen is up decodes what it lacks, and a cover a screen evicted
+    /// or never drew comes back from here. Cleared by [`LibraryShared::begin_fetch`].
+    art: HashMap<String, Arc<[u8]>>,
     /// Posters a host decoded on its own thread, waiting to be adopted. Separate from
-    /// [`Shared::art_in`] because taking one costs nothing: the work is already done.
+    /// [`Shared::art`] because taking one costs nothing: the work is already done.
     decoded_in: VecDeque<(String, DecodedPoster)>,
     /// The scale the shelf caches art at, published for hosts that decode off-thread so they
     /// size it the way this crate would. `None` until a shelf has drawn once.
@@ -854,7 +1327,7 @@ impl Default for LibraryShared {
             phase: LibraryPhase::Loading,
             games: Vec::new(),
             stale: Stale::No,
-            art_in: VecDeque::new(),
+            art: HashMap::new(),
             decoded_in: VecDeque::new(),
             art_scale: None,
             generation: 0,
@@ -875,6 +1348,9 @@ impl LibraryShared {
         s.phase = LibraryPhase::Loading;
         // Previous host's stale note is not this fetch's; a cached render re-declares it.
         s.stale = Stale::No;
+        // The previous host's posters are not this fetch's.
+        s.art.clear();
+        s.decoded_in.clear();
         s.fetch_epoch += 1;
         s.generation += 1;
     }
@@ -976,7 +1452,7 @@ impl LibraryShared {
     }
 
     pub fn push_art(&self, id: String, bytes: Vec<u8>) {
-        self.0.lock().unwrap().art_in.push_back((id, bytes));
+        self.0.lock().unwrap().art.insert(id, bytes.into());
     }
 
     /// A poster a host already decoded, off the thread that draws.
@@ -1020,36 +1496,18 @@ impl LibraryShared {
         }
     }
 
-    /// At most `max` newly fetched posters; the rest stay queued.
-    ///
-    /// Bounded: the renderer decodes on the render thread. Encoded bytes left behind are
-    /// two orders smaller than the rasters they become.
-    pub(crate) fn drain_art(&self, max: usize) -> Vec<(String, Vec<u8>)> {
-        let mut s = self.0.lock().unwrap();
-        let n = max.min(s.art_in.len());
-        s.art_in.drain(..n).collect()
-    }
-
-    /// At most `max` queued posters in `want`; every other entry stays.
-    ///
-    /// Bytes are pushed once per fetch and never re-sent. A wholesale drain on collections
-    /// would drop covers the shelf still needs.
-    pub(crate) fn take_art_for(
+    /// The first `max` of `ids` that have bytes, in that order. Nothing is consumed: a screen
+    /// asks for what it lacks, on-screen titles first, and decodes at its own pace.
+    pub(crate) fn art_for<'a>(
         &self,
-        want: &std::collections::HashSet<String>,
+        ids: impl IntoIterator<Item = &'a str>,
         max: usize,
-    ) -> Vec<(String, Vec<u8>)> {
-        let mut s = self.0.lock().unwrap();
-        let mut out = Vec::new();
-        let mut i = 0;
-        while i < s.art_in.len() && out.len() < max {
-            if want.contains(&s.art_in[i].0) {
-                out.extend(s.art_in.remove(i));
-            } else {
-                i += 1;
-            }
-        }
-        out
+    ) -> Vec<(String, Arc<[u8]>)> {
+        let s = self.0.lock().unwrap();
+        ids.into_iter()
+            .filter_map(|id| s.art.get(id).map(|b| (id.to_string(), b.clone())))
+            .take(max)
+            .collect()
     }
 }
 
@@ -1094,136 +1552,248 @@ pub fn initials(title: &str) -> String {
         .collect()
 }
 
+/// One band of the Games tab, by the id `Settings::library_sections` stores.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Section {
+    Desktops,
+    Recent,
+    Favorites,
+    Launchers,
+    Games,
+}
+
+impl Section {
+    pub const ALL: [Section; 5] = [
+        Section::Desktops,
+        Section::Recent,
+        Section::Favorites,
+        Section::Launchers,
+        Section::Games,
+    ];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Section::Desktops => "desktops",
+            Section::Recent => "recent",
+            Section::Favorites => "favorites",
+            Section::Launchers => "launchers",
+            Section::Games => "games",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Section::Desktops => "Desktops",
+            Section::Recent => "Recently played",
+            Section::Favorites => "Favorites",
+            Section::Launchers => "Launchers",
+            Section::Games => "Games",
+        }
+    }
+}
+
+/// `library_sections` as the Apple app parses it: ids in order, `-` before one switched
+/// off, an unknown id dropped, a repeat keeping its first place, a known section the value
+/// lacks appended switched on.
+pub fn sections(stored: &str) -> Vec<(Section, bool)> {
+    let mut out: Vec<(Section, bool)> = Vec::new();
+    for token in stored.split(',').map(str::trim) {
+        let (on, id) = match token.strip_prefix('-') {
+            Some(id) => (false, id),
+            None => (true, token),
+        };
+        let Some(s) = Section::ALL.into_iter().find(|s| s.id() == id) else {
+            continue;
+        };
+        if !out.iter().any(|(seen, _)| *seen == s) {
+            out.push((s, on));
+        }
+    }
+    for s in Section::ALL {
+        if !out.iter().any(|(seen, _)| *seen == s) {
+            out.push((s, true));
+        }
+    }
+    out
+}
+
+/// The stored form of `sections`.
+pub fn stored_sections(sections: &[(Section, bool)]) -> String {
+    sections
+        .iter()
+        .map(|(s, on)| format!("{}{}", if *on { "" } else { "-" }, s.id()))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// `ms` ago, as a person says it: `just now`, `12 min ago`, `2 h ago`, `3 d ago`, `5 mo ago`.
+pub fn ago(ms: u64) -> String {
+    let min = ms / 60_000;
+    match min {
+        0 => "just now".into(),
+        1..60 => format!("{min} min ago"),
+        60..1_440 => format!("{} h ago", min / 60),
+        1_440..43_200 => format!("{} d ago", min / 1_440),
+        _ => format!("{} mo ago", min / 43_200),
+    }
+}
+
+/// The Details card's play line: `Last played 2 h ago · 14 h total · 12 launches`. `None`
+/// for a title never played here.
+pub fn stats_line(s: &pf_client_core::library::GameStats, now_ms: u64) -> Option<String> {
+    if s.last_played_unix_ms == 0 {
+        return None;
+    }
+    let mut parts = vec![format!(
+        "Last played {}",
+        ago(now_ms.saturating_sub(s.last_played_unix_ms))
+    )];
+    let hours = s.play_time_ms / 3_600_000;
+    if hours > 0 {
+        parts.push(format!("{hours} h total"));
+    }
+    if s.launch_count > 0 {
+        parts.push(format!(
+            "{} launch{}",
+            s.launch_count,
+            if s.launch_count == 1 { "" } else { "es" }
+        ));
+    }
+    Some(parts.join(" \u{b7} "))
+}
+
+/// Where a host's favorites live in the settings document's `extra` map.
+fn favorites_key(fp_hex: &str) -> String {
+    format!("favorites.{fp_hex}")
+}
+
+/// The titles marked favorite on host `fp_hex` from this device, in marking order.
+pub fn favorites(settings: &pf_client_core::trust::Settings, fp_hex: &str) -> Vec<String> {
+    settings
+        .extra
+        .get(&favorites_key(fp_hex))
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Mark or unmark `id` on host `fp_hex`; `true` when it is now a favorite.
+pub fn toggle_favorite(
+    settings: &mut pf_client_core::trust::Settings,
+    fp_hex: &str,
+    id: &str,
+) -> bool {
+    let mut list = favorites(settings, fp_hex);
+    let on = match list.iter().position(|f| f == id) {
+        Some(i) => {
+            list.remove(i);
+            false
+        }
+        None => {
+            list.push(id.to_string());
+            true
+        }
+    };
+    let key = favorites_key(fp_hex);
+    if list.is_empty() {
+        settings.extra.remove(&key);
+    } else {
+        settings.extra.insert(key, list.into());
+    }
+    on
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Parity with `clients/shared/console-vectors.json` (`include_str!`: missing file fails compile).
-    ///
-    /// Three copies: here, `GamepadPalette.kt`, `GamepadPalette.swift`. The file pins the
-    /// 13 palettes and the derived 16-cell mesh each one produces.
     #[test]
-    fn shared_console_vectors() {
-        let raw = include_str!("../../../clients/shared/console-vectors.json");
-        let file: serde_json::Value =
-            serde_json::from_str(raw).expect("console-vectors.json must parse");
-        let nums = |v: &serde_json::Value| -> Vec<f64> {
-            v.as_array()
-                .expect("array")
-                .iter()
-                .map(|n| n.as_f64().expect("number"))
-                .collect()
-        };
-        let close = |what: &str, a: f64, b: f64| {
-            assert!(
-                (a - b).abs() < 1e-6,
-                "{what}: vectors say {b}, this client computes {a}"
-            );
-        };
-
-        assert_eq!(nums(&file["cell_ramp"]), CELL_RAMP.to_vec(), "CELL_RAMP");
-
-        let interior = file["mesh_interior"].as_array().expect("mesh_interior");
-        assert_eq!(interior.len(), MESH_INTERIOR.len(), "mesh interior count");
-        for (w, p) in interior.iter().zip(MESH_INTERIOR.iter()) {
-            let w = nums(w);
-            let got = [p.0, p.1, p.2, p.3, p.4, p.5];
-            for (i, (a, b)) in got.iter().zip(w.iter()).enumerate() {
-                close(&format!("mesh_interior[{i}]"), *a, *b);
-            }
-        }
-
-        let want = file["palettes"].as_array().expect("palettes");
-        assert_eq!(want.len(), PALETTES.len(), "palette count");
-        for (w, p) in want.iter().zip(PALETTES.iter()) {
-            let id = w["id"].as_str().expect("id");
-            assert_eq!(id, p.id, "palette order");
-            assert_eq!(w["name"].as_str().expect("name"), p.name, "{id} name");
-            assert_eq!(w["light"].as_bool().expect("light"), p.light, "{id} light");
-            let g = nums(&w["ground"]);
-            close(&format!("{id} ground.r"), p.ground.0, g[0]);
-            close(&format!("{id} ground.g"), p.ground.1, g[1]);
-            close(&format!("{id} ground.b"), p.ground.2, g[2]);
-            let a = nums(&w["accent"]);
-            close(&format!("{id} accent.r"), p.accent.0, a[0]);
-            close(&format!("{id} accent.g"), p.accent.1, a[1]);
-            close(&format!("{id} accent.b"), p.accent.2, a[2]);
-
-            let mesh = p.mesh_colors();
-            let wm = w["mesh"].as_array().expect("mesh");
-            assert_eq!(wm.len(), mesh.len(), "{id} mesh cells");
-            for (i, (c, wc)) in mesh.iter().zip(wm.iter()).enumerate() {
-                let wc = nums(wc);
-                close(&format!("{id} mesh[{i}].r"), c.0, wc[0]);
-                close(&format!("{id} mesh[{i}].g"), c.1, wc[1]);
-                close(&format!("{id} mesh[{i}].b"), c.2, wc[2]);
-            }
-            let blobs = p.blob_colors();
-            let wb = w["blobs"].as_array().expect("blobs");
-            assert_eq!(wb.len(), blobs.len(), "{id} blob count");
-            for (i, (c, wc)) in blobs.iter().zip(wb.iter()).enumerate() {
-                let wc = nums(wc);
-                close(&format!("{id} blob[{i}].r"), c.0, wc[0]);
-                close(&format!("{id} blob[{i}].g"), c.1, wc[1]);
-                close(&format!("{id} blob[{i}].b"), c.2, wc[2]);
-            }
-        }
-    }
-
-    #[test]
-    fn art_drains_in_bounded_batches_and_keeps_the_order() {
-        let shared = LibraryShared::default();
-        for i in 0..5 {
-            shared.push_art(format!("g{i}"), vec![i as u8]);
-        }
-        let first: Vec<String> = shared.drain_art(2).into_iter().map(|(id, _)| id).collect();
-        assert_eq!(first, ["g0", "g1"]);
-        let rest: Vec<String> = shared.drain_art(9).into_iter().map(|(id, _)| id).collect();
+    fn sections_parse_as_the_apple_app_does() {
+        use Section::*;
         assert_eq!(
-            rest,
-            ["g2", "g3", "g4"],
-            "asking for more than is there is fine"
+            sections(""),
+            Section::ALL.map(|s| (s, true)).to_vec(),
+            "empty is every section, on"
         );
-        assert!(shared.drain_art(2).is_empty());
+        assert_eq!(
+            sections("games,-recent,bogus,games,desktops"),
+            vec![
+                (Games, true),
+                (Recent, false),
+                (Desktops, true),
+                (Favorites, true),
+                (Launchers, true),
+            ]
+        );
+        let s = sections("desktops,recent,-favorites,launchers,games");
+        assert_eq!(
+            stored_sections(&s),
+            "desktops,recent,-favorites,launchers,games"
+        );
     }
 
-    /// Poster bytes are pushed once per fetch and never re-sent; anything taken and not drawn is gone.
     #[test]
-    fn a_selective_take_leaves_everything_it_did_not_ask_for() {
+    fn the_play_line_reads_like_a_person_says_it() {
+        let s = pf_client_core::library::GameStats {
+            last_played_unix_ms: 1_000,
+            play_time_ms: 14 * 3_600_000,
+            last_run_ms: 0,
+            launch_count: 12,
+        };
+        assert_eq!(
+            stats_line(&s, 1_000 + 2 * 3_600_000).as_deref(),
+            Some("Last played 2 h ago \u{b7} 14 h total \u{b7} 12 launches")
+        );
+        assert_eq!(ago(30_000), "just now");
+        assert_eq!(ago(3 * 86_400_000), "3 d ago");
+        let never = pf_client_core::library::GameStats {
+            last_played_unix_ms: 0,
+            ..s
+        };
+        assert_eq!(stats_line(&never, 5), None);
+    }
+
+    #[test]
+    fn favorites_toggle_per_host_and_drop_an_empty_list() {
+        let mut settings = pf_client_core::trust::Settings::default();
+        assert!(toggle_favorite(&mut settings, "aa", "steam:1"));
+        assert!(toggle_favorite(&mut settings, "aa", "steam:2"));
+        assert!(favorites(&settings, "bb").is_empty(), "per host");
+        assert_eq!(favorites(&settings, "aa"), ["steam:1", "steam:2"]);
+        assert!(!toggle_favorite(&mut settings, "aa", "steam:1"));
+        assert!(!toggle_favorite(&mut settings, "aa", "steam:2"));
+        assert!(settings.extra.is_empty(), "no empty list left behind");
+    }
+
+    /// Poster bytes stay for the fetch: any screen takes what it lacks, in the order it asks,
+    /// as often as it asks; the next fetch starts clean.
+    #[test]
+    fn art_stays_for_the_fetch_and_serves_in_asked_order() {
         let shared = LibraryShared::default();
         for i in 0..6 {
             shared.push_art(format!("g{i}"), vec![i as u8]);
         }
-        let want = ["g1".to_string(), "g4".to_string(), "g9".to_string()]
-            .into_iter()
-            .collect();
-        let took: Vec<String> = shared
-            .take_art_for(&want, 8)
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
+        let ids =
+            |got: Vec<(String, Arc<[u8]>)>| got.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
         assert_eq!(
-            took,
-            ["g1", "g4"],
+            ids(shared.art_for(["g4", "g1", "g9"], 8)),
+            ["g4", "g1"],
             "an id that never arrived is not an error"
         );
-        let rest: Vec<String> = shared.drain_art(9).into_iter().map(|(id, _)| id).collect();
-        assert_eq!(rest, ["g0", "g2", "g3", "g5"], "the rest is untouched");
-    }
-
-    #[test]
-    fn a_selective_take_is_bounded_too() {
-        let shared = LibraryShared::default();
-        for i in 0..6 {
-            shared.push_art(format!("g{i}"), vec![i as u8]);
-        }
-        let want: std::collections::HashSet<String> = (0..6).map(|i| format!("g{i}")).collect();
-        assert_eq!(shared.take_art_for(&want, 2).len(), 2);
-        assert_eq!(shared.take_art_for(&want, 2).len(), 2);
         assert_eq!(
-            shared.take_art_for(&want, 9).len(),
-            2,
-            "and then it is empty"
+            ids(shared.art_for(["g4", "g1"], 8)),
+            ["g4", "g1"],
+            "not consumed"
+        );
+        assert_eq!(shared.art_for(["g0", "g1", "g2"], 2).len(), 2, "bounded");
+        shared.begin_fetch();
+        assert!(
+            shared.art_for(["g0", "g1"], 9).is_empty(),
+            "a new fetch starts clean"
         );
     }
 
@@ -1440,9 +2010,9 @@ mod tests {
     fn library_view_parses_leniently() {
         assert_eq!(LibraryView::parse("grid"), LibraryView::Grid);
         assert_eq!(LibraryView::parse("shelf"), LibraryView::Shelf);
-        assert_eq!(LibraryView::parse("coverwall"), LibraryView::Shelf);
-        assert_eq!(LibraryView::parse(""), LibraryView::Shelf);
-        assert_eq!(LibraryView::default(), LibraryView::Shelf);
+        assert_eq!(LibraryView::parse("coverwall"), LibraryView::Grid);
+        assert_eq!(LibraryView::parse(""), LibraryView::Grid);
+        assert_eq!(LibraryView::default(), LibraryView::Grid);
         for v in LibraryView::ALL {
             assert_eq!(LibraryView::parse(v.id()), v, "{} round-trips", v.label());
         }
@@ -1834,20 +2404,68 @@ mod tests {
         assert!((tilt_right - tilt_left) < (flat_right - flat_left) * 0.95);
     }
 
+    /// Unturned, a cover is its rect. Turned about the edge facing focus, that edge stays
+    /// put and the outer edge swings toward the eye, taller than the inner one.
+    #[test]
+    fn a_shelf_cover_turns_about_the_edge_facing_focus() {
+        let (w, h) = (POSTER_W, POSTER_H);
+        let depth = h / SHELF_EYE;
+        let flat = shelf_matrix((640.0, 400.0), (w, h), 1.0, 0.0, w, depth);
+        let (x, y) = super::project(&flat, 0.0, 0.0);
+        assert!((x - (640.0 - w / 2.0)).abs() < 1e-6 && (y - (400.0 - h / 2.0)).abs() < 1e-6);
+        // Left of focus: the right edge faces it and is the pivot.
+        let left = shelf_matrix((300.0, 400.0), (w, h), 1.0, ROTATE_DEG, w, depth);
+        let (px, py) = super::project(&left, w, 0.0);
+        assert!((px - (300.0 + w / 2.0)).abs() < 1e-6 && (py - (400.0 - h / 2.0)).abs() < 1e-6);
+        let tall = |m: &[f64; 16], x: f64| super::project(m, x, h).1 - super::project(m, x, 0.0).1;
+        assert!(
+            tall(&left, 0.0) > tall(&left, w),
+            "the outer edge comes forward"
+        );
+    }
+
     #[test]
     fn initials_take_two_words() {
         assert_eq!(initials("Dota 2"), "D2");
         assert_eq!(initials("half-life"), "H");
     }
 
-    /// Generated SkSL: 16 colours baked, five bicubic evals, four interior warp terms, braces balanced.
+    /// The field's turn at t = 0 is its fixed tilt alone, and at any t a rotation: rows
+    /// orthonormal, so the sphere is turned, never squashed.
     #[test]
-    fn mesh_sksl_shape() {
-        let src = mesh_sksl(&MESH_COLORS);
-        assert!(src.matches("float3(").count() >= 16, "16 colours baked");
-        assert_eq!(src.matches("bz3(").count(), 6); // 1 definition + 5 call sites
-        assert_eq!(src.matches("wtot +=").count(), 4); // one per interior point
-        assert_eq!(src.matches('{').count(), src.matches('}').count());
+    fn field_motion_is_a_rotation() {
+        let m = field_motion(0.0);
+        let (c, s) = (0.24f32.cos(), 0.24f32.sin());
+        let tilt = [1.0, 0.0, 0.0, 0.0, 0.0, c, -s, 0.0, 0.0, s, c, 0.0];
+        for (got, want) in m[..12].iter().zip(tilt) {
+            assert!((got - want).abs() < 1e-5, "{m:?}");
+        }
+        let m = field_motion(1234.5);
+        let row = |i: usize| [m[i * 4], m[i * 4 + 1], m[i * 4 + 2]];
+        let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        for i in 0..3 {
+            for j in 0..3 {
+                let want = if i == j { 1.0 } else { 0.0 };
+                assert!((dot(row(i), row(j)) - want).abs() < 1e-5);
+            }
+        }
+    }
+
+    /// Generated SkSL compiles for every palette (and a two-stop ramp), with the 144-byte
+    /// block the shell packs.
+    #[test]
+    fn field_sksl_compiles_for_every_palette() {
+        for p in &PALETTES {
+            let src = field_sksl(p.ground, p.stops.unwrap_or(&VIOLET_FIELD));
+            assert_eq!(src.matches('{').count(), src.matches('}').count());
+            let effect = skia_safe::RuntimeEffect::make_for_shader(&src, None)
+                .unwrap_or_else(|e| panic!("{}: {e}", p.id));
+            assert_eq!(effect.uniform_size(), 144, "{}", p.id);
+        }
+        let two = field_sksl((0.0, 0.0, 0.0), &[(0.0, 0.0, 0.0), (1.0, 1.0, 1.0)]);
+        assert!(skia_safe::RuntimeEffect::make_for_shader(&two, None).is_ok());
+        let (focal, scale) = field_camera(16.0 / 9.0);
+        assert!(focal > 1.0 && scale > 0.8, "{focal} {scale}");
     }
 
     #[test]
@@ -1886,6 +2504,10 @@ mod tests {
     #[test]
     fn every_palette_is_multi_tone() {
         for p in &PALETTES {
+            // Graphite, Paper and Slate are near-neutral; Void has no hue at all.
+            if p.id == "void" {
+                continue;
+            }
             let hues: Vec<f64> = p.mesh_colors().iter().filter_map(|c| hue(*c)).collect();
             assert!(hues.len() >= 8, "{}: too few coloured cells", p.id);
             let spread = hues
@@ -1897,8 +2519,7 @@ mod tests {
                     })
                 })
                 .fold(0.0f64, f64::max);
-            // Graphite and Opal are deliberately near-neutral.
-            let floor = if matches!(p.id, "graphite" | "opal") {
+            let floor = if matches!(p.id, "graphite" | "paper" | "slate") {
                 20.0
             } else {
                 45.0
@@ -1907,16 +2528,49 @@ mod tests {
         }
     }
 
-    /// Ids, order and the light/dark split are the cross-client contract — the Apple and
-    /// Android tables must match this exactly.
+    /// Ids are stored `ui_palette` values, and their order is the cycle order.
     #[test]
-    fn table_matches_the_other_clients() {
+    fn ids_and_order_hold() {
         let ids: Vec<&str> = PALETTES.iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
             [
-                "violet", "oled", "nebula", "abyss", "ember", "moss", "graphite", "holo", "sunset",
-                "bloom", "dawn", "mint", "opal",
+                "violet",
+                "oled",
+                "void",
+                "graphite",
+                "slate",
+                "midnight",
+                "electric",
+                "ocean",
+                "aurora",
+                "jade",
+                "emerald",
+                "crimson",
+                "ruby",
+                "lava",
+                "copper",
+                "amber",
+                "dusk",
+                "grape",
+                "neon",
+                "tropic",
+                "paper",
+                "sky",
+                "glacier",
+                "lilac",
+                "iris",
+                "bubblegum",
+                "coral",
+                "flamingo",
+                "peach",
+                "candy",
+                "lemon",
+                "sunflower",
+                "sherbet",
+                "sage",
+                "meadow",
+                "lagoon",
             ]
         );
         // Dark fields lead, pale ones follow, so stepping the row walks one direction.
@@ -1925,7 +2579,7 @@ mod tests {
             .position(|p| p.light)
             .expect("some are light");
         assert!(PALETTES[first_light..].iter().all(|p| p.light));
-        assert_eq!(first_light, 7);
+        assert_eq!(first_light, 20);
     }
 
     /// `oled` is genuinely black: pure-black corners, mean under every other field, ground lifts to nothing.
@@ -1946,7 +2600,7 @@ mod tests {
         let mean = cells.iter().map(|c| luma(*c)).sum::<f64>() / 16.0;
         let darkest_other = PALETTES
             .iter()
-            .filter(|p| p.id != "oled")
+            .filter(|p| !matches!(p.id, "oled" | "void"))
             .map(|p| p.mesh_colors().iter().map(|c| luma(*c)).sum::<f64>() / 16.0)
             .fold(f64::MAX, f64::min);
         assert!(
@@ -1960,8 +2614,19 @@ mod tests {
     #[test]
     fn palettes_are_in_gamut_and_honest_about_lightness() {
         let luma = |c: (f64, f64, f64)| 0.2126 * c.0 + 0.7152 * c.1 + 0.0722 * c.2;
+        // WCAG contrast of white on `c`; 3:1 is the floor for bold and large type.
+        let contrast = |c: (f64, f64, f64)| {
+            let lin = |v: f64| {
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            1.05 / (luma((lin(c.0), lin(c.1), lin(c.2))) + 0.05)
+        };
         for p in &PALETTES {
-            for c in p.mesh_colors().iter().chain(p.blob_colors().iter()) {
+            for c in p.mesh_colors().iter() {
                 for v in [c.0, c.1, c.2] {
                     assert!((0.0..=1.0).contains(&v), "{} {c:?}", p.id);
                 }
@@ -1972,7 +2637,11 @@ mod tests {
                 assert!(luma(p.ground) > 0.6, "{}'s ground is dark", p.id);
             } else {
                 assert!(mean < 0.45, "{} is flagged dark but means {mean:.2}", p.id);
-                assert!(luma(p.ground) < 0.2, "{}'s ground is light", p.id);
+                assert!(
+                    contrast(p.ground) >= 3.0,
+                    "white ink fades on {}'s ground",
+                    p.id
+                );
             }
             // Accent tints glass of the opposite polarity: dark on white frost, bright on dark glass.
             let a = luma(p.accent);
@@ -1984,7 +2653,7 @@ mod tests {
         }
     }
 
-    /// The ramp is the shared sampling rule the Swift and Kotlin ports reproduce.
+    /// The ramp samples linearly between stops and clamps outside them.
     #[test]
     fn ramp_interpolates_between_stops() {
         let stops = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 1.0)];

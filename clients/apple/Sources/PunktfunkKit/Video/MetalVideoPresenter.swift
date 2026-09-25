@@ -87,7 +87,7 @@ private let sdrColorspace: CGColorSpace? = {
 ///
 /// `PUNKTFUNK_SDR10_DRAWABLE=8` keeps the 8-bit drawable — the A/B lever if a panel composites
 /// the wide format wrong.
-private let sdr10Drawable: MTLPixelFormat =
+let sdr10Drawable: MTLPixelFormat =
     ProcessInfo.processInfo.environment["PUNKTFUNK_SDR10_DRAWABLE"] == "8"
     ? .bgra8Unorm : .bgr10a2Unorm
 
@@ -821,13 +821,14 @@ public final class MetalVideoPresenter {
     /// Drain the staged HDR grade and apply it. RENDER THREAD (or `reconcileLayer`'s caller):
     /// idempotent, so every present path can call it and the first one to run wins. Every path
     /// must — a stream whose path skipped it tone-maps against the bare reference-white anchor
-    /// with no mastering volume for the whole session.
+    /// with no mastering volume for the whole session. The host repeats the grade on every
+    /// keyframe (every PyroWave frame); an unchanged one leaves the layer alone.
     private func applyStagedHdrMeta() {
         stagingLock.lock()
         let newHdrMeta = pendingHdrMeta
         pendingHdrMeta = nil
         stagingLock.unlock()
-        guard let newHdrMeta else { return }
+        guard let newHdrMeta, newHdrMeta != lastHdrMeta else { return }
         lastHdrMeta = newHdrMeta
         // tvOS has no edrMetadata — the cached grade still matters for a later flip's
         // configureColor. macOS/iOS refine the live tone-map now.

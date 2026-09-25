@@ -27,13 +27,24 @@ pub enum Content {
     /// A source slower than the session: `fps` new frames a second, each still sized from the
     /// session's per-frame allowance, so the budget goes unspent.
     FrameDriven { fps: u32, fill_pct: u32 },
+    /// A minute of [`Content::Steady`], then a desktop gone still: `fps` new frames a second
+    /// and host-marked repeats between them.
+    MotionThenStill { fps: u32, fill_pct: u32 },
 }
 
+/// How long [`Content::MotionThenStill`] moves before it goes still.
+const STILL_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
 impl Content {
-    /// `steady`, `idle-then-motion` or `frame-driven:35`, at `fill_pct` of the allowance.
+    /// `steady`, `idle-then-motion`, `frame-driven:35` or `motion-then-still:5`, at
+    /// `fill_pct` of the allowance.
     pub fn parse(spec: &str, fill_pct: u32) -> Option<Content> {
         match spec.split_once(':') {
             Some(("frame-driven", fps)) => Some(Content::FrameDriven {
+                fps: fps.parse().ok().filter(|&f| f > 0)?,
+                fill_pct,
+            }),
+            Some(("motion-then-still", fps)) => Some(Content::MotionThenStill {
                 fps: fps.parse().ok().filter(|&f| f > 0)?,
                 fill_pct,
             }),
@@ -50,7 +61,8 @@ impl Content {
         match self {
             Content::Steady { fill_pct }
             | Content::IdleThenMotion { fill_pct }
-            | Content::FrameDriven { fill_pct, .. } => fill_pct,
+            | Content::FrameDriven { fill_pct, .. }
+            | Content::MotionThenStill { fill_pct, .. } => fill_pct,
         }
     }
 
@@ -67,13 +79,22 @@ impl Content {
                 }
             }
             // Integer cadence over the tick count: 35 of every 165 ticks carry content.
-            Content::FrameDriven { fps: src, .. } => {
-                let want = u64::from(src.min(fps));
-                let per = u64::from(fps.max(1));
-                (tick * want / per != (tick + 1) * want / per).then_some(Shot::New)
-            }
+            Content::FrameDriven { fps: src, .. } => cadence(src, fps, tick).then_some(Shot::New),
+            Content::MotionThenStill { .. } if elapsed < STILL_AFTER => Some(Shot::New),
+            Content::MotionThenStill { fps: src, .. } => Some(if cadence(src, fps, tick) {
+                Shot::New
+            } else {
+                Shot::Repeat
+            }),
         }
     }
+}
+
+/// Whether tick `tick` of a session at `fps` carries one of `src` new frames a second.
+fn cadence(src: u32, fps: u32, tick: u64) -> bool {
+    let want = u64::from(src.min(fps));
+    let per = u64::from(fps.max(1));
+    tick * want / per != (tick + 1) * want / per
 }
 
 /// How the source answers a keyframe request.
@@ -324,6 +345,9 @@ pub(crate) fn synthetic_abr_stream(ctx: SynthAbrContext) -> Result<()> {
         codec: "synthetic-abr",
         client: client_label.clone(),
         bitrate_kbps: live_bitrate.clone(),
+        // No client ramp reaches the synthetic source; the factor paces it.
+        link_kbps: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        link_paced: false,
         bringup: bringup.clone(),
         wire_sock,
         driver_dropped: Arc::new(AtomicU64::new(0)),
@@ -652,6 +676,17 @@ mod tests {
             idle.frame_at(std::time::Duration::from_secs(11), 60, 0),
             Some(Shot::New)
         );
+
+        // A minute of motion, then 5 new frames a second among repeats.
+        let still = Content::parse("motion-then-still:5", 100).expect("motion-then-still parses");
+        assert!((0..60)
+            .all(|t| still.frame_at(std::time::Duration::from_secs(1), 60, t) == Some(Shot::New)));
+        let late = std::time::Duration::from_secs(61);
+        let new = (0..60)
+            .filter(|&t| still.frame_at(late, 60, t) == Some(Shot::New))
+            .count();
+        assert_eq!(new, 5, "five new frames a second once still");
+        assert_eq!(still.frame_at(late, 60, 1), Some(Shot::Repeat));
 
         assert_eq!(Content::parse("frame-driven:0", 100), None);
         assert_eq!(Content::parse("nonsense", 100), None);

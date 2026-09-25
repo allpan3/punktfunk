@@ -1307,7 +1307,7 @@ pub(crate) fn settings_page(
                         over.hdr_enabled,
                         hdr_toggle,
                         "HDR10, when the host has HDR content and this display supports it. \
-                         HEVC only; otherwise the stream stays SDR.",
+                         With H.264 the stream stays SDR.",
                     ),
                     // First sentence shared with the GTK client (its chroma_row); the
                     // constraint sentence names the real gate (host: PyroWave || NVENC) —

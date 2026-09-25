@@ -186,31 +186,23 @@ pub(crate) fn spawn_session(
     spawn_with(cmd, &format!("{addr}:{port}"), spec_path, slot, on_event)
 }
 
-/// Spawn the session binary in `--browse` mode: the console (gamepad) library for a
-/// PAIRED host, in the session window — launches run as streams in that same window.
-/// The same stdout contract as a connect (`--json-status`): `ready` when the library
-/// window presents, `error` on a failed start, EOF on quit.
+/// Spawn the session binary in `--browse` mode: the console home, in the session window —
+/// launches run as streams in that same window. The same stdout contract as a connect
+/// (`--json-status`): `ready` when the console window presents, `error` on a failed start,
+/// EOF on quit.
 pub(crate) fn spawn_browse(
-    target: Option<(&str, u16)>,
     fullscreen: bool,
     slot: SessionChild,
     on_event: impl FnMut(SpawnEvent) + Send + 'static,
 ) -> Result<(), String> {
     let mut cmd = Command::new(session_binary());
     cmd.arg("--browse");
-    // A target opens straight into that host's library; bare `--browse` opens the console's
-    // OWN host view (discovery, pairing, settings, Wake-on-LAN) — the couch equivalent of
-    // the shell's hosts page.
-    if let Some((addr, port)) = target {
-        cmd.arg(format!("{addr}:{port}"));
-    }
     cmd.arg("--json-status");
     if fullscreen {
         cmd.arg("--fullscreen");
     }
     add_window_pos(&mut cmd);
-    let label = target.map_or_else(|| "console".to_string(), |(a, p)| format!("{a}:{p}"));
-    spawn_with(cmd, &label, None, slot, on_event)
+    spawn_with(cmd, "console", None, slot, on_event)
 }
 
 /// Hand the shell window's position to the child (`--window-pos`) so the session window

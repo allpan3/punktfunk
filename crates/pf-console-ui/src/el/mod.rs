@@ -9,10 +9,48 @@
 //! A [`Kind::Scroll`] clips and offsets its children. A long list goes under it as a
 //! [`Kind::Virtual`], which builds only the items in view: a 2000-title grid laid out in
 //! full every frame is the one way to make this slow.
+//!
+//! Focus is the tree's too: a node marked [`El::focusable`] is a target, a [`Group`] is a
+//! container, and [`Tree::move_focus`] answers a direction from last frame's rects.
+//! [`census`] tells the shell whether a surface has any target at all.
 
+mod focus;
 mod layout;
 
+pub(crate) use focus::forget_handoff;
+pub use focus::{begin_frame, Group, Plate};
 pub use layout::{Frame, Tree};
+
+thread_local! {
+    /// Focus is on the shell's tab strip, not in the layer painting now: its trees step
+    /// their plates without drawing them, so one plate shows. Set by the shell per layer.
+    static DORMANT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Focus targets placed inside the running [`census`]; `None` outside one.
+    static CENSUS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+pub fn set_dormant(on: bool) {
+    DORMANT.with(|d| d.set(on));
+}
+
+fn dormant() -> bool {
+    DORMANT.with(std::cell::Cell::get)
+}
+
+/// Runs `paint` and answers how many focus targets it placed. A tree counts its own;
+/// focus drawn outside a tree [`claim`]s it. Zero is a surface focus cannot enter.
+pub fn census(paint: impl FnOnce()) -> usize {
+    let outer = CENSUS.with(|c| c.replace(Some(0)));
+    paint();
+    let n = CENSUS.with(|c| c.replace(outer)).unwrap_or(0);
+    claim(n);
+    n
+}
+
+/// `n` more focus targets for the running [`census`]; nothing outside one.
+pub fn claim(n: usize) {
+    CENSUS.with(|c| c.set(c.get().map(|m| m + n)));
+}
 use skia_safe::{Canvas, Rect};
 pub use taffy::Style;
 use taffy::{Dimension, FlexDirection, LengthPercentage, Overflow, Point, Size};
@@ -45,6 +83,9 @@ pub struct El<'a> {
     pub style: Style,
     pub kind: Kind<'a>,
     pub children: Vec<El<'a>>,
+    /// A focus target; the plate behind it rounds its corners by this many px.
+    pub focus: Option<f32>,
+    pub group: Option<Group>,
 }
 
 pub enum Kind<'a> {
@@ -74,6 +115,8 @@ impl<'a> El<'a> {
             style,
             kind,
             children: Vec::new(),
+            focus: None,
+            group: None,
         }
     }
 
@@ -146,6 +189,32 @@ impl<'a> El<'a> {
     pub fn id(mut self, id: Id) -> El<'a> {
         self.id = Some(id);
         self
+    }
+
+    /// A focus target. Needs an id; `corner` rounds the plate, px.
+    pub fn focusable(mut self, corner: f32) -> El<'a> {
+        self.focus = Some(corner);
+        self
+    }
+
+    /// A focus container. With an id, focus entering it returns to the child it left.
+    pub fn group(mut self, group: Group) -> El<'a> {
+        self.group = Some(group);
+        self
+    }
+
+    /// Out of the flow, at `r` relative to the parent's top-left.
+    pub fn place(self, r: Rect) -> El<'a> {
+        self.style(|s| {
+            s.position = taffy::Position::Absolute;
+            s.inset = taffy::Rect {
+                left: taffy::LengthPercentageAuto::length(r.left),
+                top: taffy::LengthPercentageAuto::length(r.top),
+                right: taffy::LengthPercentageAuto::auto(),
+                bottom: taffy::LengthPercentageAuto::auto(),
+            };
+        })
+        .size(r.width(), r.height())
     }
 
     /// Any style the named builders do not cover.

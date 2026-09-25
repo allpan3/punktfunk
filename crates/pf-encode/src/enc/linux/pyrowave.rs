@@ -201,6 +201,127 @@ struct DeviceHold {
     device_ci: Box<vk::DeviceCreateInfo<'static>>,
 }
 
+/// `CLOCK_MONOTONIC` in ns — the domain the GPU split calibrates its timestamps into.
+fn mono_ns() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `ts` is a live, writable timespec; CLOCK_MONOTONIC always exists on Linux.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+}
+
+/// `PUNKTFUNK_PERF` GPU split of one encode: three timestamps per slot (start, after
+/// CSC, end) mapped onto `CLOCK_MONOTONIC`, so a slow submit→AU reads as a late GPU
+/// start, GPU work, or a late CPU wake. Without calibration only the GPU spans are real.
+struct GpuTimer {
+    pool: vk::QueryPool,
+    period_ns: f64,
+    mask: u64,
+    calibrate: Option<vk::PFN_vkGetCalibratedTimestampsKHR>,
+    /// `cpu_ns − gpu_ns`, refreshed every 2 s (the clocks drift apart slowly).
+    offset_ns: Option<i128>,
+    calibrated_at: Option<std::time::Instant>,
+    /// Per frame (µs): our record, pyrowave record, submit call, GPU start lag, CSC,
+    /// wavelet GPU, wake, packetize. Lag and wake are signed (negative = overlap).
+    samples: Vec<[i64; 8]>,
+}
+
+impl GpuTimer {
+    /// # Safety
+    /// `instance`/`device` live; `family` is the queue family `device` was created with.
+    unsafe fn new(
+        instance: &ash::Instance,
+        device: &ash::Device,
+        pd: vk::PhysicalDevice,
+        family: u32,
+        calib_ext: Option<&std::ffi::CStr>,
+    ) -> Option<Self> {
+        let bits = instance
+            .get_physical_device_queue_family_properties(pd)
+            .get(family as usize)?
+            .timestamp_valid_bits;
+        if bits == 0 {
+            return None;
+        }
+        let pool = device
+            .create_query_pool(
+                &vk::QueryPoolCreateInfo::default()
+                    .query_type(vk::QueryType::TIMESTAMP)
+                    .query_count(3 * SLOTS as u32),
+                None,
+            )
+            .ok()?;
+        let calibrate = calib_ext.and_then(|ext| {
+            let name = if ext == ash::khr::calibrated_timestamps::NAME {
+                c"vkGetCalibratedTimestampsKHR"
+            } else {
+                c"vkGetCalibratedTimestampsEXT"
+            };
+            // SAFETY: both entry points share `PFN_vkGetCalibratedTimestampsKHR`'s signature.
+            instance
+                .get_device_proc_addr(device.handle(), name.as_ptr())
+                .map(|f| std::mem::transmute::<_, vk::PFN_vkGetCalibratedTimestampsKHR>(f))
+        });
+        Some(Self {
+            pool,
+            period_ns: f64::from(
+                instance
+                    .get_physical_device_properties(pd)
+                    .limits
+                    .timestamp_period,
+            ),
+            mask: if bits >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << bits) - 1
+            },
+            calibrate,
+            offset_ns: None,
+            calibrated_at: None,
+            samples: Vec::new(),
+        })
+    }
+
+    /// # Safety
+    /// `device` is the device the calibrate entry point was loaded from.
+    unsafe fn recalibrate(&mut self, device: &ash::Device) {
+        let Some(f) = self.calibrate else { return };
+        if self
+            .calibrated_at
+            .is_some_and(|t| t.elapsed().as_secs() < 2)
+        {
+            return;
+        }
+        let infos = [
+            vk::CalibratedTimestampInfoKHR::default().time_domain(vk::TimeDomainKHR::DEVICE),
+            vk::CalibratedTimestampInfoKHR::default()
+                .time_domain(vk::TimeDomainKHR::CLOCK_MONOTONIC),
+        ];
+        let mut out = [0u64; 2];
+        let mut dev = 0u64;
+        if f(
+            device.handle(),
+            2,
+            infos.as_ptr(),
+            out.as_mut_ptr(),
+            &mut dev,
+        ) == vk::Result::SUCCESS
+        {
+            let gpu_ns = ((out[0] & self.mask) as f64 * self.period_ns) as i128;
+            self.offset_ns = Some(out[1] as i128 - gpu_ns);
+        }
+        self.calibrated_at = Some(std::time::Instant::now());
+    }
+
+    /// GPU tick → `CLOCK_MONOTONIC` ns, once calibrated.
+    fn to_cpu_ns(&self, ticks: u64) -> Option<i128> {
+        let gpu_ns = ((ticks & self.mask) as f64 * self.period_ns) as i128;
+        self.offset_ns.map(|o| gpu_ns + o)
+    }
+}
+
 /// Nearest-rank percentile of a sorted sample. The encode spike is a tail event
 /// (mean barely moves); a mean-only readout would report "fine".
 fn pct(sorted: &[u32], q: f64) -> u32 {
@@ -211,21 +332,29 @@ fn pct(sorted: &[u32], q: f64) -> u32 {
     sorted[rank.clamp(1, sorted.len()) - 1]
 }
 
-/// Global-priority classes for `PYROWAVE_QUEUE_PRIORITY`, character-identical to
-/// `patches/0005-global-priority-queue.patch`: unset → realtime ladder;
-/// ASCII-lowercased; `off` → none; `high` → `[HIGH]`; junk → `[REALTIME, HIGH]`.
+/// PCI vendor id of NVIDIA, whose REALTIME queues pay extra on every submit.
+const VENDOR_NVIDIA: u32 = 0x10de;
+
+/// Global-priority classes for `PYROWAVE_QUEUE_PRIORITY`, the grammar of
+/// `patches/0005-global-priority-queue.patch`: ASCII-lowercased; `off` → none;
+/// `high` → `[HIGH]`; `realtime`, unset and junk → `[REALTIME, HIGH]`.
+/// Linux adds one rule: unset or junk on an NVIDIA device → `[HIGH]`. Its REALTIME
+/// queue makes every `vkQueueSubmit` cost 0.4–1 ms, more than the preemption saves.
 /// The same env var drives Windows (patch live) and Linux (we pass create-infos,
 /// Granite takes `inherit_info`). `off` is the only disable spelling; `0` is not.
-/// Do not change this without the patch in the same commit.
-fn queue_priority_candidates(raw: Option<&str>) -> Vec<vk::QueueGlobalPriorityKHR> {
+/// Do not change the grammar without the patch in the same commit.
+fn queue_priority_candidates(raw: Option<&str>, vendor_id: u32) -> Vec<vk::QueueGlobalPriorityKHR> {
     let want = raw.map(|s| s.to_ascii_lowercase());
+    let ladder = vec![
+        vk::QueueGlobalPriorityKHR::REALTIME,
+        vk::QueueGlobalPriorityKHR::HIGH,
+    ];
     match want.as_deref() {
         Some("off") => Vec::new(),
         Some("high") => vec![vk::QueueGlobalPriorityKHR::HIGH],
-        _ => vec![
-            vk::QueueGlobalPriorityKHR::REALTIME,
-            vk::QueueGlobalPriorityKHR::HIGH,
-        ],
+        Some("realtime") => ladder,
+        _ if vendor_id == VENDOR_NVIDIA => vec![vk::QueueGlobalPriorityKHR::HIGH],
+        _ => ladder,
     }
 }
 
@@ -317,6 +446,9 @@ struct InFlight {
     /// Submit-time chunking; a later update cannot relabel this frame's AU.
     wire_chunk: Option<usize>,
     t0: std::time::Instant,
+    /// `CLOCK_MONOTONIC` at record start, around the pyrowave record, and after
+    /// `vkQueueSubmit` returned. Read only by the `PUNKTFUNK_PERF` GPU split.
+    cpu_ns: [u64; 4],
     /// Keeps a raw producer buffer stable through the GPU read.
     _src_hold: Option<pf_frame::FrameHold>,
 }
@@ -397,6 +529,8 @@ pub struct PyroWaveEncoder {
     /// a submit split; this is the number the priority lever exists to protect.
     perf_us: Vec<u32>,
     perf_logged_at: Option<std::time::Instant>,
+    /// `PUNKTFUNK_PERF` only; `None` when the queue family has no timestamps.
+    gpu_timer: Option<GpuTimer>,
     /// Datagram-aligned packetize boundary; packets pad to it so each shard carries
     /// whole self-delimiting packets. `None` = one packet per AU.
     wire_chunk: Option<usize>,
@@ -407,7 +541,93 @@ pub struct PyroWaveEncoder {
     /// AU being handed out in streamed chunks (`Some` between `first` and `last`).
     /// Encode is synchronous, so the AU is complete before the first chunk leaves.
     chunker: Option<crate::pyrowave_wire::AuChunker>,
+    /// The worker's mapped return buffer: `build_au` writes windows straight into it.
+    au_arena: Option<AuArena>,
+    /// Bytes the last AU put in `au_arena`, until the worker reports them.
+    arena_len: Option<usize>,
     frame_count: u64,
+}
+
+/// The worker's AU return buffer, mapped, so the wire windows are laid out once in the
+/// memfd the host reads instead of in a `Vec` that is copied there. Grows in 1 MiB steps
+/// when a frame's bound outgrows it.
+pub(crate) struct AuArena {
+    file: std::fs::File,
+    ptr: *mut u8,
+    len: usize,
+}
+
+// SAFETY: the mapping is process memory with no thread affinity; the encoder that owns it
+// moves between threads as a whole.
+unsafe impl Send for AuArena {}
+
+impl AuArena {
+    pub(crate) fn new(file: std::fs::File) -> Self {
+        AuArena {
+            file,
+            ptr: std::ptr::null_mut(),
+            len: 0,
+        }
+    }
+
+    fn unmap(&mut self) {
+        if !self.ptr.is_null() {
+            // SAFETY: `ptr`/`len` are exactly what `mmap` returned below.
+            unsafe { libc::munmap(self.ptr as *mut libc::c_void, self.len) };
+            self.ptr = std::ptr::null_mut();
+            self.len = 0;
+        }
+    }
+
+    fn ensure(&mut self, need: usize) -> std::io::Result<()> {
+        if need <= self.len {
+            return Ok(());
+        }
+        let len = need.next_multiple_of(1 << 20);
+        self.file.set_len(len as u64)?;
+        self.unmap();
+        // SAFETY: a fresh shared mapping of the first `len` bytes of our own memfd, which
+        // `set_len` just made at least that long; checked against `MAP_FAILED` before use.
+        let p = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                self.file.as_raw_fd(),
+                0,
+            )
+        };
+        if p == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error());
+        }
+        self.ptr = p as *mut u8;
+        self.len = len;
+        Ok(())
+    }
+
+    /// Lay `packets` out as the wire AU in the mapping; its length.
+    pub(crate) fn build(
+        &mut self,
+        packets: &[(usize, usize)],
+        bitstream: &[u8],
+        wire_chunk: Option<usize>,
+    ) -> Result<usize> {
+        let bound = crate::pyrowave_wire::au_bound(packets, wire_chunk);
+        self.ensure(bound).context("grow the AU return buffer")?;
+        // SAFETY: `ptr` maps `len ≥ bound` writable bytes that only this thread touches until
+        // the host is told the length, and the host reads the memfd with `pread`, not a
+        // mapping of ours.
+        let out = unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) };
+        crate::pyrowave_wire::build_au_into(packets, bitstream, wire_chunk, out)
+            .ok_or_else(|| anyhow::anyhow!("AU larger than its bound {bound}"))
+    }
+}
+
+impl Drop for AuArena {
+    fn drop(&mut self) {
+        self.unmap();
+    }
 }
 
 // SAFETY: encode thread only; Vulkan handles are owned and never shared. Pyrowave
@@ -453,12 +673,59 @@ impl PyroWaveEncoder {
              GPU-bound game this is the number the global-priority queue exists to protect — \
              watch p99, not the mean. At depth > 1 it includes one loop period of pipelining"
         );
+        let Some(t) = self.gpu_timer.as_mut() else {
+            return;
+        };
+        let rows = std::mem::take(&mut t.samples);
+        let col = |i: usize| {
+            let mut v: Vec<i64> = rows.iter().map(|r| r[i]).collect();
+            v.sort_unstable();
+            let at = |q: f64| v[((v.len() as f64 * q).ceil() as usize).clamp(1, v.len()) - 1];
+            (at(0.50), at(0.99))
+        };
+        let [rec, pwrec, sub, lag, csc, pw, wake, pack] = [0, 1, 2, 3, 4, 5, 6, 7].map(col);
+        tracing::info!(
+            frames = rows.len(),
+            calibrated = t.offset_ns.is_some(),
+            rec_us_p50 = rec.0,
+            rec_us_p99 = rec.1,
+            pwrec_us_p50 = pwrec.0,
+            pwrec_us_p99 = pwrec.1,
+            sub_us_p50 = sub.0,
+            sub_us_p99 = sub.1,
+            lag_us_p50 = lag.0,
+            lag_us_p99 = lag.1,
+            csc_us_p50 = csc.0,
+            csc_us_p99 = csc.1,
+            gpu_us_p50 = pw.0,
+            gpu_us_p99 = pw.1,
+            wake_us_p50 = wake.0,
+            wake_us_p99 = wake.1,
+            pack_us_p50 = pack.0,
+            pack_us_p99 = pack.1,
+            "pyrowave encode split: rec=our record (CPU) pwrec=pyrowave record (CPU) \
+             sub=vkQueueSubmit call lag=submit returned→GPU start csc=CSC (GPU) \
+             gpu=wavelet encode+readback copy (GPU) wake=GPU done→fence returned \
+             pack=packetize (CPU)"
+        );
     }
 
     /// Ladder outcome the worker reports so the host can log the grant (or refusal)
     /// once, naming the right binary.
     pub(crate) fn priority_outcome(&self) -> super::worker::PriorityOutcome {
         self.priority
+    }
+
+    /// Worker only: lay every AU out in `file` (the return buffer the host reads) instead of
+    /// a `Vec`. From then on [`Encoder::poll`] hands out empty frames and
+    /// [`take_arena_len`](Self::take_arena_len) says how many bytes the buffer holds.
+    pub(crate) fn set_au_arena(&mut self, file: std::fs::File) {
+        self.au_arena = Some(AuArena::new(file));
+    }
+
+    /// Bytes the last polled AU put in the arena; `None` off the arena.
+    pub(crate) fn take_arena_len(&mut self) -> Option<usize> {
+        self.arena_len.take()
     }
 
     pub(crate) fn device_name(&self) -> &str {
@@ -565,7 +832,7 @@ impl PyroWaveEncoder {
         }
     }
 
-    /// `intent` is the raw `PYROWAVE_QUEUE_PRIORITY` (`None` = default ladder), resolved
+    /// `intent` is the raw `PYROWAVE_QUEUE_PRIORITY` (`None` = the default class), resolved
     /// by the caller. `warn_inert` is whether this process emits the "every class refused"
     /// warning — see [`Self::open_in_worker`]. `bit_depth`/`hdr` are the negotiated stream
     /// depth and the BT.2020 PQ flag — they pick the CSC shader, the plane formats, and the
@@ -701,7 +968,7 @@ impl PyroWaveEncoder {
             // Encode shares shader cores with the game; process priority only orders
             // submission. The vendored patch is gated `if (!inherit_info)` and Linux
             // passes its own create-infos, so Granite takes the inherit branch.
-            let gp_candidates = queue_priority_candidates(intent);
+            let gp_candidates = queue_priority_candidates(intent, picked.vendor_id);
             // KHR is the promoted name; match pf-zerocopy's VkBridge probe so spellings agree.
             let gp_ext =
                 if crate::vk_util::ext_advertised(&dev_ext_props, vk::KHR_GLOBAL_PRIORITY_NAME) {
@@ -716,6 +983,17 @@ impl PyroWaveEncoder {
                 };
             let gp = gp_ext.filter(|_| !gp_candidates.is_empty());
             if let Some(name) = gp {
+                hold._dev_exts.push(name.as_ptr());
+            }
+            // `PUNKTFUNK_PERF` only, so the default device stays exactly as before.
+            let calib_ext = [
+                ash::khr::calibrated_timestamps::NAME,
+                ash::ext::calibrated_timestamps::NAME,
+            ]
+            .into_iter()
+            .filter(|_| pf_host_config::config().perf)
+            .find(|n| crate::vk_util::ext_advertised(&dev_ext_props, n));
+            if let Some(name) = calib_ext {
                 hold._dev_exts.push(name.as_ptr());
             }
 
@@ -812,9 +1090,17 @@ impl PyroWaveEncoder {
                 .and_then(|s| s.to_str().ok())
                 .unwrap_or("unknown")
                 .to_string();
-            Ok((pd, family, device, foreign_qfi, priority, device_name))
+            Ok((
+                pd,
+                family,
+                device,
+                foreign_qfi,
+                priority,
+                device_name,
+                calib_ext,
+            ))
         })();
-        let (pd, family, device, foreign_qfi, priority, device_name) = match selected {
+        let (pd, family, device, foreign_qfi, priority, device_name, calib_ext) = match selected {
             Ok(v) => v,
             Err(e) => {
                 instance.destroy_instance(None);
@@ -867,11 +1153,14 @@ impl PyroWaveEncoder {
             frame_budget: budget_for(bitrate, fps),
             perf_us: Vec::new(),
             perf_logged_at: None,
+            gpu_timer: None,
             wire_chunk: None,
             wire_budget: crate::pyrowave_wire::WireBudget::new(),
             bitstream: Vec::new(),
             pending: VecDeque::new(),
             chunker: None,
+            au_arena: None,
+            arena_len: None,
             frame_count: 0,
         };
 
@@ -1115,6 +1404,10 @@ impl PyroWaveEncoder {
                     .command_buffer_count(1),
             )?[0];
             me.slots[i].fence = device.create_fence(&vk::FenceCreateInfo::default(), None)?;
+        }
+
+        if pf_host_config::config().perf {
+            me.gpu_timer = GpuTimer::new(&me.instance, &device, pd, family, calib_ext);
         }
 
         // Driver-reported slot size (not an estimate). CPU staging is excluded: lazy, software
@@ -1412,12 +1705,19 @@ impl PyroWaveEncoder {
         let seq = self.wire_seq;
         let cmd = self.slots[slot].cmd;
         let fence = self.slots[slot].fence;
+        let mut cpu_ns = [mono_ns(), 0, 0, 0];
+        let ts_pool = self.gpu_timer.as_ref().map(|t| t.pool);
+        let q0 = slot as u32 * 3;
         let record_and_submit = (|| -> Result<()> {
             dev.begin_command_buffer(
                 cmd,
                 &vk::CommandBufferBeginInfo::default()
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )?;
+            if let Some(pool) = ts_pool {
+                dev.cmd_reset_query_pool(cmd, pool, q0, 3);
+                dev.cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::TOP_OF_PIPE, pool, q0);
+            }
 
             let cursor_pc = self.prep_cursor(slot, frame.cursor.as_ref())?;
 
@@ -1558,6 +1858,9 @@ impl PyroWaveEncoder {
             } else {
                 dev.cmd_dispatch(cmd, (w / 2).div_ceil(8), (h / 2).div_ceil(8), 1);
             }
+            if let Some(pool) = ts_pool {
+                dev.cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::ALL_COMMANDS, pool, q0 + 1);
+            }
 
             // CSC writes → pyrowave sampled reads. Stay GENERAL (pyrowave's GPU-buffer layout).
             let to_sampled = |img| {
@@ -1636,6 +1939,7 @@ impl PyroWaveEncoder {
             let rc = pw::pyrowave_rate_control {
                 maximum_bitstream_size: rate_budget,
             };
+            cpu_ns[1] = mono_ns();
             pw::pyrowave_device_set_command_buffer(
                 self.pw_dev,
                 cmd.as_raw() as usize as pw::VkCommandBuffer,
@@ -1660,20 +1964,28 @@ impl PyroWaveEncoder {
             pw::pyrowave_device_set_command_buffer(self.pw_dev, std::ptr::null_mut());
             pw_check(enc_res, "encode_gpu_synchronous")?;
 
+            if let Some(pool) = ts_pool {
+                dev.cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::ALL_COMMANDS, pool, q0 + 2);
+            }
             dev.end_command_buffer(cmd)?;
             dev.reset_fences(&[fence])?;
             let cmds = [cmd];
+            cpu_ns[2] = mono_ns();
             dev.queue_submit(
                 self.queue,
                 &[vk::SubmitInfo::default().command_buffers(&cmds)],
                 fence,
             )?;
+            cpu_ns[3] = mono_ns();
             Ok(())
         })();
         if let Err(e) = record_and_submit {
             // SAFETY: every closure error arm is RECORDING/INVALID/EXECUTABLE — never PENDING
-            // (nothing was enqueued) — and the pool allows the reset.
+            // (nothing was enqueued) — and the pool allows the reset. The reset discards any
+            // cursor upload recorded here, so the slot forgets it had one.
             let _ = dev.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty());
+            self.slots[slot].cursor_serial = u64::MAX;
+            self.slots[slot].cursor_ready = false;
             return Err(e);
         }
         // GPU may be executing: do not touch `cmd`, y/uv, or `csc_set` until retired.
@@ -1688,6 +2000,7 @@ impl PyroWaveEncoder {
             cap: self.frame_budget + BS_SLACK,
             wire_chunk: self.wire_chunk,
             t0,
+            cpu_ns,
             _src_hold: match &frame.payload {
                 FramePayload::Dmabuf(d) => d.hold.clone(),
                 _ => None,
@@ -1707,6 +2020,7 @@ impl PyroWaveEncoder {
         let dev = self.device.clone();
         dev.wait_for_fences(&[self.slots[fr.slot].fence], true, 5_000_000_000)
             .context("pyrowave encode fence")?;
+        let t_fence = mono_ns();
         // One-time submit: command buffer is INVALID; next `begin` may implicitly reset.
         self.inflight.pop_front();
 
@@ -1762,10 +2076,23 @@ impl PyroWaveEncoder {
             }
         }
         let pkts: Vec<(usize, usize)> = packets.iter().map(|p| (p.offset, p.size)).collect();
-        let au = crate::pyrowave_wire::build_au(&pkts, &self.bitstream, fr.wire_chunk);
+        let (au, au_len) = match self.au_arena.as_mut() {
+            // The worker's return buffer: the AU is laid out in place, the frame carries
+            // its length and no bytes.
+            Some(arena) => {
+                let n = arena.build(&pkts, &self.bitstream, fr.wire_chunk)?;
+                self.arena_len = Some(n);
+                (Vec::new(), n)
+            }
+            None => {
+                let au = crate::pyrowave_wire::build_au(&pkts, &self.bitstream, fr.wire_chunk);
+                let n = au.len();
+                (au, n)
+            }
+        };
         if fr.wire_chunk.is_some() {
             let raw: usize = pkts.iter().map(|&(_, s)| s).sum();
-            self.wire_budget.observe(raw, au.len());
+            self.wire_budget.observe(raw, au_len);
         }
         self.frame_count += 1;
         self.pending.push_back(EncodedFrame {
@@ -1777,6 +2104,41 @@ impl PyroWaveEncoder {
             recovery_close: false,
             chunk_aligned: fr.wire_chunk.is_some(),
         });
+        if let Some(t) = self.gpu_timer.as_mut() {
+            let t_pack = mono_ns();
+            let mut ts = [0u64; 3];
+            // The fence signaled, so all three queries are available; no WAIT flag needed.
+            if dev
+                .get_query_pool_results(
+                    t.pool,
+                    fr.slot as u32 * 3,
+                    &mut ts,
+                    vk::QueryResultFlags::TYPE_64,
+                )
+                .is_ok()
+            {
+                t.recalibrate(&dev);
+                let span = |a: u64, b: u64| {
+                    ((b.wrapping_sub(a) & t.mask) as f64 * t.period_ns / 1000.0) as u32
+                };
+                let us = |d: i128| (d / 1000) as i64;
+                let [c0, c_pw, c_sub, c_subd] = fr.cpu_ns.map(i128::from);
+                let (lag, wake) = match (t.to_cpu_ns(ts[0]), t.to_cpu_ns(ts[2])) {
+                    (Some(g0), Some(g2)) => (us(g0 - c_subd), us(i128::from(t_fence) - g2)),
+                    _ => (0, 0),
+                };
+                t.samples.push([
+                    us(c_pw - c0),
+                    us(c_sub - c_pw),
+                    us(c_subd - c_sub),
+                    lag,
+                    i64::from(span(ts[0], ts[1])),
+                    i64::from(span(ts[1], ts[2])),
+                    wake,
+                    us(i128::from(t_pack) - i128::from(t_fence)),
+                ]);
+            }
+        }
         self.note_encode_us(fr.t0.elapsed().as_micros() as u32);
         Ok(())
     }
@@ -1997,6 +2359,9 @@ impl Drop for PyroWaveEncoder {
                 self.device.destroy_buffer(sl.cursor_stage, None);
                 self.device.free_memory(sl.cursor_stage_mem, None);
             }
+            if let Some(t) = self.gpu_timer.take() {
+                self.device.destroy_query_pool(t.pool, None);
+            }
             // Command buffers and descriptor sets are freed with their pools.
             self.device.destroy_command_pool(self.cmd_pool, None);
             self.device.destroy_descriptor_pool(self.csc_pool, None);
@@ -2042,6 +2407,7 @@ mod tests {
             seq: 0,
             wire_chunk: None,
             t0: std::time::Instant::now(),
+            cpu_ns: [0; 4],
             _src_hold: Some(hold.clone()),
         };
         assert_eq!(std::sync::Arc::strong_count(&hold), 2);
@@ -2678,37 +3044,60 @@ mod tests {
     // Windows (patch live) and Linux. Device-free: `queue_priority_candidates` takes the
     // raw string so env-var tests do not race.
 
+    const AMD: u32 = 0x1002;
+    const LADDER: [vk::QueueGlobalPriorityKHR; 2] = [
+        vk::QueueGlobalPriorityKHR::REALTIME,
+        vk::QueueGlobalPriorityKHR::HIGH,
+    ];
+
     /// Unset means the realtime ladder (REALTIME then HIGH), not a single class.
     #[test]
     fn unset_requests_the_realtime_ladder() {
+        assert_eq!(queue_priority_candidates(None, AMD), LADDER);
+    }
+
+    /// Unset on NVIDIA means HIGH alone: its REALTIME queue slows every submit.
+    #[test]
+    fn unset_on_nvidia_requests_high() {
         assert_eq!(
-            queue_priority_candidates(None),
-            vec![
-                vk::QueueGlobalPriorityKHR::REALTIME,
-                vk::QueueGlobalPriorityKHR::HIGH
-            ]
+            queue_priority_candidates(None, VENDOR_NVIDIA),
+            vec![vk::QueueGlobalPriorityKHR::HIGH]
         );
+        assert_eq!(
+            queue_priority_candidates(Some("junk"), VENDOR_NVIDIA),
+            vec![vk::QueueGlobalPriorityKHR::HIGH]
+        );
+    }
+
+    /// An explicit `realtime` wins over the NVIDIA default.
+    #[test]
+    fn realtime_asks_for_the_ladder_on_every_vendor() {
+        for vendor in [AMD, VENDOR_NVIDIA] {
+            assert_eq!(queue_priority_candidates(Some("REALTIME"), vendor), LADDER);
+        }
     }
 
     /// `off` is the only disable spelling (case-insensitive). `0` is not: the C side
     /// does not accept it either.
     #[test]
     fn only_off_disables_and_it_is_case_insensitive() {
-        assert!(queue_priority_candidates(Some("off")).is_empty());
-        assert!(queue_priority_candidates(Some("OFF")).is_empty());
-        assert!(queue_priority_candidates(Some("Off")).is_empty());
-        assert!(!queue_priority_candidates(Some("0")).is_empty());
+        for vendor in [AMD, VENDOR_NVIDIA] {
+            assert!(queue_priority_candidates(Some("off"), vendor).is_empty());
+            assert!(queue_priority_candidates(Some("OFF"), vendor).is_empty());
+            assert!(queue_priority_candidates(Some("Off"), vendor).is_empty());
+            assert!(!queue_priority_candidates(Some("0"), vendor).is_empty());
+        }
     }
 
     /// `high` is HIGH only — silently trying REALTIME first would hide "elevated, not realtime".
     #[test]
     fn high_asks_for_high_alone() {
         assert_eq!(
-            queue_priority_candidates(Some("high")),
+            queue_priority_candidates(Some("high"), AMD),
             vec![vk::QueueGlobalPriorityKHR::HIGH]
         );
         assert_eq!(
-            queue_priority_candidates(Some("HIGH")),
+            queue_priority_candidates(Some("HIGH"), AMD),
             vec![vk::QueueGlobalPriorityKHR::HIGH]
         );
     }
@@ -2716,14 +3105,9 @@ mod tests {
     /// Junk falls back to the default ladder, not to off: unparseable must not disable the lever.
     #[test]
     fn junk_falls_back_to_the_default_ladder() {
-        for raw in ["", "realtime", "REALTIME", "yes", "1", "medium", "  high"] {
-            assert!(
-                !queue_priority_candidates(Some(raw)).is_empty(),
-                "{raw:?} must not disable the priority request"
-            );
+        for raw in ["", "yes", "1", "medium", "  high"] {
+            assert_eq!(queue_priority_candidates(Some(raw), AMD), LADDER, "{raw:?}");
         }
-        // Full ladder, not HIGH alone. The C patch does not trim, so neither do we.
-        assert_eq!(queue_priority_candidates(Some("  high")).len(), 2);
     }
 
     /// A refused class walks the ladder down, never fails the open. `NOT_PERMITTED` is
