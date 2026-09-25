@@ -272,7 +272,7 @@ impl Drive<'_> {
                         self.applied_kbps,
                     );
                 }
-                Ctl::SetHdrMeta(bytes) => self.enc.set_hdr_meta(Some(hdr_meta(&bytes))),
+                Ctl::SetHdrMeta(bytes) => self.enc.set_hdr_meta(hdr_meta(&bytes)),
                 Ctl::Flush => {
                     if let Err(e) = self.enc.flush() {
                         dbglog!("[pf-vd] encode: flush failed: {e:#}");
