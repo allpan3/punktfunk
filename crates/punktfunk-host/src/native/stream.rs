@@ -277,7 +277,7 @@ impl ProbeBurst {
 }
 
 /// All-zero: the client reads it as a decline and keeps its negotiated ceiling.
-fn declined() -> ProbeResult {
+pub(super) fn declined() -> ProbeResult {
     ProbeResult {
         bytes_sent: 0,
         packets_sent: 0,
