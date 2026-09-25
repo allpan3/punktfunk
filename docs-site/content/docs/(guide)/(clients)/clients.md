@@ -58,6 +58,13 @@ the host then gets rumble, adaptive triggers, the lightbar and gyro. Over Blueto
 an ordinary gamepad. **Settings → Controllers → DualSense / DualShock passthrough (USB)** turns
 this off.
 
+On a handheld with a second, smaller screen below the first (an Ayn Thor, a Retroid Pocket with the
+Dual Screen add-on) or a foldable half-opened like a laptop, the stream takes the top screen. The
+lower one has tabs for **Stats**, **Actions** (the buttons of the
+[quick-action dial](/docs/input#the-quick-action-dial)), **Trackpad** and **Controller** (the
+[virtual controller](/docs/input#virtual-controller)). There is nothing to set. If the lower screen stays dark while you stream, end the stream and
+[send your logs](/docs/report-an-issue): they record the screens your device reported.
+
 ## webOS (LG TV) — community
 
 [`pf-webos`](https://github.com/dyptan-io/pf-webos) is a native Punktfunk app for LG TVs, built by
