@@ -33,6 +33,7 @@ use pf_client_core::video::{DecodeHealth, DecodedFrame, DecodedImage};
 use punktfunk_core::client::NativeClient;
 use punktfunk_core::config::{CompositorPref, Mode};
 use punktfunk_core::hud::{self, HudLine, StatsSnapshot};
+use punktfunk_core::quic::HdrMeta;
 use punktfunk_core::video_fit::{self, VideoFit};
 use sdl3::event::{DisplayEvent, Event, WindowEvent};
 use sdl3::keyboard::Mod;
@@ -116,26 +117,34 @@ pub enum ActionOutcome {
 /// One `--connect` stream; returns when it ends.
 pub fn run_session<F>(opts: SessionOpts, build_params: F) -> Result<Outcome>
 where
-    F: FnOnce(&GamepadService, Mode, Arc<AtomicBool>, Option<VulkanDecodeDevice>) -> SessionParams,
+    F: FnOnce(
+        &GamepadService,
+        Mode,
+        Option<HdrMeta>,
+        Arc<AtomicBool>,
+        Option<VulkanDecodeDevice>,
+    ) -> SessionParams,
 {
     let mut build = Some(build_params);
     run_inner(
         opts,
-        ModeCtl::Single(Box::new(move |gp, native, fs, vk| {
-            (build.take().expect("single build runs once"))(gp, native, fs, vk)
+        ModeCtl::Single(Box::new(move |gp, native, hdr, fs, vk| {
+            (build.take().expect("single build runs once"))(gp, native, hdr, fs, vk)
         })),
     )
     .map(|o| o.expect("single mode always yields an outcome"))
 }
 
 /// Console library idles between streams. `on_action` gets every overlay action plus what
-/// a launch needs: gamepad service, native display mode, a fresh `force_software` flag.
+/// a launch needs: gamepad service, native display mode, the window display's HDR volume
+/// ([`window_display_hdr`]), a fresh `force_software` flag.
 pub fn run_browse<F>(opts: SessionOpts, on_action: F) -> Result<()>
 where
     F: FnMut(
         OverlayAction,
         &GamepadService,
         Mode,
+        Option<HdrMeta>,
         Arc<AtomicBool>,
         Option<VulkanDecodeDevice>,
     ) -> ActionOutcome,
@@ -149,7 +158,13 @@ where
 
 /// Params builder for the one single-mode session (called once, after setup).
 type BuildParams<'a> = Box<
-    dyn FnMut(&GamepadService, Mode, Arc<AtomicBool>, Option<VulkanDecodeDevice>) -> SessionParams
+    dyn FnMut(
+            &GamepadService,
+            Mode,
+            Option<HdrMeta>,
+            Arc<AtomicBool>,
+            Option<VulkanDecodeDevice>,
+        ) -> SessionParams
         + 'a,
 >;
 type OnAction<'a> = Box<
@@ -157,6 +172,7 @@ type OnAction<'a> = Box<
             OverlayAction,
             &GamepadService,
             Mode,
+            Option<HdrMeta>,
             Arc<AtomicBool>,
             Option<VulkanDecodeDevice>,
         ) -> ActionOutcome
@@ -698,6 +714,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
             let mut params = build(
                 &gamepad,
                 native,
+                window_display_hdr(&window),
                 force_software.clone(),
                 presenter.vulkan_decode(),
             );
@@ -1446,6 +1463,7 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                             action,
                             &gamepad,
                             native,
+                            window_display_hdr(&window),
                             force_software.clone(),
                             presenter.vulkan_decode(),
                         ) {
@@ -2439,6 +2457,18 @@ fn native_mode(w: i32, h: i32, pixel_density: f32, refresh_rate: f32) -> Mode {
         width: px(w),
         height: px(h),
         refresh_hz: refresh_rate.round().max(0.0) as u32,
+    }
+}
+
+/// The HDR volume of the display the window is on now, read per launch, so a console
+/// moved to a TV asks for the TV's HDR. `None` for an SDR display, and off Windows.
+fn window_display_hdr(window: &sdl3::video::Window) -> Option<HdrMeta> {
+    #[cfg(windows)]
+    return pf_client_core::video_d3d11::display_hdr_volume(crate::win32::window_monitor(window));
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+        None
     }
 }
 

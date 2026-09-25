@@ -283,7 +283,8 @@ mod session_main {
     ///
     /// Both direct and browse launches pass the result of [`trust::effective_settings`],
     /// including the resolved host preset. Zero-valued mode fields inherit the display
-    /// under the session window. `preset` names that resolution in the stats overlay.
+    /// under the session window, and `display_hdr` is that display's HDR volume (Windows).
+    /// `preset` names that resolution in the stats overlay.
     ///
     /// Capability preferences remain requests. Device and selected-output probes narrow
     /// them before they enter [`SessionParams`], so the handshake only advertises formats
@@ -300,6 +301,7 @@ mod session_main {
         launch: Option<String>,
         gamepad: &GamepadService,
         native: Mode,
+        display_hdr: Option<punktfunk_core::quic::HdrMeta>,
         force_software: Arc<AtomicBool>,
         vulkan: Option<pf_client_core::video::VulkanDecodeDevice>,
     ) -> SessionParams {
@@ -399,8 +401,7 @@ mod session_main {
         // the conversion and cover the stream with a black or corrupt layer. The peak-nits
         // environment override remains the explicit headless-test bypass.
         #[cfg(windows)]
-        let display_hdr = punktfunk_core::client::display_hdr_env_override()
-            .or_else(|| pf_client_core::video_d3d11::display_hdr_volume(window_pos()));
+        let display_hdr = punktfunk_core::client::display_hdr_env_override().or(display_hdr);
         #[cfg(windows)]
         let output_hdr = display_hdr.is_some();
         #[cfg(not(windows))]
@@ -456,14 +457,10 @@ mod session_main {
             ),
             want_444: settings.enable_444,
             // The panel's HDR volume reaches the host's virtual-display EDID so host apps
-            // tone-map to the real glass. Windows only: DXGI reads the `--window-pos`
-            // monitor (advanced-color outputs), gated on the HDR setting because an
-            // unadvertised 10-bit/HDR makes the volume noise. Linux has no portable query
-            // and keeps the host EDID; `PUNKTFUNK_CLIENT_PEAK_NITS` overrides both.
-            #[cfg(windows)]
+            // tone-map to the real glass: the window's monitor on Windows (or
+            // `PUNKTFUNK_CLIENT_PEAK_NITS`), gated on the HDR setting because an unadvertised
+            // 10-bit/HDR makes the volume noise. Linux has no portable query and sends none.
             display_hdr: hdr_enabled.then_some(display_hdr).flatten(),
-            #[cfg(not(windows))]
-            display_hdr: None,
             // The presenter renders the host cursor locally in desktop mouse mode (M2 cursor
             // channel); capture-mode sessions keep the composited cursor, so only advertise
             // when the session STARTS in desktop mode. The host gates further (Linux portal
@@ -1136,7 +1133,7 @@ mod session_main {
         };
 
         let outcome =
-            pf_presenter::run_session(opts, move |gamepad, native, force_software, vulkan| {
+            pf_presenter::run_session(opts, move |gamepad, native, hdr, force_software, vulkan| {
                 session_params(
                     &settings,
                     preset_name,
@@ -1148,6 +1145,7 @@ mod session_main {
                     launch,
                     gamepad,
                     native,
+                    hdr,
                     force_software,
                     vulkan,
                 )
