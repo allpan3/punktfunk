@@ -935,6 +935,8 @@ pub struct VulkanVideoEncoder {
     /// A cursor-blend session that may run on EFC while no cursor reaches it
     /// ([`Self::switch_for_cursor`]). False pins whatever `open` chose.
     cursor_switch: bool,
+    /// This mode passed the EFC probe; without it a switch to EFC would reopen for nothing.
+    rgb_capable: bool,
     /// First cursorless submit since the CSC last blended; EFC after [`EFC_AFTER_CURSORLESS`].
     cursorless_since: Option<std::time::Instant>,
 }
@@ -1003,7 +1005,8 @@ impl VulkanVideoEncoder {
             is_hdr,
             src_rgb_fmt,
         )?;
-        enc.cursor_switch = cursor_blend && !native_nv12 && rgb_request() != Some(false);
+        enc.cursor_switch =
+            cursor_blend && !native_nv12 && rgb_request() != Some(false) && enc.rgb_capable;
         Ok(enc)
     }
 
@@ -1968,6 +1971,7 @@ impl VulkanVideoEncoder {
             pending_loss: None,
             pending: VecDeque::new(),
             cursor_switch: false,
+            rgb_capable: rgb_probe.is_ok(),
             cursorless_since: None,
             pipelined: false,
         })
