@@ -98,6 +98,30 @@ pub(super) struct CompositeLog {
 const PARK_ATTEMPTS_MAX: u32 = 10;
 
 impl StreamState {
+    /// Re-derive the cursor plan for compositor `c` on `route` before the next pipeline is built
+    /// from it: blend, gamescope reader, both composite flags. Returns whether the display asks
+    /// for a metadata cursor ([`crate::vdisplay::VirtualDisplay::set_hw_cursor`]). Shared by the
+    /// capture-loss retarget and the session switch so neither keeps the old compositor's plan.
+    pub(super) fn retarget_cursor_plan(
+        &mut self,
+        c: crate::vdisplay::Compositor,
+        route: Option<&crate::vdisplay::GamescopeRoute>,
+    ) -> bool {
+        let gamescope = c == crate::vdisplay::Compositor::Gamescope;
+        self.plan.cursor_blend = crate::session_plan::cursor_blend_for(
+            self.plan.cursor_forward,
+            c,
+            self.plan.codec,
+            self.plan.bit_depth,
+            self.plan.hdr,
+            route,
+        );
+        self.plan.gamescope_cursor = crate::session_plan::gamescope_cursor_for(gamescope, route);
+        (self.gamescope_composite, self.metadata_composite) =
+            composite_plan(&self.plan, self.cursor_fwd.is_some(), gamescope);
+        self.plan.cursor_forward || self.metadata_composite
+    }
+
     /// Route this tick's cursor: forward it when the client draws, else put the live overlay on
     /// the frame for the encoder blend. Either way the capturer hears the host places it, so it
     /// bakes no second copy. An invisible cursor never reaches the encoder.
