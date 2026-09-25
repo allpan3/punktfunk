@@ -254,25 +254,41 @@ fn run(
             }
         }
 
-        let overlay = shape.as_ref().map(|s| {
-            let (px, py) = (ci.ptScreenPos.x - rect.0, ci.ptScreenPos.y - rect.1);
-            let in_rect = px >= 0 && py >= 0 && px < rect.2 && py < rect.3;
-            pf_frame::CursorOverlay {
-                // Overlay x/y = bitmap top-left (reported position − hotspot), frame pixels.
-                x: px - s.hot_x as i32,
-                y: py - s.hot_y as i32,
-                w: s.w,
-                h: s.h,
-                rgba: s.rgba.clone(),
-                serial: s.serial,
-                hot_x: s.hot_x,
-                hot_y: s.hot_y,
-                // `handle != 0` is part of visible, not just of rasterise:
-                // `SetCursor(NULL)` (game/video hide) leaves `CURSOR_SHOWING` set
-                // with a NULL `hCursor`. Flags alone would publish the last shape.
-                visible: showing && in_rect && handle != 0,
-            }
-        });
+        let (px, py) = (ci.ptScreenPos.x - rect.0, ci.ptScreenPos.y - rect.1);
+        let overlay = match shape.as_ref() {
+            // Hidden before any shape was seen (a game that hid the pointer before this
+            // session): still a hide the client must hear, so an empty, invisible overlay.
+            None if !(showing && handle != 0) => Some(pf_frame::CursorOverlay {
+                x: px,
+                y: py,
+                w: 0,
+                h: 0,
+                rgba: std::sync::Arc::new(Vec::new()),
+                serial: 0,
+                hot_x: 0,
+                hot_y: 0,
+                visible: false,
+            }),
+            None => None,
+            Some(s) => Some({
+                let in_rect = px >= 0 && py >= 0 && px < rect.2 && py < rect.3;
+                pf_frame::CursorOverlay {
+                    // Overlay x/y = bitmap top-left (reported position − hotspot), frame pixels.
+                    x: px - s.hot_x as i32,
+                    y: py - s.hot_y as i32,
+                    w: s.w,
+                    h: s.h,
+                    rgba: s.rgba.clone(),
+                    serial: s.serial,
+                    hot_x: s.hot_x,
+                    hot_y: s.hot_y,
+                    // `handle != 0` is part of visible, not just of rasterise:
+                    // `SetCursor(NULL)` (game/video hide) leaves `CURSOR_SHOWING` set
+                    // with a NULL `hCursor`. Flags alone would publish the last shape.
+                    visible: showing && in_rect && handle != 0,
+                }
+            }),
+        };
         *slot.lock().unwrap_or_else(|p| p.into_inner()) = overlay;
     }
 }
