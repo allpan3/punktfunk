@@ -84,6 +84,12 @@ pub trait AudioCapturer: Send {
         SAMPLE_RATE
     }
 
+    /// Whether a parked capturer still matches the audio settings it opened under. `false`:
+    /// drop it and open fresh. Linux fixes its capture mode and host bridge at open.
+    fn reusable(&self) -> bool {
+        true
+    }
+
     /// Drop buffered chunks on reuse so a new stream does not hear idle capture. Linux
     /// stream-sink also re-claims the default sink here (pair: [`idle`](Self::idle)). Default: no-op.
     fn drain(&mut self) {}
@@ -328,7 +334,7 @@ pub(crate) mod capture_policy;
 
 mod mic_jitter;
 mod mic_pump;
-pub use mic_pump::{MicFrame, MicPump};
+pub use mic_pump::{mic_source_id, MicFrame, MicPump};
 
 /// Apps playing audio on the host right now, lowercased. Empty where the host cannot list them.
 /// Blocks on a PipeWire round trip; call it off the async runtime.

@@ -388,6 +388,31 @@ impl AudioGapTracker {
     }
 }
 
+/// Drops audio a later packet already superseded. A reordered or duplicate datagram lands after
+/// its slot was concealed or rebuilt from `0xD2`; decoding it plays that slot twice, out of order,
+/// and feeds the decoder a stale packet.
+#[derive(Debug, Default)]
+pub struct AudioSeqGate {
+    newest: Option<u32>,
+}
+
+impl AudioSeqGate {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `true` for the first packet and anything newer than the newest passed (wrap-aware).
+    pub fn fresh(&mut self, seq: u32) -> bool {
+        let fresh = self
+            .newest
+            .is_none_or(|n| (1..=u32::MAX / 2).contains(&seq.wrapping_sub(n)));
+        if fresh {
+            self.newest = Some(seq);
+        }
+        fresh
+    }
+}
+
 /// Rebuilds the stream from the redundant `0xD2` plane so a single lost datagram is recovered,
 /// not concealed.
 ///
@@ -930,7 +955,9 @@ impl JitterPolicy {
         };
         if let Some(keep) = keep {
             // Wedged: discard down to the line and restart the drift clock from what is left,
-            // so the trim is not counted as drift. Faded like any other drop.
+            // so the trim is not counted as drift. Faded like any other drop. Whole frames:
+            // a ms line at 44.1 kHz can fall mid-frame, and a split frame swaps channels.
+            let keep = keep - keep % self.channels as usize;
             out.drop_front = depth - keep;
             out.hard_trim = true;
             out.crossfade = self.crossfade_samples().min(keep);
@@ -967,9 +994,11 @@ impl JitterPolicy {
             self.under_run = 0;
         }
         // Shed is no longer buffered; insert is. Reflect both now so the next callback does
-        // not re-fire on a stale average.
-        self.depth_avg =
-            (self.depth_avg - out.drop_front as f32 + out.insert_front as f32).max(0.0);
+        // not re-fire on a stale average. A trim already restarted it at `keep`.
+        if !out.hard_trim {
+            self.depth_avg =
+                (self.depth_avg - out.drop_front as f32 + out.insert_front as f32).max(0.0);
+        }
 
         if !self.primed && depth.saturating_sub(out.drop_front) >= target {
             self.primed = true;
@@ -1250,6 +1279,9 @@ pub struct AudioSyncCell {
     /// Concealment the decode side has synthesized this session, ms. Produced on decode, read
     /// from the callback's 10 s playback line.
     plc_ms: std::sync::atomic::AtomicU64,
+    /// Device output latency past the ring, ns ([`AvSyncObservation::output_latency_ns`]).
+    /// Produced by the backend, read on decode.
+    output_latency_ns: std::sync::atomic::AtomicU64,
 }
 
 impl Default for AudioSyncCell {
@@ -1258,6 +1290,7 @@ impl Default for AudioSyncCell {
             depth: std::sync::atomic::AtomicUsize::new(0),
             target: std::sync::atomic::AtomicUsize::new(usize::MAX),
             plc_ms: std::sync::atomic::AtomicU64::new(0),
+            output_latency_ns: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -1278,6 +1311,16 @@ impl AudioSyncCell {
 
     pub fn plc_ms(&self) -> u64 {
         self.plc_ms.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn publish_output_latency_ns(&self, ns: u64) {
+        self.output_latency_ns
+            .store(ns, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn output_latency_ns(&self) -> u64 {
+        self.output_latency_ns
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Decode side: ask the ring to aim for this depth (`None` = unsynchronised).
@@ -1330,6 +1373,8 @@ pub struct AvSync {
     offset_avg_ns: f32,
     observations: u32,
     implausible: bool,
+    /// Last depth offered outside the deadband; what the deadband keeps asking for.
+    held: Option<usize>,
 }
 
 /// One measurement for [`AvSync::observe`]. Each field is in the units its source already produces.
@@ -1342,6 +1387,9 @@ pub struct AvSyncObservation {
     pub clock_offset_ns: i64,
     /// How much audio is already queued ahead of this frame, in interleaved samples.
     pub buffered_ahead: usize,
+    /// Device output latency past the ring: from a sample leaving it to the speaker (the
+    /// graph or endpoint buffer, a Bluetooth link). `0` = unknown.
+    pub output_latency_ns: u64,
     /// Video end-to-end in ns: `displayed + clock_offset − pts`. `None` until a frame is presented.
     pub video_e2e_ns: Option<u64>,
 }
@@ -1361,6 +1409,7 @@ impl AvSync {
             offset_avg_ns: 0.0,
             observations: 0,
             implausible: false,
+            held: None,
         }
     }
 
@@ -1378,7 +1427,8 @@ impl AvSync {
         // milliseconds; ≤ 1 ms is inside [`AV_DEADBAND_MS`]. The conversion itself is exact at
         // every rate.
         let buffered_ns = self.samples_ms(o.buffered_ahead) as i128 * 1_000_000;
-        let play_at_host = o.now_local_ns + buffered_ns + o.clock_offset_ns as i128;
+        let play_at_host =
+            o.now_local_ns + buffered_ns + o.output_latency_ns as i128 + o.clock_offset_ns as i128;
         let audio_e2e_ns = play_at_host - o.pts_ns as i128;
         let offset_ns = audio_e2e_ns - video_e2e_ns as i128;
 
@@ -1415,24 +1465,28 @@ impl AvSync {
     }
 
     /// The ring depth that would place audio with the picture, given where the ring is now.
-    /// `None` while unsettled or inside the deadband — the caller then leaves the policy alone.
+    /// `None` while unsettled: the caller runs unsynchronised. Inside the deadband, the last
+    /// request again: a ring that reached its depth stays there, where `None` would drop it to
+    /// the floor and shed what the insert just built.
     ///
     /// Audio late (offset > 0) means there is too much queued: aim shallower. Audio early means
     /// aim deeper.
-    pub fn desired_depth(&self, current_depth: usize) -> Option<usize> {
+    pub fn desired_depth(&mut self, current_depth: usize) -> Option<usize> {
         if !self.settled() {
+            self.held = None;
             return None;
         }
         let offset_ms = self.offset_avg_ns / 1_000_000.0;
         if offset_ms.abs() < AV_DEADBAND_MS as f32 {
-            return None;
+            return self.held;
         }
         // One millisecond of samples as a float, so a fractional offset scales smoothly.
         // Divide the constant, not the product: `x * 96000.0 / 1000.0` can land one sample off
         // the `x * 96.0` every 48 kHz session computes. This way 44 100 Hz stereo is 88.2, not 88.
         let per_ms = interleaved_per_sec(self.rate_hz, self.channels) as f32 / 1000.0;
         let delta = (offset_ms * per_ms) as i64;
-        Some((current_depth as i64 - delta).max(0) as usize)
+        self.held = Some((current_depth as i64 - delta).max(0) as usize);
+        self.held
     }
 }
 
@@ -1565,6 +1619,19 @@ mod tests {
     }
 
     // ---- redundant-plane recovery ---------------------------------------------------------
+
+    #[test]
+    fn a_superseded_audio_packet_is_dropped() {
+        let mut g = AudioSeqGate::new();
+        assert!(g.fresh(100));
+        assert!(g.fresh(102), "a gap is concealed downstream");
+        assert!(!g.fresh(101), "late: its slot was already concealed");
+        assert!(!g.fresh(102), "duplicate");
+        assert!(g.fresh(103));
+        let mut w = AudioSeqGate::new();
+        assert!(w.fresh(u32::MAX));
+        assert!(w.fresh(0), "a wrap is newer");
+    }
 
     #[test]
     fn red_recovery_rebuilds_exactly_the_single_missing_frame() {
@@ -2071,6 +2138,31 @@ mod tests {
         );
     }
 
+    /// A trim drops whole frames. 25 ms at 44.1 kHz stereo is 2 205 samples, half a frame;
+    /// dropping to it would play every later sample on the wrong channel.
+    #[test]
+    fn a_trim_never_splits_a_frame() {
+        for ch in [2u8, 6, 8] {
+            for sync in [None, Some(2_851)] {
+                let mut p = JitterPolicy::new_at_rate(JitterTuning::AAUDIO, ch, 44_100);
+                p.set_sync_target(sync);
+                let depth = 100 * 441 / 10 * ch as usize;
+                let want = 96 * ch as usize;
+                p.step(depth, want);
+                p.note_read(false);
+                let s = p.step(depth, want);
+                assert!(s.hard_trim, "{ch}ch {sync:?}: {s:?}");
+                assert_eq!(s.drop_front % ch as usize, 0, "{ch}ch {sync:?}: {s:?}");
+                // What was kept is what the drift clock restarts from.
+                assert_eq!(
+                    p.avg_depth_ms(),
+                    p.depth_ms(depth - s.drop_front),
+                    "{ch}ch {sync:?}"
+                );
+            }
+        }
+    }
+
     /// One transient drain must not manufacture a fresh target's worth of silence.
     #[test]
     fn deprime_requires_hysteresis() {
@@ -2558,6 +2650,7 @@ mod tests {
             now_local_ns: 1_000_000_000i128 + 40 * 1_000_000,
             clock_offset_ns: 0,
             buffered_ahead: depth,
+            output_latency_ns: 0,
             video_e2e_ns: Some((video_e2e_ms.max(0) as u64) * 1_000_000),
         }
     }
@@ -2632,6 +2725,29 @@ mod tests {
         );
     }
 
+    /// Audio that leaves the ring still has the device to cross. A 150 ms Bluetooth link on a
+    /// ring that alone looks 30 ms early is audio 120 ms late: aim shallower, never deeper.
+    #[test]
+    fn av_sync_counts_the_device_behind_the_ring() {
+        let pm = per_ms(2);
+        let depth = 30 * pm;
+        let mut s = AvSync::new(2);
+        for _ in 0..AV_MIN_OBSERVATIONS * 4 {
+            s.observe(AvSyncObservation {
+                output_latency_ns: 150_000_000,
+                ..obs(-30, depth, pm)
+            });
+        }
+        assert_eq!(s.offset_ms(), 120);
+        let want = s
+            .desired_depth(depth)
+            .expect("a 120 ms offset is actionable");
+        assert!(
+            want < depth,
+            "late audio must aim shallower: {want} vs {depth}"
+        );
+    }
+
     #[test]
     fn av_sync_rejects_the_implausible_instead_of_clamping_it() {
         let pm = per_ms(2);
@@ -2647,6 +2763,7 @@ mod tests {
             now_local_ns: 5_000_000_000,
             clock_offset_ns: 0,
             buffered_ahead: depth,
+            output_latency_ns: 0,
             video_e2e_ns: Some(40_000_000),
         };
         assert!(s.observe(wild).is_none());
@@ -2700,6 +2817,48 @@ mod tests {
             target >= want,
             "the target must still be able to serve one callback"
         );
+    }
+
+    /// Closed loop, as every client wires it: observe per packet, hand `desired_depth` to the
+    /// policy. Video sits a steady `early_ms` behind the ring's own audio. Once the ring is deep
+    /// enough the offset enters the deadband; the loop must hold there, not hunt.
+    #[test]
+    fn sync_steering_settles_instead_of_hunting() {
+        let pm = per_ms(2);
+        let want = 5 * pm;
+        for early_ms in [40u64, 60, 100] {
+            let mut p = JitterPolicy::new(JitterTuning::PIPEWIRE, 2);
+            let mut av = AvSync::new(2);
+            let (mut depth, mut sheds, mut inserts, mut trims) = (0usize, 0u32, 0u32, 0u32);
+            for cb in 0..24_000u32 {
+                depth += want;
+                // Video end-to-end is fixed; only the ring moves the audio side.
+                av.observe(AvSyncObservation {
+                    video_e2e_ns: Some((40 + early_ms) * 1_000_000),
+                    ..obs(0, depth, pm)
+                });
+                p.set_sync_target(av.desired_depth(depth));
+                let s = p.step(depth, want);
+                depth -= s.drop_front.min(depth);
+                depth += s.insert_front;
+                // Converging costs a handful of inserts; count only what follows the first minute.
+                if cb >= 12_000 {
+                    sheds += (s.drop_front > 0 && !s.hard_trim) as u32;
+                    trims += s.hard_trim as u32;
+                    inserts += (s.insert_front > 0) as u32;
+                }
+                let short = !s.silence && depth < want;
+                if !s.silence {
+                    depth -= want.min(depth);
+                }
+                p.note_read(short);
+            }
+            assert_eq!(
+                (sheds, trims, inserts),
+                (0, 0, 0),
+                "{early_ms} ms early: still hunting in the second minute (sheds, trims, inserts)"
+            );
+        }
     }
 
     #[test]

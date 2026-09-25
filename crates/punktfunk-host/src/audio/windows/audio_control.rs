@@ -637,32 +637,33 @@ pub(crate) fn restore_default_recording() {
     }
 }
 
-/// Endpoint reshaped for the capture's life: `(id, channels before, rate_hz)`. The first
-/// reshape wins. Memory only: after a crash, the next capture's reshape corrects the count.
-static RESHAPED: Mutex<Option<(String, u16, u32)>> = Mutex::new(None);
+/// Endpoints reshaped for the capture's life: `(id, channels before, rate_hz)`. Each
+/// endpoint's first reshape wins; a reopen onto another sink adds it. Memory only: after a
+/// crash, the next capture's reshape corrects the count.
+static RESHAPED: Mutex<Vec<(String, u16, u32)>> = Mutex::new(Vec::new());
 
 /// Give a render endpoint `channels` until [`restore_endpoint_channels`]. `from` is its count now.
 pub(crate) fn reshape_endpoint(id: &str, from: u16, channels: u16, rate_hz: u32) -> Result<()> {
     set_endpoint_channels(id, channels, rate_hz)?;
-    RESHAPED
-        .lock()
-        .unwrap()
-        .get_or_insert_with(|| (id.to_string(), from, rate_hz));
+    let mut reshaped = RESHAPED.lock().unwrap();
+    if !reshaped.iter().any(|(r, ..)| r == id) {
+        reshaped.push((id.to_string(), from, rate_hz));
+    }
     Ok(())
 }
 
-/// Inverse of [`reshape_endpoint`]. No-op if nothing was reshaped. Capture exit path.
+/// Inverse of [`reshape_endpoint`] for every endpoint reshaped. Capture exit path.
 pub(crate) fn restore_endpoint_channels() {
-    let Some((id, channels, rate_hz)) = RESHAPED.lock().unwrap().take() else {
-        return;
-    };
-    match set_endpoint_channels(&id, channels, rate_hz) {
-        Ok(()) => tracing::info!(
-            channels,
-            "desktop-audio sink speaker layout restored after streaming"
-        ),
-        Err(e) => tracing::warn!(error = %format!("{e:#}"),
-            "restore the desktop-audio sink speaker layout after streaming"),
+    let reshaped = std::mem::take(&mut *RESHAPED.lock().unwrap());
+    for (id, channels, rate_hz) in reshaped {
+        match set_endpoint_channels(&id, channels, rate_hz) {
+            Ok(()) => tracing::info!(
+                channels,
+                "desktop-audio sink speaker layout restored after streaming"
+            ),
+            Err(e) => tracing::warn!(error = %format!("{e:#}"),
+                "restore the desktop-audio sink speaker layout after streaming"),
+        }
     }
 }
 

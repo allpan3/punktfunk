@@ -57,6 +57,12 @@ pub(crate) fn playing_apps() -> Result<Vec<String>> {
             }
         })
         .register();
+    // A stalled daemon must not hold the console's request thread forever.
+    let timer = mainloop.loop_().add_timer({
+        let mainloop = mainloop.clone();
+        move |_| mainloop.quit()
+    });
+    let _ = timer.update_timer(Some(std::time::Duration::from_secs(2)), None);
     awaited.set(Some(core.sync(0).context("pw sync")?));
     mainloop.run();
 

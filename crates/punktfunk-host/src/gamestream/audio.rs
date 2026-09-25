@@ -253,7 +253,7 @@ fn run(
     // Always 48 kHz: GameStream Opus has no rate field, and libopus tops out here.
     // Hi-res `0xD3` is native-only (`design/hi-res-audio.md`).
     let mut cap = match audio_cap.lock().unwrap().take() {
-        Some(mut c) if c.channels() == want => {
+        Some(mut c) if c.channels() == want && c.reusable() => {
             c.drain(); // previous session's buffer would play first
             c
         }
@@ -261,7 +261,7 @@ fn run(
             tracing::info!(
                 have = c.channels(),
                 want,
-                "audio capturer channel count changed — reopening"
+                "parked audio capturer no longer fits (channels or audio settings) — reopening"
             );
             drop(c);
             audio::open_audio_capture(want, SAMPLE_RATE).context("open audio capture")?
@@ -270,7 +270,10 @@ fn run(
     };
     let result = audio_body(&mut *cap, &sock, aes_key, rikeyid, params, running, on_lost);
     cap.idle(); // release the Linux stream-sink routing claim between sessions
-    audio::park_audio_capture(audio_cap, cap); // drop on Windows (restores default); keep on Linux
+                // A failed body may mean a dead capture thread; parked, every later session would reuse it.
+    if result.is_ok() {
+        audio::park_audio_capture(audio_cap, cap); // drop on Windows (restores default); keep on Linux
+    }
     result
 }
 
@@ -328,6 +331,11 @@ fn audio_payload(opus: &[u8], aes_key: Option<&[u8; 16]>, iv_seq: u32) -> Vec<u8
     Aes128CbcEnc::new(key.into(), (&iv).into()).encrypt_padded_vec::<Pkcs7>(opus)
 }
 
+/// Longest capture wait per loop turn: how late a stop is seen.
+const STOP_POLL: Duration = Duration::from_millis(100);
+/// How far behind the pacer may fall before it re-anchors instead of catching up.
+const PACE_REANCHOR: Duration = Duration::from_millis(100);
+
 #[allow(clippy::too_many_arguments)]
 fn audio_body(
     cap: &mut dyn AudioCapturer,
@@ -364,8 +372,8 @@ fn audio_body(
     let mut fec_skipped = false;
     // Pace to packet duration. PipeWire hands ~1024-frame chunks; bursting them
     // glitches the client's low-latency jitter buffer.
-    let start = Instant::now();
-    let mut frame_no: u64 = 0;
+    let frame_dur = Duration::from_millis(frame_ms as u64);
+    let mut due = Instant::now();
     // Soft-limited capture gain (`PUNKTFUNK_AUDIO_GAIN`); do not clamp — see
     // `crate::audio::capture_gain`.
     let gain = crate::audio::capture_gain();
@@ -380,7 +388,11 @@ fn audio_body(
     );
 
     while running.load(Ordering::SeqCst) {
-        let chunk = cap.next_chunk().context("capture audio chunk")?;
+        // Bounded so a stop is seen well inside `/resume`'s wait for this thread; a quiet
+        // host would otherwise hold port 48000 for the backend's whole 5 s timeout.
+        let chunk = cap
+            .next_chunk_within(STOP_POLL)
+            .context("capture audio chunk")?;
         acc.extend_from_slice(&chunk);
         while acc.len() >= frame_len {
             let mut frame: Vec<f32> = acc.drain(..frame_len).collect();
@@ -440,12 +452,15 @@ fn audio_body(
                 tracing::debug!(sent, "audio: streaming");
             }
 
-            // Sleep only when ahead; a capture burst must not queue sleeps.
-            frame_no += 1;
-            let scheduled = start + Duration::from_millis(frame_ms as u64 * frame_no);
+            // Sleep only when ahead; a capture burst must not queue sleeps. Past
+            // `PACE_REANCHOR` behind, a quiet stretch is forgiven: chasing it would send
+            // every later chunk as a burst.
+            due += frame_dur;
             let now = Instant::now();
-            if scheduled > now {
-                std::thread::sleep((scheduled - now).min(Duration::from_millis(20)));
+            if due > now {
+                std::thread::sleep((due - now).min(Duration::from_millis(20)));
+            } else if now.duration_since(due) > PACE_REANCHOR {
+                due = now;
             }
         }
     }

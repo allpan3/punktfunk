@@ -81,6 +81,28 @@ fn capture_mode() -> CaptureMode {
     capture_mode_from(std::env::var("PUNKTFUNK_STREAM_SINK").ok().as_deref())
 }
 
+/// What an open read from the audio settings. A parked capturer serves the next session only
+/// while this still holds: a keep-host session must not inherit a sink claim.
+#[derive(Debug, PartialEq)]
+struct OpenPolicy {
+    mode: CaptureMode,
+    output: pf_host_config::AudioOutputMode,
+    voice: pf_host_config::VoiceChatRoute,
+    voice_apps: Vec<String>,
+}
+
+impl OpenPolicy {
+    fn now() -> OpenPolicy {
+        let cfg = pf_host_config::config();
+        OpenPolicy {
+            mode: capture_mode(),
+            output: cfg.audio_output_mode,
+            voice: cfg.audio_voice_chat,
+            voice_apps: cfg.audio_voice_apps.clone(),
+        }
+    }
+}
+
 /// Env grammar without process-global mutation, so the three modes are testable.
 /// Unrecognised values (and unset) are NullSink: a typo must not kill audio.
 fn capture_mode_from(value: Option<&str>) -> CaptureMode {
@@ -163,6 +185,8 @@ pub struct PwAudioCapturer {
     /// this is the resampled stream, not the node upstream — the hi-res gate
     /// reads that from [`monitor_rate`], not here.
     negotiated_rate: Arc<AtomicU32>,
+    /// Settings this capturer opened under; see [`AudioCapturer::reusable`].
+    policy: OpenPolicy,
 }
 
 impl PwAudioCapturer {
@@ -190,10 +214,11 @@ impl PwAudioCapturer {
         );
         anyhow::ensure!(rate_hz > 0, "audio capture rate must be positive");
         let target = sink_override.filter(|_| tap).map(str::to_string);
+        let policy = OpenPolicy::now();
         let mode = if target.is_some() {
             CaptureMode::Monitor
         } else {
-            capture_mode()
+            policy.mode
         };
         // Unique per capturer: overlapping instances must not alias, and a
         // fresh name gets unity WirePlumber volume, not the previous run's.
@@ -251,7 +276,11 @@ impl PwAudioCapturer {
         match ready_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(Ok(())) => {}
             Ok(Err(e)) => return Err(e),
-            Err(_) => return Err(anyhow!("pipewire audio init timed out")),
+            Err(_) => {
+                // The thread may still come up; it must not outlive this error with a live sink.
+                let _ = quit_tx.send(Terminate);
+                return Err(anyhow!("pipewire audio init timed out"));
+            }
         }
         // Routing claim starts with the session; release is `idle()` or Drop.
         let claimed = match &sink_name {
@@ -271,6 +300,7 @@ impl PwAudioCapturer {
             claimed,
             active,
             negotiated_rate,
+            policy,
         })
     }
 }
@@ -280,9 +310,9 @@ impl Drop for PwAudioCapturer {
         // Receiver dies with us; remaining producer pushes must not count as
         // encode-thread-behind.
         self.active.store(false, Ordering::Relaxed);
-        if self.claimed {
+        if let (true, Some(name)) = (self.claimed, &self.sink_name) {
             self.claimed = false;
-            stream_sink::release();
+            stream_sink::release(name);
         }
         // Failed send means the thread already exited — nothing to tear down.
         let _ = self.quit.send(Terminate);
@@ -316,6 +346,10 @@ impl AudioCapturer for PwAudioCapturer {
         self.negotiated_rate.load(Ordering::Relaxed)
     }
 
+    fn reusable(&self) -> bool {
+        self.policy == OpenPolicy::now()
+    }
+
     fn drain(&mut self) {
         while self.chunks.try_recv().is_ok() {}
         // Reused parked capturer = new session: re-claim the default sink. The
@@ -333,10 +367,12 @@ impl AudioCapturer for PwAudioCapturer {
     fn idle(&mut self) {
         // Parked: channel fills and stays full; those drops are nobody's fault.
         self.active.store(false, Ordering::Relaxed);
-        if self.claimed {
+        if let (true, Some(name)) = (self.claimed, &self.sink_name) {
             self.claimed = false;
-            stream_sink::release();
+            stream_sink::release(name);
         }
+        // No session to route for: pins and playthrough links come down until `drain`.
+        let _ = self.host.send(None);
     }
 }
 
@@ -707,6 +743,9 @@ fn mic_pw_thread(
                     let Some(mut buffer) = stream.dequeue_buffer() else {
                         return;
                     };
+                    // This cycle's quantum. The mapped buffer is sized for `quantum-limit`
+                    // (8192 ≈ 170 ms); filling it primes and queues 170 ms a cycle. 0 → capacity.
+                    let requested = usize::try_from(buffer.requested()).unwrap_or(0);
                     // Before pulling new frames: drop the ring on flush (uplink
                     // gap) or when this callback has not run for `MIC_STALE`
                     // (idle, no recorder). A recorder must not hear old audio.
@@ -730,13 +769,18 @@ fn mic_pw_thread(
                         return;
                     }
                     let data = &mut datas[0];
-                    let want_frames = data.data().map(|s| s.len() / stride).unwrap_or(0);
+                    let max_frames = data.data().map(|s| s.len() / stride).unwrap_or(0);
+                    let want_frames = match requested {
+                        0 => max_frames,
+                        r => r.min(max_frames),
+                    };
                     let want = want_frames * ud.channels;
                     static FIRST: std::sync::atomic::AtomicBool =
                         std::sync::atomic::AtomicBool::new(true);
                     if FIRST.swap(false, std::sync::atomic::Ordering::Relaxed) {
                         tracing::info!(
                             quantum_frames = want_frames,
+                            capacity_frames = max_frames,
                             quantum_ms = want_frames as f32 / 48.0,
                             "virtual-mic consumer connected"
                         );
@@ -906,7 +950,7 @@ fn pw_thread(
             let core = core.clone();
             let quit_seq = quit_seq.clone();
             move |_| {
-                if bridge.borrow_mut().clear() {
+                if bridge.borrow_mut().clear(&core) {
                     if let Ok(seq) = core.sync(0) {
                         *quit_seq.borrow_mut() = Some(seq);
                         return;
@@ -920,7 +964,11 @@ fn pw_thread(
             let core = core.clone();
             move |host| {
                 let mut b = bridge.borrow_mut();
-                b.set_host(host);
+                // Parked (`idle`): nothing to route to until the next claim.
+                if host.is_none() {
+                    b.clear(&core);
+                }
+                b.set_host(&core, host);
                 b.sync(&core);
             }
         });
@@ -941,7 +989,13 @@ fn pw_thread(
             })
             .error({
                 let mainloop = mainloop.clone();
+                let bridge = bridge.clone();
                 move |id, _seq, res, message| {
+                    // A refused playthrough link is that link's failure, not the capture's.
+                    if bridge.try_borrow().is_ok_and(|b| b.owns_proxy(id)) {
+                        tracing::warn!(id, res, message, "host bridge object refused");
+                        return;
+                    }
                     tracing::warn!(id, res, message, "pipewire core error — audio capture ends");
                     mainloop.quit();
                 }
