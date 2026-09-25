@@ -78,14 +78,27 @@ impl CursorState {
 }
 
 /// Straight (R,G,B,A) from one 4-byte cursor pixel. Portals emit RGBA or
-/// BGRA; ARGB/ABGR are accepted. Unknown 4-byte formats read as RGBA.
+/// BGRA; ARGB/ABGR are accepted. Unknown 4-byte formats read as RGBA. The
+/// colour arrives premultiplied — KWin paints into `RGBA8888_Premultiplied`,
+/// Mutter reads `RGBA_8888_PRE` — and is divided back out.
 pub(super) fn decode_bitmap_pixel(vfmt: u32, s: &[u8]) -> (u8, u8, u8, u8) {
-    match vfmt {
+    let (r, g, b, a) = match vfmt {
         x if x == spa::sys::SPA_VIDEO_FORMAT_RGBA => (s[0], s[1], s[2], s[3]),
         x if x == spa::sys::SPA_VIDEO_FORMAT_BGRA => (s[2], s[1], s[0], s[3]),
         x if x == spa::sys::SPA_VIDEO_FORMAT_ARGB => (s[1], s[2], s[3], s[0]),
         x if x == spa::sys::SPA_VIDEO_FORMAT_ABGR => (s[3], s[2], s[1], s[0]),
         _ => (s[0], s[1], s[2], s[3]),
+    };
+    (straight(r, a), straight(g, a), straight(b, a), a)
+}
+
+/// One premultiplied channel at alpha `a`, as straight alpha (rounded; clamped for
+/// producers that overshoot).
+pub(super) fn straight(c: u8, a: u8) -> u8 {
+    match a {
+        0 => 0,
+        255 => c,
+        a => ((u32::from(c) * 255 + u32::from(a) / 2) / u32::from(a)).min(255) as u8,
     }
 }
 
@@ -736,24 +749,39 @@ mod tests {
 
     #[test]
     fn each_bitmap_format_is_decoded_to_straight_rgba() {
-        let s = [1u8, 2, 3, 4];
+        // Opaque, so only the channel order shows.
         assert_eq!(
-            decode_bitmap_pixel(spa::sys::SPA_VIDEO_FORMAT_RGBA, &s),
-            (1, 2, 3, 4)
+            decode_bitmap_pixel(spa::sys::SPA_VIDEO_FORMAT_RGBA, &[1, 2, 3, 255]),
+            (1, 2, 3, 255)
         );
         assert_eq!(
-            decode_bitmap_pixel(spa::sys::SPA_VIDEO_FORMAT_BGRA, &s),
-            (3, 2, 1, 4)
+            decode_bitmap_pixel(spa::sys::SPA_VIDEO_FORMAT_BGRA, &[1, 2, 3, 255]),
+            (3, 2, 1, 255)
         );
         assert_eq!(
-            decode_bitmap_pixel(spa::sys::SPA_VIDEO_FORMAT_ARGB, &s),
-            (2, 3, 4, 1)
+            decode_bitmap_pixel(spa::sys::SPA_VIDEO_FORMAT_ARGB, &[255, 2, 3, 4]),
+            (2, 3, 4, 255)
         );
         assert_eq!(
-            decode_bitmap_pixel(spa::sys::SPA_VIDEO_FORMAT_ABGR, &s),
-            (4, 3, 2, 1)
+            decode_bitmap_pixel(spa::sys::SPA_VIDEO_FORMAT_ABGR, &[255, 3, 2, 1]),
+            (1, 2, 3, 255)
         );
         // Unknown 4-byte format reads as RGBA, not rejected.
-        assert_eq!(decode_bitmap_pixel(0xdead_beef, &s), (1, 2, 3, 4));
+        assert_eq!(
+            decode_bitmap_pixel(0xdead_beef, &[1, 2, 3, 255]),
+            (1, 2, 3, 255)
+        );
+    }
+
+    #[test]
+    fn a_premultiplied_edge_comes_back_to_its_own_colour() {
+        // KWin/Mutter hand a white anti-aliased edge at half alpha as (128, 128, 128, 128).
+        assert_eq!(
+            decode_bitmap_pixel(spa::sys::SPA_VIDEO_FORMAT_RGBA, &[128, 128, 128, 128]),
+            (255, 255, 255, 128)
+        );
+        // A shadow is black at any alpha; a clear pixel is all zero.
+        assert_eq!(straight(0, 64), 0);
+        assert_eq!(straight(9, 0), 0);
     }
 }

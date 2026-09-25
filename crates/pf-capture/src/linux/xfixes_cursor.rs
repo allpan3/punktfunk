@@ -731,22 +731,11 @@ fn fetch_pointer(conn: &RustConnection, root: Window) -> Result<QueryPointerRepl
 /// Xcursor). The overlay and both blend paths want straight RGBA, like
 /// `SPA_META_Cursor`.
 fn argb_premul_to_straight_rgba(argb: &[u32]) -> Vec<u8> {
+    use super::pw_cursor::straight;
     let mut out = Vec::with_capacity(argb.len() * 4);
     for &px in argb {
-        let a = (px >> 24) & 0xff;
-        let r = (px >> 16) & 0xff;
-        let g = (px >> 8) & 0xff;
-        let b = px & 0xff;
-        let (r, g, b) = match a {
-            0 => (0, 0, 0),
-            255 => (r, g, b),
-            a => (
-                ((r * 255 + a / 2) / a).min(255),
-                ((g * 255 + a / 2) / a).min(255),
-                ((b * 255 + a / 2) / a).min(255),
-            ),
-        };
-        out.extend_from_slice(&[r as u8, g as u8, b as u8, a as u8]);
+        let [a, r, g, b] = px.to_be_bytes();
+        out.extend_from_slice(&[straight(r, a), straight(g, a), straight(b, a), a]);
     }
     out
 }
