@@ -299,8 +299,8 @@ let
     }
     {
       # Everything ProtectHome=tmpfs takes away that the runner genuinely needs. Drop one of these
-      # and the runner comes up unable to authenticate, unable to persist, or with an EMPTY
-      # LIBRARY — on Linux a game library lives in the home the tmpfs just hid.
+      # and the runner comes up unable to authenticate or to persist. The library roots are not
+      # here: the host writes them into the unit's 50-plugin-roots.conf drop-in.
       name = "the plugin runner keeps the paths it needs through the empty home";
       ok =
         has appliance "punktfunk-scripting" "BindPaths=-%h/.config/punktfunk/plugins"
@@ -316,8 +316,7 @@ let
         && has appliance "punktfunk-scripting" "BindReadOnlyPaths=-%h/.config/punktfunk/cert.pem"
         # Without this a moved listener leaves every plugin dialling 47990 forever.
         && has appliance "punktfunk-scripting" "BindReadOnlyPaths=-%h/.config/punktfunk/mgmt-endpoint"
-        && has appliance "punktfunk-scripting" "BindReadOnlyPaths=-%h/.config/punktfunk/scripts"
-        && has appliance "punktfunk-scripting" "BindReadOnlyPaths=-%h/.local/share/Steam";
+        && has appliance "punktfunk-scripting" "BindReadOnlyPaths=-%h/.config/punktfunk/scripts";
     }
     {
       # Without bwrap on its PATH the runner starts no plugin at all, and the library is empty.
