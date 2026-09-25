@@ -93,14 +93,13 @@ fn delivery_share(
         .flatten()
 }
 
-/// Whether this probe request skips the one-per-10 s spacing: a bring-up ramp
-/// step, which is short and lands on a data plane with no video on it.
+/// Whether this probe request is as short as a bring-up ramp step.
 ///
-/// The length bound is the exemption's own limit. Without it a client could
-/// hold the window open with 5 s bursts at the probe ceiling, which is the
-/// uplink-pinning the spacing exists against.
-fn is_ramp_step(req: &ProbeRequest, ramp_open: bool) -> bool {
-    ramp_open && req.duration_ms <= super::stream::RAMP_STEP_MAX_MS
+/// The length bound is the ramp's exemption from the spacing. Without it a
+/// client could hold the window open with 5 s bursts at the probe ceiling,
+/// which is the uplink-pinning the spacing exists against.
+fn is_ramp_length(req: &ProbeRequest) -> bool {
+    req.duration_ms <= super::stream::RAMP_STEP_MAX_MS
 }
 
 /// One speed-test burst per 10 s. Each burst is already clamped (5 s, 10 Gbps);
@@ -108,18 +107,34 @@ fn is_ramp_step(req: &ProbeRequest, ramp_open: bool) -> bool {
 ///
 /// A ramp step neither waits on the spacing nor starts it: a ramp cut short
 /// by the first frame asks for its burst two seconds later, and that burst is
-/// the only measurement the session gets.
+/// the only measurement the session gets. A short step just after the window
+/// closed is still the ramp's — the client asks each step once the last one
+/// drained, and a re-ask can cross the close.
 #[derive(Default)]
 struct ProbeSpacing {
     last: Option<std::time::Instant>,
+    /// When a short step last arrived with the ramp window open.
+    last_ramp_step: Option<std::time::Instant>,
 }
 
 impl ProbeSpacing {
     const INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+    /// How long after the last in-window step a short step still counts as the
+    /// ramp's. A step settles within a round trip of its answer; only in-window
+    /// steps restart this clock, so it cannot be chained past the window.
+    const RAMP_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 
-    /// Whether to serve this request.
-    fn admit(&mut self, now: std::time::Instant, ramping: bool) -> bool {
-        if ramping {
+    /// Whether to serve this request. `short` is ramp length
+    /// ([`is_ramp_length`]); `open` is the ramp window.
+    fn admit(&mut self, now: std::time::Instant, short: bool, open: bool) -> bool {
+        if short && open {
+            self.last_ramp_step = Some(now);
+            return true;
+        }
+        let in_grace = self
+            .last_ramp_step
+            .is_some_and(|t| now.duration_since(t) < Self::RAMP_GRACE);
+        if short && in_grace {
             return true;
         }
         if self
@@ -616,8 +631,8 @@ pub(super) async fn run(task: Task) {
                     );
                     let _ = shard_ack_tx.send(ack.shard_payload);
                 } else if let Ok(req) = ProbeRequest::decode(&msg) {
-                    let ramping = is_ramp_step(&req, ramp_open.load(Ordering::SeqCst));
-                    if !probe_spacing.admit(std::time::Instant::now(), ramping) {
+                    let open = ramp_open.load(Ordering::SeqCst);
+                    if !probe_spacing.admit(std::time::Instant::now(), is_ramp_length(&req), open) {
                         tracing::warn!(
                             target_kbps = req.target_kbps,
                             "speed-test probe rejected (rate-limited)"
@@ -1198,40 +1213,69 @@ mod tests {
         assert!(!clip_offer_permitted(GRANT_ALL, false));
     }
 
-    /// The bring-up exemption is bounded twice: the window has to be open,
-    /// and the step short. An 800 ms burst or a 5 s one is spaced like any
-    /// other, open window or not.
+    /// The bring-up exemption is bounded twice: the step has to be short, and
+    /// it has to be in the window or just after an in-window step. An 800 ms
+    /// burst is spaced like any other, open window or not, and a short step
+    /// with no ramp behind it is spaced too.
     #[test]
-    fn only_a_short_step_inside_the_window_skips_the_spacing() {
+    fn only_a_short_step_of_the_ramp_skips_the_spacing() {
         let req = |duration_ms| ProbeRequest {
             target_kbps: 40_000,
             duration_ms,
         };
-        assert!(is_ramp_step(&req(25), true));
-        assert!(is_ramp_step(&req(super::stream::RAMP_STEP_MAX_MS), true));
-        assert!(!is_ramp_step(
-            &req(super::stream::RAMP_STEP_MAX_MS + 1),
-            true
-        ));
-        assert!(!is_ramp_step(&req(800), true));
-        assert!(!is_ramp_step(&req(25), false));
+        assert!(is_ramp_length(&req(25)));
+        assert!(is_ramp_length(&req(super::stream::RAMP_STEP_MAX_MS)));
+        assert!(!is_ramp_length(&req(super::stream::RAMP_STEP_MAX_MS + 1)));
+
+        let t0 = std::time::Instant::now();
+        let at = |ms| t0 + std::time::Duration::from_millis(ms);
+        let mut spacing = ProbeSpacing::default();
+        assert!(spacing.admit(at(0), false, true), "a long burst: served");
+        assert!(
+            !spacing.admit(at(10), false, true),
+            "and spaced, window or not"
+        );
+        let mut spacing = ProbeSpacing::default();
+        assert!(
+            spacing.admit(at(0), true, false),
+            "a short step, no ramp: served"
+        );
+        assert!(
+            !spacing.admit(at(10), true, false),
+            "and it started the spacing"
+        );
     }
 
     /// A ramp cut short by the first frame asks for its burst two seconds
-    /// later. The steps before it must not have started the spacing, or that
+    /// later. The steps before it — including a re-ask that reached the host
+    /// just after the window closed — must not start the spacing, or that
     /// burst is refused and the session gets no measurement at all.
     #[test]
     fn ramp_steps_leave_the_spacing_to_the_burst_after_them() {
         let t0 = std::time::Instant::now();
         let at = |ms| t0 + std::time::Duration::from_millis(ms);
         let mut spacing = ProbeSpacing::default();
-        for ms in [0, 40, 80, 120] {
-            assert!(spacing.admit(at(ms), true), "a ramp step is always served");
+        for ms in [0, 72] {
+            assert!(spacing.admit(at(ms), true, true), "an in-window step");
         }
-        assert!(spacing.admit(at(2_120), false), "the burst after the ramp");
-        assert!(!spacing.admit(at(5_000), false), "spaced from that burst");
-        assert!(spacing.admit(at(5_010), true), "a ramp step still is not");
-        assert!(spacing.admit(at(12_121), false), "ten seconds on");
+        // The rig: the window closed at 103 ms, the re-ask arrived at 157 ms.
+        assert!(
+            spacing.admit(at(157), true, false),
+            "a re-ask across the close"
+        );
+        assert!(
+            spacing.admit(at(2_628), false, false),
+            "the burst after the ramp"
+        );
+        assert!(
+            !spacing.admit(at(5_000), false, false),
+            "spaced from that burst"
+        );
+        assert!(
+            !spacing.admit(at(5_010), true, false),
+            "past the grace a short step is spaced"
+        );
+        assert!(spacing.admit(at(12_629), false, false), "ten seconds on");
     }
 
     /// The ramp's verdict ask — lower than the pin, inside the bring-up
