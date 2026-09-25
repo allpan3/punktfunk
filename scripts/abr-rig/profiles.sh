@@ -131,6 +131,13 @@ profile() {
       MODE=1920x1080x30; ACHIEVABLE_KBPS=9000
       PROBES=2; PROBE_SECONDS="0 300"
       ;;
+    # A pinned 8 Mbps session outlives an Automatic sibling that leaves halfway. Its
+    # target column stays 0 and no Governor ack reaches it, before or after.
+    shared_fixed_survivor)
+      RATE_KBIT=18000; DELAY_MS=10; BUFFER_MS=450; LOSS_PCT=0.5
+      MODE=1920x1080x30; ACHIEVABLE_KBPS=9000
+      PROBES=2; PROBE_BITRATE="8000 0"; PROBE_SECONDS="0 300"
+      ;;
     # One session on this link: what a lone session holds, for the leaver row.
     shared_lone)
       RATE_KBIT=18000; DELAY_MS=10; BUFFER_MS=450; LOSS_PCT=0.5
@@ -158,7 +165,7 @@ profile() {
     *)
       echo "unknown profile '$1' (lan_1g wifi_tv wifi_tv_probe_damage wan_wg_12 \
 lte_variable nowall_720p policer_20 shared_two_auto shared_both shared_newcomer \
-shared_fixed_plus_auto shared_leaver shared_lone shared_fixed_lone)" >&2
+shared_fixed_plus_auto shared_fixed_survivor shared_leaver shared_lone shared_fixed_lone)" >&2
       return 1
       ;;
   esac
