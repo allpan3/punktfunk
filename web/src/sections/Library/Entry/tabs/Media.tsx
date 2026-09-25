@@ -21,12 +21,15 @@ const SLOTS: {
 	label: () => string;
 	help: () => string;
 	frame: string;
+	/** The grid cell: the poster fills the left column beside the three banners. */
+	cell?: string;
 }[] = [
 	{
 		kind: "portrait",
 		label: m.library_media_portrait,
 		help: m.library_media_portrait_help,
-		frame: "aspect-[2/3] max-w-48",
+		frame: "aspect-[2/3] max-w-56",
+		cell: "@2xl:row-span-3",
 	},
 	{
 		kind: "hero",
@@ -108,9 +111,9 @@ export const MediaTab: FC<TabProps> = ({
 }) => (
 	<>
 		<Group title={m.library_entry_tab_media()}>
-			<div className="grid gap-6 @2xl:grid-cols-2">
-				{SLOTS.map(({ kind, label, help, frame }) => (
-					<div key={kind} className="space-y-3">
+			<div className="grid gap-6 @2xl:grid-cols-[minmax(0,14rem)_minmax(0,1fr)]">
+				{SLOTS.map(({ kind, label, help, frame, cell }) => (
+					<div key={kind} className={`space-y-3 ${cell ?? ""}`}>
 						<Preview
 							src={previewSrc(
 								kind,
