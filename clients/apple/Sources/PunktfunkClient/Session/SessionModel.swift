@@ -407,9 +407,10 @@ final class SessionModel: ObservableObject {
         statsVerbosity = StatsVerbosity(rawValue: effective.statsVerbosity) ?? .normal
         #if os(iOS)
         // An attached monitor shows the picture (StreamViewController), so its size and rate win.
-        let mode = ExternalDisplay.streamMode(effective) ?? effective.streamMode
+        let mode = ExternalDisplay.streamMode(effective)
+            ?? effective.streamMode(native: NativeDisplay.mode)
         #else
-        let mode = effective.streamMode
+        let mode = effective.streamMode(native: NativeDisplay.mode)
         #endif
         let (width, height, hz) = (mode.width, mode.height, mode.hz)
         let compositor = PunktfunkConnection.Compositor(
