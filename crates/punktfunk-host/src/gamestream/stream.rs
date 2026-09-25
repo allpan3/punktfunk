@@ -833,6 +833,9 @@ fn open_gs_virtual_source(
     };
     let mut vd = crate::vdisplay::open(compositor).context("open virtual display")?;
     vd.set_hw_cursor(host_composites_metadata_cursor(compositor, &cfg));
+    // gamescope takes its HDR flags and display-reuse key from this. An HDR plan captures PQ
+    // only, so without it an SDR gamescope streams SDR inside a PQ container.
+    vd.set_hdr(cfg.hdr);
     // Per-session, not a process-global env: concurrent sessions must not stomp launch targets.
     vd.set_launch_command(launch.and_then(|t| t.command.clone()));
     // Same reason: a process env let either plane retarget the other's `create`.
@@ -857,7 +860,6 @@ fn open_gs_virtual_source(
         None,
     )
     .context("create virtual output at client resolution")?;
-    // Linux virtual-output capture is SDR-only (Mutter RecordVirtual); HDR is portal mirror.
     let plan = gs_session_plan(&cfg, host_composites_metadata_cursor(compositor, &cfg));
     let mut capturer = capture::capture_virtual_output(
         vout,
