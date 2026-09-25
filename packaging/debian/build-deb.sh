@@ -339,7 +339,8 @@ if [ "$1" = "configure" ]; then
     echo "virtual Steam Deck pad: sudo usermod -aG punktfunk \"\$USER\"   # then log out and back in"
     echo "  — it authorizes stopping the display manager for a managed gamescope session, and the"
     echo "    pad's usbip nodes; it can emulate arbitrary USB devices, so join it only on a box you trust."
-    echo "Config:  mkdir -p ~/.config/punktfunk && cp /usr/share/punktfunk-host/host.env.example ~/.config/punktfunk/host.env"
+    echo "Settings: the console (Host -> Settings). A line in ~/.config/punktfunk/host.env locks that setting there;"
+    echo "  annotated templates: /usr/share/punktfunk-host/host.env.{example,kde}"
     echo "Enable:  systemctl --user enable --now punktfunk-host"
     # Debian ships no active firewall and Ubuntu's ufw is inactive by default; hint whichever is present.
     if command -v ufw >/dev/null 2>&1; then

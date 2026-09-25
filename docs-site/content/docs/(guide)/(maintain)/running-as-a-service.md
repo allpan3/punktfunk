@@ -41,7 +41,8 @@ systemctl --user status punktfunk-host
 The host finds your live session by itself, so it needs no `host.env` and no
 `systemctl --user import-environment`. For settings, use the console or copy a template to
 `~/.config/punktfunk/host.env` — they are in `/usr/share/punktfunk/` (`/usr/share/punktfunk-host/`
-on Ubuntu); every knob is in [Configuration](/docs/configuration). Built from source?
+on Ubuntu); every knob is in [Configuration](/docs/configuration). A line in `host.env` locks
+that setting in the console until you delete it. Built from source?
 [Build from source](/docs/developers/build-from-source) installs the unit.
 
 ### Restart the host with your desktop

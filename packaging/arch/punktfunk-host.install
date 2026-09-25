@@ -100,9 +100,8 @@ punktfunk-host installed.
        sudo usermod -aG punktfunk "$USER"   # then log out and back in
      It authorizes stopping the display manager for a managed gamescope session, and the pad's
      usbip nodes. It can emulate arbitrary USB devices — join it only on a machine you trust.
-  2. Pick a backend config (gamescope is the no-desktop default on SteamOS/Deck):
-       mkdir -p ~/.config/punktfunk
-       cp /usr/share/punktfunk/host.env.bazzite ~/.config/punktfunk/host.env
+  2. Settings live in the console (Host -> Settings). A line in ~/.config/punktfunk/host.env
+     locks that setting there; annotated templates: /usr/share/punktfunk/host.env.{bazzite,kde}
   3. Enable the host:
        systemctl --user enable --now punktfunk-host
 

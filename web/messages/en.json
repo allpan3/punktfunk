@@ -1037,7 +1037,7 @@
 	"setting_dualsense_usbip": "DualSense over USB/IP",
 	"setting_dualsense_usbip_hint": "Gives each DualSense a real sound card for its speaker.",
 	"setting_gamescope_attach": "Attach mode",
-	"setting_gamescope_attach_hint": "Streams the Game Mode already on screen instead of starting one for the device.",
+	"setting_gamescope_attach_hint": "Mirrors this box's screen at its own resolution instead of giving the device a display of its own.",
 	"setting_gamescope_hdr": "Game Mode HDR",
 	"setting_gamescope_hdr_hint": "Off keeps Game Mode sessions in SDR.",
 	"setting_gamescope_managed": "Force managed mode",

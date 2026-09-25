@@ -739,7 +739,8 @@ echo "virtual Steam Deck pad: sudo usermod -aG punktfunk \$USER   # then log out
 echo "  — it authorizes stopping the display manager for a managed gamescope session, and the"
 echo "    pad's usbip nodes; it can emulate arbitrary USB devices, so join it only on a box you trust."
 echo "then enable the host: systemctl --user enable --now punktfunk-host"
-echo "Config: cp %{_datadir}/%{name}/host.env.bazzite ~/.config/punktfunk/host.env"
+echo "Settings: the console (Host -> Settings). A line in ~/.config/punktfunk/host.env locks that setting there;"
+echo "  annotated templates: %{_datadir}/%{name}/host.env.{bazzite,kde,example}"
 # Fedora/RHEL run firewalld by default — point the way to the installed service definitions.
 if command -v firewall-cmd >/dev/null 2>&1; then
     echo "Firewall (firewalld): sudo firewall-cmd --reload &&"
