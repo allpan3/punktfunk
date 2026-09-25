@@ -298,9 +298,9 @@ let
         && has appliance "punktfunk-scripting" "InaccessiblePaths=-%h/.config/punktfunk/key.pem";
     }
     {
-      # Everything ProtectHome=tmpfs takes away that the runner genuinely needs. Drop one of these
-      # and the runner comes up unable to authenticate or to persist. The library roots are not
-      # here: the host writes them into the unit's 50-plugin-roots.conf drop-in.
+      # Everything ProtectHome=tmpfs takes away that the runner itself needs. Drop one of these and
+      # the runner comes up unable to authenticate or persist. Library roots are not listed here:
+      # the host binds them through its 50-plugin-roots.conf drop-in.
       name = "the plugin runner keeps the paths it needs through the empty home";
       ok =
         has appliance "punktfunk-scripting" "BindPaths=-%h/.config/punktfunk/plugins"
