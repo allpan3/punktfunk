@@ -172,44 +172,54 @@ class MouseForwarder(
     }
 
     /**
-     * Captured-pointer events (the view holds [android.view.View.requestPointerCapture]): x/y ARE
-     * the relative deltas ([InputDevice.SOURCE_MOUSE_RELATIVE]), batched samples included. A
-     * captured touchpad reports absolute finger coordinates instead — not handled (the touch
-     * gesture layer is the touchpad story); returning false leaves those to the framework.
+     * Captured-pointer events (the view holds [android.view.View.requestPointerCapture]). A mouse
+     * reports [InputDevice.SOURCE_MOUSE_RELATIVE], its x/y ARE the deltas, and DOWN/UP carry that
+     * report's motion too. A touchpad reports [InputDevice.SOURCE_TOUCHPAD] with absolute finger
+     * positions; one finger moves by its [MotionEvent.AXIS_RELATIVE_X]/Y, and its clicks are
+     * buttons. Batched samples are included either way.
      */
     fun onCapturedPointer(ev: MotionEvent): Boolean {
         // A revocation or the ring is racing the release of the grab.
         if (!pointerGranted || suspended) return true
-        if (ev.actionMasked == MotionEvent.ACTION_SCROLL && ev.isFromSource(InputDevice.SOURCE_TOUCHPAD)) {
-            wheel(ev)
+        if (ev.isFromSource(InputDevice.SOURCE_TOUCHPAD)) {
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_SCROLL -> wheel(ev)
+                MotionEvent.ACTION_MOVE -> if (ev.pointerCount == 1) {
+                    moveBy(ev, MotionEvent.AXIS_RELATIVE_X, MotionEvent.AXIS_RELATIVE_Y)
+                }
+                MotionEvent.ACTION_BUTTON_PRESS -> button(ev.actionButton, true)
+                MotionEvent.ACTION_BUTTON_RELEASE -> button(ev.actionButton, false)
+            }
             return true
         }
         if (!ev.isFromSource(InputDevice.SOURCE_MOUSE_RELATIVE)) return false
         when (ev.actionMasked) {
-            MotionEvent.ACTION_MOVE -> {
-                var dx = 0f
-                var dy = 0f
-                for (i in 0 until ev.historySize) {
-                    dx += ev.getHistoricalX(i)
-                    dy += ev.getHistoricalY(i)
-                }
-                dx += ev.x
-                dy += ev.y
-                moveAccX += dx
-                moveAccY += dy
-                val ox = moveAccX.toInt() // truncate toward zero — sub-pixel remainder kept w/ sign
-                val oy = moveAccY.toInt()
-                if (ox != 0 || oy != 0) {
-                    NativeBridge.nativeSendPointerMove(handle, ox, oy)
-                    moveAccX -= ox
-                    moveAccY -= oy
-                }
-            }
+            MotionEvent.ACTION_MOVE, MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP ->
+                moveBy(ev, MotionEvent.AXIS_X, MotionEvent.AXIS_Y)
             MotionEvent.ACTION_BUTTON_PRESS -> button(ev.actionButton, true)
             MotionEvent.ACTION_BUTTON_RELEASE -> button(ev.actionButton, false)
             MotionEvent.ACTION_SCROLL -> wheel(ev)
         }
         return true
+    }
+
+    /** Relative motion off `ev`'s [axisX]/[axisY], history included, whole pixels only. */
+    private fun moveBy(ev: MotionEvent, axisX: Int, axisY: Int) {
+        var dx = ev.getAxisValue(axisX)
+        var dy = ev.getAxisValue(axisY)
+        for (i in 0 until ev.historySize) {
+            dx += ev.getHistoricalAxisValue(axisX, i)
+            dy += ev.getHistoricalAxisValue(axisY, i)
+        }
+        moveAccX += dx
+        moveAccY += dy
+        val ox = moveAccX.toInt() // truncate toward zero — sub-pixel remainder kept w/ sign
+        val oy = moveAccY.toInt()
+        if (ox != 0 || oy != 0) {
+            NativeBridge.nativeSendPointerMove(handle, ox, oy)
+            moveAccX -= ox
+            moveAccY -= oy
+        }
     }
 
     /** Ctrl+Alt+Shift+Q: release the grab, or (re-)engage it — works even when auto-capture is off. */
