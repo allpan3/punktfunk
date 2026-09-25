@@ -1116,13 +1116,19 @@ fn endpoint_container_id(endpoint_id: &str) -> Option<String> {
     container_guid_from_blob(&v.bytes)
 }
 
-/// Independent write cursors (10 ms vs 5 ms); [`Self::pop`] emits the further-ahead kind,
-/// lagging pair zeros. Latency lives in the platform ring.
+/// A kind silent this long stops holding the other back: the host gate closed its lane.
+/// 25 ms = 2.5 speaker frames.
+const LANE_LIVE: Duration = Duration::from_millis(25);
+
+/// Independent write cursors (10 ms vs 5 ms); [`Self::pop`] emits what every live kind has
+/// written, so a pair is zero only once its kind went quiet. Latency lives in the platform ring.
 pub(crate) struct QuadMixer {
     /// Interleaved 4-ch; front is next output. Length is always `ready_frames() * 4`.
     ring: std::collections::VecDeque<f32>,
     /// Per-kind write cursor in frames from the ring front (`[haptics, speaker]`, wire `kind`).
     written: [usize; 2],
+    /// Per-kind last push; live within [`LANE_LIVE`].
+    pushed: [Option<Instant>; 2],
 }
 
 impl QuadMixer {
@@ -1130,12 +1136,14 @@ impl QuadMixer {
         QuadMixer {
             ring: std::collections::VecDeque::new(),
             written: [0; 2],
+            pushed: [None; 2],
         }
     }
 
     /// Overflow drops oldest frames; both cursors shift so interleave does not skew.
-    pub(crate) fn push(&mut self, kind: u8, stereo: &[f32]) {
+    pub(crate) fn push(&mut self, kind: u8, stereo: &[f32], now: Instant) {
         let k = (kind as usize).min(1);
+        self.pushed[k] = Some(now);
         let off = if kind == PAD_AUDIO_KIND_SPEAKER { 0 } else { 2 };
         let frames = stereo.len() / 2;
         let base = self.written[k];
@@ -1159,11 +1167,16 @@ impl QuadMixer {
         self.written[0].max(self.written[1])
     }
 
-    /// Both cursors move back; a lagging kind resumes at the new front.
-    pub(crate) fn pop(&mut self, out: &mut Vec<f32>) -> usize {
-        let frames = self.ready_frames();
+    /// Frames every live kind has written; everything once none is live. Popping past a live
+    /// kind's cursor zeros its pair for that span and plays the span twice. Both cursors move
+    /// back; a lagging kind resumes at the new front.
+    pub(crate) fn pop(&mut self, out: &mut Vec<f32>, now: Instant) -> usize {
+        let frames = (0..2)
+            .filter(|&k| self.pushed[k].is_some_and(|t| now.duration_since(t) < LANE_LIVE))
+            .map(|k| self.written[k])
+            .min()
+            .unwrap_or_else(|| self.ready_frames());
         let n = frames * PAD_CHANNELS;
-        debug_assert_eq!(self.ring.len(), n);
         out.extend(self.ring.drain(..n.min(self.ring.len())));
         for w in &mut self.written {
             *w = w.saturating_sub(frames);
@@ -1284,14 +1297,14 @@ fn run(connector: &NativeClient, stop: &AtomicBool, haptics: bool, speaker: bool
         for _ in 0..plc_frames(&mut st.gaps, f.seq, st.frame_samples) {
             let n = st.frame_samples * 2;
             if let Ok(samples) = st.dec.decode_float(&[], &mut pcm[..n], false) {
-                mixer.push(f.kind, &pcm[..samples * 2]);
+                mixer.push(f.kind, &pcm[..samples * 2], Instant::now());
             }
         }
         if !f.opus.is_empty() {
             match st.dec.decode_float(&f.opus, &mut pcm, false) {
                 Ok(samples) => {
                     st.frame_samples = samples;
-                    mixer.push(f.kind, &pcm[..samples * 2]);
+                    mixer.push(f.kind, &pcm[..samples * 2], Instant::now());
                 }
                 Err(e) => tracing::debug!(error = %e, kind = f.kind, "pad-audio opus decode"),
             }
@@ -1327,7 +1340,7 @@ fn run(connector: &NativeClient, stop: &AtomicBool, haptics: bool, speaker: bool
         match &out {
             Some(o) => {
                 let mut chunk = o.take_buffer();
-                if mixer.pop(&mut chunk) > 0 {
+                if mixer.pop(&mut chunk, Instant::now()) > 0 {
                     o.push(chunk);
                 }
             }
@@ -2110,50 +2123,86 @@ mod tests {
 
     #[test]
     fn mixer_interleaves_kinds_into_quad_frames() {
+        let t = Instant::now();
         let mut m = QuadMixer::new();
-        m.push(PAD_AUDIO_KIND_SPEAKER, &[1.0, 2.0, 3.0, 4.0]);
-        m.push(PAD_AUDIO_KIND_HAPTICS, &[5.0, 6.0]);
+        m.push(PAD_AUDIO_KIND_SPEAKER, &[1.0, 2.0, 3.0, 4.0], t);
+        m.push(PAD_AUDIO_KIND_HAPTICS, &[5.0, 6.0], t);
         assert_eq!(m.ready_frames(), 2);
+        // Both live: only the frame both have written leaves.
         let mut out = Vec::new();
-        assert_eq!(m.pop(&mut out), 2);
-        assert_eq!(out, vec![1.0, 2.0, 5.0, 6.0, 3.0, 4.0, 0.0, 0.0]);
-        assert_eq!(m.ready_frames(), 0);
-        // After pop both cursors are at the front; next haptics starts a fresh frame.
-        m.push(PAD_AUDIO_KIND_HAPTICS, &[7.0, 8.0]);
+        assert_eq!(m.pop(&mut out, t), 1);
+        assert_eq!(out, vec![1.0, 2.0, 5.0, 6.0]);
+        m.push(PAD_AUDIO_KIND_HAPTICS, &[7.0, 8.0], t);
         let mut out = Vec::new();
-        assert_eq!(m.pop(&mut out), 1);
-        assert_eq!(out, vec![0.0, 0.0, 7.0, 8.0]);
+        assert_eq!(m.pop(&mut out, t), 1);
+        assert_eq!(out, vec![3.0, 4.0, 7.0, 8.0]);
+        // A lane gone quiet stops holding the other back; its pair is zero.
+        m.push(PAD_AUDIO_KIND_SPEAKER, &[9.0, 9.0], t);
+        let mut out = Vec::new();
+        assert_eq!(m.pop(&mut out, t), 0);
+        assert_eq!(m.pop(&mut out, t + LANE_LIVE), 1);
+        assert_eq!(out, vec![9.0, 9.0, 0.0, 0.0]);
+    }
+
+    /// The loop pops after every datagram. With both lanes live that must play wall time once:
+    /// popping the further-ahead kind played 20 ms per 10 ms and zeroed each pair in turn.
+    #[test]
+    fn mixer_plays_both_live_lanes_in_real_time() {
+        let t0 = Instant::now();
+        let mut m = QuadMixer::new();
+        let (hap, spk) = (vec![0.5f32; 240 * 2], vec![1.0f32; 480 * 2]);
+        let mut out = Vec::new();
+        for ms in (0..1_000u64).step_by(5) {
+            let now = t0 + Duration::from_millis(ms);
+            m.push(PAD_AUDIO_KIND_HAPTICS, &hap, now);
+            m.pop(&mut out, now);
+            if ms % 10 == 0 {
+                m.push(PAD_AUDIO_KIND_SPEAKER, &spk, now);
+                m.pop(&mut out, now);
+            }
+        }
+        let frames = out.len() / PAD_CHANNELS;
+        assert!(
+            (47_500..=48_000).contains(&frames),
+            "{frames} frames for 1 s"
+        );
+        // Past the first speaker frame, every frame carries both pairs.
+        assert!(out[480 * PAD_CHANNELS..]
+            .chunks_exact(4)
+            .all(|f| f[0] == 1.0 && f[2] == 0.5));
     }
 
     #[test]
     fn mixer_missing_kind_stays_zero() {
+        let t = Instant::now();
         let mut m = QuadMixer::new();
-        m.push(PAD_AUDIO_KIND_HAPTICS, &[0.5, -0.5, 0.25, -0.25]);
+        m.push(PAD_AUDIO_KIND_HAPTICS, &[0.5, -0.5, 0.25, -0.25], t);
         let mut out = Vec::new();
-        assert_eq!(m.pop(&mut out), 2);
+        assert_eq!(m.pop(&mut out, t), 2);
         assert_eq!(out, vec![0.0, 0.0, 0.5, -0.5, 0.0, 0.0, 0.25, -0.25]);
         let mut m = QuadMixer::new();
-        m.push(PAD_AUDIO_KIND_SPEAKER, &[0.5, -0.5]);
+        m.push(PAD_AUDIO_KIND_SPEAKER, &[0.5, -0.5], t);
         let mut out = Vec::new();
-        assert_eq!(m.pop(&mut out), 1);
+        assert_eq!(m.pop(&mut out, t), 1);
         assert_eq!(out, vec![0.5, -0.5, 0.0, 0.0]);
     }
 
     /// Depth cap: wedged output cannot grow past [`MAX_BUFFER_FRAMES`]; oldest drop, cursors shift together.
     #[test]
     fn mixer_caps_depth_dropping_oldest() {
+        let t = Instant::now();
         let mut m = QuadMixer::new();
         let chunk = vec![1.0f32; 480 * 2]; // 480 frames per push
         for _ in 0..12 {
-            m.push(PAD_AUDIO_KIND_HAPTICS, &chunk);
+            m.push(PAD_AUDIO_KIND_HAPTICS, &chunk, t);
         }
         assert_eq!(m.ready_frames(), MAX_BUFFER_FRAMES);
         // Late speaker push lands at its cursor (0 after the drops) — front of ring.
-        m.push(PAD_AUDIO_KIND_SPEAKER, &[9.0, 9.0]);
+        m.push(PAD_AUDIO_KIND_SPEAKER, &[9.0, 9.0], t);
         let mut out = Vec::new();
-        m.pop(&mut out);
+        m.pop(&mut out, t);
         assert_eq!(&out[..4], &[9.0, 9.0, 1.0, 1.0]);
-        m.push(PAD_AUDIO_KIND_HAPTICS, &chunk);
+        m.push(PAD_AUDIO_KIND_HAPTICS, &chunk, t);
         m.discard();
         assert_eq!(m.ready_frames(), 0);
     }
