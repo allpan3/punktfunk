@@ -156,6 +156,8 @@ pub struct WlrootsInjector {
     pointer: ZwlrVirtualPointerV1,
     /// Output `pointer` is bound to; `None` maps absolute motion over the whole layout.
     bound_output: Option<String>,
+    /// Aim generation [`Self::retarget`] last read the socket for an unbound name.
+    lookup_gen: u64,
     /// Buttons held on `pointer`. Released before destroy; the compositor will not.
     pressed: Vec<u32>,
     keyboard: ZwpVirtualKeyboardV1,
@@ -283,6 +285,7 @@ impl WlrootsInjector {
             globals,
             pointer,
             bound_output,
+            lookup_gen: crate::aim_gen(),
             pressed: Vec::new(),
             keyboard,
             held_keys: Vec::new(),
@@ -300,9 +303,24 @@ impl WlrootsInjector {
     /// is this sample, not the compositor's default.
     ///
     /// Match by name, never by size: `MouseMoveAbs` extent is the client's
-    /// letterboxed content rect, not the streamed mode.
+    /// letterboxed content rect, not the streamed mode. A head created since the
+    /// last read takes two roundtrips, one to bind it and one for its name; they
+    /// run once per aim generation, not per motion.
     fn retarget(&mut self) {
-        let (target, want) = resolve_target(&self.globals);
+        let mut resolved = resolve_target(&self.globals);
+        if resolved.1.is_none()
+            && crate::stream_output().is_some()
+            && self.lookup_gen != crate::aim_gen()
+        {
+            self.lookup_gen = crate::aim_gen();
+            for _ in 0..2 {
+                if self.queue.roundtrip(&mut self.globals).is_err() {
+                    break;
+                }
+            }
+            resolved = resolve_target(&self.globals);
+        }
+        let (target, want) = resolved;
         if want == self.bound_output {
             return;
         }
