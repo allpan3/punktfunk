@@ -2,7 +2,6 @@
 
 use super::setup::pick_formats;
 use super::{OverlayPipe, Presenter};
-use crate::csc::CscPass;
 use anyhow::{anyhow, Context as _, Result};
 use ash::vk;
 
@@ -158,6 +157,14 @@ impl Presenter {
         self.hdr_active
     }
 
+    /// The swapchain holds 10 bits a channel (SDR or HDR10): an overlay drawn in 8 would band.
+    pub fn ten_bit(&self) -> bool {
+        matches!(
+            self.format.format,
+            vk::Format::A2B10G10R10_UNORM_PACK32 | vk::Format::A2R10G10B10_UNORM_PACK32
+        )
+    }
+
     /// Drop back to the SDR swapchain. No-op unless HDR10 is live.
     ///
     /// Console UI is SDR and composites into whatever swapchain the last
@@ -229,7 +236,10 @@ impl Presenter {
         unsafe { ext.set_hdr_metadata(&[self.swapchain], &[md]) };
         tracing::debug!(from_host = self.hdr_meta.is_some(), "HDR metadata pushed");
     }
-    /// SDR↔HDR10 flip. Video intermediate is 10-bit: PQ in 8 bits bands.
+    /// SDR↔HDR10 flip. The video intermediate ([`super::VIDEO_FORMAT`]) keeps its format; only
+    /// its content, mapped for the old mode, is dropped. A driver that refuses the HDR10
+    /// swapchain it advertised loses `hdr10_format` for good: back to SDR, where PQ frames
+    /// tone-map.
     pub(super) fn set_hdr_mode(&mut self, window: &sdl3::video::Window, on: bool) -> Result<()> {
         let target = if on {
             self.hdr10_format.expect("caller checked availability")
@@ -239,16 +249,6 @@ impl Presenter {
         };
         tracing::info!(hdr = on, format = ?target, "switching presentation mode");
         self.quiesce_own()?;
-        self.video_format = if on {
-            vk::Format::A2B10G10R10_UNORM_PACK32
-        } else {
-            vk::Format::R8G8B8A8_UNORM
-        };
-        self.csc.destroy(&self.device); // `quiesce_own` above; only our cmd bufs reference it
-        self.csc = CscPass::new(&self.device, self.video_format)?;
-        // Planar CSC (PyroWave + software) writes the same intermediate; rebuild it too.
-        self.csc_planar.destroy(&self.device);
-        self.csc_planar = CscPass::new_planar(&self.device, self.video_format)?;
         if let Some(v) = self.video.take() {
             // SAFETY: `quiesce_own` above; GPU idle on this video image.
             unsafe {
@@ -281,6 +281,14 @@ impl Presenter {
         self.scale = crate::scale::ScalePass::new(&self.device, target.format)?;
         self.format = target;
         self.hdr_active = on;
-        self.recreate_swapchain(window)
+        match self.recreate_swapchain(window) {
+            Err(e) if on => {
+                tracing::warn!(error = %format!("{e:#}"),
+                    "HDR10 swapchain refused — staying SDR and tone-mapping PQ");
+                self.hdr10_format = None;
+                self.set_hdr_mode(window, false)
+            }
+            r => r,
+        }
     }
 }

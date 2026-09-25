@@ -52,6 +52,8 @@ pub(crate) fn purge() -> Result<Removed> {
     if audio_control::unpark_default_for_uninstall() {
         println!("restored the default audio device(s) this host had parked");
     }
+    // Voice apps pinned to a sink this sweep deletes would lose their output.
+    super::voice_route::recover_orphaned();
 
     let mut out = Removed::default();
     for inst in owned_devnodes()? {

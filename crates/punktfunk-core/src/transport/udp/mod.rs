@@ -108,6 +108,8 @@ pub struct UdpTransport {
     /// the flow membership before the socket closes. Always `None` off-Windows.
     _qos_flow: Option<super::qos::QosFlow>,
     socket: UdpSocket,
+    /// GSO asked for by the session (Linux), beside the process-wide env gate.
+    gso: std::sync::atomic::AtomicBool,
 }
 
 impl UdpTransport {
@@ -127,7 +129,13 @@ impl UdpTransport {
         Ok(UdpTransport {
             _qos_flow: qos_flow,
             socket,
+            gso: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn gso_wanted(&self) -> bool {
+        self.gso.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Wait up to `punch_timeout` for [`PUNCH_MAGIC`] from `expect_ip`, then
@@ -203,6 +211,7 @@ impl UdpTransport {
             UdpTransport {
                 _qos_flow: qos_flow,
                 socket,
+                gso: std::sync::atomic::AtomicBool::new(false),
             },
             punched,
         ))
@@ -236,6 +245,10 @@ impl Transport for UdpTransport {
     #[cfg(target_os = "linux")]
     fn send_gso(&self, packets: &[&[u8]]) -> std::io::Result<usize> {
         linux::send_gso(self, packets)
+    }
+
+    fn set_gso(&self, on: bool) {
+        self.gso.store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[cfg(target_os = "windows")]

@@ -395,11 +395,17 @@ pub fn apply_audio_policy(sessions: AudioSessions, launcher: &str) -> AudioPolic
             muted.push(s.id);
         }
     }
-    *AUDIO_POLICY.lock().unwrap() = Some(AudioPolicy {
+    let mut live = AUDIO_POLICY.lock().unwrap();
+    // Replacing a live policy inherits what it muted: the first lease to end lifts both.
+    if let Some(prev) = live.take() {
+        muted.extend(prev.muted);
+    }
+    *live = Some(AudioPolicy {
         sessions,
         launcher: launcher.to_owned(),
         muted,
     });
+    drop(live);
     tracing::info!(policy = ?sessions, launcher, "title audio policy applied");
     AudioPolicyGuard(())
 }
@@ -787,6 +793,11 @@ fn shared_path(reg: &[LiveSession], id: u64, peer: Option<std::net::IpAddr>) -> 
 /// startup-only sample expires.
 const DELIVERY_STALE: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// A sibling silent this long has left the path as far as the governor can
+/// tell, and the survivor is handed it. Shorter would read a client's own
+/// stall as a departure.
+const GROUP_DISSOLVE: std::time::Duration = std::time::Duration::from_secs(12);
+
 /// What the shared-path governor reads across the sessions of one client
 /// address, published by each session's control task on its own report cadence.
 ///
@@ -852,6 +863,14 @@ impl AbrShare {
                 .is_some_and(|at| now.saturating_duration_since(at) <= DELIVERY_STALE)
     }
 
+    /// Whether the last report is older than `after`, or never came.
+    fn silent_for(&self, now: std::time::Instant, after: std::time::Duration) -> bool {
+        self.last_delivery
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none_or(|at| now.saturating_duration_since(at) >= after)
+    }
+
     /// The ceiling this session is running under. `0` = none.
     pub fn share_kbps(&self) -> u32 {
         self.share_kbps.load(Ordering::Relaxed)
@@ -868,7 +887,9 @@ impl AbrShare {
 /// Every member computes the whole group and applies only its own, so a share
 /// is only ever sent by the task that owns the control stream it goes down.
 /// Only sessions with repeated, fresh delivery reports form the group; one
-/// capable reporter beside a legacy or stale client is left alone.
+/// capable reporter beside a legacy or stale client is left alone. A fixed or
+/// pinned session is never told anything. A survivor is handed the path once
+/// and holds no share afterwards: [`AbrShare::share_kbps`] reads `0`.
 pub fn share_for(id: u64, clocks: punktfunk_core::abr::governor::Clocks) -> Option<u32> {
     share_for_at(id, std::time::Instant::now(), clocks)
 }
@@ -882,7 +903,9 @@ fn share_for_at(
     use punktfunk_core::abr::governor;
     let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
     let me = reg.iter().find(|s| s.id == id)?;
-    if !me.counters.share.delivery_ready(now) {
+    if !me.counters.share.automatic.load(Ordering::Relaxed)
+        || !me.counters.share.delivery_ready(now)
+    {
         return None;
     }
     let peer = me.peer?;
@@ -895,19 +918,24 @@ fn share_for_at(
     let mine = group.iter().position(|s| s.id == id)?;
     let share = &me.counters.share;
     if group.len() < 2 {
-        // An incapable or stale sibling may still be consuming the path. Leave
-        // the capable session alone, but do not hand it that sibling's share.
-        if peers.len() > 1 {
+        // A sibling that stopped reporting may still be using the path: leave
+        // the standing share until every one of them has been silent long
+        // enough to have gone.
+        let silent = peers
+            .iter()
+            .filter(|s| s.id != id)
+            .all(|s| s.counters.share.silent_for(now, GROUP_DISSOLVE));
+        if !silent {
             return None;
         }
         // Alone on the path: hand over the whole of what the group proved it
-        // carried, once. The wall this session measured beside them was their
-        // residual, and nobody but this host knows they have gone.
+        // carried, once, as a ceiling. The wall this session measured beside
+        // them was their residual, and nobody but this host knows they have gone.
         let path = share.path_kbps.swap(0, Ordering::Relaxed);
         if !share.grouped.swap(false, Ordering::Relaxed) || path == 0 {
             return None;
         }
-        share.note_share(path);
+        share.note_share(0);
         tracing::info!(
             session = id,
             peer = %peer,
@@ -1666,11 +1694,54 @@ pub(crate) mod tests {
             Some(18_000),
             "all of what the two of them were carrying"
         );
+        assert_eq!(ac.share.share_kbps(), 0, "as a ceiling: nothing binds it");
         assert_eq!(
             share_for_at(a.id, ready, both_clocks()),
             None,
             "and only the once"
         );
+    }
+
+    /// A fixed-rate survivor is never handed the path: nothing may move a rate
+    /// the player set, or a PyroWave pin.
+    #[test]
+    fn a_fixed_rate_survivor_is_never_handed_the_path() {
+        let _registry = registry_lock();
+        let peer: std::net::IpAddr = "203.0.113.89".parse().unwrap();
+        let (auto, auto_c, _ar) = fake_member("phone", peer, 14_000);
+        let (fixed, fixed_c, _fr) = fake_member("pc", peer, 8_000);
+        let now = std::time::Instant::now();
+        let ready = publish_ready(&auto_c, now, true, 14_000, 10_000);
+        publish_ready(&fixed_c, now, false, 8_000, 8_000);
+        assert_eq!(share_for_at(fixed.id, ready, both_clocks()), None);
+        assert_eq!(share_for_at(auto.id, ready, both_clocks()), Some(10_000));
+        drop(auto);
+        assert_eq!(share_for_at(fixed.id, ready, both_clocks()), None);
+        assert_eq!(fixed_c.share.share_kbps(), 0);
+    }
+
+    /// A sibling silent for [`GROUP_DISSOLVE`] has gone as far as the governor
+    /// can tell: the survivor is handed the path, and the share it held goes.
+    #[test]
+    fn a_long_silent_sibling_hands_the_path_over() {
+        let _registry = registry_lock();
+        let peer: std::net::IpAddr = "203.0.113.88".parse().unwrap();
+        let (a, ac, _ar) = fake_member("phone", peer, 12_000);
+        let (_b, bc, _br) = fake_member("pc", peer, 12_000);
+        let now = std::time::Instant::now();
+        let ready = publish_ready(&ac, now, true, 12_000, 9_000);
+        publish_ready(&bc, now, true, 12_000, 9_000);
+        assert_eq!(share_for_at(a.id, ready, both_clocks()), Some(9_000));
+        let gone = ready + GROUP_DISSOLVE;
+        publish_ready(
+            &ac,
+            gone - std::time::Duration::from_millis(750),
+            true,
+            12_000,
+            9_000,
+        );
+        assert_eq!(share_for_at(a.id, gone, both_clocks()), Some(18_000));
+        assert_eq!(ac.share.share_kbps(), 0);
     }
 
     /// One address is one NAT or tunnel: each session names the others there, and an
@@ -1766,6 +1837,24 @@ pub(crate) mod tests {
             "a joiner follows the owner's picture"
         );
         assert!(!owns_live_session("eeeeeeeeeeee0011223344556677"));
+    }
+
+    /// A second lease replaces the first; the first to end lifts both, so nothing the
+    /// replaced policy muted stays muted with no policy left to lift it.
+    #[test]
+    fn a_replaced_policy_mute_still_lifts() {
+        let _registry = registry_lock();
+        let (_owner, _o) = fake_joiner("eeeeeeeeeeee", false);
+        let (_joiner, joiner) = fake_joiner("ffffffffffff", true);
+        let first = apply_audio_policy(AudioSessions::Launcher, "eeeeeeeeeeee");
+        assert!(joiner.muted.load(Ordering::SeqCst));
+        let second = apply_audio_policy(AudioSessions::All, "eeeeeeeeeeee");
+        drop(first);
+        assert!(
+            !joiner.muted.load(Ordering::SeqCst),
+            "the first lease ending lifts what either policy muted"
+        );
+        drop(second);
     }
 
     /// Unpair revokes a live session by the 12-hex fingerprint prefix

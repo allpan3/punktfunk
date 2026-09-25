@@ -65,12 +65,6 @@ WHY THE APP ASKS FOR WHAT IT ASKS FOR
 - network.server (macOS): the App Sandbox gates bind() itself. Our QUIC endpoint and UDP socket
   each bind a local port to receive host-to-client datagrams, and the demo host listens on
   127.0.0.1; without this, no video, audio or rumble arrives.
-- Accessibility (macOS, optional, never requested unprompted): "Capture system shortcuts" in
-  Settings > Input lets Cmd+Space, Cmd+Tab and Mission Control reach the remote desktop instead
-  of the Mac while the stream has captured the keyboard, as every remote-desktop app offers.
-  macOS delivers those keys to Spotlight/the Dock before any app, so only a keyboard event tap
-  receives them. The prompt appears only when the user turns the toggle on; the tap exists only
-  while a stream has the keyboard captured, and keys go to the stream, never logged or stored.
 - UIBackgroundModes "audio" (iPhone/iPad): a session carries real, audible audio from the host,
   and this keeps it alive if the user steps away briefly. Backgrounded, video decoding stops, only
   the real audio keeps rendering, and a bounded timer disconnects automatically. We never play

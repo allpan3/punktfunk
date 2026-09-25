@@ -283,7 +283,8 @@ mod session_main {
     ///
     /// Both direct and browse launches pass the result of [`trust::effective_settings`],
     /// including the resolved host preset. Zero-valued mode fields inherit the display
-    /// under the session window. `preset` names that resolution in the stats overlay.
+    /// under the session window, and `display_hdr` is that display's HDR volume (Windows).
+    /// `preset` names that resolution in the stats overlay.
     ///
     /// Capability preferences remain requests. Device and selected-output probes narrow
     /// them before they enter [`SessionParams`], so the handshake only advertises formats
@@ -300,6 +301,7 @@ mod session_main {
         launch: Option<String>,
         gamepad: &GamepadService,
         native: Mode,
+        display_hdr: Option<punktfunk_core::quic::HdrMeta>,
         force_software: Arc<AtomicBool>,
         vulkan: Option<pf_client_core::video::VulkanDecodeDevice>,
     ) -> SessionParams {
@@ -399,8 +401,7 @@ mod session_main {
         // the conversion and cover the stream with a black or corrupt layer. The peak-nits
         // environment override remains the explicit headless-test bypass.
         #[cfg(windows)]
-        let display_hdr = punktfunk_core::client::display_hdr_env_override()
-            .or_else(|| pf_client_core::video_d3d11::display_hdr_volume(window_pos()));
+        let display_hdr = punktfunk_core::client::display_hdr_env_override().or(display_hdr);
         #[cfg(windows)]
         let output_hdr = display_hdr.is_some();
         #[cfg(not(windows))]
@@ -456,14 +457,10 @@ mod session_main {
             ),
             want_444: settings.enable_444,
             // The panel's HDR volume reaches the host's virtual-display EDID so host apps
-            // tone-map to the real glass. Windows only: DXGI reads the `--window-pos`
-            // monitor (advanced-color outputs), gated on the HDR setting because an
-            // unadvertised 10-bit/HDR makes the volume noise. Linux has no portable query
-            // and keeps the host EDID; `PUNKTFUNK_CLIENT_PEAK_NITS` overrides both.
-            #[cfg(windows)]
+            // tone-map to the real glass: the window's monitor on Windows (or
+            // `PUNKTFUNK_CLIENT_PEAK_NITS`), gated on the HDR setting because an unadvertised
+            // 10-bit/HDR makes the volume noise. Linux has no portable query and sends none.
             display_hdr: hdr_enabled.then_some(display_hdr).flatten(),
-            #[cfg(not(windows))]
-            display_hdr: None,
             // The presenter renders the host cursor locally in desktop mouse mode (M2 cursor
             // channel); capture-mode sessions keep the composited cursor, so only advertise
             // when the session STARTS in desktop mode. The host gates further (Linux portal
@@ -755,42 +752,44 @@ mod session_main {
         }
     }
 
-    /// Steam Deck / RADV: Mesa gates Vulkan Video decode — the `VK_KHR_video_decode_*`
-    /// extensions AND the decode-capable queue family — behind `RADV_PERFTEST=video_decode`.
-    /// Without it the presenter's device advertises no decode queue, so `Decoder::new`'s
-    /// `auto` path can't build the Vulkan decoder and the session silently falls back to
-    /// VAAPI (whose separate-plane dmabuf import shows chroma fringing — green/yellow specks
-    /// around the cursor — on VanGogh). We want the Vulkan path, so opt in here, before the
-    /// RADV driver loads (the Vulkan instance is created later, inside `run_session`).
-    ///
-    /// RADV-only knob: ANV/NVIDIA/other drivers ignore `RADV_PERFTEST`, and a box where video
-    /// decode is already the default just no-ops. Append rather than clobber so a user's own
-    /// `RADV_PERFTEST` survives; `PUNKTFUNK_DECODER=native-vaapi` still overrides the decoder
-    /// choice (the pre-M10 `vaapi` spelling reaches the same rung — it migrates, loudly).
+    /// Mesa gates Vulkan Video decode — the `VK_KHR_video_decode_*` extensions AND the
+    /// decode-capable queue family — behind one switch per driver: RADV reads
+    /// `RADV_PERFTEST=video_decode`, ANV (Intel) `ANV_DEBUG=video-decode`. Without it the
+    /// presenter's device advertises no decode queue and `auto` falls to VAAPI, which
+    /// chroma-fringes on VanGogh and is unverified on Intel. Every other driver ignores
+    /// both, and a driver that already decodes by default no-ops. Appended, never
+    /// clobbered, so a user's own flags survive; `PUNKTFUNK_DECODER=native-vaapi` still
+    /// pins VAAPI.
     ///
     /// ⚠⚠ Called from the TOP of [`run`], ahead of the `--list-adapters` / `--probe-decode`
-    /// early exits — not merely "before `run_session` creates the instance". Those flags
-    /// create Vulkan instances of their own and RADV latches `RADV_PERFTEST` when its ICD
-    /// initialises, so a call placed after them leaves the triage tool describing a device
-    /// that cannot decode while the streaming path decodes on it.
+    /// early exits. Those create Vulkan instances of their own and Mesa latches these
+    /// variables when its ICD initialises, so a later call leaves the triage tools
+    /// describing a device that cannot decode while the streaming path decodes on it.
     #[cfg(target_os = "linux")]
-    #[allow(unsafe_code)] // the two SAFETY-commented single-threaded-startup env writes below
-    fn enable_radv_video_decode() {
-        const TOKEN: &str = "video_decode";
-        match std::env::var("RADV_PERFTEST") {
-            Ok(v) if v.split(',').any(|t| t == TOKEN) => return,
+    #[allow(unsafe_code)] // the SAFETY-commented single-threaded-startup env write below
+    fn enable_mesa_video_decode() {
+        for (var, token) in [
+            ("RADV_PERFTEST", "video_decode"),
+            ("ANV_DEBUG", "video-decode"),
+        ] {
+            let Some(value) = with_token(std::env::var(var).ok().as_deref(), token) else {
+                continue;
+            };
             // SAFETY: called at the very top of `run()`, before this process creates any
             // thread — the Vulkan loader, SDL, and the session runtime all start later.
-            Ok(v) if !v.is_empty() => unsafe {
-                std::env::set_var("RADV_PERFTEST", format!("{v},{TOKEN}"))
-            },
-            // SAFETY: as above — single-threaded startup.
-            _ => unsafe { std::env::set_var("RADV_PERFTEST", TOKEN) },
+            unsafe { std::env::set_var(var, &value) };
+            tracing::info!(var, value = %value, "opted into Mesa Vulkan Video decode");
         }
-        tracing::info!(
-            radv_perftest = %std::env::var("RADV_PERFTEST").unwrap_or_default(),
-            "opted into RADV Vulkan Video decode (Mesa gates it behind RADV_PERFTEST on the Deck)"
-        );
+    }
+
+    /// `current` with `token` appended to its comma list; `None` when it is already there.
+    #[cfg(target_os = "linux")]
+    fn with_token(current: Option<&str>, token: &str) -> Option<String> {
+        match current {
+            Some(v) if v.split(',').any(|t| t == token) => None,
+            Some(v) if !v.is_empty() => Some(format!("{v},{token}")),
+            _ => Some(token.to_owned()),
+        }
     }
 
     /// The driver's own answers about video images, printed with nothing in front of
@@ -879,10 +878,10 @@ mod session_main {
 
         // Runs before ANY Vulkan call, including the probe flags below — hence the top of
         // `run`, ahead of the early exits, so triage answers the same question the streaming
-        // path asks. Makes RADV expose its video-decode queue and extensions so the decoder's
-        // `auto` path prefers Vulkan Video over VAAPI. Windows drivers expose theirs already.
+        // path asks. Makes RADV and ANV expose their video-decode queue and extensions so the
+        // decoder's `auto` path can take Vulkan Video. Windows drivers expose theirs already.
         #[cfg(target_os = "linux")]
-        enable_radv_video_decode();
+        enable_mesa_video_decode();
 
         // `--list-adapters`: print the Vulkan physical devices' marketing names (one per
         // line, discrete first) for the desktop shells' GPU picker, then exit.
@@ -1134,7 +1133,7 @@ mod session_main {
         };
 
         let outcome =
-            pf_presenter::run_session(opts, move |gamepad, native, force_software, vulkan| {
+            pf_presenter::run_session(opts, move |gamepad, native, hdr, force_software, vulkan| {
                 session_params(
                     &settings,
                     preset_name,
@@ -1146,6 +1145,7 @@ mod session_main {
                     launch,
                     gamepad,
                     native,
+                    hdr,
                     force_software,
                     vulkan,
                 )
@@ -1194,6 +1194,24 @@ mod session_main {
                 assert_eq!(stats_tier_with(chosen, true), chosen);
                 assert_eq!(stats_tier_with(chosen, false), chosen);
             }
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_mesa_switch_is_appended_once_and_keeps_the_users_own() {
+            assert_eq!(
+                with_token(None, "video-decode").as_deref(),
+                Some("video-decode")
+            );
+            assert_eq!(
+                with_token(Some(""), "video-decode").as_deref(),
+                Some("video-decode")
+            );
+            assert_eq!(
+                with_token(Some("sync"), "video-decode").as_deref(),
+                Some("sync,video-decode")
+            );
+            assert_eq!(with_token(Some("sync,video-decode"), "video-decode"), None);
         }
 
         /// The console reads the file ONCE for its window, so a tier changed between streams

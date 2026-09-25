@@ -15,7 +15,7 @@
 //! normal key events.
 
 use super::{gs_button_to_evdev, vk_to_evdev, InputInjector};
-use crate::scroll::{ScrollBackend, ScrollMapper, ScrollOp};
+use crate::scroll::{mutter_axis_calls, ScrollBackend, ScrollMapper, ScrollOp};
 use crate::AbsoluteAnchor;
 use anyhow::{anyhow, Result};
 use ashpd::desktop::{
@@ -26,16 +26,13 @@ use ashpd::desktop::{
 };
 use ashpd::zbus;
 use futures_util::StreamExt;
-use punktfunk_core::input::{InputEvent, InputKind, PRECISE_PX_PER_DETENT, SCROLL_FLAG_PRECISE};
+use punktfunk_core::input::{InputEvent, InputKind};
 use reis::ei;
 use reis::event::{DeviceCapability, EiEvent};
 use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-
-/// Wire `code` for a horizontal scroll event (same as `gamestream::input`).
-const SCROLL_HORIZONTAL: u32 = 1;
 
 #[derive(Clone, Debug)]
 pub enum EiSource {
@@ -95,7 +92,7 @@ async fn session_main(mut rx: UnboundedReceiver<InputEvent>, source: EiSource) {
     // Closing the portal session (end of fn) closes EIS. Bound setup so an unanswered
     // approval dialog cannot hang the worker.
     let gamescope = matches!(source, EiSource::SocketPathFile(_));
-    let (keepalive, context, mut events, output_hint) = match tokio::time::timeout(
+    let (keepalive, context, mut events, output_hint, mutter) = match tokio::time::timeout(
         Duration::from_secs(30),
         connect(source),
     )
@@ -120,15 +117,19 @@ async fn session_main(mut rx: UnboundedReceiver<InputEvent>, source: EiSource) {
     state.gamescope = gamescope;
     state.scroll = ScrollMapper::new(if gamescope {
         ScrollBackend::Gamescope
+    } else if mutter.is_some() {
+        ScrollBackend::Mutter
     } else {
         ScrollBackend::Libei
     });
+    state.mutter_axis = mutter.map(mutter_axis_sender);
     // 5s: a live EIS resumes a device right after handshake. Past that the socket
     // was stale — exit so InjectorService reopens instead of swallowing every event.
     let resume_deadline = tokio::time::sleep(Duration::from_secs(5));
     tokio::pin!(resume_deadline);
     let mut resumed_once = false;
     loop {
+        let scroll_due = state.scroll.stop_due();
         tokio::select! {
             ei = events.next() => match ei {
                 Some(Ok(ev)) => {
@@ -144,6 +145,13 @@ async fn session_main(mut rx: UnboundedReceiver<InputEvent>, source: EiSource) {
                 Some(input) => state.inject(&input, &context),
                 None => { tracing::info!("libei: injector closed — ending session"); break; }
             },
+            // A held finger stop whose momentum never came goes out now.
+            _ = tokio::time::sleep_until(scroll_due.unwrap_or_else(Instant::now).into()),
+                if scroll_due.is_some() =>
+            {
+                let ops = state.scroll.flush_due(Instant::now());
+                state.exec_scroll(ops, &context);
+            }
             _ = &mut resume_deadline, if !resumed_once => {
                 tracing::warn!(
                     "libei: no input device resumed within 5s of connecting — treating the EIS \
@@ -202,22 +210,24 @@ type Connected = (
     // Relay-file "WxH" scale target when EIS advertises a degenerate region
     // (gamescope). `None` on portal/Mutter, whose regions are real.
     Option<(u32, u32)>,
+    // Mutter's RemoteDesktop session, which scroll goes through ([`mutter_axis_sender`]).
+    Option<zbus::Proxy<'static>>,
 );
 
 async fn connect(source: EiSource) -> Result<Connected> {
-    let (keepalive, stream, output_hint): (Keepalive, UnixStream, Option<(u32, u32)>) = match source
-    {
+    let (keepalive, stream, output_hint, mutter) = match source {
         EiSource::Portal => {
             let (_rd, session, fd) = connect_portal().await?;
-            (Keepalive::Portal(session), UnixStream::from(fd), None)
+            (Keepalive::Portal(session), UnixStream::from(fd), None, None)
         }
         EiSource::MutterEis => {
-            let (keepalive, fd) = connect_mutter().await?;
-            (Keepalive::Mutter(keepalive), UnixStream::from(fd), None)
+            let (keepalive, session, fd) = connect_mutter().await?;
+            let stream = UnixStream::from(fd);
+            (Keepalive::Mutter(keepalive), stream, None, Some(session))
         }
         EiSource::SocketPathFile(file) => {
             let (stream, hint) = connect_socket_file(&file).await?;
-            (Keepalive::Socket, stream, hint)
+            (Keepalive::Socket, stream, hint, None)
         }
     };
     let context = ei::Context::new(stream).map_err(|e| anyhow!("reis EI context: {e}"))?;
@@ -232,7 +242,30 @@ async fn connect(source: EiSource) -> Result<Connected> {
         anyhow!("EI handshake timed out (EIS server not responding — stale/half-ready socket?)")
     })?
     .map_err(|e| anyhow!("EI handshake: {e}"))?;
-    Ok((keepalive, context, events, output_hint))
+    Ok((keepalive, context, events, output_hint, mutter))
+}
+
+/// One task sends every `NotifyPointerAxis` in order: a stop must not pass the
+/// deltas before it. Mutter accepts the call only from the session's own
+/// connection, which `session` rides. Ends when the sender drops.
+fn mutter_axis_sender(session: zbus::Proxy<'static>) -> UnboundedSender<(f64, f64, u32)> {
+    let (tx, mut rx) = unbounded_channel::<(f64, f64, u32)>();
+    tokio::spawn(async move {
+        // Mutter makes the session's pointer on first use and re-enters the focused
+        // surface while it does; a scroll in that gap is lost. Make it now.
+        let _ = session
+            .call_noreply("NotifyPointerMotionRelative", &(0.0f64, 0.0f64))
+            .await;
+        let mut warned = false;
+        while let Some(call) = rx.recv().await {
+            if let Err(e) = session.call_noreply("NotifyPointerAxis", &call).await {
+                if !std::mem::replace(&mut warned, true) {
+                    tracing::warn!(error = %e, "libei: scroll did not reach Mutter's NotifyPointerAxis");
+                }
+            }
+        }
+    });
+    tx
 }
 
 async fn connect_portal() -> Result<(
@@ -275,8 +308,9 @@ async fn connect_portal() -> Result<(
 
 /// EIS fd from Mutter's direct `org.gnome.Mutter.RemoteDesktop` (`CreateSession` →
 /// `Start` → `ConnectToEIS`). No portal approval. Keep-alive owns the D-Bus
-/// connection + session; dropping it tears the Mutter session down and closes EIS.
-async fn connect_mutter() -> Result<(Box<dyn Send>, std::os::fd::OwnedFd)> {
+/// connection + session; dropping it, and the session proxy returned beside it,
+/// tears the Mutter session down and closes EIS.
+async fn connect_mutter() -> Result<(Box<dyn Send>, zbus::Proxy<'static>, std::os::fd::OwnedFd)> {
     use zbus::zvariant::{OwnedObjectPath, Value};
     let conn = zbus::Connection::session()
         .await
@@ -311,7 +345,12 @@ async fn connect_mutter() -> Result<(Box<dyn Send>, std::os::fd::OwnedFd)> {
         .await
         .map_err(|e| anyhow!("Mutter RemoteDesktop.Session.ConnectToEIS: {e}"))?;
     tracing::info!("libei: connected to Mutter's direct RemoteDesktop EIS (no portal approval)");
-    Ok((Box::new((conn, session)), std::os::fd::OwnedFd::from(fd)))
+    let axis = session.clone();
+    Ok((
+        Box::new((conn, session)),
+        axis,
+        std::os::fd::OwnedFd::from(fd),
+    ))
 }
 
 /// Poll `file` for the EIS socket path (gamescope relays `LIBEI_SOCKET` there), then
@@ -385,14 +424,16 @@ async fn connect_socket_file(file: &std::path::Path) -> Result<(UnixStream, Opti
 /// 1. [`AbsoluteAnchor::mapping_id`] — protocol key correlating a region with a stream.
 /// 2. Anchor origin — two outputs can share a size, never a top-left. A mirrored
 ///    physical monitor's region is not the client's size (`design/per-monitor-portal-capture.md`).
-/// 3. Streamed mode size — right for a client-sized virtual output, ambiguous once
-///    two heads share a mode.
+/// 3. The streamed head's mode (`extent`, [`crate::stream_extent`]), then the event's own
+///    `w`×`h` — ambiguous once two heads share a mode. The event's size alone is the
+///    client's rect: a GameStream window the size of the operator's monitor lands there.
 /// 4. `first()`.
 ///
 /// An unmatched anchor falls through: the region set is the truth. The caller logs
 /// the miss ([`anchor_missed`]).
 fn region_for_mode<'a>(
     regions: &'a [reis::event::Region],
+    extent: Option<(u16, u16)>,
     w: f32,
     h: f32,
     anchor: Option<&AbsoluteAnchor>,
@@ -413,13 +454,18 @@ fn region_for_mode<'a>(
             }
         }
     }
-    regions
-        .iter()
-        .find(|r| r.width as f32 == w && r.height as f32 == h)
-        // Display scale shrinks the EI region to logical pixels (Mutter: 1280×800
-        // at 1.5 → 853×533). Exact size then misses; without this rung we take
-        // `regions.first()` — the wrong monitor whenever another region sorts first.
-        .or_else(|| regions.iter().find(|r| scaled_region_match(r, w, h)))
+    let by_size = |w: f32, h: f32| {
+        regions
+            .iter()
+            .find(|r| r.width as f32 == w && r.height as f32 == h)
+            // Display scale shrinks the EI region to logical pixels (Mutter: 1280×800
+            // at 1.5 → 853×533). Exact size then misses; without this rung we take
+            // `regions.first()` — the wrong monitor whenever another region sorts first.
+            .or_else(|| regions.iter().find(|r| scaled_region_match(r, w, h)))
+    };
+    extent
+        .and_then(|(ew, eh)| by_size(f32::from(ew), f32::from(eh)))
+        .or_else(|| by_size(w, h))
         .or_else(|| regions.first())
 }
 
@@ -508,10 +554,10 @@ struct EiState {
     output_hint: Option<(u32, u32)>,
     /// Connected through gamescope's relayed socket, whose EIS counts scroll in clicks.
     gamescope: bool,
-    /// Sub-v120 remainder of repriced precise scroll, `[horizontal, vertical]`.
-    scroll_rem: [i32; 2],
-    /// Normalized-scroll lowering; the backend inside follows `gamescope`.
+    /// Scroll lowering; the backend inside follows the EIS source.
     scroll: ScrollMapper,
+    /// Mutter only: scroll goes to the session's `NotifyPointerAxis`, never to EIS.
+    mutter_axis: Option<UnboundedSender<(f64, f64, u32)>>,
 }
 
 /// Last-warned unmatched anchor, so a sticky miss logs once per change rather
@@ -546,25 +592,9 @@ fn sane_region(r: &reis::event::Region) -> bool {
     r.width > 0 && r.height > 0 && r.width <= 16_384 && r.height <= 16_384
 }
 
-/// v120 for gamescope, whose EIS turns any scroll into wheel clicks (`wlserver_mousewheel`
-/// sends value × 120), so a px delta of 10 is ten clicks. A wheel's wire value is already v120.
-/// A precise one is a distance at [`PRECISE_PX_PER_DETENT`] px per detent, repriced to the
-/// clicks it buys at [`crate::kwin_fake_input::PRECISE_CLICK_PX`]. `rem` keeps the remainder so
-/// a slow drag still scrolls.
-fn gamescope_v120(rem: &mut i32, x: i32, precise: bool) -> i32 {
-    if !precise {
-        return x;
-    }
-    let click_px = crate::kwin_fake_input::PRECISE_CLICK_PX as i64;
-    let num = i64::from(*rem) + i64::from(x) * PRECISE_PX_PER_DETENT as i64;
-    let v120 = num / click_px;
-    *rem = (num - v120 * click_px) as i32;
-    v120.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
-}
-
 /// Execute a normalized-scroll plan on an `ei::Scroll` interface: continuous
 /// and discrete deltas, stops, and the plan's own frame boundaries. Shared by
-/// [`EiState::inject`] and [`EiState::release_all`].
+/// [`EiState::inject`] and [`EiState::exec_scroll`].
 fn exec_scroll_ops(s: &ei::Scroll, dev: &ei::Device, serial: u32, ops: Vec<ScrollOp>) {
     for op in ops {
         match op {
@@ -631,8 +661,31 @@ impl EiState {
             degraded_touch: None,
             output_hint: None,
             gamescope: false,
-            scroll_rem: [0; 2],
             scroll: ScrollMapper::new(ScrollBackend::Libei),
+            mutter_axis: None,
+        }
+    }
+
+    /// Run a scroll plan where this backend scrolls: Mutter's session call, or
+    /// the EIS scroll device.
+    fn exec_scroll(&mut self, ops: Vec<ScrollOp>, ctx: &ei::Context) {
+        if ops.is_empty() {
+            return;
+        }
+        if let Some(tx) = &self.mutter_axis {
+            for call in mutter_axis_calls(&ops) {
+                let _ = tx.send(call);
+            }
+            return;
+        }
+        let Some(idx) = self.device_for(DeviceCapability::Scroll) else {
+            return;
+        };
+        let dev = self.devices[idx].device.device().clone();
+        self.ensure_emulating(idx, &dev);
+        if let Some(s) = self.devices[idx].device.interface::<ei::Scroll>() {
+            exec_scroll_ops(&s, &dev, self.last_serial, ops);
+            let _ = ctx.flush();
         }
     }
 
@@ -677,16 +730,7 @@ impl EiState {
         for id in touches {
             self.inject(&release(InputKind::TouchUp, id), ctx);
         }
-        if !scroll_ops.is_empty() {
-            if let Some(idx) = self.device_for(DeviceCapability::Scroll) {
-                let dev = self.devices[idx].device.device().clone();
-                self.ensure_emulating(idx, &dev);
-                if let Some(s) = self.devices[idx].device.interface::<ei::Scroll>() {
-                    exec_scroll_ops(&s, &dev, self.last_serial, scroll_ops);
-                    let _ = ctx.flush();
-                }
-            }
-        }
+        self.exec_scroll(scroll_ops, ctx);
     }
 
     fn handle_ei(&mut self, ev: EiEvent, ctx: &ei::Context) {
@@ -861,6 +905,11 @@ impl EiState {
         let first = self.seen_kinds & bit == 0;
         self.seen_kinds |= bit;
         let loud = first || n <= 5 || n % 600 == 0;
+        if self.mutter_axis.is_some() && cap == DeviceCapability::Scroll {
+            let ops = self.scroll.plan(ev);
+            self.exec_scroll(ops, ctx);
+            return;
+        }
         let Some(idx) = self.device_for(cap) else {
             if loud {
                 tracing::warn!(
@@ -909,8 +958,8 @@ impl EiState {
                         // region. `sane_region` rejects gamescope's INT32_MAX "raw"
                         // region (a center tap would become x≈1e9). Else output hint,
                         // then raw client pixels.
-                        let nx = (ev.x as f32 / w).clamp(0.0, 1.0);
-                        let ny = (ev.y as f32 / h).clamp(0.0, 1.0);
+                        let nx = (ev.x as f32 / w).clamp(0.0, crate::ABS_EDGE);
+                        let ny = (ev.y as f32 / h).clamp(0.0, crate::ABS_EDGE);
                         let anchor = crate::absolute_anchor();
                         if let Some(a) = anchor
                             .as_ref()
@@ -918,23 +967,25 @@ impl EiState {
                         {
                             warn_anchor_miss(a, slot.regions());
                         }
-                        let (x, y) = match region_for_mode(slot.regions(), w, h, anchor.as_ref())
-                            .filter(|r| sane_region(r))
-                        {
-                            Some(region) => {
-                                note_abs_region(region, anchor.as_ref());
-                                (
-                                    region.x as f32 + nx * region.width as f32,
-                                    region.y as f32 + ny * region.height as f32,
-                                )
-                            }
-                            // Degenerate/absent region: scale into the relay-file
-                            // output hint; raw client pixels as last resort.
-                            None => match self.output_hint {
-                                Some((ow, oh)) => (nx * ow as f32, ny * oh as f32),
-                                None => (ev.x as f32, ev.y as f32),
-                            },
-                        };
+                        let extent = crate::stream_extent();
+                        let (x, y) =
+                            match region_for_mode(slot.regions(), extent, w, h, anchor.as_ref())
+                                .filter(|r| sane_region(r))
+                            {
+                                Some(region) => {
+                                    note_abs_region(region, anchor.as_ref());
+                                    (
+                                        region.x as f32 + nx * region.width as f32,
+                                        region.y as f32 + ny * region.height as f32,
+                                    )
+                                }
+                                // Degenerate/absent region: scale into the relay-file
+                                // output hint; raw client pixels as last resort.
+                                None => match self.output_hint {
+                                    Some((ow, oh)) => (nx * ow as f32, ny * oh as f32),
+                                    None => (ev.x as f32, ev.y as f32),
+                                },
+                            };
                         p.motion_absolute(x, y);
                     }
                     _ => emitted = false,
@@ -953,49 +1004,10 @@ impl EiState {
                     _ => emitted = false,
                 }
             }
-            InputKind::MouseScroll => match slot.interface::<ei::Scroll>() {
-                Some(s) if self.gamescope => {
-                    // gamescope counts every scroll in wheel clicks, a px delta included, so
-                    // it gets v120 alone ([`gamescope_v120`]). Vertical is negated.
-                    let horizontal = ev.code == SCROLL_HORIZONTAL;
-                    let precise = ev.flags & SCROLL_FLAG_PRECISE != 0;
-                    let rem = &mut self.scroll_rem[usize::from(!horizontal)];
-                    match gamescope_v120(rem, ev.x, precise) {
-                        0 => {}
-                        v120 if horizontal => s.scroll_discrete(v120, 0),
-                        v120 => s.scroll_discrete(0, -v120),
-                    }
-                }
-                Some(s) => {
-                    // Wire `x` is WHEEL_DELTA(120); vertical is negated. A precise delta is a
-                    // distance, so it gets the continuous axis ALONE — a discrete step would
-                    // cost the app ~3 lines per 10 px of finger. A wheel keeps both: Mutter
-                    // floors a sub-detent delta to zero without the px axis.
-                    let precise = ev.flags & SCROLL_FLAG_PRECISE != 0;
-                    let px_per_detent = if precise {
-                        PRECISE_PX_PER_DETENT as f32
-                    } else {
-                        15.0
-                    };
-                    let px = ev.x as f32 / 120.0 * px_per_detent;
-                    let steps = if precise { 0 } else { ev.x };
-                    if ev.code == SCROLL_HORIZONTAL {
-                        if steps != 0 {
-                            s.scroll_discrete(steps, 0);
-                        }
-                        s.scroll(px, 0.0);
-                    } else {
-                        if steps != 0 {
-                            s.scroll_discrete(0, -steps);
-                        }
-                        s.scroll(0.0, -px);
-                    }
-                }
-                None => emitted = false,
-            },
-            // The plan already carries ei's framing rules: a Begin-cancel gets
-            // its own frame and a stop never shares one with a nonzero delta.
-            InputKind::Scroll => match slot.interface::<ei::Scroll>() {
+            // Legacy and normalized scroll share the mapper. The plan carries
+            // ei's framing rules: a Begin-cancel gets its own frame and a stop
+            // never shares one with a nonzero delta.
+            InputKind::MouseScroll | InputKind::Scroll => match slot.interface::<ei::Scroll>() {
                 Some(s) => {
                     exec_scroll_ops(&s, &dev, self.last_serial, self.scroll.plan(ev));
                     emitted = false; // plan Frame ops did the framing
@@ -1026,26 +1038,28 @@ impl EiState {
                 let h = (ev.flags & 0xffff) as f32;
                 match slot.interface::<ei::Touchscreen>() {
                     Some(t) if w > 0.0 && h > 0.0 => {
-                        let nx = (ev.x as f32 / w).clamp(0.0, 1.0);
-                        let ny = (ev.y as f32 / h).clamp(0.0, 1.0);
+                        let nx = (ev.x as f32 / w).clamp(0.0, crate::ABS_EDGE);
+                        let ny = (ev.y as f32 / h).clamp(0.0, crate::ABS_EDGE);
                         // Same region ladder as MouseMoveAbs so touch and pointer
                         // land on the same monitor.
                         let anchor = crate::absolute_anchor();
-                        let (x, y) = match region_for_mode(slot.regions(), w, h, anchor.as_ref())
-                            .filter(|r| sane_region(r))
-                        {
-                            Some(region) => {
-                                note_abs_region(region, anchor.as_ref());
-                                (
-                                    region.x as f32 + nx * region.width as f32,
-                                    region.y as f32 + ny * region.height as f32,
-                                )
-                            }
-                            None => match self.output_hint {
-                                Some((ow, oh)) => (nx * ow as f32, ny * oh as f32),
-                                None => (ev.x as f32, ev.y as f32),
-                            },
-                        };
+                        let extent = crate::stream_extent();
+                        let (x, y) =
+                            match region_for_mode(slot.regions(), extent, w, h, anchor.as_ref())
+                                .filter(|r| sane_region(r))
+                            {
+                                Some(region) => {
+                                    note_abs_region(region, anchor.as_ref());
+                                    (
+                                        region.x as f32 + nx * region.width as f32,
+                                        region.y as f32 + ny * region.height as f32,
+                                    )
+                                }
+                                None => match self.output_hint {
+                                    Some((ow, oh)) => (nx * ow as f32, ny * oh as f32),
+                                    None => (ev.x as f32, ev.y as f32),
+                                },
+                            };
                         if ev.kind == InputKind::TouchDown {
                             t.down(ev.code, x, y);
                         } else {
@@ -1116,18 +1130,6 @@ mod tests {
         }
     }
 
-    /// A wheel passes through. A 10 px drag (wire 120) is a sixth of a 60 px click — 20 v120,
-    /// not the 1200 gamescope makes of a px delta. Sub-unit drags accumulate, never vanish.
-    #[test]
-    fn gamescope_scroll_is_priced_in_clicks() {
-        let mut rem = 0;
-        assert_eq!(gamescope_v120(&mut rem, 120, false), 120);
-        assert_eq!(gamescope_v120(&mut rem, 120, true), 20);
-        let slow: i32 = (0..6).map(|_| gamescope_v120(&mut rem, 1, true)).sum();
-        assert_eq!((slow, rem), (1, 0));
-        assert_eq!(gamescope_v120(&mut rem, -120, true), -20);
-    }
-
     /// Two heads at the same size: size matching is a coin flip. Origin picks.
     #[test]
     fn the_origin_disambiguates_two_same_size_monitors() {
@@ -1139,12 +1141,29 @@ mod tests {
             origin: Some((1920, 0)),
             mapping_id: None,
         };
-        let picked = region_for_mode(&regions, 1920.0, 1080.0, Some(&anchor)).unwrap();
+        let picked = region_for_mode(&regions, None, 1920.0, 1080.0, Some(&anchor)).unwrap();
         assert_eq!((picked.x, picked.y), (1920, 0));
         // No anchor takes the first same-sized region — required for the
         // client-sized virtual-output path.
-        let picked = region_for_mode(&regions, 1920.0, 1080.0, None).unwrap();
+        let picked = region_for_mode(&regions, None, 1920.0, 1080.0, None).unwrap();
         assert_eq!((picked.x, picked.y), (0, 0));
+    }
+
+    /// A GameStream client sends its own window rect, which can be the operator's monitor size.
+    /// The streamed head's mode picks first; the event's size is the fallback.
+    #[test]
+    fn the_streamed_mode_outranks_the_client_rect() {
+        let regions = [
+            region(0, 0, 1920, 1080, None),    // the operator's monitor
+            region(1920, 0, 3840, 2160, None), // the streamed head
+        ];
+        let picked = region_for_mode(&regions, Some((3840, 2160)), 1920.0, 1080.0, None).unwrap();
+        assert_eq!(picked.x, 1920);
+        let picked = region_for_mode(&regions, None, 1920.0, 1080.0, None).unwrap();
+        assert_eq!(picked.x, 0);
+        // A published mode no region matches falls back to the event's size.
+        let picked = region_for_mode(&regions, Some((1280, 720)), 3840.0, 2160.0, None).unwrap();
+        assert_eq!(picked.x, 1920);
     }
 
     /// `mapping_id` outranks origin: a stale/rounded origin must not override
@@ -1159,7 +1178,7 @@ mod tests {
             origin: Some((0, 0)),
             mapping_id: Some("head-b".into()),
         };
-        let picked = region_for_mode(&regions, 1920.0, 1080.0, Some(&anchor)).unwrap();
+        let picked = region_for_mode(&regions, None, 1920.0, 1080.0, Some(&anchor)).unwrap();
         assert_eq!(picked.mapping_id.as_deref(), Some("head-b"));
     }
 
@@ -1172,20 +1191,20 @@ mod tests {
             region(1462, 0, 1920, 1080, None), // physical
             region(3382, 0, 853, 533, None),   // 1280×800 at 1.5
         ];
-        let picked = region_for_mode(&regions, 1280.0, 800.0, None).unwrap();
+        let picked = region_for_mode(&regions, None, 1280.0, 800.0, None).unwrap();
         assert_eq!((picked.width, picked.height), (853, 533));
         let regions = [
             region(0, 0, 1920, 1080, None),
             region(1920, 0, 640, 400, None),
         ];
-        let picked = region_for_mode(&regions, 1280.0, 800.0, None).unwrap();
+        let picked = region_for_mode(&regions, None, 1280.0, 800.0, None).unwrap();
         assert_eq!((picked.width, picked.height), (640, 400));
         // Wrong aspect is not a consistent scale — fallback stays `regions.first()`.
         let regions = [
             region(0, 0, 1000, 1000, None),
             region(1000, 0, 640, 200, None),
         ];
-        let picked = region_for_mode(&regions, 1280.0, 800.0, None).unwrap();
+        let picked = region_for_mode(&regions, None, 1280.0, 800.0, None).unwrap();
         assert_eq!((picked.width, picked.height), (1000, 1000));
     }
 
@@ -1200,7 +1219,7 @@ mod tests {
             origin: Some((1920, 0)),
             mapping_id: None,
         };
-        let picked = region_for_mode(&regions, 1280.0, 720.0, Some(&anchor)).unwrap();
+        let picked = region_for_mode(&regions, None, 1280.0, 720.0, Some(&anchor)).unwrap();
         assert_eq!((picked.width, picked.height), (3840, 2160));
     }
 
@@ -1213,7 +1232,7 @@ mod tests {
             mapping_id: None,
         };
         assert!(anchor_missed(&regions, Some(&anchor)));
-        let picked = region_for_mode(&regions, 1920.0, 1080.0, Some(&anchor)).unwrap();
+        let picked = region_for_mode(&regions, None, 1920.0, 1080.0, Some(&anchor)).unwrap();
         assert_eq!((picked.x, picked.y), (0, 0), "fell back to the size match");
         let ok = AbsoluteAnchor {
             origin: Some((0, 0)),
@@ -1232,7 +1251,7 @@ mod tests {
             mapping_id: None,
         };
         assert!(anchor_missed(&regions, Some(&anchor)));
-        let picked = region_for_mode(&regions, 1920.0, 1080.0, Some(&anchor)).unwrap();
+        let picked = region_for_mode(&regions, None, 1920.0, 1080.0, Some(&anchor)).unwrap();
         assert_eq!((picked.x, picked.y), (0, 0));
     }
 

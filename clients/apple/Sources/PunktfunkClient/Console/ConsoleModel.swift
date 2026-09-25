@@ -7,6 +7,7 @@
 
 import Combine
 import Foundation
+import GameController
 import Metal
 import PunktfunkKit
 import PunktfunkShared
@@ -14,10 +15,14 @@ import SwiftUI
 
 @MainActor
 final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
-    /// What the console asks the app to do — the closures `GamepadHomeView` already took.
+    /// What the console asks the app to do: connect, launch, wake, pair.
     struct Actions {
         var connect: (StoredHost, PresetSelection) -> Void
         var connectDiscovered: (DiscoveredHost) -> Void
+        /// The Pair screen's "Request access": the long approval dial. A discovered host is
+        /// saved first.
+        var requestAccess: (StoredHost) -> Void
+        var requestAccessDiscovered: (DiscoveredHost) -> Void
         var launchTitle: (LibraryTarget, String) -> Void
         var connectShelf: (LibraryTarget) -> Void
         var wakeOnly: (StoredHost) -> Void
@@ -41,25 +46,47 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
     let actions: Actions
     /// The pairing ceremony the console's PIN screen drives.
     let ceremony = PairCeremony()
-    /// A screen the app owns and the console asked for (`PlatformScreen`), by id. The shell
-    /// holds its own input while one is up; the pad poller is ours to hold.
-    @Published var platformScreen: String? {
+    private let pads = GamepadMenuInput(manager: .shared)
+    private let haptics = MenuHaptics(manager: .shared)
+    /// When the pad last drove the console. A pulse from a remote, keyboard or finger is
+    /// felt by nobody holding the pad, so it stays silent.
+    private var padInputAt: TimeInterval = 0
+    /// A console field the system keyboard is typing into (Apple TV). The pad rests meanwhile:
+    /// on a TV it drives the keyboard through the focus engine.
+    @Published var systemEntry: SystemEntry? {
         didSet {
-            if platformScreen == nil { pads.start() } else { pads.stop() }
+            guard (systemEntry == nil) != (oldValue == nil) else { return }
+            if systemEntry == nil { pads.start() } else { pads.stop() }
         }
     }
-    private let pads = GamepadMenuInput(manager: .shared)
+    /// The field the console named just before it raised `editing`.
+    private var openedField: SystemEntry?
+    /// Sends the pad's reading while the console's input test is up; the menu poller rests.
+    private var padTestTimer: Timer?
+
+    struct SystemEntry: Identifiable, Equatable {
+        let id = UUID()
+        let label: String
+        let text: String
+        let digits: Bool
+    }
+
+    /// Open prompts by id, each with what its answer does.
+    private var prompts: [String: (Int?) -> Void] = [:]
     private var watching: [AnyCancellable] = []
     /// The shelf the console has open, so a fetch knows whose catalog it is filling.
     private var shelf: StoredHost?
     var fetching: Task<Void, Never>?
+    /// The posters of the last list fetch; a new fetch cancels it.
+    var artTask: Task<Void, Never>?
 
     init?(entry: StoredHost?, pin: StreamPreset?, store: HostStore, discovery: HostDiscovery,
           presets: PresetStore, power: HostPowerStore, nowPlaying: NowPlayingStore,
           waker: HostWaker, actions: Actions) {
         guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue(),
             let bridge = ConsoleBridge(
-                options: Self.options(entry: entry, pin: pin, presets: presets.presets),
+                options: Self.options(
+                    entry: entry, pin: pin, presets: presets.presets, hosts: store.hosts),
                 device: device, queue: queue)
         else { return nil }
         self.device = device
@@ -83,7 +110,7 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
         pushHosts()
         pushPresets()
         pushKnownHosts()
-        bridge.push(.settings, ConsoleSettings.json())
+        bridge.push(.settings, ConsoleJSON.string(Self.settings(store.hosts)))
         discovery.start()
         pads.start()
         for object in [store.objectWillChange, presets.objectWillChange, power.objectWillChange,
@@ -101,11 +128,27 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
             presets.objectWillChange.receive(on: RunLoop.main).sink { [weak self] _ in
                 self?.pushPresets()
             })
+        pushPads()
+        watching.append(
+            GamepadManager.shared.objectWillChange.receive(on: RunLoop.main).sink { [weak self] _ in
+                self?.pushPads()
+            })
+        let plugs: [Notification.Name] = [
+            .GCKeyboardDidConnect, .GCKeyboardDidDisconnect, .GCMouseDidConnect,
+            .GCMouseDidDisconnect, .GCControllerDidConnect, .GCControllerDidDisconnect,
+        ]
+        for name in plugs {
+            watching.append(
+                NotificationCenter.default.publisher(for: name).receive(on: RunLoop.main)
+                    .sink { [weak self] _ in self?.pushPads() })
+        }
     }
 
     func detach() {
         watching.removeAll()
+        padTest(false)
         pads.stop()
+        haptics.stop()
         fetching?.cancel()
         // The touch UI runs its own browse; two subscribers would keep the radio up between them.
         discovery.stop()
@@ -116,9 +159,23 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
         bridge.push(.navigate, ConsoleJSON.entry(shelf.host, pin: pin, presets: presets.presets))
     }
 
-    /// Hold the pad while something the console did not draw is up.
-    func suspend(_ held: Bool) {
-        if held { pads.stop() } else { pads.start() }
+    /// Open the console's Pair screen for `host`: a pairing the app was asked for elsewhere.
+    func pair(_ host: StoredHost) {
+        bridge.push(.navigate, ConsoleJSON.pairEntry(host, presets: presets.presets))
+    }
+
+    /// Ask in the console instead of a system alert a pad cannot answer. `answer` gets the
+    /// chosen index, or nil for Back.
+    func prompt(
+        id: String, title: String, message: String, choices: [String],
+        answer: @escaping (Int?) -> Void
+    ) {
+        prompts[id] = answer
+        bridge.push(.prompt, ConsoleJSON.prompt(id: id, title: title, message: message, choices: choices))
+    }
+
+    func answerPrompt(id: String, choice: Int?) {
+        prompts.removeValue(forKey: id)?(choice)
     }
 
     /// Where the session the console asked for stands, so the takeover can narrate it.
@@ -137,18 +194,44 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
 
     // MARK: - what the app pushes
 
-    private static func options(entry: StoredHost?, pin: StreamPreset?, presets: [StreamPreset])
-        -> String
-    {
+    /// The settings document with each saved host's favorites under `favorites.<fp>`, where
+    /// the console reads them; `LibraryFavorites` keeps them by host record.
+    private static func settings(_ hosts: [StoredHost]) -> [String: Any] {
+        var doc = ConsoleSettings.document()
+        for host in hosts {
+            guard let fp = host.pinnedSHA256?.map({ String(format: "%02x", $0) }).joined()
+            else { continue }
+            let ids = LibraryFavorites.shared.ids(for: host.id.uuidString)
+            doc["favorites.\(fp)"] = ids.isEmpty ? nil : ids
+        }
+        return doc
+    }
+
+    /// The console saved favorites: back into `LibraryFavorites`, by record.
+    private func applyFavorites(_ doc: [String: Any]) {
+        for host in store.hosts {
+            guard let fp = host.pinnedSHA256?.map({ String(format: "%02x", $0) }).joined()
+            else { continue }
+            let ids = doc["favorites.\(fp)"] as? [String] ?? []
+            LibraryFavorites.shared.set(ids, host: host.id.uuidString)
+        }
+    }
+
+    private static func options(
+        entry: StoredHost?, pin: StreamPreset?, presets: [StreamPreset], hosts: [StoredHost]
+    ) -> String {
         var options: [String: Any] = [
             "device_name": deviceName,
             "gpu_cache_bytes": gpuCacheBytes,
             // Every Apple platform keeps an interface to fall back to, so the console's own
             // off switch always has somewhere to land.
             "fallback_ui": true,
+            "tv": isTV,
+            // tvOS types through its own keyboard, where iPhone typing and dictation live.
+            "system_keyboard": isTV,
             "av1_ok": AV1.hardwareDecodeSupported,
             "pyrowave_ok": MetalWaveletDecoder.supported,
-            "settings": ConsoleSettings.document(),
+            "settings": settings(hosts),
             "presets": presets.map { ["id": $0.id, "name": $0.name, "overrides": [:] as [String: Any]] },
         ]
         if let screen = screenSize {
@@ -162,6 +245,14 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
             options["entry"] = row
         }
         return ConsoleJSON.string(options)
+    }
+
+    private static var isTV: Bool {
+        #if os(tvOS)
+        return true
+        #else
+        return false
+        #endif
     }
 
     private static var deviceName: String {
@@ -211,6 +302,65 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
 
     private func pushPresets() { bridge.push(.presets, ConsoleJSON.presets(presets.presets)) }
 
+    /// The connected pads, for the Players tab and the legend's chip.
+    private func pushPads() {
+        let m = GamepadManager.shared
+        let forwarded = Set(m.forwarded.map(\.id))
+        let pad = { (c: GamepadManager.DiscoveredController) in
+            ConsoleJSON.Pad(c, forwarded: forwarded.contains(c.id))
+        }
+        var others: [(name: String, kind: String)] = []
+        if let keyboard = GCKeyboard.coalesced {
+            others.append((keyboard.vendorName ?? "Keyboard", "keyboard"))
+        }
+        others += GCMouse.mice().map { ($0.vendorName ?? "Mouse", "mouse") }
+        // A controller with no extended profile is a remote: the Siri Remote on a TV.
+        others += GCController.controllers()
+            .filter { $0.extendedGamepad == nil && $0.microGamepad != nil }
+            .map { ($0.vendorName ?? "Remote", "remote") }
+        bridge.push(
+            .pads,
+            ConsoleJSON.pads(m.controllers.map(pad), active: m.active.map(pad), others: others))
+    }
+
+    /// The console's input test is up (`true`) or gone. While up, the pad's every button and
+    /// axis goes to the console at 30 Hz, and the pad moves no menu.
+    func padTest(_ on: Bool) {
+        padTestTimer?.invalidate()
+        padTestTimer = nil
+        guard on else {
+            if systemEntry == nil { pads.start() }
+            return
+        }
+        pads.stop()
+        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.pushPadTest() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        padTestTimer = timer
+    }
+
+    private func pushPadTest() {
+        guard let g = GamepadManager.shared.active?.controller.extendedGamepad else { return }
+        let buttons: [(String, GCControllerButtonInput?)] = [
+            ("A", g.buttonA), ("B", g.buttonB), ("X", g.buttonX), ("Y", g.buttonY),
+            ("LB", g.leftShoulder), ("RB", g.rightShoulder),
+            ("LT", g.leftTrigger), ("RT", g.rightTrigger),
+            ("Back", g.buttonOptions), ("Start", g.buttonMenu), ("Guide", g.buttonHome),
+            ("LS", g.leftThumbstickButton), ("RS", g.rightThumbstickButton),
+            ("Up", g.dpad.up), ("Down", g.dpad.down), ("Left", g.dpad.left),
+            ("Right", g.dpad.right),
+        ]
+        // GameController's +y is up; the console's is down.
+        let axes: [[Any]] = [
+            ["LX", g.leftThumbstick.xAxis.value], ["LY", -g.leftThumbstick.yAxis.value],
+            ["RX", g.rightThumbstick.xAxis.value], ["RY", -g.rightThumbstick.yAxis.value],
+            ["LT", g.leftTrigger.value], ["RT", g.rightTrigger.value],
+        ]
+        let held = buttons.filter { $0.1?.isPressed == true }.map(\.0)
+        bridge.push(.padTest, ConsoleJSON.string(["held": held, "axes": axes]))
+    }
+
     private func pushKnownHosts() {
         bridge.push(.knownHosts, ConsoleJSON.knownHosts(store.hosts))
     }
@@ -219,8 +369,8 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
 
     // MARK: - input
 
-    /// The pad drives the console through the same poller the SwiftUI shell used: GameController's
-    /// handlers do not fire on device outside a stream (`GamepadMenuInput`'s header).
+    /// The pad drives the console through `GamepadMenuInput`'s poller: GameController's handlers
+    /// do not fire on device outside a stream (its header).
     private func wirePads() {
         pads.onMove = { [weak self] (direction: GamepadMenuInput.Direction) in
             let event: ConsoleBridge.Menu =
@@ -230,24 +380,37 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
                 case .left: .left
                 case .right: .right
                 }
-            self?.bridge.menu(event, from: .pad)
+            self?.fromPad(event)
         }
-        pads.onConfirm = { [weak self] in self?.bridge.menu(.confirm, from: .pad) }
-        pads.onSecondary = { [weak self] in self?.bridge.menu(.secondary, from: .pad) }
-        pads.onTertiary = { [weak self] in self?.bridge.menu(.tertiary, from: .pad) }
+        pads.onConfirm = { [weak self] in self?.fromPad(.confirm) }
+        pads.onSecondary = { [weak self] in self?.fromPad(.secondary) }
+        pads.onTertiary = { [weak self] in self?.fromPad(.tertiary) }
         pads.onBack = { [weak self] in
             guard let self else { return }
             // `false` = the shell let it go, which at the root is the system's press.
-            if !bridge.menu(.back, from: .pad) { actions.quit() }
+            if !fromPad(.back) { actions.quit() }
         }
         pads.onShoulder = { [weak self] forward in
-            self?.bridge.menu(forward ? .jumpForward : .jumpBack, from: .pad)
+            self?.fromPad(forward ? .jumpForward : .jumpBack)
         }
     }
 
-    /// A remote or keyboard Back (tvOS `.onExitCommand`). `false` = the system's press.
     @discardableResult
-    func back() -> Bool { bridge.menu(.back, from: .keys) }
+    private func fromPad(_ event: ConsoleBridge.Menu) -> Bool {
+        padInputAt = ProcessInfo.processInfo.systemUptime
+        return bridge.menu(event, from: .pad)
+    }
+
+    /// The shell's haptic cue, on the pad, when the pad caused it.
+    private func pulse(_ kind: String) {
+        guard ProcessInfo.processInfo.systemUptime - padInputAt < 0.5 else { return }
+        switch kind {
+        case "move": haptics.move()
+        case "confirm": haptics.confirm()
+        case "boundary": haptics.boundary()
+        default: break
+        }
+    }
 
     // MARK: - what the console raises
 
@@ -257,12 +420,34 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
         else { return }
         if let settings = event["settings"] as? [String: Any] {
             ConsoleSettings.apply(settings)
+            applyFavorites(settings)
         } else if let text = event["announce"] as? String {
             announce(text)
         } else if let action = event["action"] {
             handle(action: action)
+        } else if let kind = event["pulse"] as? String {
+            pulse(kind)
+        } else if let field = event["edit_text"] as? [String: Any] {
+            openedField = SystemEntry(
+                label: field["label"] as? String ?? "", text: field["text"] as? String ?? "",
+                digits: field["digits"] as? Bool ?? false)
+        } else if let editing = event["editing"] as? Bool {
+            #if os(tvOS)
+            systemEntry = editing ? openedField : nil
+            #endif
+            openedField = nil
         }
-        // `pulse` is the haptic cue and `editing` the shell's own keyboard: neither is ours.
+    }
+
+    /// The system keyboard closed: its text replaces the field's, and the field closes.
+    func finishEntry(_ text: String) {
+        guard let entry = systemEntry else { return }
+        systemEntry = nil
+        for _ in entry.text {
+            bridge.key(.backspace)
+        }
+        bridge.text(text)
+        bridge.key(.return)
     }
 
     private func announce(_ text: String) {
@@ -294,14 +479,21 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
         let addr = a["addr"] as? String ?? ""
         let port = UInt16(a["port"] as? Int ?? 0)
         let preset: PresetSelection = (a["preset"] as? String).map { .preset($0) } ?? .inherit
+        let requestAccess = a["request_access"] as? Bool ?? false
         guard let host = host(fp: fp, addr: addr, port: port) else {
             // Not saved yet: the row came from an advert, so dial it as a discovery does.
             if let found = discovery.hosts.first(where: { $0.host == addr && $0.port == port }) {
-                actions.connectDiscovered(found)
+                if requestAccess {
+                    actions.requestAccessDiscovered(found)
+                } else {
+                    actions.connectDiscovered(found)
+                }
             }
             return
         }
-        if let title = a["launch"] as? String {
+        if requestAccess {
+            actions.requestAccess(host)
+        } else if let title = a["launch"] as? String {
             actions.launchTitle(LibraryTarget(host: host, preset: preset), title)
         } else {
             actions.connect(host, preset)

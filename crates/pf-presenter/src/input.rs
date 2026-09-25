@@ -78,10 +78,13 @@ pub struct Capture {
     user_released: bool,
     held_keys: HashSet<u8>,
     held_buttons: HashSet<u32>,
-    /// Relative motion not yet on the wire, summed per loop iteration.
-    pending_rel: (i32, i32),
+    /// Relative motion not yet on the wire, summed per loop iteration. Fractional: a slow
+    /// touchpad moves less than a pixel per event, and the remainder carries to the next send.
+    pending_rel: (f32, f32),
     /// Desktop-model position not yet on the wire, latest-wins per loop iteration.
     pending_abs: Option<Abs>,
+    /// See [`Self::last_abs`].
+    last_abs: Option<(i32, i32)>,
     /// Never true unless `abs_ok`.
     desktop: bool,
     /// Host injector accepts `MouseMoveAbs` (any compositor but gamescope).
@@ -145,8 +148,9 @@ impl Capture {
             user_released: false,
             held_keys: HashSet::new(),
             held_buttons: HashSet::new(),
-            pending_rel: (0, 0),
+            pending_rel: (0.0, 0.0),
             pending_abs: None,
+            last_abs: None,
             desktop: abs_ok && mouse_mode == MouseMode::Desktop,
             abs_ok,
             scroll_acc: ScrollAccumulator::new(),
@@ -189,7 +193,7 @@ impl Capture {
             self.release_keys();
         }
         if lost & GRANT_POINTER != 0 {
-            self.pending_rel = (0, 0);
+            self.pending_rel = (0.0, 0.0);
             self.pending_abs = None;
             self.release_contacts();
             self.reset_touch_gestures();
@@ -202,6 +206,11 @@ impl Capture {
         self.desktop
     }
 
+    /// A mouse button is down on the host: a model flip now would cut the drag.
+    pub fn buttons_held(&self) -> bool {
+        !self.held_buttons.is_empty()
+    }
+
     /// Ctrl+Alt+Shift+M. `None` if the host cannot take absolute events
     /// (gamescope). Pending motion from the old model is dropped, not sent.
     pub fn toggle_desktop(&mut self) -> Option<bool> {
@@ -209,7 +218,7 @@ impl Capture {
             return None;
         }
         self.desktop = !self.desktop;
-        self.pending_rel = (0, 0);
+        self.pending_rel = (0.0, 0.0);
         self.pending_abs = None;
         Some(self.desktop)
     }
@@ -222,7 +231,7 @@ impl Capture {
             return false;
         }
         self.desktop = on;
-        self.pending_rel = (0, 0);
+        self.pending_rel = (0.0, 0.0);
         self.pending_abs = None;
         true
     }
@@ -334,24 +343,26 @@ impl Capture {
         if !std::mem::replace(&mut self.captured, false) {
             return false;
         }
-        self.pending_rel = (0, 0); // never send motion gathered while captured
+        self.pending_rel = (0.0, 0.0); // never send motion gathered while captured
         self.pending_abs = None;
         self.flush_held();
         true
     }
 
     /// One datagram per loop. Only one store is populated; the run loop routes
-    /// by [`desktop`](Self::desktop).
+    /// by [`desktop`](Self::desktop). Relative motion goes out in whole pixels.
     pub fn flush_motion(&mut self) {
-        let (dx, dy) = std::mem::take(&mut self.pending_rel);
-        if dx != 0 || dy != 0 {
+        let (dx, dy) = (self.pending_rel.0.trunc(), self.pending_rel.1.trunc());
+        self.pending_rel.0 -= dx;
+        self.pending_rel.1 -= dy;
+        if dx != 0.0 || dy != 0.0 {
             send(
                 &self.connector,
                 self.grants,
                 InputKind::MouseMove,
                 0,
-                dx,
-                dy,
+                dx as i32,
+                dy as i32,
                 0,
             );
         }
@@ -370,8 +381,8 @@ impl Capture {
 
     pub fn on_motion(&mut self, xrel: f32, yrel: f32) {
         if self.captured && !self.desktop {
-            self.pending_rel.0 += xrel as i32;
-            self.pending_rel.1 += yrel as i32;
+            self.pending_rel.0 += xrel;
+            self.pending_rel.1 += yrel;
         }
     }
 
@@ -379,8 +390,20 @@ impl Capture {
     /// (deltas must sum).
     pub fn on_motion_abs(&mut self, abs: Abs) {
         if self.captured && self.desktop {
+            self.last_abs = Some((abs.x, abs.y));
             self.pending_abs = Some(abs);
         }
+    }
+
+    /// Where this client last put the host pointer, in frame pixels; `None` before any
+    /// desktop-model motion. The local cursor follows the host from here when they differ.
+    pub fn last_abs(&self) -> Option<(i32, i32)> {
+        self.last_abs
+    }
+
+    /// The local cursor was moved to the host's `pos`: that is now where we put it.
+    pub fn followed_host(&mut self, pos: (i32, i32)) {
+        self.last_abs = Some(pos);
     }
 
     pub fn on_key_down(&mut self, sc: sdl3::keyboard::Scancode) {

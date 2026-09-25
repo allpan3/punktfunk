@@ -95,11 +95,10 @@ public final class GamepadManager: ObservableObject {
     private var externalIndices: Set<UInt8> = []
 
     /// The kind of the last controller that was actually attached — persisted under
-    /// `DefaultsKey.lastGamepadKind` and deliberately NEVER cleared on disconnect. The gamepad
-    /// UI's legends read it (through `GamepadGlyphs`) whenever `active` is nil, so a DualSense
-    /// user's ✕/◯ hints don't turn into A/B the moment the pad sleeps, and so the legends are
-    /// right at all under `gamepadUIMode == "always"`, which puts the console UI up with no pad
-    /// attached by design. `.auto` = nothing has ever been seen on this device (⇒ neutral glyphs).
+    /// `DefaultsKey.lastGamepadKind` and deliberately NEVER cleared on disconnect. Button
+    /// legends read it (through `GamepadGlyphs`) whenever `active` is nil, so a DualSense user's
+    /// ✕/◯ hints don't turn into A/B the moment the pad sleeps. `.auto` = nothing has ever been
+    /// seen on this device (⇒ neutral glyphs).
     ///
     /// @Published so the legends re-render when a pad of a different family arrives; the screens
     /// already observe this object for `active`.

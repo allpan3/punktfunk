@@ -102,6 +102,7 @@ enum AudioDrain {
                 let accepted = av.observe(AvSync.Observation(
                     ptsNs: pcm.ptsNs, nowLocalNs: nowNs,
                     clockOffsetNs: connection.clockOffsetNs, bufferedAhead: depth,
+                    outputLatencyNs: ring.outputLatencyNs,
                     videoE2eNs: videoLatency.latestSample(asOfNs: nowNs, maxAgeMs: 500)))
                 if accepted != nil {
                     ring.setSyncTarget(av.desiredDepth(currentDepth: depth))

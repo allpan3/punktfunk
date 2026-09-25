@@ -337,6 +337,40 @@ pub(crate) enum Infill {
 
 /// Whether, and for how long, the wire covers a capture hole with silence.
 ///
+/// How long a capture-chunk size is remembered. A graph delivers its buffer every cycle, so
+/// that size stays; one merged wake after a capture stall ages out instead of raising a
+/// threshold for the rest of the session.
+const CHUNK_MAX_WINDOW: Duration = Duration::from_secs(2);
+
+/// Largest value noted over the last one to two [`CHUNK_MAX_WINDOW`]s. Time is passed in.
+#[derive(Debug, Default)]
+pub(crate) struct RecentMax<T> {
+    cur: T,
+    prev: T,
+    since: Option<Instant>,
+}
+
+impl<T: Ord + Copy + Default> RecentMax<T> {
+    pub(crate) fn note(&mut self, v: T, now: Instant) {
+        let since = *self.since.get_or_insert(now);
+        let age = now.duration_since(since);
+        if age >= CHUNK_MAX_WINDOW {
+            self.prev = if age >= CHUNK_MAX_WINDOW * 2 {
+                T::default()
+            } else {
+                self.cur
+            };
+            self.cur = T::default();
+            self.since = Some(now);
+        }
+        self.cur = self.cur.max(v);
+    }
+
+    pub(crate) fn get(&self) -> T {
+        self.cur.max(self.prev)
+    }
+}
+
 /// Silence on the session's frame schedule, with continuous `seq` and pts, keeps the client's
 /// de-jitter ring fed so a hole costs only the audio that was missing, not a de-prime/re-prime.
 /// Time is passed in. Denominated in the session's frame — see [`InfillPolicy::new`].
@@ -348,8 +382,8 @@ pub(crate) struct InfillPolicy {
     /// made the same 500 ms budget a different amount of real time on every lossless rung.
     filled: Duration,
     broke: bool,
-    /// Largest capture chunk seen; see [`Self::after`]. Zero until the caller reports one.
-    quantum: Duration,
+    /// Largest recent capture chunk; see [`Self::after`]. Zero until the caller reports one.
+    quantum: RecentMax<Duration>,
 }
 
 impl InfillPolicy {
@@ -363,13 +397,14 @@ impl InfillPolicy {
             frame: Duration::from_micros(frame_us.max(1) as u64),
             filled: Duration::ZERO,
             broke: false,
-            quantum: Duration::ZERO,
+            quantum: RecentMax::default(),
         }
     }
 
-    /// Keep the largest capture-chunk duration. A short buffer never lowers [`Self::after`].
-    pub(crate) fn note_quantum(&mut self, chunk: Duration) {
-        self.quantum = self.quantum.max(chunk);
+    /// Keep the largest recent capture-chunk duration. A short buffer never lowers
+    /// [`Self::after`]; a long one stops raising it once it ages out of [`RecentMax`].
+    pub(crate) fn note_quantum(&mut self, chunk: Duration, now: Instant) {
+        self.quantum.note(chunk, now);
     }
 
     /// How long a hole may run before the wire covers it.
@@ -378,7 +413,7 @@ impl InfillPolicy {
     /// one chunk plus one frame, so a graph clamped to a 21 ms buffer (`min-quantum = 1024`) is
     /// not a hole when a chunk is a couple of milliseconds late.
     pub(crate) fn after(&self) -> Duration {
-        (self.frame * 2).max(self.quantum + self.frame)
+        (self.frame * 2).max(self.quantum.get() + self.frame)
     }
 
     /// Decide the slot due now. Call exactly once per due frame — it consumes budget.
@@ -640,14 +675,41 @@ mod tests {
         assert!(p.exhausted(), "…and then stop asking");
     }
 
+    /// A graph's buffer arrives every cycle and stays remembered; one merged capture wake after
+    /// a stall ages out, where a session-long max kept the bonus drain off for good.
+    #[test]
+    fn a_one_off_chunk_ages_out_of_the_recent_max() {
+        let t0 = Instant::now();
+        let step = Duration::from_millis(10);
+        let mut m = RecentMax::default();
+        m.note(10usize, t0);
+        m.note(60, t0 + step);
+        assert_eq!(m.get(), 60);
+        let mut t = t0 + step;
+        for _ in 0..500 {
+            t += step;
+            m.note(10, t);
+        }
+        assert_eq!(m.get(), 10, "5 s of 10-sample chunks");
+        for _ in 0..1_000 {
+            t += step;
+            m.note(1_024, t);
+        }
+        assert_eq!(m.get(), 1_024, "a steady large quantum is not a spike");
+        // Idle past two windows: the next chunk alone is the max.
+        m.note(10, t + CHUNK_MAX_WINDOW * 2);
+        assert_eq!(m.get(), 10);
+    }
+
     /// Clamped quantum lifts the threshold to one chunk plus one frame. `covered()` equal to
     /// `frame()` is the first frame of a hole (the fade).
     #[test]
     fn infill_threshold_follows_a_clamped_quantum() {
         let frame = Duration::from_millis(FRAME_MS as u64);
+        let t = Instant::now();
         let mut tight = InfillPolicy::new(OPUS_FRAME_US);
-        tight.note_quantum(Duration::from_micros(2_667)); // 128 frames at 48 kHz
-        tight.note_quantum(frame); // 240 frames — what we ask for
+        tight.note_quantum(Duration::from_micros(2_667), t); // 128 frames at 48 kHz
+        tight.note_quantum(frame, t); // 240 frames — what we ask for
         assert_eq!(
             tight.after(),
             frame * 2,
@@ -655,8 +717,8 @@ mod tests {
         );
 
         let mut vm = InfillPolicy::new(OPUS_FRAME_US);
-        vm.note_quantum(Duration::from_micros(21_333)); // 1024 frames at 48 kHz
-        vm.note_quantum(Duration::from_micros(2_667)); // one short buffer never lowers it
+        vm.note_quantum(Duration::from_micros(21_333), t); // 1024 frames at 48 kHz
+        vm.note_quantum(Duration::from_micros(2_667), t); // one short buffer never lowers it
         assert_eq!(
             vm.after(),
             Duration::from_micros(26_333),

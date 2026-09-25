@@ -1223,13 +1223,13 @@ pub fn adapter_driver_version(luid: [u8; 8]) -> Option<[u16; 4]> {
     None
 }
 
-/// This desktop's HDR volume (`IDXGIOutput6::GetDesc1`) for Hello `display_hdr`, so
-/// the host EDID matches this panel. `pos` selects the output containing that point
-/// (`--window-pos`); no `pos` or no match uses the output at the desktop origin.
-/// `None` when advanced color is off — claiming HDR for an SDR desktop would steer
-/// host tone-mapping wrong. `PUNKTFUNK_CLIENT_PEAK_NITS` still overrides; see
+/// The HDR volume (`IDXGIOutput6::GetDesc1`) of the output driving `monitor`, the session
+/// window's `HMONITOR`, for Hello `display_hdr`, so the host EDID matches this panel. No
+/// `monitor` or no match uses the output at the desktop origin. `None` when advanced color
+/// is off — claiming HDR for an SDR desktop would steer host tone-mapping wrong.
+/// `PUNKTFUNK_CLIENT_PEAK_NITS` still overrides; see
 /// `punktfunk_core::client::display_hdr_env_override`.
-pub fn display_hdr_volume(pos: Option<(i32, i32)>) -> Option<punktfunk_core::quic::HdrMeta> {
+pub fn display_hdr_volume(monitor: Option<isize>) -> Option<punktfunk_core::quic::HdrMeta> {
     use windows::Win32::dxgi::{IDXGIOutput6, DXGI_OUTPUT_DESC1};
     // SAFETY: plain DXGI factory creation — no arguments to get wrong; the returned
     // interface is owned by this scope and dropped with it.
@@ -1261,15 +1261,12 @@ pub fn display_hdr_volume(pos: Option<(i32, i32)>) -> Option<punktfunk_core::qui
             if unsafe { out6.GetDesc1(&mut desc) }.ok().is_err() {
                 continue;
             }
-            let r = desc.DesktopCoordinates;
-            let contains =
-                |x: i32, y: i32| x >= r.left && x < r.right && y >= r.top && y < r.bottom;
-            if let Some((x, y)) = pos {
-                if contains(x, y) {
-                    return hdr_meta_from_output(&desc);
-                }
+            if monitor == Some(desc.Monitor.0 as isize) {
+                return hdr_meta_from_output(&desc);
             }
-            if fallback.is_none() || contains(0, 0) {
+            let r = desc.DesktopCoordinates;
+            let at_origin = r.left <= 0 && 0 < r.right && r.top <= 0 && 0 < r.bottom;
+            if fallback.is_none() || at_origin {
                 fallback = Some(desc);
             }
         }

@@ -32,6 +32,7 @@
 
 pub mod anim;
 pub mod art_stats;
+mod blur;
 pub mod brand;
 pub mod bridge;
 // The sort/group policy moved to pf-client-core so the GTK and WinUI dialogs share it rather
@@ -69,16 +70,19 @@ pub mod theme;
 pub mod widgets;
 
 pub use art_stats::{art_stats, ArtStats};
+pub use blur::{set_style_override, Style as BackdropStyle};
 pub use console::{Console, ConsoleEntry, ConsoleHandles, InputSource, Insets, Viewport};
 pub use input::Key;
 pub use library::decode_poster_off_thread;
 pub use library::{DecodedPoster, LibraryGame, LibraryPhase, LibraryShared, Stale};
 pub use model::{
-    ConsoleBus, ConsoleCmd, ConsoleShared, HostAction, HostRow, PairPhase, PresetChip, SpeedPhase,
-    SpeedStatus, WakeStatus,
+    ConsoleBus, ConsoleCmd, ConsoleShared, HostAction, HostRow, LicenseSection, OtherDevice,
+    PadTestState, PairPhase, PresetChip, SpeedPhase, SpeedStatus, WakeStatus,
 };
 pub use platform::{Platform, PlatformScreen};
 pub use ring::Ring;
+pub use screens::prompt::Prompt;
+pub use screens::EditField;
 pub use shell::{ConsoleOptions, DeviceScreen, DEFAULT_GPU_CACHE_BYTES, MIN_GPU_CACHE_BYTES};
 #[cfg(all(any(target_os = "linux", windows), feature = "vulkan-overlay"))]
 pub use skia_overlay::SkiaOverlay;

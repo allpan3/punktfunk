@@ -1688,6 +1688,7 @@ fn spawn_audio(
                                 now_local_ns: punktfunk_core::client::now_realtime_ns(),
                                 clock_offset_ns: connector.clock_offset_now_ns(),
                                 buffered_ahead: depth,
+                                output_latency_ns: sync_cell.output_latency_ns(),
                                 // 0 = nothing on the glass yet; no reference, no correction.
                                 video_e2e_ns: (ve2e > 0).then_some(ve2e),
                             };

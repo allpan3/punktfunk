@@ -331,6 +331,12 @@ pub trait Encoder: Send {
     fn bitrate_retarget_is_synchronous(&self) -> bool {
         true
     }
+    /// Whether the last queued retarget has reached the encoder, so
+    /// [`Self::applied_bitrate_bps`] describes it. Always true for a
+    /// synchronous encoder.
+    fn retarget_settled(&self) -> bool {
+        true
+    }
     /// Bitrate (bps) the encoder is actually running at (or will open at, for a
     /// lazily-opened backend) after any internal clamp. The session stores this,
     /// not the requested rate, as the live bitrate so the send pacer, console,

@@ -60,6 +60,16 @@ pub fn run(target: Option<&str>) -> u8 {
             std::thread::sleep(std::time::Duration::from_secs(2));
         });
     }
+    // The desktop's reduce-motion switch, followed while it answers. A desktop that says
+    // nothing starts no thread and keeps the console's own row.
+    if let Some(reduce) = pf_client_core::os_prefs::reduce_motion() {
+        pf_console_ui::os_theme::set_os_reduce_motion(Some(reduce));
+        std::thread::spawn(|| loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            let reduce = pf_client_core::os_prefs::reduce_motion();
+            pf_console_ui::os_theme::set_os_reduce_motion(reduce);
+        });
+    }
     let identity = match trust::load_or_create_identity() {
         Ok(i) => i,
         Err(e) => {
@@ -207,8 +217,9 @@ pub fn run(target: Option<&str>) -> u8 {
         video_fit: punktfunk_core::video_fit::VideoFit::from_name(&settings_at_start.video_fit),
     };
 
-    let result =
-        pf_presenter::run_browse(opts, |action, gamepad, native, force_software, vulkan| {
+    let result = pf_presenter::run_browse(
+        opts,
+        |action, gamepad, native, hdr, force_software, vulkan| {
             match action {
                 OverlayAction::Launch {
                     addr,
@@ -251,6 +262,7 @@ pub fn run(target: Option<&str>) -> u8 {
                         launch,
                         gamepad,
                         native,
+                        hdr,
                         force_software,
                         vulkan,
                     );
@@ -283,7 +295,8 @@ pub fn run(target: Option<&str>) -> u8 {
                 OverlayAction::ShowStream => ActionOutcome::Handled,
                 OverlayAction::Quit => ActionOutcome::Quit,
             }
-        });
+        },
+    );
 
     service.stop();
 
@@ -595,7 +608,7 @@ impl ServiceState {
             } => {
                 // A worker like every other command here, but a long one: the probe opens
                 // its own session and bursts for two seconds. The shell already raised the
-                // takeover, so this only advances the phase.
+                // takeover, so this only advances the phase and feeds its graph.
                 let identity = self.identity.clone();
                 let console = self.console.clone();
                 std::thread::Builder::new()
@@ -603,7 +616,10 @@ impl ServiceState {
                     .spawn(move || {
                         console.advance_speed(&key, SpeedPhase::Measuring);
                         let fp = (!fp_hex.is_empty()).then_some(fp_hex.as_str());
-                        match pf_client_core::speed::run_speed_probe(&addr, port, fp, identity) {
+                        let progress =
+                            |kbps| console.advance_speed(&key, SpeedPhase::Progress { kbps });
+                        let run = pf_client_core::speed::run_speed_probe_with;
+                        match run(&addr, port, fp, identity, progress) {
                             Ok(r) => {
                                 tracing::info!(
                                     host = %host_name,
@@ -781,6 +797,28 @@ impl ServiceState {
                 // DISCOVERED row — unsaved and unpaired, which is the honest state.
                 self.last_probe = Instant::now() - Duration::from_secs(60);
             }
+            ConsoleCmd::UnpairHost { key } => {
+                let mut known = trust::KnownHosts::load();
+                let Some(i) = index_for_key(&known, &key) else {
+                    tracing::warn!(%key, "unpair for an unknown host — ignoring");
+                    return;
+                };
+                let host = &mut known.hosts[i];
+                let fp = std::mem::take(&mut host.fp_hex);
+                host.paired = false;
+                let (id, name) = (host.id.clone(), host.name.clone());
+                self.save_known(&known);
+                // The catalog cache is keyed on the fingerprint just dropped; nothing reaches
+                // it again, so it goes now, as a forget's does.
+                pf_client_core::library_cache::forget(&fp);
+                // An unpaired host is no landing: the resolver skips it, and this stops a
+                // later re-pair inheriting the choice.
+                let mut settings = trust::Settings::load();
+                if start::clear_default(&mut settings, id.as_deref()) {
+                    settings.save();
+                }
+                tracing::info!(%name, "host unpaired");
+            }
             ConsoleCmd::Wake { key, then_connect } => {
                 if let Some(c) = self.wake_cancel.take() {
                     c.store(true, Ordering::SeqCst);
@@ -817,12 +855,60 @@ impl ServiceState {
                     r.request();
                 }
             }
-            // A platform-native screen (Android's Licences view) — the desktop shell has no
-            // such row, so this never arrives here.
+            // A platform-native screen (webOS) — the desktop shell has no such row, so this
+            // never arrives here.
             ConsoleCmd::OpenPlatformScreen { .. } => {}
             // Grants and rumble tests from the controllers screen. Android-only for the same
             // reason: the settings row that opens that screen is not on the desktop's list.
             ConsoleCmd::PadAction { .. } => {}
+            // The Controllers tab offers no input test on the desktop.
+            ConsoleCmd::PadTest { .. } => {}
+            // Only a host that raised a prompt hears its answer; the desktop raises none.
+            ConsoleCmd::PromptAnswer { .. } => {}
+            // The console reads the catalog straight from this file, so a save is the whole job.
+            ConsoleCmd::SavePreset {
+                id,
+                name,
+                overrides,
+            } => {
+                let mut file = pf_client_core::presets::PresetsFile::load();
+                let overrides = serde_json::from_value(overrides).unwrap_or_default();
+                match file.presets.iter_mut().find(|p| p.id == id) {
+                    Some(p) => {
+                        p.name = name;
+                        p.overrides = overrides;
+                    }
+                    None => {
+                        let mut p = pf_client_core::presets::StreamPreset::new(name);
+                        p.id = id;
+                        p.overrides = overrides;
+                        file.presets.push(p);
+                    }
+                }
+                if let Err(e) = file.save() {
+                    tracing::warn!(error = %e, "preset did not save");
+                }
+            }
+            ConsoleCmd::DeletePreset { id } => {
+                let mut file = pf_client_core::presets::PresetsFile::load();
+                file.presets.retain(|p| p.id != id);
+                if let Err(e) = file.save() {
+                    tracing::warn!(error = %e, "preset did not delete");
+                }
+            }
+            // The notices this build ships beside it, compiled in: an installed session has
+            // no reliable path to the file.
+            ConsoleCmd::LoadLicenses => {
+                #[cfg(windows)]
+                const NOTICES: &str = include_str!("../../windows/THIRD-PARTY-NOTICES.txt");
+                #[cfg(not(windows))]
+                const NOTICES: &str = include_str!("../../linux/THIRD-PARTY-NOTICES.txt");
+                self.console
+                    .set_licenses(vec![pf_console_ui::LicenseSection {
+                        heading: "Third-party software".into(),
+                        text: NOTICES.into(),
+                    }]);
+            }
             ConsoleCmd::SetPin {
                 key,
                 preset_id,
@@ -1243,11 +1329,11 @@ fn spawn_fetch(
             // Whatever we already know about this host, on screen before a single packet goes
             // out. Keyed on the pinned fingerprint, so a box that came back on a new DHCP lease
             // is still recognised as the same host with the same library.
-            let mut have_cached = false;
+            let mut cached_games = None;
             if let Some(cached) = pf_client_core::library_cache::load(&fp_hex) {
                 if !cached.games.is_empty() && mine() {
-                    have_cached = true;
                     shared.set_games_cached(to_model(&cached.games));
+                    cached_games = Some(cached.games);
                 }
             }
             // Fire-and-forget, and deliberately unconditional rather than only when the host
@@ -1286,24 +1372,34 @@ fn spawn_fetch(
                 }
             }
 
-            let Some(games) = fetched else {
-                let e = last_err.expect("the loop runs at least once and every miss records why");
-                if !mine() {
-                    return;
+            // The list the covers are for: the host's, or the cached one it left behind.
+            // A cached shelf without its covers is a wall of monograms until the host is back.
+            let (games, live) = match fetched {
+                Some(games) => (games, true),
+                None => {
+                    let e =
+                        last_err.expect("the loop runs at least once and every miss records why");
+                    if !mine() {
+                        return;
+                    }
+                    match cached_games.take() {
+                        Some(cached) => {
+                            // The shelf stays; only the words change. The player can still pick
+                            // a title — the launch will wake and dial the host on its own.
+                            tracing::info!(%addr, error = %e, "library fetch failed; keeping the cached shelf");
+                            shared.set_stale(pf_console_ui::Stale::Offline);
+                            (cached, false)
+                        }
+                        None => {
+                            shared.set_phase(LibraryPhase::Error {
+                                title: "Couldn't load the library".into(),
+                                body: e.to_string(),
+                                can_retry: true,
+                            });
+                            return;
+                        }
+                    }
                 }
-                if have_cached {
-                    // The shelf stays; only the words change. The player can still pick a title
-                    // — the launch will wake and dial the host on its own.
-                    tracing::info!(%addr, error = %e, "library fetch failed; keeping the cached shelf");
-                    shared.set_stale(pf_console_ui::Stale::Offline);
-                } else {
-                    shared.set_phase(LibraryPhase::Error {
-                        title: "Couldn't load the library".into(),
-                        body: e.to_string(),
-                        can_retry: true,
-                    });
-                }
-                return;
             };
 
             if !mine() {
@@ -1315,13 +1411,15 @@ fn spawn_fetch(
                 .map(|g| (g.id.clone(), g.art.poster_candidates(&base)))
                 .filter(|(_, candidates)| !candidates.is_empty())
                 .collect();
-            shared.set_games(to_model(&games));
-            // Remembered AFTER it is on screen: the disk write is not on the path to a shelf.
-            pf_client_core::library_cache::store(&fp_hex, &games);
-            // What the host has up right now, so a title the player can return to says so.
-            // Deliberately after the catalog — a slow `/status` must not hold the titles back —
-            // and never fatal: an older host answers nothing and every badge simply stays off.
-            shared.set_running(&library::fetch_running(&addr, mgmt, &identity, pin));
+            if live {
+                shared.set_games(to_model(&games));
+                // Remembered AFTER it is on screen: the disk write is not on the path to a shelf.
+                pf_client_core::library_cache::store(&fp_hex, &games);
+                // What the host has up right now, so a title the player can return to says so.
+                // Deliberately after the catalog — a slow `/status` must not hold the titles
+                // back — and never fatal: an older host answers nothing and every badge stays off.
+                shared.set_running(&library::fetch_running(&addr, mgmt, &identity, pin));
+            }
             if !jobs.is_empty() {
                 let rx = library::spawn_art_fetch(base, identity, pin, jobs);
                 while let Ok((id, bytes)) = rx.recv_blocking() {

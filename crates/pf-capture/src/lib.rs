@@ -141,11 +141,30 @@ pub struct CaptureEpisode {
 #[cfg(target_os = "linux")]
 use pf_frame::DmabufFrame;
 
+/// Context on a capture loss whose display is still up (the import side broke, not the
+/// compositor): the host may re-attach a capturer to the same output instead of creating
+/// another one — on KWin every create is a new virtual output, and a burst of them wedges it.
+#[derive(Debug, Clone, Copy)]
+pub struct DisplayStillAlive;
+
+impl std::fmt::Display for DisplayStillAlive {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the output itself is still up")
+    }
+}
+
 /// Produces frames without blocking the compositor. The Linux portal publishes
 /// into a one-deep overwriting slot (drop-oldest): a stalled consumer still
 /// sees the freshest frame.
 pub trait Capturer: Send {
     fn next_frame(&mut self) -> Result<CapturedFrame>;
+
+    /// Hand the virtual output's keepalive back so a capture-only rebuild can re-attach to the
+    /// live output. `None` when this capturer holds none, or already gave it up; the output is
+    /// then released when the capturer drops, as before.
+    fn take_keepalive(&mut self) -> Option<Box<dyn Send>> {
+        None
+    }
 
     /// [`next_frame`](Self::next_frame) with a caller-chosen first-frame budget.
     /// A PipeWire stream can sit in `Streaming` with no buffer; retry shortens
@@ -206,7 +225,9 @@ pub trait Capturer: Send {
 
     /// Cursor-render flip: `true` keeps the pointer out of the video (client
     /// draws it); `false` puts it back in. A declared IddCx hardware cursor is
-    /// irrevocable — DWM cannot take the job back. Default no-op.
+    /// irrevocable — DWM cannot take the job back. On Linux either call means
+    /// the host places [`cursor`](Self::cursor), so a CPU copy stops baking it.
+    /// Default no-op.
     fn set_cursor_forward(&mut self, _on: bool) {}
 
     /// Attach a gamescope cursor source. gamescope paints no `SPA_META_Cursor`,

@@ -10,8 +10,8 @@ use crate::glyphs::{Hint, HintKey};
 use crate::model::{ConsoleCmd, HostRow, PairPhase};
 use crate::pointer::Pointer;
 use crate::screens::{ConnectIntent, Ctx, Outbox};
-use crate::theme::{fg, Fonts, EDGE_INSET, ERROR, W};
-use crate::widgets::{permits, Charset, KeyMsg, Keyboard, ListMsg, MenuList, RowSpec, ROW_MAX_W};
+use crate::theme::{fg, Fonts, ERROR, W};
+use crate::widgets::{blurb, permits, Charset, KeyMsg, Keyboard, ListMsg, MenuList, RowSpec};
 use pf_client_core::menu_nav::{MenuEvent, MenuPulse};
 use skia_safe::{Canvas, Rect};
 
@@ -97,6 +97,13 @@ impl PairScreen {
 
     pub(crate) fn editing(&self) -> bool {
         self.editing.is_some()
+    }
+
+    pub(crate) fn edit_field(&self) -> Option<crate::screens::EditField> {
+        match self.editing? {
+            Field::Pin => crate::screens::EditField::new("PIN", &self.pin, true),
+            Field::Device => crate::screens::EditField::new("Device name", &self.device, false),
+        }
     }
 
     fn can_pair(&self) -> bool {
@@ -330,16 +337,7 @@ impl PairScreen {
         } else {
             "Enter the PIN from the host's web console (Pairing page) or its log."
         };
-        fonts.leading(
-            canvas,
-            intro,
-            W::Regular,
-            13.0 * k,
-            fg(0.55),
-            f64::from(rect.left) + EDGE_INSET * k,
-            f64::from(rect.top) + 2.0 * k,
-            ROW_MAX_W * 0.72 * k,
-        );
+        let below = blurb(canvas, fonts, intro, rect, k);
 
         let seat = self.keyboard.seat(self.editing.is_some() && !ctx.deck, dt);
         let tray_h = if seat > 0.0 {
@@ -351,7 +349,7 @@ impl PairScreen {
         let status_h = 34.0 * k;
         let list_rect = Rect::from_ltrb(
             rect.left,
-            rect.top + (34.0 * k) as f32,
+            below.top,
             rect.right,
             rect.bottom - tray_h as f32 - status_h as f32,
         );
@@ -491,6 +489,7 @@ mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -532,6 +531,7 @@ mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,

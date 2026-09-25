@@ -108,6 +108,19 @@ class ScreenshotTest {
     @Config(sdk = [36], qualifiers = "w800dp-h360dp-xxhdpi")
     fun streamBannerTouch() = shootRoot("stream-banner-touch", statusBar = false) { StreamBannerScene(pad = false) }
 
+    // The companion panel at an Ayn Thor lower screen's size (1240×1080 at about 420 dpi).
+    @Test
+    @Config(sdk = [36], qualifiers = "w472dp-h411dp-xxhdpi")
+    fun companionStats() = shootRoot("companion-stats", statusBar = false) {
+        CompanionScene(io.unom.punktfunk.CompanionPage.STATS)
+    }
+
+    @Test
+    @Config(sdk = [36], qualifiers = "w472dp-h411dp-xxhdpi")
+    fun companionActions() = shootRoot("companion-actions", statusBar = false) {
+        CompanionScene(io.unom.punktfunk.CompanionPage.ACTIONS)
+    }
+
     // The touch flow is a Material dialog over the host grid (a separate window → shootScreen).
     @Test
     fun connecting() = shootScreen("connecting") {
@@ -126,16 +139,6 @@ class ScreenshotTest {
         HostsScene()
         WakeTimedOutScene()
     }
-
-    // The licences view — the one screen the console still opens as a Compose takeover. Shot on a
-    // dark AND a pale palette, because the console draws it through a ColorScheme derived from the
-    // palette's ink — and the pale one is the only place a grey-on-pastel slip can show up.
-    @Test
-    fun consoleLicenses() = shootRoot("console-licenses", statusBar = false) { ConsoleLicensesScene() }
-
-    @Test
-    fun consoleLicensesLight() =
-        shootRoot("console-licenses-light", statusBar = false) { ConsoleLicensesScene(paletteId = "holo") }
 
     /**
      * The touch presentation, pads connected — landscape, like every store frame: the app is

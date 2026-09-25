@@ -62,11 +62,13 @@ struct CursorState {
 impl CursorState {
     /// Blend iff the client draws nothing and a hardware cursor is declared on this adapter —
     /// the declare excludes the pointer from every frame for the WUDFHost's life, and the
-    /// worker is the only shape source. `excluded` is [`registry::any_declared`], read before
-    /// the caller took this monitor's lock.
+    /// worker is the only shape source. Armed whenever a blend could turn on, so a clean plate
+    /// exists when it does. `excluded` is [`registry::any_declared`], read before the caller
+    /// took this monitor's lock.
     fn set_blend(&self, excluded: bool) {
-        self.cell
-            .set_blend(!self.forward_on && self.worker.is_some() && excluded);
+        let armed = self.worker.is_some() && excluded;
+        self.cell.set_armed(armed);
+        self.cell.set_blend(!self.forward_on && armed);
     }
 }
 
@@ -533,9 +535,11 @@ pub fn target_mode2(width: u32, height: u32, refresh_rate: u32) -> iddcx::IDDCX_
 /// added without `hw_cursor` gets one only because the adapter already excludes the pointer:
 /// its client draws nothing, so the channel exists for the pool's blend alone.
 ///
-/// A replaced worker is joined before the event it waited on closes, and both the setup DDI and
-/// every join run with no lock held: the DDI can re-enter the mode callbacks, and a join under
-/// a lock would head-block the control plane.
+/// The monitor keeps one data event across deliveries: a re-declare after a swap-chain assign
+/// copies its value out and must never find it closed. A replaced worker is joined before the
+/// new one waits on it, and both the setup DDI and every join run with no lock held: the DDI can
+/// re-enter the mode callbacks, and a join under a lock would head-block the control plane. A
+/// delivery that fails leaves no worker, so the pool stops blending its last image.
 pub fn set_cursor_channel(
     owner: u32,
     target_id: u32,
@@ -566,11 +570,11 @@ pub fn set_cursor_channel(
             c.cell.clone(),
         )
     };
-    drop(old_worker); // join a replaced worker BEFORE the event it waits on closes
-    drop(old_event);
+    drop(old_worker); // join a replaced worker BEFORE the new one waits on its event
     // Auto-reset: the OS signals it once per cursor update.
-    let Some(data_event) = OwnedHandle::event(false) else {
+    let Some(data_event) = old_event.or_else(|| OwnedHandle::event(false)) else {
         dbglog!("[pf-vd] cursor: data event creation failed — keeping composited cursor");
+        lock(&m.cursor).set_blend(registry::any_declared());
         return Err(ch);
     };
     // `declare = false`: the composite render mode on an adapter that never declared — adopt
@@ -586,6 +590,7 @@ pub fn set_cursor_channel(
     ) else {
         // setup_and_spawn consumed the channel and released everything it mapped; `data_event`
         // drops here. The host detects the missing publish and keeps its composited cursor.
+        lock(&m.cursor).set_blend(registry::any_declared());
         return Ok(());
     };
     if declare {

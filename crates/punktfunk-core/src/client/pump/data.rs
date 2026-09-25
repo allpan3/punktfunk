@@ -266,9 +266,9 @@ impl DataPump {
             let (probe_active, probe_duration_ms, probe_report) = {
                 let mut p = pump_probe.lock().unwrap();
                 if p.active && !p.done {
-                    // First mirror tick: zero arrival stamps before the
-                    // burst can claim them. ProbeRequest is still local, so
-                    // the reset cannot race a probe packet.
+                    // An embedder speed test is armed on its first mirror
+                    // tick, which can miss packets a fast link returned in
+                    // the meantime. The pump's own probes arrive armed.
                     let arming = p.base_bytes.is_none();
                     if arming {
                         session.reset_probe_arrivals();
@@ -345,6 +345,9 @@ impl DataPump {
                         let _ = ctrl_tx
                             .try_send(CtrlRequest::Delivery(DeliveryReport { packets_received }));
                     }
+                    Action::LinkRate(kbps) => {
+                        let _ = ctrl_tx.try_send(CtrlRequest::LinkRate(kbps));
+                    }
                     Action::SetBitrate(kbps) => {
                         request_kbps = Some(kbps);
                         if ctrl_tx.try_send(CtrlRequest::SetBitrate(kbps)).is_err() {
@@ -361,14 +364,27 @@ impl DataPump {
                         duration_ms,
                         ramp,
                     } => {
-                        // One ProbeState, no correlation id — do not clobber
-                        // an embedder speed test.
-                        *pump_probe.lock().unwrap() = ProbeState {
+                        // One ProbeState and no correlation id: an embedder
+                        // speed test in flight keeps it, and ours is dropped.
+                        let mut p = pump_probe.lock().unwrap();
+                        if p.active && !p.done {
+                            drop(p);
+                            abr.on_probe_dropped();
+                            continue;
+                        }
+                        // Armed before the request leaves: a fast link hands
+                        // back the first packets before the next mirror tick.
+                        session.reset_probe_arrivals();
+                        let armed = session.stats();
+                        *p = ProbeState {
                             active: true,
                             duration_ms,
                             ramp,
+                            base_packets: Some(armed.probe_packets_received),
+                            base_bytes: Some(armed.probe_bytes_received),
                             ..Default::default()
                         };
+                        drop(p);
                         if ctrl_tx
                             .try_send(CtrlRequest::Probe(ProbeRequest {
                                 target_kbps,
@@ -767,7 +783,7 @@ mod tests {
         // Hold the sender so the task does not exit on a closed channel.
         let (_task_ctrl_tx, task_ctrl_rx) = tokio::sync::mpsc::channel::<CtrlRequest>(8);
         let (clip_event_tx, _clip_event_rx) = std::sync::mpsc::sync_channel(8);
-        let (cursor_shape_tx, _cursor_shape_rx) = std::sync::mpsc::sync_channel(8);
+        let (cursor_shape_tx, _cursor_shape_rx) = crate::client::planes::shape_queue();
         let (access_tx, _access_rx) = std::sync::mpsc::sync_channel(8);
         tokio::spawn(
             super::super::control_task::ControlTask {

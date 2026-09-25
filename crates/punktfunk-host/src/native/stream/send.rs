@@ -191,6 +191,11 @@ pub(super) struct SendStats {
     pub(super) codec: &'static str,
     pub(super) client: String,
     pub(super) bitrate_kbps: Arc<AtomicU32>,
+    /// What the client's ramp proved the link carries (kbps); `0` = no report yet.
+    pub(super) link_kbps: Arc<AtomicU32>,
+    /// A pinned stream (PyroWave) is paced against `link_kbps`: its rate says
+    /// nothing about the link. An adaptive stream keeps the factor.
+    pub(super) link_paced: bool,
     pub(super) bringup: Arc<crate::bringup::Trace>,
     /// Data-socket clone for the kernel-queue probe behind the `wire egress` line.
     pub(super) wire_sock: Option<std::net::UdpSocket>,
@@ -200,6 +205,18 @@ pub(super) struct SendStats {
     /// Sealed wire bytes go here each aggregation tick; the control task diffs them into the
     /// per-minute `link health` line's `egress_mbps`.
     pub(super) counters: Arc<crate::session_status::SessionCounters>,
+}
+
+/// Pace rate for one frame, bits/s: the stream rate times the factor, or the
+/// link rate the client's ramp proved when that is higher. `factor` 0 keeps
+/// the deadline-only spread whatever the link.
+fn pace_rate_bps(bitrate_kbps: u32, factor: f64, link_kbps: Option<u32>) -> u64 {
+    if factor == 0.0 {
+        return 0;
+    }
+    let by_stream = (bitrate_kbps as f64 * 1000.0 * factor) as u64;
+    let by_link = link_kbps.map_or(0, |k| u64::from(k) * 1000);
+    by_stream.max(by_link)
 }
 
 /// Whether this session may accept a mid-stream `Reconfigure`.
@@ -277,6 +294,7 @@ pub(super) fn send_loop(
     let (mut new_frames, mut repeat_frames) = (0u64, 0u64);
     let mut streamed: Option<StreamedOpen> = None;
     let mut burst: Option<ProbeBurst> = None;
+    let mut link_gso = false;
     loop {
         if stop.load(Ordering::SeqCst) {
             break;
@@ -316,9 +334,19 @@ pub(super) fn send_loop(
         };
         match frame_rx.recv_timeout(wait) {
             Ok(send_msg) => {
-                let pace_rate = (stats.bitrate_kbps.load(Ordering::Relaxed) as f64
-                    * 1000.0
-                    * pace_factor) as u64;
+                let bitrate_kbps = stats.bitrate_kbps.load(Ordering::Relaxed);
+                let link_kbps = stats.link_kbps.load(Ordering::Relaxed);
+                let pace_rate = pace_rate_bps(
+                    bitrate_kbps,
+                    pace_factor,
+                    stats.link_paced.then_some(link_kbps),
+                );
+                // A link-rate burst is a super-buffer train: GSO cuts its send calls 3×.
+                if !link_gso && pace_rate > pace_rate_bps(bitrate_kbps, pace_factor, None) {
+                    link_gso = true;
+                    session.set_gso(true);
+                    tracing::info!(link_kbps, "pacing at the client's proven link rate, GSO on");
+                }
                 // Bound one frame's spread to ~2 intervals so a big IDR cannot back the channel
                 // into `cadence_degraded`. hz 0 = not yet known → the absolute ceiling alone.
                 let (_, _, hz) = unpack_mode(stats.mode.load(Ordering::Relaxed));
@@ -624,5 +652,18 @@ pub(super) fn send_loop(
     // Stop, teardown, or a dead channel mid-burst: report what went out, leave nothing armed.
     if let Some(b) = burst {
         let _ = probe_result_tx.send(b.finish());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pace_rate_bps;
+
+    #[test]
+    fn the_link_rate_only_ever_raises_the_pace() {
+        assert_eq!(pace_rate_bps(778_000, 3.0, None), 2_334_000_000);
+        assert_eq!(pace_rate_bps(778_000, 3.0, Some(8_900_000)), 8_900_000_000);
+        assert_eq!(pace_rate_bps(778_000, 3.0, Some(1_000_000)), 2_334_000_000);
+        assert_eq!(pace_rate_bps(778_000, 0.0, Some(8_900_000)), 0);
     }
 }

@@ -2,9 +2,10 @@
 //! a client mode switch, the Windows topology re-assert, capture loss, and a source that changed
 //! size with no client Reconfigure. Each path ends in [`StreamState::adopt_pipeline`].
 
-use super::cursor::composite_plan;
 #[cfg(target_os = "linux")]
 use super::cursor::settle_portal_cursor;
+#[cfg(target_os = "linux")]
+use super::pipeline::reattach_pipeline;
 use super::pipeline::{
     build_pipeline, build_pipeline_with_retry, is_permanent_build_error, open_session_encoder,
     Pipeline,
@@ -32,7 +33,8 @@ fn repoint_session_input(
 }
 
 impl StreamState {
-    /// Follow the watcher's latest session switch: rebuild the backend in place, keep streaming.
+    /// Follow the watcher's latest session switch: rebuild the backend in place, with the cursor
+    /// plan of the compositor it switches to, and keep streaming.
     pub(super) fn on_session_switch(&mut self) {
         let mut switch = None;
         while let Ok(s) = self.session_rx.try_recv() {
@@ -69,10 +71,19 @@ impl StreamState {
         ) {
             crate::vdisplay::settle_desktop_portal(sw.compositor);
         }
+        // The pipeline below is built from this plan; a failed switch restores the old one.
+        let (old_plan, old_composite) = (
+            self.plan,
+            (self.gamescope_composite, self.metadata_composite),
+        );
+        let hw_cursor = self.retarget_cursor_plan(sw.compositor, switched_route.as_ref());
         let rebuilt = (|| -> Result<(Box<dyn crate::vdisplay::VirtualDisplay>, Pipeline)> {
             let mut new_vd = crate::vdisplay::open(sw.compositor)?;
+            new_vd.set_hw_cursor(hw_cursor);
             new_vd.set_gamescope_route(switched_route.clone());
             new_vd.set_join_live(self.join_live);
+            // The HDR verdict, as at session start: a switched-to gamescope launches in it.
+            new_vd.set_hdr(self.plan.hdr);
             #[cfg(target_os = "linux")]
             new_vd.set_session_isolation(self.isolation.clone());
             let pipe = build_pipeline_with_retry(
@@ -100,6 +111,11 @@ impl StreamState {
                 self.adopt_built_bitrate(built);
                 self.vd = new_vd;
                 self.compositor = sw.compositor;
+                #[cfg(target_os = "linux")]
+                {
+                    self.no_overlay_means_off_output =
+                        settle_portal_cursor(&*self.vd, &mut self.metadata_composite);
+                }
                 self.next = std::time::Instant::now();
                 tracing::info!(
                     compositor = self.compositor.id(),
@@ -113,6 +129,8 @@ impl StreamState {
                 } else {
                     "transient"
                 };
+                self.plan = old_plan;
+                (self.gamescope_composite, self.metadata_composite) = old_composite;
                 tracing::warn!(error = %chain, kind,
                     "session-switch rebuild failed — staying on the current backend");
             }
@@ -196,6 +214,7 @@ impl StreamState {
         // Covers the in-place Windows resize, which swaps the encoder without
         // `adopt_pipeline`: the new one has been handed nothing yet.
         self.retargeted = false;
+        self.fec_pending = None;
         self.adopt_built_bitrate(built_bitrate);
         self.cur_mode = new_mode;
         self.next = std::time::Instant::now();
@@ -339,46 +358,82 @@ impl StreamState {
                 );
             }
         }
-        let pipe = loop {
-            if pf_host_config::config().compositor.is_none() {
-                self.retarget_to_live_session();
-            }
-            let _probe =
-                (loss_at.elapsed() < PROBE_HOLDOFF).then(crate::vdisplay::rebuild_probe_scope);
-            let enc_of = self.enc_now();
-            match build_pipeline_with_retry(
-                &mut self.vd,
-                self.cur_mode,
-                self.bitrate_kbps,
-                self.bitrate_auto,
-                self.bit_depth,
-                enc_of,
-                self.plan,
-                &self.quit,
-                &self.stop,
-                self.cur_display_gen,
-                1,
-                None,
-                self.client_hdr,
-                self.au_seq,
-            ) {
-                Ok(p) => break p,
-                Err(e2) => {
-                    let budget = if self.compositor == crate::vdisplay::Compositor::Gamescope {
-                        GAMESCOPE_REBUILD_BUDGET
-                    } else {
-                        REBUILD_BUDGET
-                    };
-                    if self.stop.load(Ordering::SeqCst)
-                        || std::time::Instant::now() >= loss_at + budget
-                    {
-                        return Err(e2).context(
-                            "capture lost — no compositor came up within the rebuild budget",
-                        );
+        let pipe = 'built: {
+            // The import side broke under a display that is still up: re-attach to it
+            // before creating another. On KWin a create is a new virtual output, and #1443
+            // shows a burst of them wedging the compositor into placeholder screens.
+            #[cfg(target_os = "linux")]
+            if e.downcast_ref::<pf_capture::DisplayStillAlive>().is_some() {
+                if let (Some(lease), Some(keepalive)) =
+                    (self.lease.clone(), self.capturer.take_keepalive())
+                {
+                    let enc_of = self.enc_now();
+                    match reattach_pipeline(
+                        &mut self.vd,
+                        lease,
+                        keepalive,
+                        self.cur_mode,
+                        self.bitrate_kbps,
+                        self.bitrate_auto,
+                        self.bit_depth,
+                        enc_of,
+                        self.plan,
+                        self.client_hdr,
+                        self.au_seq,
+                    ) {
+                        Ok(p) => {
+                            tracing::info!(
+                                node_id = p.node_id,
+                                "capture loss: re-attached to the live output — no new display"
+                            );
+                            break 'built p;
+                        }
+                        Err(e2) => tracing::warn!(error = %format!("{e2:#}"),
+                            "capture loss: re-attach to the live output failed — creating another"),
                     }
-                    tracing::warn!(error = %format!("{e2:#}"),
+                }
+            }
+            loop {
+                if pf_host_config::config().compositor.is_none() {
+                    self.retarget_to_live_session();
+                }
+                let _probe =
+                    (loss_at.elapsed() < PROBE_HOLDOFF).then(crate::vdisplay::rebuild_probe_scope);
+                let enc_of = self.enc_now();
+                match build_pipeline_with_retry(
+                    &mut self.vd,
+                    self.cur_mode,
+                    self.bitrate_kbps,
+                    self.bitrate_auto,
+                    self.bit_depth,
+                    enc_of,
+                    self.plan,
+                    &self.quit,
+                    &self.stop,
+                    self.cur_display_gen,
+                    1,
+                    None,
+                    self.client_hdr,
+                    self.au_seq,
+                ) {
+                    Ok(p) => break 'built p,
+                    Err(e2) => {
+                        let budget = if self.compositor == crate::vdisplay::Compositor::Gamescope {
+                            GAMESCOPE_REBUILD_BUDGET
+                        } else {
+                            REBUILD_BUDGET
+                        };
+                        if self.stop.load(Ordering::SeqCst)
+                            || std::time::Instant::now() >= loss_at + budget
+                        {
+                            return Err(e2).context(
+                                "capture lost — no compositor came up within the rebuild budget",
+                            );
+                        }
+                        tracing::warn!(error = %format!("{e2:#}"),
                         "capture lost — new session not up yet, retrying");
-                    std::thread::sleep(std::time::Duration::from_millis(500));
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    }
                 }
             }
         };
@@ -404,7 +459,7 @@ impl StreamState {
     }
 
     /// One capture-loss attempt's re-detection: follow the live session's compositor, opening a
-    /// new backend when it changed, and re-point input at it.
+    /// new backend when it changed, re-point input at it and re-derive the cursor plan.
     fn retarget_to_live_session(&mut self) {
         let active = crate::vdisplay::detect_active_session();
         crate::vdisplay::observe_session_instance(&active);
@@ -439,27 +494,15 @@ impl StreamState {
                     );
                     self.vd = v;
                     self.compositor = c;
-                    let gamescope = c == crate::vdisplay::Compositor::Gamescope;
-                    self.plan.cursor_blend = crate::session_plan::cursor_blend_for(
-                        self.plan.cursor_forward,
-                        c,
-                        self.plan.codec,
-                        self.plan.bit_depth,
-                        rebuilt_route.as_ref(),
-                    );
-                    self.plan.gamescope_cursor = crate::session_plan::gamescope_cursor_for(
-                        gamescope,
-                        rebuilt_route.as_ref(),
-                    );
-                    (self.gamescope_composite, self.metadata_composite) =
-                        composite_plan(&self.plan, self.cursor_fwd.is_some(), gamescope);
-                    self.vd
-                        .set_hw_cursor(self.plan.cursor_forward || self.metadata_composite);
+                    self.vd.set_hdr(self.plan.hdr);
                 }
                 Err(e2) => tracing::warn!(error = %format!("{e2:#}"),
                     "capture loss: opening the newly-detected compositor failed — retrying"),
             }
         }
+        // Also when only the gamescope route changed: Attach and Spawn differ in who draws.
+        let hw_cursor = self.retarget_cursor_plan(self.compositor, rebuilt_route.as_ref());
+        self.vd.set_hw_cursor(hw_cursor);
         self.vd.set_gamescope_route(rebuilt_route.clone());
         self.vd.set_join_live(self.join_live);
         #[cfg(target_os = "linux")]

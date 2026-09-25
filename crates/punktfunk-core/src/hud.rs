@@ -9,7 +9,7 @@
 //!   and round trip. No end-to-end figure, because Moonlight has none to compare it with.
 //! - **Advanced**: the capture→glass headline as p50/p95 and every stage that tiles it.
 //!
-//! Platforms draw the returned lines and nothing else. `docs-site/content/docs/stats.md`
+//! Platforms draw the returned lines and nothing else. `docs-site/content/docs/(guide)/(streaming)/stats.md`
 //! explains every number.
 
 use std::collections::VecDeque;

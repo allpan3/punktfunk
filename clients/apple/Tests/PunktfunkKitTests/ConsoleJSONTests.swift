@@ -61,6 +61,25 @@ final class ConsoleJSONTests: XCTestCase {
         XCTAssertEqual(row["can_wake"] as? Bool, true)
     }
 
+    /// The pads push in `bridge::PadsJson`'s shape: the legend names the active pad, battery
+    /// is a percentage or null.
+    func testPadsCarryTheCardsFields() throws {
+        let pad = ConsoleJSON.Pad(
+            name: "DualSense", key: "DualSense|Gamepad", pref: 2, detail: "Gamepad",
+            forwarded: true, rumble: true, battery: 0.42, charging: false)
+        var wired = pad
+        wired.key = "Xbox|Gamepad"
+        wired.battery = nil
+        let data = try XCTUnwrap(ConsoleJSON.pads([pad, wired], active: pad).data(using: .utf8))
+        let doc = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(doc["label"] as? String, "DualSense")
+        XCTAssertEqual(doc["pref"] as? Int, 2)
+        let pads = try XCTUnwrap(doc["pads"] as? [[String: Any]])
+        XCTAssertEqual(pads.first?["key"] as? String, "DualSense|Gamepad")
+        XCTAssertEqual((pads.first?["battery"] as? [String: Any])?["percent"] as? Int, 42)
+        XCTAssertTrue(pads.last?["battery"] is NSNull)
+    }
+
     func testKnownHostsCarryWhatALinkNeeds() throws {
         let saved = host(name: "Desk")
         let data = try XCTUnwrap(ConsoleJSON.knownHosts([saved]).data(using: .utf8))
@@ -96,5 +115,22 @@ final class ConsoleJSONTests: XCTestCase {
         XCTAssertEqual(defaults.integer(forKey: DefaultsKey.compositor), 4)
         XCTAssertTrue(defaults.bool(forKey: DefaultsKey.vsync))
         defaults.removePersistentDomain(forName: "console-json-tests")
+    }
+
+    /// A preset the console saved lands on this app's copy: the console's keys set or clear,
+    /// the compositor comes back as its wire number, and an override only this app edits stays.
+    func testAConsoleSaveKeepsWhatOnlyThisAppEdits() {
+        var base = SettingsOverlay()
+        base.windowedSafePresent = true
+        base.codec = "hevc"
+        base.bitrateKbps = 20_000
+        let merged = ConsoleJSON.overlay(
+            ["bitrate_kbps": 50_000, "compositor": "gamescope", "hdr_enabled": false],
+            over: base)
+        XCTAssertEqual(merged.bitrateKbps, 50_000)
+        XCTAssertEqual(merged.compositor, 4)
+        XCTAssertEqual(merged.hdrEnabled, false)
+        XCTAssertNil(merged.codec, "the console cleared it")
+        XCTAssertEqual(merged.windowedSafePresent, true, "only this app edits it")
     }
 }

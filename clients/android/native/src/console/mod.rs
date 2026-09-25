@@ -273,7 +273,8 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsolePadS
 /// `NativeBridge.nativeConsoleMenu(handle, event)` — a discrete menu event, for input that is
 /// already an event on the Kotlin side (a TV remote's D-pad `KeyEvent`s, the touch escape hatch):
 /// 0..3 = move up/down/left/right, 4 confirm, 5 back, 6 secondary (Y), 7 tertiary (X),
-/// 8 jump back (L1), 9 jump forward (R1).
+/// 8 jump back (L1), 9 jump forward (R1), 10/11 a remote's OK down/up (acts on release, held
+/// it is the card's menu).
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleMenu(
     _env: EnvUnowned,
@@ -293,6 +294,12 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleMenu
             7 => MenuEvent::Tertiary,
             8 => MenuEvent::JumpBack,
             9 => MenuEvent::JumpForward,
+            10 | 11 => {
+                if let Some(h) = host(handle) {
+                    h.shared.send(Cmd::Ok(event == 10));
+                }
+                return;
+            }
             _ => return,
         };
         if let Some(h) = host(handle) {
@@ -446,10 +453,12 @@ json_pusher!(
 /// `NativeBridge.nativeConsoleSetPads(handle, padsJson)` — the connected controllers for the
 /// chip, the settings rows and the controllers screen: `{"label": "DualSense", "pref": 1,
 /// "pads": [{name, key, pref, steam_virtual, battery: {percent, charging} | null, detail,
-/// forwarded, rumble}]}`.
+/// forwarded, rumble}], "others": [{name, kind, detail}]}`.
     Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetPads,
     PadsJson,
     |h, p| {
+        let mut p = p;
+        h.handles.console.set_other_devices(p.take_others());
         let (label, pref, pads) = p.into_pads();
         h.shared.send(Cmd::Pads { label, pref, pads })
     }
@@ -577,6 +586,22 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleLibr
         }
     })
 }
+
+json_pusher!(
+/// `NativeBridge.nativeConsoleSetPadTest(handle, json)` — `{"held": [..], "axes": [[name, v]]}`,
+/// the pad's reading while `ConsoleCmd::PadTest` is on.
+    Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetPadTest,
+    pf_console_ui::PadTestState,
+    |h, v| h.handles.console.set_pad_test(v)
+);
+
+json_pusher!(
+/// `NativeBridge.nativeConsoleSetLicenses(handle, json)` — `[{"heading", "text"}]`, what this app
+/// bundles; the answer to `ConsoleCmd::LoadLicenses`.
+    Java_io_unom_punktfunk_kit_NativeBridge_nativeConsoleSetLicenses,
+    Vec<pf_console_ui::LicenseSection>,
+    |h, v| h.handles.console.set_licenses(v)
+);
 
 json_pusher!(
 /// `NativeBridge.nativeConsoleLibraryPhase(handle, json)` — `"Loading"`, `"Empty"`, `"Ready"`,

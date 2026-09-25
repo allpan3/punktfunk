@@ -9,6 +9,7 @@
 // its own comment called that "one audible blip".
 
 #if !os(tvOS)
+import AVFoundation
 import XCTest
 
 @testable import PunktfunkKit
@@ -1514,6 +1515,90 @@ final class AudioRingDriftTests: XCTestCase {
             overflow.withUnsafeBufferPointer { empty.write($0.baseAddress!, count: overflow.count) }
             XCTAssertEqual(
                 empty.bufferedMS, 0, "\(channels)ch: an over-capacity write is dropped, not wrapped")
+        }
+    }
+
+    /// 7.1 follows `kAudioChannelLayoutTag_WAVE_7_1`: wire back pair on the rear speakers, side
+    /// pair on the side ones. Side/back swapped put the back content on the side speakers.
+    func testSevenOneLabelsFollowWave71() throws {
+        let wire = try XCTUnwrap(wireChannelLayout(channels: 8))
+        let offset = try XCTUnwrap(
+            MemoryLayout<AudioChannelLayout>.offset(of: \.mChannelDescriptions))
+        let labels = withExtendedLifetime(wire) { () -> [AudioChannelLabel] in
+            let layout = wire.layout
+            let descs = (UnsafeRawPointer(layout) + offset)
+                .assumingMemoryBound(to: AudioChannelDescription.self)
+            return (0..<Int(layout.pointee.mNumberChannelDescriptions)).map {
+                descs[$0].mChannelLabel
+            }
+        }
+        XCTAssertEqual(labels, [
+            kAudioChannelLabel_Left, kAudioChannelLabel_Right, kAudioChannelLabel_Center,
+            kAudioChannelLabel_LFEScreen, kAudioChannelLabel_RearSurroundLeft,
+            kAudioChannelLabel_RearSurroundRight, kAudioChannelLabel_LeftSurround,
+            kAudioChannelLabel_RightSurround,
+        ])
+    }
+
+    /// A trim drops whole frames. An odd sync target at 44.1 kHz puts the headroom line mid-frame;
+    /// trimming to it would play every later sample on the wrong channel.
+    ///
+    /// Mirrors `a_trim_never_splits_a_frame`.
+    func testATrimNeverSplitsAFrame() {
+        let ring = AudioRing(seconds: 1, channels: channels, rateHz: 44_100)
+        ring.setSyncTarget(2_851)
+        let feed = [Float](repeating: 0.5, count: 100 * 441 / 10 * channels)
+        feed.withUnsafeBufferPointer { ring.write($0.baseAddress!, count: $0.count) }
+        var scratch = [Float](repeating: 0, count: 441 * channels) // 5 ms
+        scratch.withUnsafeMutableBufferPointer { ring.read(into: $0.baseAddress!, count: $0.count) }
+        feed.withUnsafeBufferPointer { ring.write($0.baseAddress!, count: 441 * channels) }
+        XCTAssertLessThan(ring.stats.bufferedMS, 80, "the backlog must have been trimmed")
+        XCTAssertEqual(ring.bufferedSamples % channels, 0, "the trim split a frame")
+    }
+
+    /// Audio that leaves the ring still has the device to cross.
+    ///
+    /// Mirrors `av_sync_counts_the_device_behind_the_ring`.
+    func testAvSyncCountsTheDeviceBehindTheRing() {
+        let depth = 30 * perMS
+        var s = AvSync(channels: channels, rateHz: 48_000)
+        var o = obs(offsetMS: -30, depth: depth)
+        o.outputLatencyNs = 150_000_000 // a Bluetooth link: 30 ms early at the ring, 120 ms late
+        for _ in 0..<400 { s.observe(o) }
+        XCTAssertEqual(s.offsetMS, 120)
+        let want = s.desiredDepth(currentDepth: depth)
+        XCTAssertNotNil(want)
+        XCTAssertLessThan(want ?? depth, depth, "late audio must aim shallower")
+    }
+
+    /// Closed loop, as `AudioDrain` wires it. Video sits a steady `earlyMS` behind the ring's own
+    /// audio; once the ring is deep enough the offset enters the deadband and must hold there.
+    ///
+    /// Mirrors `sync_steering_settles_instead_of_hunting`.
+    func testSyncSteeringSettlesInsteadOfHunting() {
+        for earlyMS in [40, 60, 100] {
+            let ring = AudioRing(seconds: 1, channels: channels, rateHz: 48_000)
+            var s = AvSync(channels: channels, rateHz: 48_000)
+            let frame = [Float](repeating: 0.5, count: 5 * perMS)
+            var scratch = [Float](repeating: 0, count: 5 * perMS)
+            var before = (sheds: 0, inserts: 0)
+            for step in 0..<24_000 {
+                frame.withUnsafeBufferPointer { ring.write($0.baseAddress!, count: $0.count) }
+                let depth = ring.bufferedSamples
+                let o = AvSync.Observation(
+                    ptsNs: 1_000_000_000, nowLocalNs: 1_000_000_000 + 40 * 1_000_000,
+                    clockOffsetNs: 0, bufferedAhead: depth,
+                    videoE2eNs: Int64(40 + earlyMS) * 1_000_000)
+                if s.observe(o) != nil {
+                    ring.setSyncTarget(s.desiredDepth(currentDepth: depth))
+                }
+                scratch.withUnsafeMutableBufferPointer {
+                    ring.read(into: $0.baseAddress!, count: $0.count)
+                }
+                if step == 12_000 { before = (ring.stats.sheds, ring.stats.inserts) }
+            }
+            XCTAssertEqual(ring.stats.sheds - before.sheds, 0, "\(earlyMS) ms early: sheds")
+            XCTAssertEqual(ring.stats.inserts - before.inserts, 0, "\(earlyMS) ms early: inserts")
         }
     }
 }

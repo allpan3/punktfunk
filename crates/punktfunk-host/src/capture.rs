@@ -174,9 +174,10 @@ pub fn capture_virtual_output(
 
     // Aim absolute input at THIS head: EXTEND backends sit beside the operator's
     // screens. `None` (Mutter/gamescope) CLEARS a stale name, e.g. after a Game-Mode
-    // switch Hyprland → gamescope has removed `PF-…`.
-    crate::inject::set_stream_output(vout.output_name.clone().or(vout.input_output.clone()));
+    // switch Hyprland → gamescope has removed `PF-…`. The extent goes first: the output bumps
+    // the aim generation, and a warp that reads it must find this head's size.
     crate::inject::set_stream_extent(head_extent(vout.preferred_mode));
+    crate::inject::set_stream_output(vout.output_name.clone().or(vout.input_output.clone()));
     // The encoder modifier probe keys on bit depth: HDR and 10-bit SDR both ride
     // the packed 10-bit fourccs.
     let bit_depth = if want.hdr || want.ten_bit_sdr { 10 } else { 8 };
@@ -209,7 +210,7 @@ pub fn capture_virtual_output(
                 // the session is known good.
                 return Ok(Box::new(KeptAlive {
                     inner: c,
-                    _keepalive: vout.keepalive,
+                    keepalive: Some(vout.keepalive),
                 }));
             }
             Err(e) => tracing::info!(
@@ -259,14 +260,18 @@ pub fn capture_virtual_output(
 #[cfg(target_os = "linux")]
 struct KeptAlive {
     inner: Box<dyn Capturer>,
-    /// Dropped after `inner`, releasing the output only once capture has stopped.
-    _keepalive: Box<dyn Send>,
+    /// Dropped after `inner`, releasing the output only once capture has stopped — unless a
+    /// capture-only rebuild took it back first.
+    keepalive: Option<Box<dyn Send>>,
 }
 
 #[cfg(target_os = "linux")]
 impl Capturer for KeptAlive {
     fn next_frame(&mut self) -> Result<CapturedFrame> {
         self.inner.next_frame()
+    }
+    fn take_keepalive(&mut self) -> Option<Box<dyn Send>> {
+        self.keepalive.take()
     }
     fn next_frame_within(&mut self, b: std::time::Duration) -> Result<CapturedFrame> {
         self.inner.next_frame_within(b)
@@ -291,6 +296,9 @@ impl Capturer for KeptAlive {
     }
     fn cursor(&mut self) -> Option<pf_frame::CursorOverlay> {
         self.inner.cursor()
+    }
+    fn set_cursor_forward(&mut self, on: bool) {
+        self.inner.set_cursor_forward(on)
     }
     fn attach_gamescope_cursor(&mut self, t: pf_capture::GamescopeCursorTargets) {
         self.inner.attach_gamescope_cursor(t)
@@ -356,12 +364,13 @@ pub fn capture_virtual_output(
     // Aim the injectors' absolute mapping (pen/touch/abs-mouse) at THIS display: the wire
     // normalizes over the streamed frame, and mapping it over the whole virtual desktop is wrong
     // the moment a physical monitor shares the desktop (Extend topology, or an Exclusive isolate
-    // degraded to the keep-physicals fallback) — the pen-offset field bug.
+    // degraded to the keep-physicals fallback) — the pen-offset field bug. Extent first, as on
+    // Linux: the target bumps the aim generation.
+    crate::inject::set_stream_extent(head_extent(vout.preferred_mode));
     crate::inject::set_stream_target(Some(pf_win_display::win_display::CcdTargetKey::new(
         target.adapter_luid,
         target.target_id,
     )));
-    crate::inject::set_stream_extent(head_extent(vout.preferred_mode));
     let pref = vout.preferred_mode;
     let keep = vout.keepalive;
     // Resolve the pf-vdisplay control device once and wrap its cursor IOCTLs for the
@@ -437,11 +446,21 @@ pub fn capture_virtual_output(
     .map_err(|(e, _keep)| e.context("IDD-push capture open (no fallback)"))
 }
 
-/// Open the in-driver encoder for an IDD-push session: the plan as the driver numbers it, the
-/// resolved Windows backend ahead of any fallback rung, the two IOCTL senders over the
-/// manager's control handle, and the `pf_gpu` session record. The heap is sized from the
-/// opening rate; ABR climbs past twice it eat the burst margin. `client_hdr` replaces the
-/// capturer's HDR baseline, as the stream loop does, so the first IDR carries the client's panel.
+/// The driver encoder's HDR flag and depth for a session negotiated at `plan_hdr`/`bit_depth`.
+/// The driver's pool refuses every surface not in the format it opened for, so an HDR session
+/// whose display composes SDR (HDR switched off, advanced colour refused) opens 8-bit SDR.
+#[cfg(any(target_os = "windows", test))]
+fn driver_depth(plan_hdr: bool, display_hdr: bool, bit_depth: u8) -> (bool, u8) {
+    let hdr = plan_hdr && display_hdr;
+    (hdr, if plan_hdr && !hdr { 8 } else { bit_depth })
+}
+
+/// Open the in-driver encoder for an IDD-push session: the plan as the driver numbers it, at the
+/// depth the display composes now, the resolved Windows backend ahead of any fallback rung, the
+/// two IOCTL senders over the manager's control handle, and the `pf_gpu` session record. The
+/// heap is sized from the opening rate; ABR climbs past twice it eat the burst margin.
+/// `client_hdr` replaces the capturer's HDR baseline, as the stream loop does, so the first IDR
+/// carries the client's panel.
 #[cfg(target_os = "windows")]
 #[allow(clippy::too_many_arguments)]
 pub fn open_driver_encoder(
@@ -503,10 +522,12 @@ pub fn open_driver_encoder(
             ),
         },
     };
+    // The capturer reports HDR metadata exactly while the display composes FP16.
+    let (hdr, bit_depth) = driver_depth(plan.hdr, capturer.hdr_meta().is_some(), bit_depth);
     // Media Foundation is the second rung for an H.26x session a missing `amfrt64.dll` or a
     // declined native open would otherwise end, but only inside its 8-bit 4:2:0 ceiling: the
     // plan is already negotiated here, so a wider one would open and then refuse every frame.
-    let mf_fits = !plan.hdr && !plan.chroma.is_444() && bit_depth <= 8;
+    let mf_fits = !hdr && !plan.chroma.is_444() && bit_depth <= 8;
     let fallback = u32::from(!matches!(backend, be::PYROWAVE | be::MEDIA_FOUNDATION) && mf_fits)
         * be::MEDIA_FOUNDATION;
     let params = pf_capture::DriverEncodeParams {
@@ -522,7 +543,7 @@ pub fn open_driver_encoder(
         height: size.1,
         fps,
         bitrate_kbps: (bitrate_bps / 1000).min(u64::from(u32::MAX)) as u32,
-        hdr: plan.hdr,
+        hdr,
         hdr_meta: capturer.hdr_meta().map(|m| client_hdr.unwrap_or(m)),
         wire_chunk_bytes: plan.wire_chunk.unwrap_or(0) as u32,
         backends: [backend, fallback, 0, 0],
@@ -852,5 +873,18 @@ mod live_tests {
         }
         drop(cap);
         drop(vd);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::driver_depth;
+
+    #[test]
+    fn driver_encoder_opens_for_what_the_display_composes() {
+        assert_eq!(driver_depth(true, true, 10), (true, 10));
+        assert_eq!(driver_depth(true, false, 10), (false, 8));
+        assert_eq!(driver_depth(false, false, 10), (false, 10)); // 10-bit SDR
+        assert_eq!(driver_depth(false, true, 8), (false, 8));
     }
 }

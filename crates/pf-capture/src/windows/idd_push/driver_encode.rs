@@ -666,6 +666,11 @@ impl Encoder for EncoderProxy {
         false
     }
 
+    /// The driver has published an access unit past the last ask, so its stamp is the answer.
+    fn retarget_settled(&self) -> bool {
+        self.snapshot().published_total > self.retarget_after
+    }
+
     /// What the driver's backend is encoding at.
     ///
     /// The ctl is queued for the driver's encode thread and has no reply, so the ask stands

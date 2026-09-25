@@ -7,8 +7,8 @@ use crate::glyphs::{Hint, HintKey};
 use crate::model::{ConsoleCmd, HostRow};
 use crate::pointer::Pointer;
 use crate::screens::{Ctx, Outbox};
-use crate::theme::{fg, Fonts, EDGE_INSET, W};
-use crate::widgets::{permits, Charset, KeyMsg, Keyboard, ListMsg, MenuList, RowSpec, ROW_MAX_W};
+use crate::theme::Fonts;
+use crate::widgets::{blurb, permits, Charset, KeyMsg, Keyboard, ListMsg, MenuList, RowSpec};
 use pf_client_core::menu_nav::{MenuEvent, MenuPulse};
 use skia_safe::{Canvas, Rect};
 
@@ -105,6 +105,15 @@ impl AddHostScreen {
 
     pub(crate) fn editing(&self) -> bool {
         self.editing.is_some()
+    }
+
+    pub(crate) fn edit_field(&self) -> Option<crate::screens::EditField> {
+        let (label, text) = match self.editing? {
+            Field::Name => ("Name", &self.name),
+            Field::Address => ("Address", &self.address),
+            Field::Port => ("Port", &self.port),
+        };
+        crate::screens::EditField::new(label, text, self.editing == Some(Field::Port))
     }
 
     fn can_add(&self) -> bool {
@@ -297,17 +306,12 @@ impl AddHostScreen {
         fonts: &Fonts,
         ctx: &mut Ctx,
     ) {
-        // 2 px ≈ half a heading block, left-aligned to the title column.
-        // Width is ROW_MAX_W * 0.72 so the line never runs under the controller chip.
-        fonts.leading(
+        let below = blurb(
             canvas,
+            fonts,
             "Hosts on this network appear automatically — add one by address for everything else.",
-            W::Regular,
-            13.0 * k,
-            fg(0.55),
-            f64::from(rect.left) + EDGE_INSET * k,
-            f64::from(rect.top) + 2.0 * k,
-            ROW_MAX_W * 0.72 * k,
+            rect,
+            k,
         );
 
         let seat = self.keyboard.seat(self.editing.is_some() && !ctx.deck, dt);
@@ -318,7 +322,7 @@ impl AddHostScreen {
         };
         let list_rect = Rect::from_ltrb(
             rect.left,
-            rect.top + (34.0 * k) as f32,
+            below.top,
             rect.right,
             rect.bottom - tray_h as f32,
         );
@@ -385,12 +389,45 @@ mod tests {
             screen: None,
             pads,
             deck,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
             device_name: "t",
             t: 0.0,
         }
+    }
+
+    /// The field's plate carries on into the keyboard: it starts row-wide, then lands on a key.
+    #[test]
+    fn the_plate_glides_from_the_field_into_the_keyboard() {
+        let mut settings = Settings::default();
+        let library = crate::library::LibraryShared::default();
+        let mut c = ctx(&mut settings, &[], &library, false);
+        let mut s = AddHostScreen::new();
+        let mut fx = Outbox::default();
+        let fonts = crate::theme::build_fonts().unwrap();
+        let mut surface = skia_safe::surfaces::raster_n32_premul((1280, 800)).unwrap();
+        let rect = Rect::from_wh(1280.0, 800.0);
+        let mut frame = |s: &mut AddHostScreen, c: &mut Ctx| {
+            crate::el::begin_frame();
+            s.render(surface.canvas(), rect, 1.0, 1.0 / 60.0, &fonts, c);
+        };
+        for _ in 0..30 {
+            frame(&mut s, &mut c);
+        }
+        s.menu(MenuEvent::Confirm, &mut c, &mut fx);
+        assert!(s.editing.is_some());
+        for _ in 0..2 {
+            frame(&mut s, &mut c);
+        }
+        let first = s.keyboard.plate().expect("the plate came along");
+        assert!(first.width() > 300.0, "row-wide at first: {first:?}");
+        for _ in 0..90 {
+            frame(&mut s, &mut c);
+        }
+        let landed = s.keyboard.plate().expect("on a key");
+        assert!(landed.width() < 100.0, "a key wide: {landed:?}");
     }
 
     #[test]

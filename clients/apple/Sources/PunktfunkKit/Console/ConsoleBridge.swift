@@ -31,6 +31,9 @@ public final class ConsoleBridge {
         case knownHosts = 13
         case pads = 14
         case navigate = 15
+        case prompt = 16
+        case licenses = 17
+        case padTest = 18
     }
 
     /// A discrete menu event, as the shell numbers them.
@@ -38,6 +41,8 @@ public final class ConsoleBridge {
         case up = 0, down = 1, left = 2, right = 3
         case confirm = 4, back = 5, secondary = 6, tertiary = 7
         case jumpBack = 8, jumpForward = 9
+        /// A remote's OK, both edges: the console acts on release, and a hold is the menu.
+        case okDown = 10, okUp = 11
     }
 
     /// Which device the event came from — it picks the glyph legend.
@@ -148,4 +153,16 @@ public final class ConsoleBridge {
         defer { punktfunk_console_string_free(raw) }
         return String(cString: raw)
     }
+
+    /// The console's background palettes in cycle order: the `ui_palette` choices.
+    public static let palettes: [(id: String, name: String)] = {
+        guard let raw = punktfunk_console_palettes() else { return [] }
+        defer { punktfunk_console_string_free(raw) }
+        let data = Data(String(cString: raw).utf8)
+        let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: String]] ?? []
+        return rows.compactMap { row in
+            guard let id = row["id"], let name = row["name"] else { return nil }
+            return (id, name)
+        }
+    }()
 }

@@ -52,10 +52,11 @@ pub mod springs {
         response: 0.42,
         damping: 0.88,
     };
-    /// Row and tile focus. Damping 0.80 leaves a whisker of overshoot; that is the pop.
+    /// Focus travel: the plate, and the scrolls that follow focus. Damping 0.78 leaves a
+    /// slight overshoot on arrival; that is the pop.
     pub const FOCUS: SpringSpec = SpringSpec {
-        response: 0.30,
-        damping: 0.80,
+        response: 0.32,
+        damping: 0.78,
     };
     /// Tab pill and keyboard tray: the [`TRAY_K`]/[`TRAY_C`] pair, pinned by
     /// `spring_spec_matches_the_tray_constants`.
@@ -63,10 +64,16 @@ pub mod springs {
         response: 0.32,
         damping: 0.86,
     };
-    /// Confirm dip. Response 0.18 and damping 0.65 so a press reads as a press, not a fade.
+    /// OK down: the pressed element dips to [`super::PRESS_SCALE`] and springs back. Damping
+    /// 0.65 so a press reads as a press, not a fade.
     pub const PRESS: SpringSpec = SpringSpec {
-        response: 0.18,
+        response: 0.16,
         damping: 0.65,
+    };
+    /// A toast or a modal arriving: the screen push's feel, no bounce.
+    pub const MODAL: SpringSpec = SpringSpec {
+        response: 0.42,
+        damping: 0.88,
     };
     /// Quick-action ring. Looser than [`FOCUS`]: without a whisker past the seats
     /// the twist reads as stopping dead at the commit.
@@ -83,11 +90,21 @@ pub mod springs {
     };
 }
 
+/// How far a press dips the pressed element.
+pub const PRESS_SCALE: f64 = 0.97;
+
 /// `k`/`c` live in [`crate::library`] and [`TRAY_K`]/[`TRAY_C`].
 #[derive(Clone, Copy)]
 pub struct Spring {
     pub pos: f64,
     pub vel: f64,
+}
+
+impl Default for Spring {
+    /// At rest on zero.
+    fn default() -> Spring {
+        Spring::rest(0.0)
+    }
 }
 
 impl Spring {
@@ -144,12 +161,18 @@ pub struct EntranceSpec {
 pub mod entrances {
     use super::EntranceSpec;
 
-    /// Carousel and coverflow. Stagger 0.12 is judged against the ~0.2 s of
-    /// readable action (`FADE_SHARE` of 0.6), not the full window: ease-out-back
-    /// is already at 0.89 by then, and every surface culls to a handful of items.
+    /// Cards, posters and coverflow: 40 ms apart, a ripple rather than a sequence. Six steps
+    /// fan; the rest of a long row lands with the sixth.
     pub const CARDS: EntranceSpec = EntranceSpec {
-        window: 0.6,
-        stagger: 0.12,
+        window: 0.5,
+        stagger: 0.04,
+        cap: 0.24,
+    };
+    /// A poster grid: the [`CARDS`] ripple along a row, with room for rows to follow one
+    /// another. The grid counts a row as several steps, so a screenful cascades downward.
+    pub const GRID: EntranceSpec = EntranceSpec {
+        window: 0.5,
+        stagger: 0.04,
         cap: 0.6,
     };
     /// Menu rows. Shorter than [`CARDS`], not zero: under about three frames
@@ -319,12 +342,13 @@ mod tests {
             e.at(5, t_mid).fade - e.at(6, t_mid).fade
         };
         let cards = separation(entrances::CARDS);
-        assert!(cards > 0.7, "CARDS neighbours arrive together: {cards}");
+        assert!(cards > 0.2, "CARDS neighbours arrive together: {cards}");
         let rows = separation(entrances::ROWS);
         assert!(rows > 0.5, "ROWS is quieter, not staggerless: {rows}");
 
         for (name, spec, budget) in [
             ("CARDS", entrances::CARDS, 1.25),
+            ("GRID", entrances::GRID, 1.25),
             ("ROWS", entrances::ROWS, 0.8),
         ] {
             // `cap / stagger` is how many steps ever fan. Drop this and a wider

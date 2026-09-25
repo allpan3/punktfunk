@@ -39,6 +39,8 @@ pub(super) enum Phase {
 /// What Kotlin asks the render thread to do.
 pub(super) enum Cmd {
     Menu(MenuEvent),
+    /// A remote's OK, down (`true`) or up.
+    Ok(bool),
     /// The raw pad, whenever it changes; the thread feeds `MenuNav` with the LAST sample every
     /// frame (repeats need a clock) and once on arrival (a press must not wait for a frame).
     PadSample(MenuSample),
@@ -514,6 +516,11 @@ impl Ui {
     ) -> Result<bool> {
         match cmd {
             Cmd::Quit => return Ok(false),
+            Cmd::Ok(down) => {
+                if let Some(p) = console.ok(down, InputSource::Keys) {
+                    shared.emit(HostEvent::Console(Event::Pulse(p)));
+                }
+            }
             Cmd::Menu(ev) => {
                 // Discrete events are the remote/keyboard path (Kotlin routes pad
                 // buttons through PadSample) — with one wrinkle: a pad's SELECT also

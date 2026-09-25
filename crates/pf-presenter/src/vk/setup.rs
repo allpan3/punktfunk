@@ -456,11 +456,10 @@ impl Presenter {
             ext_mem_win32: ash::khr::external_memory_win32::Device::new(&instance, &device),
             imports: crate::d3d11::ImportCache::default(),
         });
-        let csc = CscPass::new(&device, vk::Format::R8G8B8A8_UNORM)?;
-        // Starts SDR like `csc`; an HDR session rebuilds it at 10-bit via `set_hdr_mode`.
-        // Always built: the software decode rung renders through it. Gating on the
-        // pyrowave probe would hide software frames.
-        let csc_planar = CscPass::new_planar(&device, vk::Format::R8G8B8A8_UNORM)?;
+        let csc = CscPass::new(&device, super::VIDEO_FORMAT)?;
+        // Writes the same intermediate as `csc`. Always built: the software decode rung
+        // renders through it. Gating on the pyrowave probe would hide software frames.
+        let csc_planar = CscPass::new_planar(&device, super::VIDEO_FORMAT)?;
 
         // Export the selected device facts when any consumer needs the handles —
         // on Linux always: the presenter has a selected device and every consumer
@@ -492,6 +491,8 @@ impl Presenter {
                 device_extensions.push(CString::from(ash::ext::hdr_metadata::NAME));
             }
             device_extensions.extend(video_ext_names.iter().map(|n| CString::from(*n)));
+            let decode_ops =
+                pf_client_core::video::usable_decode_ops(dev_props.vendor_id, decode_caps.as_raw());
             Some(pf_client_core::video::VulkanDecodeDevice {
                 get_instance_proc_addr: entry.static_fn().get_instance_proc_addr as usize,
                 instance: instance.handle().as_raw() as usize,
@@ -504,7 +505,7 @@ impl Presenter {
                     .unwrap_or_default(),
                 graphics_qf: qfi,
                 decode_qf,
-                decode_video_caps: decode_caps.as_raw(),
+                decode_video_caps: decode_ops,
                 instance_extensions: instance_extensions
                     .iter()
                     .map(|e| CString::new(e.as_str()).unwrap())
@@ -532,6 +533,16 @@ impl Presenter {
                 dmabuf_import: hw_capable,
                 #[cfg(not(target_os = "linux"))]
                 dmabuf_import: false,
+                #[cfg(target_os = "linux")]
+                vaapi_av1_decode: hw_capable
+                    && pf_client_core::video::vaapi_av1_decodable(
+                        dev_props.vendor_id,
+                        video_ok
+                            && decode_ops & vk::VideoCodecOperationFlagsKHR::DECODE_AV1.as_raw()
+                                != 0,
+                    ),
+                #[cfg(not(target_os = "linux"))]
+                vaapi_av1_decode: false,
                 // HDR10 surface facts arrive with `pick_formats` below.
                 d3d11_hdr10: false,
                 d3d11_nv12: false,
@@ -638,7 +649,6 @@ impl Presenter {
             hdr_downgrade_warned: false,
             hdr_metadata_d,
             hdr_meta: None,
-            video_format: vk::Format::R8G8B8A8_UNORM,
             present_mode,
             swapchain: vk::SwapchainKHR::null(),
             images: Vec::new(),
@@ -913,8 +923,9 @@ fn pick_device(
     bail!("no Vulkan device with a graphics+present queue family")
 }
 
-/// SDR: BGRA8 UNORM, then RGBA8, then any sRGB-space UNORM, else the first format. UNORM not SRGB —
-/// decoded RGBA is already display-referred; an SRGB blit would re-encode it.
+/// SDR: a 10-bit UNORM, then BGRA8, then RGBA8, then any sRGB-space UNORM, else the first
+/// format. 10-bit first: the console's gradients band in 8. UNORM not SRGB — decoded RGBA is
+/// already display-referred; an SRGB blit would re-encode it.
 /// HDR: a 10-bit UNORM + HDR10/ST.2084 colorspace when the instance ext and surface
 /// offer one; otherwise the shader tonemaps.
 pub(super) fn pick_formats(
@@ -931,7 +942,12 @@ pub(super) fn pick_formats(
     // SAFETY: read-only query; `pdev` and `surface` are live on this instance.
     let formats = unsafe { surface_i.get_physical_device_surface_formats(pdev, surface) }?;
     let mut sdr = None;
-    for want in [vk::Format::B8G8R8A8_UNORM, vk::Format::R8G8B8A8_UNORM] {
+    for want in [
+        vk::Format::A2B10G10R10_UNORM_PACK32,
+        vk::Format::A2R10G10B10_UNORM_PACK32,
+        vk::Format::B8G8R8A8_UNORM,
+        vk::Format::R8G8B8A8_UNORM,
+    ] {
         if let Some(f) = formats
             .iter()
             .find(|f| f.format == want && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR)

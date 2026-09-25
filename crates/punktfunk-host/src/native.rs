@@ -22,9 +22,9 @@ use punktfunk_core::input::{InputEvent, InputKind};
 use punktfunk_core::packet::{FLAG_PIC, FLAG_PROBE, FLAG_SOF};
 use punktfunk_core::quic::{
     classify, endpoint, io, AccessUpdate, AckReason, BitrateChanged, ClockEcho, ClockProbe,
-    ColorInfo, GrantClass, Hello, LossReport, PairRequest, PipelineGap, ProbeRequest, ProbeResult,
-    Reconfigure, Reconfigured, RequestKeyframe, RfiRequest, SetBitrate, Start, Welcome, GRANT_ALL,
-    GRANT_CLIPBOARD, GRANT_GAMEPAD, GRANT_LAUNCH, GRANT_MIC, GRANT_POINTER,
+    ColorInfo, GrantClass, Hello, LinkReport, LossReport, PairRequest, PipelineGap, ProbeRequest,
+    ProbeResult, Reconfigure, Reconfigured, RequestKeyframe, RfiRequest, SetBitrate, Start,
+    Welcome, GRANT_ALL, GRANT_CLIPBOARD, GRANT_GAMEPAD, GRANT_LAUNCH, GRANT_MIC, GRANT_POINTER,
 };
 use punktfunk_core::transport::UdpTransport;
 use punktfunk_core::Session;
@@ -948,10 +948,10 @@ fn resolve_bitrate_kbps(requested: u32) -> u32 {
     }
 }
 
-/// PyroWave Automatic (`0`) pins ~1.6 bpp for the negotiated mode, not the 20 Mbps H.26x
-/// default. ABR stays off; mid-stream retargets are refused. An explicit client rate is
-/// ignored — kbps is ill-defined for all-intra bpp; every rate still goes through
-/// `PUNKTFUNK_PYROWAVE_MAX_MBPS`. H.26x/AV1 explicit rates stand.
+/// PyroWave pins the host's bits per pixel (row `pyrowave_bpp`) for the negotiated mode, not
+/// the 20 Mbps H.26x default. ABR stays off; mid-stream retargets are refused. A client rate
+/// is ignored: bits per pixel is the quality knob, and it holds across modes. Every pin goes
+/// through `PUNKTFUNK_PYROWAVE_MAX_MBPS`. H.26x/AV1 explicit rates stand.
 fn resolve_bitrate_kbps_for(
     codec: crate::encode::Codec,
     requested: u32,
@@ -963,22 +963,11 @@ fn resolve_bitrate_kbps_for(
         if requested != 0 {
             tracing::warn!(
                 requested_kbps = requested,
-                "an explicit bitrate is ill-defined under PyroWave (all-intra bpp semantics) — \
-                 treating it as Automatic and resolving the per-mode pin"
+                "a client bitrate does not apply to PyroWave — using the host's bits per pixel"
             );
         }
-        // ~1.6 bpp 4:2:0. 4:4:4 is ×1.625 ≈ 2.6 bpp (chroma compresses better than luma);
-        // 10-bit planes add ~15 %. See `design/pyrowave-444-hdr.md`.
-        let bpp_x10: u64 = if chroma.is_444() { 26 } else { 16 };
-        let mut bps =
-            mode.width as u64 * mode.height as u64 * u64::from(mode.refresh_hz.max(1)) * bpp_x10
-                / 10;
-        if bit_depth >= 10 {
-            bps = bps * 115 / 100;
-        }
-        let pin = u32::try_from(bps / 1000)
-            .unwrap_or(MAX_BITRATE_KBPS)
-            .clamp(MIN_BITRATE_KBPS, MAX_BITRATE_KBPS);
+        let bpp = pf_host_config::config().pyrowave_bpp;
+        let pin = pyrowave_pin_kbps(mode, chroma, bit_depth, bpp);
         // Open-loop pin can outrun the link. `PUNKTFUNK_PYROWAVE_MAX_MBPS` caps it;
         // unset ⇒ no cap.
         if let Some(ceiling) = pyrowave_auto_pin_ceiling_kbps() {
@@ -986,8 +975,7 @@ fn resolve_bitrate_kbps_for(
                 tracing::warn!(
                     pin_kbps = pin,
                     ceiling_kbps = ceiling,
-                    "PyroWave Automatic bitrate pin exceeds PUNKTFUNK_PYROWAVE_MAX_MBPS — capping \
-                     to the link ceiling (set an explicit client bitrate to choose your own)"
+                    "PyroWave bitrate pin exceeds PUNKTFUNK_PYROWAVE_MAX_MBPS — capping to it"
                 );
                 return ceiling.max(MIN_BITRATE_KBPS);
             }
@@ -1068,6 +1056,27 @@ fn audio_reserved_kbps(welcome: &punktfunk_core::quic::Welcome) -> u32 {
         )
         .kbps
     }
+}
+
+/// `bpp` bits per pixel for a 4:2:0 SDR frame. 4:4:4 carries twice the samples but costs
+/// ×1.625, since chroma compresses better than luma; 10-bit planes add 15 %.
+fn pyrowave_pin_kbps(
+    mode: &punktfunk_core::config::Mode,
+    chroma: crate::encode::ChromaFormat,
+    bit_depth: u8,
+    bpp: f64,
+) -> u32 {
+    let mut bpp = bpp;
+    if chroma.is_444() {
+        bpp *= 1.625;
+    }
+    if bit_depth >= 10 {
+        bpp *= 1.15;
+    }
+    let px_per_s =
+        f64::from(mode.width) * f64::from(mode.height) * f64::from(mode.refresh_hz.max(1));
+    // `as` saturates, so a huge mode lands on the clamp.
+    ((px_per_s * bpp / 1000.0) as u32).clamp(MIN_BITRATE_KBPS, MAX_BITRATE_KBPS)
 }
 
 /// `PUNKTFUNK_PYROWAVE_MAX_MBPS` (Mb/s) → kbps. `None` when unset/zero/invalid (no cap).
@@ -1697,6 +1706,8 @@ pub(crate) async fn run_admitted(
         Punktfunk1Source::SyntheticAbr(_) => fec_target.clone(),
         _ => Arc::new(AtomicU8::new(welcome.fec.fec_percent)),
     };
+    // The client's proven link rate; the send loop paces a pinned stream against it.
+    let link_kbps = Arc::new(AtomicU32::new(0));
     // PhaseReports from the control task; encode loop drains. Inert until a vsync-aware client.
     let phase_ctl = Arc::new(stream::PhaseCtl::new());
     let phase_ctl_control = phase_ctl.clone();
@@ -1788,6 +1799,7 @@ pub(crate) async fn run_admitted(
         client_packets_received: client_packets_received_ctl,
         fec_target: fec_target.clone(),
         fec_requested: fec_requested.clone(),
+        link_kbps: link_kbps.clone(),
         phase_ctl: phase_ctl_control,
         reconfig_tx,
         keyframe_tx,
@@ -1973,6 +1985,7 @@ pub(crate) async fn run_admitted(
         let n = &*counters_dp;
         // Per-class counts; one warn on the first drop; totals at end-of-stream.
         let denied = GrantDrops::new();
+        let mic_source = crate::audio::mic_source_id();
         // Full queue: drop, never block (would stall mic + this reader). Disconnected ends the loop.
         let offer = |tx: &std::sync::mpsc::SyncSender<ClientInput>, item: ClientInput| match tx
             .try_send(item)
@@ -1997,6 +2010,7 @@ pub(crate) async fn run_admitted(
                 n.input_mic.fetch_add(1, Ordering::Relaxed);
                 // Bounded `try_send`: never block this loop. seq + pts ride for de-jitter.
                 let _ = mic_tx.try_send(crate::audio::MicFrame {
+                    source: mic_source,
                     seq,
                     pts_ns: pts,
                     opus: opus.to_vec(),
@@ -2111,6 +2125,12 @@ pub(crate) async fn run_admitted(
         )
     };
 
+    // `CLIENT_CAP_KEEP_HOST_AUDIO`: taken before the audio thread spawns, which opens
+    // capture straight away and reads this to pick its topology. RAII.
+    let _keep_host_audio = (hello.client_caps & punktfunk_core::quic::CLIENT_CAP_KEEP_HOST_AUDIO
+        != 0)
+        .then(crate::audio::capture_policy::keep_host_audio_guard);
+
     // Not for the two frame-arithmetic sources: their clients want nothing else on the wire,
     // and the rig's budget carries the audio reservation without a capture behind it.
     // Best-effort: a spawn error must not early-return (threads already up).
@@ -2169,9 +2189,10 @@ pub(crate) async fn run_admitted(
     // (GetDesc1) on capture start and keyframes. This covers synthetic + the pre-capture gap.
     if welcome.color.is_hdr() {
         // Client display volume (Hello::display_hdr) — EDID advertises it. Generic HDR10 for old clients.
-        let meta = hello
-            .display_hdr
-            .unwrap_or_else(|| crate::encode::hdr_meta_to_wire(pf_frame::hdr::generic_hdr10()));
+        let meta = crate::encode::hdr_meta_to_wire(hello.display_hdr.map_or_else(
+            pf_frame::hdr::generic_hdr10,
+            crate::encode::hdr_meta_from_wire,
+        ));
         let _ = conn.send_datagram(punktfunk_core::quic::encode_hdr_meta_datagram(&meta));
         tracing::info!(
             client_volume = hello.display_hdr.is_some(),
@@ -2291,10 +2312,6 @@ pub(crate) async fn run_admitted(
         (!cmds.is_empty())
             .then(|| tokio::task::block_in_place(|| crate::hooks::run_prep(&cmds, &env)))
     });
-    // `CLIENT_CAP_KEEP_HOST_AUDIO`: hold the wiring override before capture opens. RAII.
-    let _keep_host_audio = (hello.client_caps & punktfunk_core::quic::CLIENT_CAP_KEEP_HOST_AUDIO
-        != 0)
-        .then(crate::audio::capture_policy::keep_host_audio_guard);
     // Welcome/acks/HUD speak wire budget. Encoder opens get the derived video rate (`EncDerive`).
     // PyroWave: budget == encoder rate (bpp pin).
     let bitrate_kbps = welcome.bitrate_kbps;
@@ -2317,6 +2334,7 @@ pub(crate) async fn run_admitted(
     // Client HDR volume for EDID + 0xCE. `None` = older client / no HDR → built-in defaults.
     let client_hdr = hello.display_hdr.map(crate::encode::hdr_meta_from_wire);
     let fec_target_dp = fec_target.clone();
+    let link_kbps_dp = link_kbps.clone();
     let fec_requested_dp = fec_requested.clone();
     let conn_stream = conn.clone();
     // 0xCF host-timing only if the client advertised the cap; older clients get no extra datagrams.
@@ -2541,6 +2559,7 @@ pub(crate) async fn run_admitted(
                         gap_tx,
                         fec_target: fec_target_dp,
                         fec_requested: fec_requested_dp,
+                        link_kbps: link_kbps_dp,
                         phase: phase_ctl,
                         conn: conn_stream,
                         timing_conn,
@@ -3036,7 +3055,7 @@ mod tests {
             ),
             (1920u64 * 1080 * 60 * 26 / 10 * 115 / 100 / 1000) as u32
         );
-        // Explicit client rate is overridden to the same pin (kbps is ill-defined for all-intra).
+        // A client rate is ignored; the host's bits per pixel sets the pin.
         assert_eq!(
             resolve_bitrate_kbps_for(
                 crate::encode::Codec::PyroWave,
@@ -3057,6 +3076,37 @@ mod tests {
                 8
             ),
             DEFAULT_BITRATE_KBPS
+        );
+    }
+
+    #[test]
+    fn pyrowave_pin_follows_the_host_bpp() {
+        use crate::encode::ChromaFormat;
+        use punktfunk_core::config::Mode;
+        let mode = Mode {
+            width: 3840,
+            height: 2160,
+            refresh_hz: 120,
+        };
+        let px = 3840 * 2160 * 120;
+        // 0.5 bpp is Steam's 500 Mbps ceiling at 4K120.
+        assert_eq!(
+            pyrowave_pin_kbps(&mode, ChromaFormat::Yuv420, 8, 0.5),
+            px / 2 / 1000
+        );
+        // 4:4:4 and 10-bit scale from the operator's value, not from 1.6.
+        assert_eq!(
+            pyrowave_pin_kbps(&mode, ChromaFormat::Yuv444, 10, 1.0),
+            (f64::from(px) * 1.625 * 1.15 / 1000.0) as u32
+        );
+        let tiny = Mode {
+            width: 64,
+            height: 64,
+            refresh_hz: 1,
+        };
+        assert_eq!(
+            pyrowave_pin_kbps(&tiny, ChromaFormat::Yuv420, 8, 0.25),
+            MIN_BITRATE_KBPS
         );
     }
 

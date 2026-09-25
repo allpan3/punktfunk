@@ -893,11 +893,13 @@ public final class PunktfunkConnection: @unchecked Sendable {
     /// excludes the pointer from the video and forwards shape/state); `false` — the host
     /// composites it into the video (the capture model, full fidelity). Idempotent,
     /// latest-wins; harmless against hosts without the cursor cap. Fire-and-forget — errors
-    /// are swallowed (a closed session is the only failure and it moots the flip).
+    /// are swallowed (a closed session is the only failure and it moots the flip). A quick
+    /// enqueue under `abiLock`: the main thread calls it, and the cursor pull thread holds
+    /// `cursorLock` through a 100 ms poll.
     public func setCursorRender(clientDraws: Bool) {
-        cursorLock.lock()
-        defer { cursorLock.unlock() }
-        guard let h = liveHandle() else { return }
+        abiLock.lock()
+        defer { abiLock.unlock() }
+        guard let h = handle, !closeRequested else { return }
         _ = punktfunk_connection_set_cursor_render(h, clientDraws)
     }
 
