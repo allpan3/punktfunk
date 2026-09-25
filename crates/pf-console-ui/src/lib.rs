@@ -82,6 +82,7 @@ pub use model::{
 pub use platform::{Platform, PlatformScreen};
 pub use ring::Ring;
 pub use screens::prompt::Prompt;
+pub use screens::EditField;
 pub use shell::{ConsoleOptions, DeviceScreen, DEFAULT_GPU_CACHE_BYTES, MIN_GPU_CACHE_BYTES};
 #[cfg(all(any(target_os = "linux", windows), feature = "vulkan-overlay"))]
 pub use skia_overlay::SkiaOverlay;

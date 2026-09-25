@@ -49,6 +49,13 @@ impl SearchScreen {
         self.editing
     }
 
+    pub(crate) fn edit_field(&self) -> Option<crate::screens::EditField> {
+        let query = self.query.as_str();
+        self.editing
+            .then(|| crate::screens::EditField::new("Title", query, false))
+            .flatten()
+    }
+
     fn type_char(&mut self, ch: char) -> bool {
         if !self.editing || ch.is_control() {
             return false;

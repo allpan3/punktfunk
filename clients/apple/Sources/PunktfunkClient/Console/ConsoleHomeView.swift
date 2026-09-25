@@ -77,6 +77,9 @@ struct ConsoleHomeView: View {
                 bridge: console.bridge, device: console.device, queue: console.queue,
                 delegate: console
             )
+            #if os(tvOS)
+            .modifier(SystemEntryCover(model: console))
+            #endif
         } else {
             // Black for the frame before `onFailed` swaps in the app's own UI.
             Color.black
@@ -149,3 +152,20 @@ struct ConsoleHomeView: View {
         }
     }
 }
+
+#if os(tvOS)
+/// A console field typed on the tvOS keyboard, which is where iPhone typing and dictation
+/// live. The model raises it when the console opens a field.
+private struct SystemEntryCover: ViewModifier {
+    @ObservedObject var model: ConsoleModel
+
+    func body(content: Content) -> some View {
+        content.fullScreenCover(item: $model.systemEntry) { entry in
+            TVTextEntry(
+                title: entry.label, text: entry.text,
+                keyboardType: entry.digits ? .numberPad : .default
+            ) { text in model.finishEntry(text) }
+        }
+    }
+}
+#endif

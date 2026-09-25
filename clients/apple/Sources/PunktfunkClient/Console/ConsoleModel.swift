@@ -50,6 +50,24 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
     /// When the pad last drove the console. A pulse from a remote, keyboard or finger is
     /// felt by nobody holding the pad, so it stays silent.
     private var padInputAt: TimeInterval = 0
+    /// A console field the system keyboard is typing into (Apple TV). The pad rests meanwhile:
+    /// on a TV it drives the keyboard through the focus engine.
+    @Published var systemEntry: SystemEntry? {
+        didSet {
+            guard (systemEntry == nil) != (oldValue == nil) else { return }
+            if systemEntry == nil { pads.start() } else { pads.stop() }
+        }
+    }
+    /// The field the console named just before it raised `editing`.
+    private var openedField: SystemEntry?
+
+    struct SystemEntry: Identifiable, Equatable {
+        let id = UUID()
+        let label: String
+        let text: String
+        let digits: Bool
+    }
+
     /// Open prompts by id, each with what its answer does.
     private var prompts: [String: (Int?) -> Void] = [:]
     private var watching: [AnyCancellable] = []
@@ -196,6 +214,8 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
             // off switch always has somewhere to land.
             "fallback_ui": true,
             "tv": isTV,
+            // tvOS types through its own keyboard, where iPhone typing and dictation live.
+            "system_keyboard": isTV,
             "av1_ok": AV1.hardwareDecodeSupported,
             "pyrowave_ok": MetalWaveletDecoder.supported,
             "settings": settings(hosts),
@@ -349,8 +369,27 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
             handle(action: action)
         } else if let kind = event["pulse"] as? String {
             pulse(kind)
+        } else if let field = event["edit_text"] as? [String: Any] {
+            openedField = SystemEntry(
+                label: field["label"] as? String ?? "", text: field["text"] as? String ?? "",
+                digits: field["digits"] as? Bool ?? false)
+        } else if let editing = event["editing"] as? Bool {
+            #if os(tvOS)
+            systemEntry = editing ? openedField : nil
+            #endif
+            openedField = nil
         }
-        // `editing` is the shell's own keyboard: not ours.
+    }
+
+    /// The system keyboard closed: its text replaces the field's, and the field closes.
+    func finishEntry(_ text: String) {
+        guard let entry = systemEntry else { return }
+        systemEntry = nil
+        for _ in entry.text {
+            bridge.key(.backspace)
+        }
+        bridge.text(text)
+        bridge.key(.return)
     }
 
     private func announce(_ text: String) {

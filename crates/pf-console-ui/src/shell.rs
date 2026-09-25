@@ -672,6 +672,13 @@ impl Shell {
             && self.stack.last().is_some_and(Screen::editing)
     }
 
+    pub(crate) fn edit_field(&self) -> Option<crate::screens::EditField> {
+        if !self.editing() {
+            return None;
+        }
+        self.stack.last()?.edit_field()
+    }
+
     /// What a screen reader should speak for the focused row. `None` while a takeover owns
     /// the input, or on a screen that names no focus.
     /// `&mut` only to hand `Ctx` the settings it wants by `&mut`; nothing on this

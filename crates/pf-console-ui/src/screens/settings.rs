@@ -585,6 +585,10 @@ impl SettingsScreen {
         self.custom_bitrate.is_some()
     }
 
+    pub(crate) fn edit_field(&self) -> Option<crate::screens::EditField> {
+        crate::screens::EditField::new("Bitrate in Mbps", self.custom_bitrate.as_deref()?, true)
+    }
+
     /// SDL text. Digits only; four chars is 2000 Mbps, the ceiling.
     pub(crate) fn text_input(&mut self, text: &str) {
         for ch in text.chars() {

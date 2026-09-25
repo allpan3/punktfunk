@@ -107,6 +107,15 @@ impl AddHostScreen {
         self.editing.is_some()
     }
 
+    pub(crate) fn edit_field(&self) -> Option<crate::screens::EditField> {
+        let (label, text) = match self.editing? {
+            Field::Name => ("Name", &self.name),
+            Field::Address => ("Address", &self.address),
+            Field::Port => ("Port", &self.port),
+        };
+        crate::screens::EditField::new(label, text, self.editing == Some(Field::Port))
+    }
+
     fn can_add(&self) -> bool {
         !self.address.trim().is_empty() && self.port.parse::<u16>().is_ok_and(|p| p > 0)
     }

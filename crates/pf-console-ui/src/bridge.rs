@@ -25,6 +25,10 @@ pub struct CreateOptions {
     /// A TV. Absent means a handheld or a desktop.
     #[serde(default)]
     pub tv: bool,
+    /// The host's own keyboard types into every field (`edit_text` tells it which), so the
+    /// console never draws its tray: an Apple TV's, where iPhone typing works.
+    #[serde(default)]
+    pub system_keyboard: bool,
     /// Whether a real AV1 decoder exists, as the host's codec list answers it. Absent means
     /// don't claim the device lacks it, so the codec row stays unmarked.
     #[serde(default = "yes")]
@@ -69,7 +73,7 @@ impl CreateOptions {
         store.set_known_hosts(self.known_hosts);
         let opts = ConsoleOptions {
             device_name: self.device_name,
-            deck: false,
+            deck: self.system_keyboard,
             tv: self.tv,
             fallback_ui: self.fallback_ui,
             pyrowave_ok: self.pyrowave_ok,
@@ -198,6 +202,8 @@ pub enum Event {
     Action(OverlayAction),
     Pulse(MenuPulse),
     Editing(bool),
+    /// The field an `Editing(true)` opens, raised just before it.
+    EditField(crate::screens::EditField),
     /// What the console's focus now reads as. Raised only when it changes; the host hands it
     /// to the screen reader.
     Announce(String),
@@ -223,6 +229,10 @@ impl Event {
                 }
             ),
             Event::Editing(e) => format!("{{\"editing\":{e}}}"),
+            Event::EditField(f) => format!(
+                "{{\"edit_text\":{}}}",
+                serde_json::to_string(f).unwrap_or_else(|_| "null".into())
+            ),
             Event::Announce(text) => format!(
                 "{{\"announce\":{}}}",
                 serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into())
@@ -265,6 +275,9 @@ impl Published {
         let editing = console.editing();
         if editing != self.was_editing {
             self.was_editing = editing;
+            if let Some(field) = editing.then(|| console.edit_field()).flatten() {
+                emit(Event::EditField(field));
+            }
             emit(Event::Editing(editing));
         }
         let announce = console.focus_announcement();
@@ -307,6 +320,20 @@ mod tests {
         let both: EntryJson =
             serde_json::from_str(&format!(r#"{{"library": {row}, "pair": {row}}}"#)).unwrap();
         assert!(matches!(both.into_entry(), ConsoleEntry::Library(_)));
+    }
+
+    /// The field a host's own keyboard types into, as the host reads it.
+    #[test]
+    fn an_opened_field_reads_with_its_label_and_text() {
+        let field = crate::screens::EditField {
+            label: "PIN".into(),
+            text: "12".into(),
+            digits: true,
+        };
+        assert_eq!(
+            Event::EditField(field).to_json(),
+            r#"{"edit_text":{"label":"PIN","text":"12","digits":true}}"#
+        );
     }
 
     #[test]

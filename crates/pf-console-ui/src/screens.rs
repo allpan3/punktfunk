@@ -72,6 +72,26 @@ pub struct Ctx<'a> {
     pub t: f64,
 }
 
+/// The text field a screen has open, for a host whose own keyboard types into it
+/// (an Apple TV's, where iPhone typing and dictation live).
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct EditField {
+    pub label: String,
+    pub text: String,
+    /// Digits only: a PIN, a port, a bitrate.
+    pub digits: bool,
+}
+
+impl EditField {
+    fn new(label: &str, text: &str, digits: bool) -> Option<EditField> {
+        Some(EditField {
+            label: label.into(),
+            text: text.into(),
+            digits,
+        })
+    }
+}
+
 /// Session the shell turns into `OverlayAction::Launch` plus the connecting overlay.
 pub(crate) struct ConnectIntent {
     pub addr: String,
@@ -344,6 +364,18 @@ impl Screen {
             Screen::Search(s) => s.editing(),
             Screen::Settings(s) => s.editing(),
             _ => false,
+        }
+    }
+
+    /// The field [`Self::editing`] has open.
+    pub(crate) fn edit_field(&self) -> Option<EditField> {
+        match self {
+            Screen::AddHost(s) => s.edit_field(),
+            Screen::ShortcutEditor(s) => s.edit_field(),
+            Screen::Pair(s) => s.edit_field(),
+            Screen::Settings(s) => s.edit_field(),
+            Screen::Search(s) => s.edit_field(),
+            _ => None,
         }
     }
 

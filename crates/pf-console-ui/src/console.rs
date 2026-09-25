@@ -227,6 +227,11 @@ impl Console {
         self.shell.editing()
     }
 
+    /// The field [`Self::editing`] has open: label, text so far, and whether it takes digits.
+    pub fn edit_field(&self) -> Option<crate::screens::EditField> {
+        self.shell.edit_field()
+    }
+
     pub fn session_phase(&mut self, phase: SessionPhase) {
         self.shell.session_phase(phase);
     }

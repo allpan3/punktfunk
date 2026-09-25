@@ -99,6 +99,13 @@ impl PairScreen {
         self.editing.is_some()
     }
 
+    pub(crate) fn edit_field(&self) -> Option<crate::screens::EditField> {
+        match self.editing? {
+            Field::Pin => crate::screens::EditField::new("PIN", &self.pin, true),
+            Field::Device => crate::screens::EditField::new("Device name", &self.device, false),
+        }
+    }
+
     fn can_pair(&self) -> bool {
         !self.pin.trim().is_empty() && !self.busy
     }
