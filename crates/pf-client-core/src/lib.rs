@@ -25,7 +25,7 @@ pub mod audio_vitals;
 // Priority for threads that feed the device callbacks (decode, pad-audio, WASAPI). rtkit / Realtime portal on Linux, MMCSS on Windows.
 #[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub mod audio_rt;
-#[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
+#[cfg(all(feature = "discovery", any(target_os = "linux", windows)))]
 pub mod discovery;
 #[cfg(all(feature = "desktop", any(target_os = "linux", windows)))]
 pub mod gamepad;
