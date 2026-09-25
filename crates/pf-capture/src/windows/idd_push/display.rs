@@ -83,7 +83,8 @@ impl IddPushCapturer {
     }
 
     /// Re-open the encoder when two consecutive poller samples agree on a new descriptor
-    /// (~½ s), so a topology re-probe blip never costs a session rebuild.
+    /// (~½ s), so a topology re-probe blip never costs a session rebuild. Every sample
+    /// re-stamps the cursor section's SDR white and origin.
     pub(super) fn poll_display_hdr(&mut self) {
         let (mut now, seq) = self.desc_poller.snapshot();
         if seq == self.desc_seq {
@@ -91,6 +92,8 @@ impl IddPushCapturer {
         }
         self.desc_seq = seq;
         self.refresh_sdr_white_scale();
+        // A rearranged desktop moves this monitor without changing its descriptor.
+        self.refresh_cursor_origin();
         // Exclusive-watchdog reassert in flight: a sample here is the transient eviction.
         if pf_win_display::topology_churn::held() {
             self.pending_desc = None;
@@ -170,8 +173,9 @@ impl IddPushCapturer {
     }
 
     /// Re-read where this monitor sits on the desktop, from the display actor's snapshot (no
-    /// CCD call on this thread), and re-stamp the cursor section — a mode change or an HDR
-    /// re-arrival moves it. `None` keeps the last value, as the poller does.
+    /// CCD call on this thread), and re-stamp the cursor section — a mode change, an HDR
+    /// re-arrival or a rearranged desktop moves it. `None` keeps the last value, as the poller
+    /// does; an unchanged origin writes nothing.
     pub(super) fn refresh_cursor_origin(&mut self) {
         let Some((x, y, _, _)) = pf_win_display::display_events::snapshot().source_rect(self.ccd)
         else {
