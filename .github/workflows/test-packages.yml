@@ -127,3 +127,37 @@ jobs:
             dist/punktfunk-host-*.pkg.tar.zst
             dist/punktfunk-icons-*.pkg.tar.zst
           if-no-files-found: error
+
+  release:
+    name: Publish prerelease
+    needs: [macos, omarchy]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Publish the packages as a prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="$(awk -F'"' '/^version = / { print $2; exit }' Cargo.toml)"
+          PKG_VERSION="${VERSION}.${HOTFIX}-${GITHUB_RUN_NUMBER}"
+          gh run download "$GITHUB_RUN_ID" -D dist
+          NOTES="$RUNNER_TEMP/notes.md"
+          {
+            echo "Test build ${PKG_VERSION} of \`build/test-packages\` at ${GITHUB_SHA::9}."
+            echo
+            echo "Assembled from:"
+            git log --first-parent --format='- %s' "v${VERSION}..HEAD"
+            echo
+            echo "Arch: \`sudo pacman -U punktfunk-host-${PKG_VERSION}-x86_64.pkg.tar.zst punktfunk-icons-${PKG_VERSION}-x86_64.pkg.tar.zst\`"
+          } > "$NOTES"
+          gh release create "test-${PKG_VERSION}" \
+            --target "$GITHUB_SHA" --prerelease \
+            --title "Test packages ${PKG_VERSION}" --notes-file "$NOTES" \
+            dist/*/*.dmg dist/*/*.pkg.tar.zst
