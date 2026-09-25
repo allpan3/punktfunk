@@ -8,7 +8,8 @@
 //! (double, bounded by proven-throughput headroom) then additive (+~6 % after
 //! ~4.5 s). Slow start comes back on an idle stretch, and on a clean run that
 //! refutes a verdict the link never authorised. Each change rebuilds the
-//! encoder (IDR); silence after [`MAX_UNACKED`] unanswered requests.
+//! encoder (IDR); [`MAX_UNACKED`] unanswered requests wait for an answer, and
+//! one still unanswered after [`ACK_GIVE_UP`] is silence.
 //!
 //! Caps are learned: two identical short host acks latch `host_cap_kbps`; two
 //! similar decode-driven backoffs latch `decode_cap_kbps`, and so does decode
@@ -76,9 +77,13 @@ const DECODE_FULL_RATE_DEN: i64 = 4;
 /// ×0.7 of the first — outside the band by construction — so only a
 /// climbed-to rate (`climb_since_backoff`) can sample the knee.
 pub(super) const DECODE_CAP_SIMILAR_DIV: u32 = 8;
-/// Unacked [`crate::quic::SetBitrate`] requests before the host is treated as
-/// predating renegotiation and the controller goes quiet.
+/// Unacked [`crate::quic::SetBitrate`] requests the controller sends before
+/// it waits for an answer.
 const MAX_UNACKED: u32 = 3;
+/// An ask this old with no answer is a host that predates renegotiation, and
+/// the controller goes quiet. A deep queue answers late — 3.3 s on the rig's
+/// cell — and a late answer must not retire it for the session.
+const ACK_GIVE_UP: Duration = Duration::from_secs(10);
 /// Where a link-attributed cut lands: this share of what the window actually
 /// delivered. The 15 % held back is what drains the queue the overshoot
 /// built; ×0.7 of a rate the link never carried drains nothing.
@@ -327,8 +332,10 @@ pub(crate) struct BitrateController {
     bad_windows: u32,
     clean_windows: u32,
     last_change: Option<Instant>,
-    /// Reaching [`MAX_UNACKED`] disables the controller.
+    /// Reaching [`MAX_UNACKED`] holds the controller until an answer lands.
     unacked: u32,
+    /// When the oldest ask still unanswered went out.
+    first_unacked: Option<Instant>,
     /// Last ceiling-clamp target asked (`0` = none). Asked once per distinct
     /// target: a host that answers higher cannot go there.
     ceiling_ask_kbps: u32,
@@ -405,6 +412,7 @@ impl BitrateController {
             clean_windows: 0,
             last_change: None,
             unacked: 0,
+            first_unacked: None,
             ceiling_ask_kbps: 0,
             last_reason: Reason::Clean,
             streak_cut: None,
@@ -872,9 +880,13 @@ impl BitrateController {
             return None;
         }
         if self.unacked >= MAX_UNACKED {
-            // Host never answered: older build. Quiet, don't spam unknown.
-            self.enabled = false;
-            tracing::info!("adaptive bitrate off — host never acked a SetBitrate (older host)");
+            // No new ask until an answer lands; an older host logs every
+            // unknown message. Silence past the give-up is that older host.
+            let oldest = self.first_unacked.unwrap_or(w.now);
+            if w.now.duration_since(oldest) >= ACK_GIVE_UP {
+                self.enabled = false;
+                tracing::info!("adaptive bitrate off — host never acked a SetBitrate (older host)");
+            }
             return None;
         }
         let draining = self.note_drain(w);
@@ -1852,6 +1864,9 @@ impl BitrateController {
     fn request(&mut self, kbps: u32, now: Instant) -> Option<u32> {
         self.forget_rate_norms();
         self.last_change = Some(now);
+        if self.unacked == 0 {
+            self.first_unacked = Some(now);
+        }
         self.unacked += 1;
         self.last_requested_kbps = Some(kbps);
         // Ack is authoritative. A lost request recomputes from the same base.
@@ -3051,6 +3066,34 @@ mod tests {
             i += 1;
         }
         assert_eq!(sent, MAX_UNACKED);
+        assert!(!c.enabled, "45 s of silence is a host that never answers");
+    }
+
+    /// Three cuts inside a deep queue's ack path wait for the answer; the
+    /// answer arriving late does not retire the controller.
+    #[test]
+    fn a_late_ack_keeps_the_controller() {
+        let mut c = BitrateController::new(20_000, None);
+        let start = Instant::now();
+        let bad = |c: &mut BitrateController, i: u32| {
+            c.on_window(&WindowSample {
+                dropped: 1,
+                actual_kbps: 1_000_000,
+                ..WindowSample::at(ticks(start, i))
+            })
+        };
+        let mut asked = Vec::new();
+        for i in 0..8 {
+            asked.extend(bad(&mut c, i));
+        }
+        assert_eq!(asked.len() as u32, MAX_UNACKED, "{asked:?}");
+        // The first answer lands 6 s after the first ask.
+        c.on_ack(asked[0], None);
+        assert!(c.enabled, "a late answer is an answer");
+        assert!(
+            (8..20).any(|i| bad(&mut c, i).is_some()),
+            "and the controller asks again"
+        );
     }
     #[test]
     fn decode_headroom_parks_a_clean_climb() {
