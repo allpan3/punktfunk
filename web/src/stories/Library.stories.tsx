@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import type { PluginAccessSnapshot } from "@/api/gen/model/pluginAccessSnapshot";
+import { emptyForm } from "@/sections/Library/Entry/model";
 import { GameForm } from "@/sections/Library/GameForm";
 import { LibraryGrid } from "@/sections/Library/LibraryGrid";
 import { MigrationBanner, SourcesCard } from "@/sections/Library/Sources";
@@ -7,33 +8,6 @@ import { library } from "./lib/fixtures";
 
 const noop = () => {};
 const idle = { isLoading: false, error: null, refetch: noop };
-const emptyForm = {
-	title: "",
-	portrait: "",
-	hero: "",
-	header: "",
-	logo: "",
-	command: "",
-	// The console-password confirmation the form requires alongside a launch command; empty here
-	// because the story renders the untouched add form, which has no command yet.
-	password: "",
-	isLauncher: false,
-	exe: "",
-	installDir: "",
-	processName: "",
-	hintsLoaded: false,
-	audioSessions: "all" as const,
-	platform: "",
-	description: "",
-	developer: "",
-	publisher: "",
-	releaseYear: "",
-	genres: "",
-	tags: "",
-	region: "",
-	players: "",
-};
-
 // The overview grid and the add/edit form are separate components now, so the stories
 // render each on its own (no combined page view).
 const meta = {

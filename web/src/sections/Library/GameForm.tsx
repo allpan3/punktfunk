@@ -8,10 +8,8 @@ import {
 	useUpdateCustomGame,
 } from "@/api/gen/library/library";
 import type { AudioSessions } from "@/api/gen/model/audioSessions";
-import type { CustomEntry } from "@/api/gen/model/customEntry";
 import type { CustomInput } from "@/api/gen/model/customInput";
 import type { GameEntry } from "@/api/gen/model/gameEntry";
-import type { PrepCmd } from "@/api/gen/model/prepCmd";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -26,182 +24,16 @@ import {
 } from "@/components/ui/select";
 import { apiErrorMessage } from "@/lib/errors";
 import { m } from "@/paraglide/messages";
+import {
+	emptyForm,
+	type FormState,
+	formFrom,
+	needsPassword,
+	toInput,
+	withPassword,
+	withStored,
+} from "./Entry/model";
 import { customId } from "./helpers";
-
-interface FormState {
-	title: string;
-	portrait: string;
-	hero: string;
-	header: string;
-	logo: string;
-	command: string;
-	/** Console-password re-confirmation, required only when `command` is set — see the field's
-	 *  own comment at the render site (2026-08-05 review M-6). Never round-tripped from the
-	 *  server, so it is always empty on open, including when editing an entry that has one. */
-	password: string;
-	/** `true` = this entry opens a launcher rather than a game (design D4). Purely presentational:
-	 *  the console groups launcher entries into their own rail, and clients that don't know the
-	 *  field render them as ordinary tiles. */
-	isLauncher: boolean;
-	// Process hints (the host's `detect`) and prep commands, read from the host's own copy of
-	// the row on edit. `prep` is opaque here and round-tripped so a save keeps it. `hintsLoaded`
-	// says the host answered, so a blank hint field is sent as cleared, not omitted (= kept).
-	exe: string;
-	installDir: string;
-	processName: string;
-	prep?: PrepCmd[];
-	hintsLoaded: boolean;
-	/** Which sessions hear the title (`audio.sessions`). `all` is the host's "no policy". */
-	audioSessions: AudioSessions;
-	// Details — the flattened GameMeta fields; numbers and lists are kept as the raw
-	// text the user typed and only parsed on submit.
-	platform: string;
-	description: string;
-	developer: string;
-	publisher: string;
-	releaseYear: string;
-	genres: string;
-	tags: string;
-	region: string;
-	players: string;
-}
-
-const emptyForm: FormState = {
-	title: "",
-	portrait: "",
-	hero: "",
-	header: "",
-	logo: "",
-	command: "",
-	password: "",
-	isLauncher: false,
-	exe: "",
-	installDir: "",
-	processName: "",
-	hintsLoaded: false,
-	audioSessions: "all",
-	platform: "",
-	description: "",
-	developer: "",
-	publisher: "",
-	releaseYear: "",
-	genres: "",
-	tags: "",
-	region: "",
-	players: "",
-};
-
-function formFrom(entry: GameEntry): FormState {
-	return {
-		title: entry.title,
-		portrait: entry.art.portrait ?? "",
-		hero: entry.art.hero ?? "",
-		header: entry.art.header ?? "",
-		logo: entry.art.logo ?? "",
-		command: entry.launch?.kind === "command" ? entry.launch.value : "",
-		password: "",
-		// Round-tripped like every other field: `update_custom` REPLACES the whole entry, so an
-		// unread field here would silently demote a launcher entry back to a game on any edit.
-		isLauncher: entry.role === "launcher",
-		exe: "",
-		installDir: "",
-		processName: "",
-		hintsLoaded: false,
-		audioSessions: "all",
-		platform: entry.platform ?? "",
-		description: entry.description ?? "",
-		developer: entry.developer ?? "",
-		publisher: entry.publisher ?? "",
-		releaseYear: entry.release_year?.toString() ?? "",
-		genres: entry.genres?.join(", ") ?? "",
-		tags: entry.tags?.join(", ") ?? "",
-		region: entry.region ?? "",
-		players: entry.players?.toString() ?? "",
-	};
-}
-
-/** Fold the host's own copy of the row into the form: the hint fields, and `prep` as read. No
- * copy (the request failed) leaves `hintsLoaded` false, so `toInput` omits both and the host
- * keeps what it has. */
-function withStored(f: FormState, stored: CustomEntry | undefined): FormState {
-	if (!stored) return f;
-	return {
-		...f,
-		exe: stored.detect?.exe ?? "",
-		installDir: stored.detect?.install_dir ?? "",
-		processName: stored.detect?.process_name ?? "",
-		prep: stored.prep ?? [],
-		audioSessions: stored.audio?.sessions ?? "all",
-		hintsLoaded: true,
-	};
-}
-
-/** Map the form to the API body — only attach `launch` when a command was given. `update_custom`
- * REPLACES the whole entry (art AND the metadata fields), so every field the form knows must
- * round-trip (else editing a game with a `logo` or a `platform` would silently drop it). */
-function toInput(f: FormState): CustomInput {
-	const trim = (s: string) => {
-		const t = s.trim();
-		return t ? t : undefined;
-	};
-	// "RPG, Platformer" → ["RPG", "Platformer"]; empty input → omitted entirely.
-	const list = (s: string) => {
-		const items = s
-			.split(",")
-			.map((x) => x.trim())
-			.filter(Boolean);
-		return items.length ? items : undefined;
-	};
-	const int = (s: string) => {
-		const n = Number.parseInt(s.trim(), 10);
-		return Number.isFinite(n) ? n : undefined;
-	};
-	const command = f.command.trim();
-	return {
-		title: f.title.trim(),
-		art: {
-			portrait: trim(f.portrait),
-			hero: trim(f.hero),
-			header: trim(f.header),
-			logo: trim(f.logo),
-		},
-		launch: command ? { kind: "command", value: command } : null,
-		// The BFF re-verifies this and strips it before forwarding; the host never sees the field.
-		// Only sent when there is a command to authorize, matching the conditional gate.
-		...(command ? { password: f.password } : {}),
-		// Omitted when it is the default, matching the host's skip-when-`game` serialization.
-		...(f.isLauncher ? { role: "launcher" as const } : {}),
-		// Sent once the host's copy was read, or when a hint was typed: an omitted key means
-		// "keep" on the host, so a blank field clears only on purpose.
-		...(f.hintsLoaded ||
-		trim(f.exe) ||
-		trim(f.installDir) ||
-		trim(f.processName)
-			? {
-					detect: {
-						exe: trim(f.exe),
-						install_dir: trim(f.installDir),
-						process_name: trim(f.processName),
-					},
-				}
-			: {}),
-		...(f.prep ? { prep: f.prep } : {}),
-		// Same rule as `detect`: omitted means "keep", so send it once the row was read or when
-		// the operator narrowed it; `all` is how a stored policy is cleared.
-		...(f.hintsLoaded || f.audioSessions !== "all"
-			? { audio: { sessions: f.audioSessions } }
-			: {}),
-		platform: trim(f.platform),
-		description: trim(f.description),
-		developer: trim(f.developer),
-		publisher: trim(f.publisher),
-		release_year: int(f.releaseYear),
-		genres: list(f.genres),
-		tags: list(f.tags),
-		region: trim(f.region),
-		players: int(f.players),
-	};
-}
 
 /** What the form targets: an existing custom entry to edit, or "new" for a fresh add. */
 export type FormTarget = GameEntry | "new";
@@ -258,7 +90,7 @@ export const GameFormSection: FC<{
 
 /** One labeled text input bound to a FormState key — the form is a stack of these. */
 const Field: FC<{
-	id: keyof FormState;
+	id: string;
 	label: string;
 	value: string;
 	onChange: (value: string) => void;
@@ -296,16 +128,18 @@ export const GameForm: FC<{
 	error?: string;
 }> = ({ initial, mode, onSubmit, onCancel, isSaving, error }) => {
 	const [form, setForm] = useState<FormState>(initial);
+	// The console password; never part of the entry, so never in the draft.
+	const [password, setPassword] = useState("");
 	const set = (key: keyof FormState) => (value: string) =>
 		setForm((f) => ({ ...f, [key]: value }));
+	const gated = needsPassword(toInput(form));
 
 	const handleSubmit = (e: FormEvent) => {
 		e.preventDefault();
 		const data = toInput(form);
 		if (!data.title) return;
-		// A command is code the host will run on its own; the password field is required with it.
-		if (form.command.trim() && !form.password) return;
-		onSubmit(data);
+		if (gated && !password) return;
+		onSubmit(withPassword(data, password));
 	};
 
 	return (
@@ -372,17 +206,14 @@ export const GameForm: FC<{
 						onChange={set("command")}
 						help={m.library_field_command_help()}
 					/>
-					{/* A launch command is a shell command the host runs as the host user, so saving
-					    one clears the same bar as a hook or an unreviewed install: the console
-					    password, not just a 7-day session cookie (2026-08-05 review M-6). Shown only
-					    when there is a command to authorize — gating an ordinary title/art edit
-					    would just train the operator to type it without reading. */}
-					{form.command.trim() && (
+					{/* Saving a command, or a row that carries prep, runs code as the host user: the
+						    console password is asked for exactly when the BFF gate applies. */}
+					{gated && (
 						<Field
 							id="password"
 							label={m.library_field_password()}
-							value={form.password}
-							onChange={set("password")}
+							value={password}
+							onChange={setPassword}
 							help={m.library_field_password_help()}
 							type="password"
 							required

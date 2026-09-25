@@ -80,7 +80,7 @@ write(
 import type {{ FC }} from "react";
 
 /** One monochrome brand mark: original per-icon viewBox, drawn in currentColor. */
-const LAUNCHER_ICONS: Record<string, {{ viewBox: string; d: string }}> = {{
+export const LAUNCHER_ICONS: Record<string, {{ viewBox: string; d: string }}> = {{
 {rows}
 }};
 
