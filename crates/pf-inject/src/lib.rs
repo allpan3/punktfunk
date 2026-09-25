@@ -28,6 +28,10 @@ pub use keymap::vk_to_evdev;
 #[path = "inject/hidout_dedup.rs"]
 pub mod hidout_dedup;
 
+/// Presses a session still holds, released at its end by both planes.
+#[path = "inject/held.rs"]
+pub mod held;
+
 /// Normalized scroll ([`InputKind::Scroll`]) → per-backend primitive plans.
 /// Pure and ungated so tests on any platform assert the same mapping the
 /// injectors execute.
