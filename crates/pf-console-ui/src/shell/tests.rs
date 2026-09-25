@@ -742,6 +742,26 @@ fn the_licences_page_through_a_hosts_notices() {
     assert!(matches!(s.stack.last(), Some(Screen::Home(_))));
 }
 
+/// A preset's editor draws every row it can hold, and a step saves the override; the global
+/// settings stay as they were.
+#[test]
+fn a_preset_editor_rasters_and_saves_over_the_global() {
+    let fonts = crate::theme::build_fonts().unwrap();
+    let mut surface = skia_safe::surfaces::raster_n32_premul((1280, 800)).unwrap();
+    let edit =
+        crate::screens::preset::PresetEdit::new("p1".into(), "Couch".into(), Default::default());
+    let (mut s, _console, _library) = shell(vec![
+        Screen::Home(HomeScreen::new()),
+        Screen::PresetEdit(edit),
+    ]);
+    let mut frame = |s: &mut Shell| s.render(surface.canvas(), 1280, 800, &fonts, None, None, &[]);
+    frame(&mut s);
+    let global = s.settings.clone();
+    s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    frame(&mut s);
+    assert_eq!(s.settings, global, "the preset changes, not Settings");
+}
+
 /// A grouped row draws its band captions, and the shell re-arranges the hosts when the
 /// setting moves, with no new host list to prompt it.
 #[test]

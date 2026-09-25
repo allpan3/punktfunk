@@ -399,6 +399,19 @@ pub enum ConsoleCmd {
     UnpairHost {
         key: String,
     },
+    /// Create or replace one preset. `overrides` is a [`SettingsOverlay`] in the shared
+    /// presets file's spelling; the host persists it and pushes its catalog back.
+    ///
+    /// [`SettingsOverlay`]: pf_client_core::presets::SettingsOverlay
+    SavePreset {
+        id: String,
+        name: String,
+        overrides: serde_json::Value,
+    },
+    /// Remove one preset; a host bound or pinned to it falls back as a dangling id does.
+    DeletePreset {
+        id: String,
+    },
     /// The Licences screen opened: send this host's [`LicenseSection`]s.
     LoadLicenses,
     /// The answer to a [`crate::screens::prompt::Prompt`]: the row picked, or `None` for

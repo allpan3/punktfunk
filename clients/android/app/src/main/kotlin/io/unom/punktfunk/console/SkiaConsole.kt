@@ -855,6 +855,11 @@ object SkiaConsole {
                     c.optJSONObject("UpdateHost")?.let(::updateHost)
                     c.optJSONObject("ForgetHost")?.let(::forgetHost)
                     c.optJSONObject("UnpairHost")?.let(::unpairHost)
+                    c.optJSONObject("SavePreset")?.let(::savePreset)
+                    c.optJSONObject("DeletePreset")?.let {
+                        presetStore.delete(it.optString("id"))
+                        pushPresets()
+                    }
                     c.optJSONObject("Wake")?.let(::wake)
                     c.optJSONObject("SetPin")?.let(::setPin)
                     c.optJSONObject("BindPreset")?.let(::bindPreset)
@@ -898,6 +903,21 @@ object SkiaConsole {
         knownHostStore.remove(kh)
         appContext?.let { LibraryCache.standard(it.cacheDir).forget(kh.id) }
         pushHosts(); pushKnownHosts()
+    }
+
+    /** `ConsoleCmd::SavePreset`: the console saved one preset whole, merged onto the stored one. */
+    private fun savePreset(c: JSONObject) {
+        val id = c.optString("id").takeIf { it.isNotEmpty() } ?: return
+        val stored = presetStore.byId(id) ?: StreamPreset(id = id, name = "")
+        val overrides = io.unom.punktfunk.SettingsOverlay.fromConsoleJson(
+            c.optJSONObject("overrides") ?: JSONObject(), stored.overrides,
+        )
+        presetStore.save(stored.copy(name = c.optString("name"), overrides = overrides))
+        pushPresets()
+    }
+
+    private fun pushPresets() {
+        if (handle != 0L) NativeBridge.nativeConsoleSetPresets(handle, ConsoleJson.presets(presetStore.all()))
     }
 
     /** `ConsoleCmd::UnpairHost`: keep the record, drop its pin, so the next connect pairs again. */

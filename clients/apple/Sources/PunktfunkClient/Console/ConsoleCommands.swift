@@ -54,6 +54,12 @@ extension ConsoleModel {
                 addr: a["addr"] as? String ?? "", port: port(a["port"]))
         case "ForgetHost":
             if let host = host(key: a["key"] as? String ?? "") { store.remove(host) }
+        case "SavePreset":
+            savePreset(
+                id: a["id"] as? String ?? "", name: a["name"] as? String ?? "",
+                overrides: a["overrides"] as? [String: Any] ?? [:])
+        case "DeletePreset":
+            presets.delete(a["id"] as? String ?? "")
         case "UnpairHost":
             if let host = host(key: a["key"] as? String ?? "") { store.forgetIdentity(host) }
         case "Wake":
@@ -89,6 +95,15 @@ extension ConsoleModel {
     }
 
     private func port(_ value: Any?) -> UInt16 { UInt16(value as? Int ?? 0) }
+
+    /// A preset the console's editor saved whole, merged onto this app's copy of it.
+    private func savePreset(id: String, name: String, overrides: [String: Any]) {
+        guard !id.isEmpty else { return }
+        var preset = presets.preset(id: id) ?? StreamPreset(name: name, id: id)
+        preset.name = name
+        preset.overrides = ConsoleJSON.overlay(overrides, over: preset.overrides)
+        presets.put(preset)
+    }
 
     /// What this app bundles beside the console's own texts, for its Licences screen.
     private func pushLicenses() {

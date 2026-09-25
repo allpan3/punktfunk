@@ -233,6 +233,9 @@ public enum ConsoleJSON {
         var j: [String: Any] = [:]
         j["width"] = o.width
         j["height"] = o.height
+        j["match_window"] = o.matchWindow
+        j["compositor"] = o.compositor.map(ConsoleSettings.compositorName)
+        j["gamepad"] = o.gamepadType.map(ConsoleSettings.padTypeName)
         j["refresh_hz"] = o.refreshHz
         j["bitrate_kbps"] = o.bitrateKbps
         j["render_scale"] = o.renderScale
@@ -261,6 +264,33 @@ public enum ConsoleJSON {
         j["vsync"] = o.vsync
         j["allow_vrr"] = o.allowVRR
         return j.compactMapValues { $0 }
+    }
+
+    /// The keys `overrides(_:)` sends: exactly the ones a console save sets or clears.
+    private static let consoleKeys: Set<String> = [
+        "width", "height", "match_window", "compositor", "gamepad", "refresh_hz", "bitrate_kbps",
+        "render_scale", "video_fit", "codec", "hdr_enabled", "enable_444", "ten_bit_sdr",
+        "audio_channels", "audio_format", "mic_enabled", "echo_cancel", "keep_host_audio",
+        "touch_mode", "mouse_mode", "invert_scroll", "overlay_actions", "inhibit_shortcuts",
+        "gamepad_forwarding", "system_buttons", "guide_gesture", "stats_verbosity",
+        "fullscreen_on_stream", "present_priority", "smooth_buffer", "vsync", "allow_vrr",
+    ]
+
+    /// The console's saved overlay over `base`: every key the console edits comes from it,
+    /// set or cleared, and every override only this app knows stays.
+    public static func overlay(_ console: [String: Any], over base: SettingsOverlay) -> SettingsOverlay {
+        guard let data = try? JSONEncoder().encode(base),
+            var j = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return base }
+        for key in consoleKeys { j[key] = nil }
+        for (key, value) in console where consoleKeys.contains(key) { j[key] = value }
+        // The console names these two; this app's overlay stores the wire number.
+        j["compositor"] = (console["compositor"] as? String).flatMap(ConsoleSettings.compositorTag)
+        j["gamepad"] = (console["gamepad"] as? String).flatMap(ConsoleSettings.padTypeTag)
+        guard let merged = try? JSONSerialization.data(withJSONObject: j.compactMapValues { $0 }),
+            let overlay = try? JSONDecoder().decode(SettingsOverlay.self, from: merged)
+        else { return base }
+        return overlay
     }
 
     // MARK: - wake and pair

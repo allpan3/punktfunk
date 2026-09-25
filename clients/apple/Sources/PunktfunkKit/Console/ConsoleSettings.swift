@@ -173,16 +173,16 @@ public enum ConsoleSettings {
         (6, "steamdeck"),
     ]
 
-    private static func compositorName(_ tag: Int) -> String {
+    static func compositorName(_ tag: Int) -> String {
         compositors.first { $0.0 == tag }?.1 ?? "auto"
     }
-    private static func compositorTag(_ name: String) -> Int? {
+    static func compositorTag(_ name: String) -> Int? {
         compositors.first { $0.1 == name }?.0
     }
-    private static func padTypeName(_ tag: Int) -> String {
+    static func padTypeName(_ tag: Int) -> String {
         padTypes.first { $0.0 == tag }?.1 ?? "auto"
     }
-    private static func padTypeTag(_ name: String) -> Int? {
+    static func padTypeTag(_ name: String) -> Int? {
         padTypes.first { $0.1 == name }?.0
     }
 }

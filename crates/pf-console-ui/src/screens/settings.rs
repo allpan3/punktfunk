@@ -5,8 +5,8 @@
 //! returns. Left/right steps the focused
 //! value (clamped); A cycles wrapping; L1/R1 change section; B closes. Every change
 //! writes the store immediately so desktop shells round-trip the same file.
-//! Each section remembers its cursor. Presets is built from the catalog at render
-//! time — the console never creates or edits presets.
+//! Each section remembers its cursor. Presets lists the catalog and ends on New preset;
+//! a preset's own screens ([`super::preset`]) edit it through the host.
 //!
 //! Section names match `settings_sections` in `clients/shared/console-vectors.json`.
 //! Platform split: [`row_on`]. Availability this frame: [`row_applies`].
@@ -29,10 +29,10 @@ use skia_safe::{Canvas, Rect};
 /// churn between frames, so an index would act on the wrong row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowId {
-    /// Index into [`SettingsScreen::presets`]. Activate opens pin-to-hosts;
-    /// the console never edits a preset.
+    /// Index into [`SettingsScreen::presets`]. Activate opens the preset's menu.
     Preset(usize),
-    NoPresets,
+    /// Last on the Presets tab: name a new preset, then edit it.
+    NewPreset,
     Resolution,
     /// The family of sizes the Resolution row steps through.
     Aspect,
@@ -542,9 +542,10 @@ pub(crate) struct SettingsScreen {
     tab: usize,
     /// Per-tab cursor so a detour does not reset the one you left.
     tab_cursors: [usize; TABS.len()],
-    /// `(id, name)` loaded once. The console cannot create presets, so this is
-    /// stable for the screen's lifetime.
+    /// `(id, name)`, re-read at most twice a second while the Presets tab is up: a preset
+    /// saved from its own screens lands through the host.
     presets: Vec<(String, String)>,
+    presets_at: f64,
     /// Each preset's overrides by id, loaded with `presets`: the rows say when a
     /// host's bound preset outranks the global value they show.
     overrides: std::collections::HashMap<String, SettingsOverlay>,
@@ -572,6 +573,7 @@ impl SettingsScreen {
             tab: 0,
             tab_cursors: [0; TABS.len()],
             presets,
+            presets_at: 0.0,
             overrides: Default::default(),
             strip_focus: false,
             custom_bitrate: None,
@@ -682,6 +684,20 @@ impl SettingsScreen {
         }
     }
 
+    /// The catalog as the store has it now, on the Presets tab.
+    fn sync_presets(&mut self, ctx: &Ctx) {
+        if self.tab != PRESETS_TAB || (ctx.t - self.presets_at).abs() < 0.5 {
+            return;
+        }
+        self.presets_at = ctx.t;
+        let presets = ctx.store.presets();
+        if presets != self.presets {
+            self.presets = presets;
+            self.overrides = ctx.store.preset_overrides();
+            self.list.cursor = self.list.cursor.min(self.presets.len());
+        }
+    }
+
     /// Filtered by [`row_on`] / [`row_applies`]. Presets comes from the catalog.
     fn row_ids(&self, ctx: &Ctx) -> Vec<RowId> {
         if self.tab != PRESETS_TAB {
@@ -693,9 +709,12 @@ impl SettingsScreen {
                 .collect();
         }
         if self.presets.is_empty() {
-            vec![RowId::NoPresets]
+            vec![RowId::NewPreset]
         } else {
-            (0..self.presets.len()).map(RowId::Preset).collect()
+            (0..self.presets.len())
+                .map(RowId::Preset)
+                .chain([RowId::NewPreset])
+                .collect()
         }
     }
 
@@ -912,16 +931,24 @@ impl SettingsScreen {
                 return match msg {
                     ListMsg::Activate => {
                         let (id, name) = self.presets[i].clone();
-                        fx.push(Screen::PinHosts(super::pin_hosts::PinHostsScreen::new(
-                            id, name,
-                        )));
+                        fx.push(Screen::PresetMenu(super::preset::PresetMenu::new(id, name)));
                         pulse
                     }
                     ListMsg::Adjust(_) => Some(MenuPulse::Boundary),
                     ListMsg::None => pulse,
                 };
             }
-            RowId::NoPresets | RowId::Version => {
+            RowId::NewPreset => {
+                return match msg {
+                    ListMsg::Activate => {
+                        fx.push(Screen::PresetName(super::preset::PresetName::new()));
+                        pulse
+                    }
+                    ListMsg::Adjust(_) => Some(MenuPulse::Boundary),
+                    ListMsg::None => pulse,
+                };
+            }
+            RowId::Version => {
                 return match msg {
                     ListMsg::Adjust(_) | ListMsg::Activate => Some(MenuPulse::Boundary),
                     ListMsg::None => pulse,
@@ -1063,10 +1090,14 @@ impl SettingsScreen {
         let mut hints = vec![Hint::new(HintKey::Shoulders, "Section")];
         hints.extend(match ids.get(self.list.cursor) {
             Some(RowId::Preset(_)) => vec![
-                Hint::new(HintKey::Confirm, "Pin to hosts…"),
+                Hint::new(HintKey::Confirm, "Options\u{2026}"),
                 Hint::new(HintKey::Back, "Done"),
             ],
-            Some(RowId::NoPresets | RowId::Version) | None => {
+            Some(RowId::NewPreset) => vec![
+                Hint::new(HintKey::Confirm, "Create\u{2026}"),
+                Hint::new(HintKey::Back, "Done"),
+            ],
+            Some(RowId::Version) | None => {
                 vec![Hint::new(HintKey::Back, "Done")]
             }
             Some(
@@ -1105,6 +1136,7 @@ impl SettingsScreen {
         self.seat = self
             .keyboard
             .seat(self.custom_bitrate.is_some() && !ctx.deck, dt);
+        self.sync_presets(ctx);
         let list_rect = self.list_rect(rect, k);
         let ids = self.row_ids(ctx);
         self.clamp_cursor(ids.len());
@@ -1393,7 +1425,7 @@ fn row_icon(id: RowId) -> &'static str {
         RowId::ReduceMotion => "eye",
         RowId::AutoWake => "power",
         RowId::Version | RowId::Licenses => "info",
-        RowId::Preset(_) | RowId::NoPresets => "settings",
+        RowId::Preset(_) | RowId::NewPreset => "settings",
     }
 }
 
@@ -1420,7 +1452,53 @@ fn preset_override<'a>(
 }
 
 /// Whether an overlay pins the value this row shows.
-fn overrides_row(id: RowId, o: &SettingsOverlay) -> bool {
+/// The overlay field a preset stores for this row, by its serialised name
+/// ([`SettingsOverlay::clear`]); `None` for a row no preset carries. Mirrors [`overrides_row`].
+pub(crate) fn preset_field(id: RowId) -> Option<&'static str> {
+    Some(match id {
+        RowId::Resolution | RowId::Aspect => "resolution",
+        RowId::Refresh => "refresh_hz",
+        RowId::RenderScale => "render_scale",
+        RowId::VideoFit => "video_fit",
+        RowId::Bitrate => "bitrate_kbps",
+        RowId::Compositor => "compositor",
+        RowId::Codec => "codec",
+        RowId::Hdr => "hdr_enabled",
+        RowId::Chroma444 => "enable_444",
+        RowId::TenBitSdr => "ten_bit_sdr",
+        RowId::PresentPriority => "present_priority",
+        RowId::SmoothBuffer => "smooth_buffer",
+        RowId::Vsync => "vsync",
+        RowId::AllowVrr => "allow_vrr",
+        RowId::Audio => "audio_channels",
+        RowId::AudioFormat => "audio_format",
+        RowId::KeepHostAudio => "keep_host_audio",
+        RowId::Mic => "mic_enabled",
+        RowId::EchoCancel => "echo_cancel",
+        RowId::PadForward => "gamepad_forwarding",
+        RowId::PadType => "gamepad",
+        RowId::SystemButtons => "system_buttons",
+        RowId::GuideGesture => "guide_gesture",
+        RowId::Touch => "touch_mode",
+        RowId::Mouse => "mouse_mode",
+        RowId::InvertScroll => "invert_scroll",
+        RowId::Shortcuts => "inhibit_shortcuts",
+        RowId::Stats => "stats_verbosity",
+        RowId::Fullscreen => "fullscreen_on_stream",
+        _ => return None,
+    })
+}
+
+/// The rows a preset can hold on this platform this frame, each with its section's name.
+pub(crate) fn preset_rows(ctx: &Ctx) -> Vec<(&'static str, RowId)> {
+    (TABS.iter())
+        .flat_map(|(tab, rows)| rows.iter().map(move |id| (*tab, *id)))
+        .filter(|(_, id)| preset_field(*id).is_some())
+        .filter(|(_, id)| row_on(*id, ctx.platform) && row_applies(*id, ctx))
+        .collect()
+}
+
+pub(crate) fn overrides_row(id: RowId, o: &SettingsOverlay) -> bool {
     match id {
         RowId::Resolution | RowId::Aspect => {
             o.width.is_some() || o.height.is_some() || o.match_window.is_some()
@@ -1482,8 +1560,8 @@ fn row_spec_base(id: RowId, ctx: &Ctx, presets: &[(String, String)]) -> RowSpec 
                 ..RowSpec::default()
             };
         }
-        RowId::NoPresets => {
-            return RowSpec::action("No presets yet", false);
+        RowId::NewPreset => {
+            return RowSpec::action("New preset\u{2026}", true);
         }
         RowId::Controllers => return RowSpec::action("Controllers", true),
         RowId::Licenses => return RowSpec::action("Open-source licences", true),
@@ -1836,7 +1914,7 @@ fn row_spec_base(id: RowId, ctx: &Ctx, presets: &[(String, String)]) -> RowSpec 
             .into(),
         ),
         RowId::Preset(_)
-        | RowId::NoPresets
+        | RowId::NewPreset
         | RowId::Controllers
         | RowId::Licenses
         | RowId::QuickActions
@@ -2138,14 +2216,12 @@ pub fn detail(id: RowId, ctx: &Ctx) -> &'static str {
         RowId::LibrarySections => "Which sections the Games tab shows, and in what order.",
         RowId::Version => "This console's build.",
         RowId::Preset(_) => {
-            "Pin this preset to a host and it appears as its own card — one press \
-             connects with these settings. Presets are created and edited in the \
-             Punktfunk desktop app."
+            "Its settings, its name, and the hosts it is pinned to: pinned, it appears as \
+             its own card, and one press connects with these settings."
         }
-        RowId::NoPresets => {
-            "Presets bundle stream settings for different uses (a low-latency one, a \
-             quality one…). Create them in the Punktfunk desktop app, then pin them \
-             here as one-press connect cards."
+        RowId::NewPreset => {
+            "A preset bundles stream settings for one use, a low-latency one or a quality \
+             one, over the settings here. Pin it to a host as a one-press card."
         }
     }
 }
@@ -2484,7 +2560,7 @@ pub fn adjust(id: RowId, delta: i32, wrap: bool, ctx: &mut Ctx) -> bool {
         }
         // Navigation rows: handled in `apply_row` before the settings path.
         RowId::Preset(_)
-        | RowId::NoPresets
+        | RowId::NewPreset
         | RowId::Controllers
         | RowId::Licenses
         | RowId::QuickActions
@@ -2635,7 +2711,7 @@ pub(crate) mod tests {
     #[test]
     fn every_row_icon_ships() {
         let rows = (TABS.iter().flat_map(|(_, rows)| rows.iter().copied()))
-            .chain([RowId::Preset(0), RowId::NoPresets]);
+            .chain([RowId::Preset(0), RowId::NewPreset]);
         for id in rows {
             let icon = row_icon(id);
             assert!(crate::icons::by_name(icon).is_some(), "{id:?}: {icon}");
@@ -3678,7 +3754,10 @@ pub(crate) mod tests {
         ]);
         s.tab = PRESETS_TAB;
         let ids = s.row_ids(&ctx);
-        assert_eq!(ids, vec![RowId::Preset(0), RowId::Preset(1)]);
+        assert_eq!(
+            ids,
+            vec![RowId::Preset(0), RowId::Preset(1), RowId::NewPreset]
+        );
 
         let spec = row_spec(RowId::Preset(0), &ctx, &s.presets, &s.overrides);
         assert_eq!(spec.header, None, "the tab pill names the section");
@@ -3692,8 +3771,8 @@ pub(crate) mod tests {
         s.menu(MenuEvent::Confirm, &mut ctx, &mut fx);
         assert!(
             matches!(fx.nav, Some(crate::screens::Nav::Push(b))
-                if matches!(*b, Screen::PinHosts(ref p) if p.preset_name() == "Work")),
-            "A on a preset row opens its pin screen"
+                if matches!(*b, Screen::PresetMenu(_))),
+            "A on a preset row opens its menu"
         );
 
         let mut fx = Outbox::default();
@@ -3706,8 +3785,9 @@ pub(crate) mod tests {
         assert!(fx.nav.is_none() && fx.cmds.is_empty());
     }
 
+    /// With no presets the tab still offers New preset, which opens the name screen.
     #[test]
-    fn empty_catalog_shows_the_placeholder() {
+    fn empty_catalog_offers_a_new_preset() {
         let (mut settings, pads) = ctx_parts();
         let library = crate::library::LibraryShared::default();
         let mut ctx = Ctx {
@@ -3729,15 +3809,15 @@ pub(crate) mod tests {
         let mut s = SettingsScreen::with_presets(Vec::new());
         s.tab = PRESETS_TAB;
         let ids = s.row_ids(&ctx);
-        assert_eq!(ids, vec![RowId::NoPresets]);
-        let spec = row_spec(RowId::NoPresets, &ctx, &s.presets, &s.overrides);
-        assert!(!spec.enabled);
+        assert_eq!(ids, vec![RowId::NewPreset]);
+        let spec = row_spec(RowId::NewPreset, &ctx, &s.presets, &s.overrides);
+        assert!(spec.enabled);
 
         s.list.cursor = ids.len() - 1;
         let mut fx = Outbox::default();
-        let pulse = s.menu(MenuEvent::Confirm, &mut ctx, &mut fx);
-        assert!(matches!(pulse, Some(MenuPulse::Boundary)));
-        assert!(fx.nav.is_none());
+        s.menu(MenuEvent::Confirm, &mut ctx, &mut fx);
+        assert!(matches!(fx.nav, Some(crate::screens::Nav::Push(b))
+            if matches!(*b, Screen::PresetName(_))));
     }
 
     #[test]
@@ -4406,5 +4486,30 @@ pub(crate) mod tests {
                 "an Android phone"
             );
         });
+    }
+
+    /// The two row-to-field maps agree: a row names an overlay field exactly when an overlay
+    /// holding every field marks it overridden.
+    #[test]
+    fn the_preset_field_map_matches_the_override_map() {
+        let every: SettingsOverlay = serde_json::from_value(serde_json::json!({
+            "width": 1920, "height": 1080, "refresh_hz": 60, "match_window": false,
+            "bitrate_kbps": 20000, "render_scale": 1.0, "video_fit": "fit", "codec": "hevc",
+            "hdr_enabled": true, "enable_444": false, "ten_bit_sdr": false, "compositor": "auto",
+            "audio_channels": 2, "audio_format": "opus", "keep_host_audio": false,
+            "mic_enabled": true, "echo_cancel": true, "touch_mode": "trackpad",
+            "mouse_mode": "capture", "invert_scroll": false, "inhibit_shortcuts": true,
+            "gamepad": "auto", "gamepad_forwarding": true, "system_buttons": "auto",
+            "guide_gesture": "auto", "stats_verbosity": "normal", "fullscreen_on_stream": true,
+            "present_priority": "latency", "smooth_buffer": 0, "vsync": false, "allow_vrr": true
+        }))
+        .unwrap();
+        for id in TABS.iter().flat_map(|(_, rows)| rows.iter().copied()) {
+            assert_eq!(
+                preset_field(id).is_some(),
+                overrides_row(id, &every),
+                "{id:?}"
+            );
+        }
     }
 }

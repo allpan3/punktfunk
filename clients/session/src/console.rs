@@ -860,6 +860,37 @@ impl ServiceState {
             ConsoleCmd::PadAction { .. } => {}
             // Only a host that raised a prompt hears its answer; the desktop raises none.
             ConsoleCmd::PromptAnswer { .. } => {}
+            // The console reads the catalog straight from this file, so a save is the whole job.
+            ConsoleCmd::SavePreset {
+                id,
+                name,
+                overrides,
+            } => {
+                let mut file = pf_client_core::presets::PresetsFile::load();
+                let overrides = serde_json::from_value(overrides).unwrap_or_default();
+                match file.presets.iter_mut().find(|p| p.id == id) {
+                    Some(p) => {
+                        p.name = name;
+                        p.overrides = overrides;
+                    }
+                    None => {
+                        let mut p = pf_client_core::presets::StreamPreset::new(name);
+                        p.id = id;
+                        p.overrides = overrides;
+                        file.presets.push(p);
+                    }
+                }
+                if let Err(e) = file.save() {
+                    tracing::warn!(error = %e, "preset did not save");
+                }
+            }
+            ConsoleCmd::DeletePreset { id } => {
+                let mut file = pf_client_core::presets::PresetsFile::load();
+                file.presets.retain(|p| p.id != id);
+                if let Err(e) = file.save() {
+                    tracing::warn!(error = %e, "preset did not delete");
+                }
+            }
             // The notices this build ships beside it, compiled in: an installed session has
             // no reliable path to the file.
             ConsoleCmd::LoadLicenses => {

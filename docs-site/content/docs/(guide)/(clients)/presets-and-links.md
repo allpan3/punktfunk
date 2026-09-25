@@ -28,9 +28,11 @@ Apple and Android apps in their own storage.
 | Linux, Windows, iPhone, iPad, Apple TV | **Editing** row | Linux: next to the switcher. Windows: **Edit preset…** in the switcher. Apple: the switcher's menu. |
 | Mac | Menu at the top of the settings window | The same menu |
 | Android | Row of chips | Tap the selected chip again |
+| Console | **Settings** → **Presets** → **New preset…** | Pick a preset: **Edit settings…**, **Rename…**, **Delete preset** |
 
-Windows creates *Preset 1* and opens it; rename it there. Names are unique, ignoring case. The
-console (the controller interface) can bind and pin presets but not create or edit them.
+Windows creates *Preset 1* and opens it; rename it there. Names are unique, ignoring case. In the
+console (the controller interface) a changed row shows a dot, and **X** puts it back on the global
+value.
 
 ## What a preset can't change
 

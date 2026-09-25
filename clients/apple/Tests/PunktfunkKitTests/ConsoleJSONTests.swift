@@ -116,4 +116,21 @@ final class ConsoleJSONTests: XCTestCase {
         XCTAssertTrue(defaults.bool(forKey: DefaultsKey.vsync))
         defaults.removePersistentDomain(forName: "console-json-tests")
     }
+
+    /// A preset the console saved lands on this app's copy: the console's keys set or clear,
+    /// the compositor comes back as its wire number, and an override only this app edits stays.
+    func testAConsoleSaveKeepsWhatOnlyThisAppEdits() {
+        var base = SettingsOverlay()
+        base.windowedSafePresent = true
+        base.codec = "hevc"
+        base.bitrateKbps = 20_000
+        let merged = ConsoleJSON.overlay(
+            ["bitrate_kbps": 50_000, "compositor": "gamescope", "hdr_enabled": false],
+            over: base)
+        XCTAssertEqual(merged.bitrateKbps, 50_000)
+        XCTAssertEqual(merged.compositor, 4)
+        XCTAssertEqual(merged.hdrEnabled, false)
+        XCTAssertNil(merged.codec, "the console cleared it")
+        XCTAssertEqual(merged.windowedSafePresent, true, "only this app edits it")
+    }
 }
