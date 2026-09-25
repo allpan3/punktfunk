@@ -1556,6 +1556,7 @@ pub(crate) async fn run_admitted(
         data_sock,
         start,
         client_label,
+        session_preset,
         abr_features,
         compositor,
         gamescope_route,
@@ -1767,6 +1768,7 @@ pub(crate) async fn run_admitted(
         audio_tx: Some(audio_tx),
         pad_slots: pad_slots.clone(),
         fingerprint: session_fp_hex.clone(),
+        preset: session_preset.clone(),
         pad_owner: pad_id.owner,
         preferred_pad_slot: Arc::new(std::sync::atomic::AtomicU8::new(
             preferred_pad_slot.unwrap_or(crate::session_status::NO_PAD_SLOT),
@@ -2069,6 +2071,7 @@ pub(crate) async fn run_admitted(
         name: client_name.clone().unwrap_or_default(),
         fingerprint: session_fp_hex.clone(),
         plane: crate::events::Plane::Native,
+        preset: session_preset.clone(),
     };
     crate::events::emit(crate::events::EventKind::ClientConnected {
         client: event_client.clone(),
@@ -2248,6 +2251,7 @@ pub(crate) async fn run_admitted(
         fingerprint: session_fp_hex.clone(),
         launch: hello.launch.clone(),
         plane: crate::events::Plane::Native,
+        preset: session_preset.clone(),
     });
     // Linux `PUNKTFUNK_PIN_CLOCKS`: refcounted vendor clock floor while any session streams.
     #[cfg(target_os = "linux")]
@@ -2301,8 +2305,13 @@ pub(crate) async fn run_admitted(
     // operator code is blocking and this is a multi-thread runtime.
     let _prep = hello.launch.as_deref().and_then(|id| {
         let cmds = crate::library::prep_for(id);
-        // `PF_APP_ID` + `PF_STREAM_*` so a prep step can set a per-mode FPS cap.
+        // `PF_APP_ID` + `PF_STREAM_*` so a prep step can set a per-mode FPS cap; `PF_PRESET_*`
+        // so it can tell a docked session from a handheld one.
         let mut env = vec![("PF_APP_ID".to_string(), id.to_string())];
+        if let Some(p) = &session_preset {
+            env.push(("PF_PRESET_ID".to_string(), p.id.clone()));
+            env.push(("PF_PRESET_NAME".to_string(), p.name.clone()));
+        }
         env.extend(crate::hooks::prep_mode_env(
             hello.mode.width,
             hello.mode.height,

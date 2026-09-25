@@ -32,6 +32,19 @@ describe("wire", () => {
 		expect(stopping._tag).toBe("Success");
 	});
 
+	test("keeps the device and its preset on a game event", () => {
+		const r = decodeHostEvent(
+			JSON.parse(
+				'{"seq":5,"ts_ms":1700000000000,"schema":1,"kind":"game.exited","game":{"app":"steam:504230","title":"Celeste","client":"Deck","fingerprint":"ab12cd","plane":"native","preset":{"id":"3f9a0c11e2b4","name":"Docked"}},"reason":"exited"}',
+			),
+		);
+		expect(r._tag).toBe("Success");
+		if (r._tag === "Success" && r.success.kind === "game.exited") {
+			expect(r.success.game.fingerprint).toBe("ab12cd");
+			expect(r.success.game.preset).toEqual({ id: "3f9a0c11e2b4", name: "Docked" });
+		}
+	});
+
 	test("tolerates unknown keys (additive-only wire)", () => {
 		const r = decodeHostEvent({
 			seq: 9,

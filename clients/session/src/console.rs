@@ -250,9 +250,11 @@ pub fn run(target: Option<&str>) -> u8 {
                         preset.as_deref(),
                         launch.as_deref(),
                     );
+                    let preset_id = preset.as_ref().map(|p| p.id.clone());
                     let mut params = session_params(
                         &settings,
                         preset.map(|p| p.name),
+                        preset_id,
                         // In-process launch: no spawner resolved a clipboard decision for us.
                         None,
                         addr.clone(),

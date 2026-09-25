@@ -829,6 +829,7 @@ impl StreamState {
                     game: target.game.clone(),
                     client: client_label.clone(),
                     fingerprint: controls.fingerprint.clone(),
+                    preset: controls.preset.clone(),
                     plane: crate::events::Plane::Native,
                     spec: target.detect.clone(),
                     nested,

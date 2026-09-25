@@ -47,8 +47,12 @@ Fields are only ever added, never renamed.
   "kind": "stream.started",
   "stream": { "mode": "2560x1440@120", "hdr": true,
               "client": "Living Room TV", "fingerprint": "9f86d081…",
-              "app": "steam:570", "plane": "native" } }
+              "app": "steam:570", "plane": "native",
+              "preset": { "id": "3f9a0c11e2b4", "name": "Docked" } } }
 ```
+
+`preset` names the settings preset the device streamed with; it is absent when the device used
+its plain settings, and on Moonlight.
 
 ## Hooks
 
@@ -79,7 +83,7 @@ The console writes `~/.config/punktfunk/hooks.json` (Windows:
 | `on` | An event kind (`stream.started`) or a domain (`pairing.*`). Required, with `run`, `webhook` or both. |
 | `run` | A shell command. |
 | `webhook` | A URL the event JSON is POSTed to. |
-| `filter` | Optional exact matches, all of which must hold: `fingerprint` (the device), `client` (its name), `plane` (`native` / `gamestream`), `app`. |
+| `filter` | Optional exact matches, all of which must hold: `fingerprint` (the device), `client` (its name), `plane` (`native` / `gamestream`), `app`, `preset` (its name or id). |
 | `timeout_s` | Seconds before a command is killed with everything it started. 1–600, default 30. |
 | `debounce_ms` | Minimum gap between firings of this hook. Default 0. |
 | `hmac_secret_file` | Signs webhooks with `X-Punktfunk-Signature: sha256=<hex HMAC-SHA256 of the body>`. |
@@ -143,7 +147,7 @@ Library form keeps prep steps but can't edit them.
 
 Every step gets the session's mode: `PF_STREAM_WIDTH`, `PF_STREAM_HEIGHT`, `PF_STREAM_REFRESH`,
 `PF_STREAM_HDR` (`1` / `0`), plus `PF_APP_ID` (a Punktfunk client's launch) or `PF_APP_TITLE`
-(Moonlight). `undo` sees the same values as its `do`, so one entry serves every device. A
+(Moonlight), and `PF_PRESET_ID` / `PF_PRESET_NAME` when the device streamed with a preset. `undo` sees the same values as its `do`, so one entry serves every device. A
 Windows host service can't pass these variables to its steps.
 
 An `apps.json` entry; the `prep` array is the same in `library.json`:

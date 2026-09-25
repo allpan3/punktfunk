@@ -129,11 +129,13 @@ pub fn start(
                 fingerprint: life.fingerprint.clone(),
                 launch: app.as_ref().map(|a| a.title.clone()),
                 plane: crate::events::Plane::Gamestream,
+                preset: None,
             });
             let event_client = crate::events::ClientRef {
                 name: client_label.clone(),
                 fingerprint: life.fingerprint.clone(),
                 plane: crate::events::Plane::Gamestream,
+                preset: None,
             };
             crate::events::emit(crate::events::EventKind::ClientConnected {
                 client: event_client.clone(),
@@ -489,6 +491,7 @@ fn run(
                     // RTSP carries no device name; peer IP is the stats-capture label too.
                     client: client_label.clone(),
                     fingerprint: life.fingerprint.clone(),
+                    preset: None,
                     plane: crate::events::Plane::Gamestream,
                     spec: t.detect.clone(),
                     // Native plane only: this one has no per-session head to
