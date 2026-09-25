@@ -479,26 +479,30 @@ export async function applyUpdate(
   }
 
   if (info.update_available) {
+    // The manifest names the channel's alias zip, which every publish replaces. Read it again
+    // now, past the backend's 30 min cache, so the hash is the one beside the zip Decky fetches.
+    const fresh = await checkUpdate(true).catch(() => null);
+    const plugin = fresh?.update_available ? fresh : info;
     try {
       const backend = window.DeckyBackend;
       if (backend?.callable) {
         // Fire-and-forget: the loader reinstalls + reloads THIS plugin, tearing the panel down
         // before any result could arrive — so never await it. Decky shows its own confirm prompt.
         void backend.callable("utilities/install_plugin")(
-          info.artifact,
+          plugin.artifact,
           // The name Decky uninstalls before extracting the new zip — it locates the folder by
           // matching plugin.json "name", so this must equal THIS build's plugin.json name (the
           // brand-cased one), not the lowercase on-disk dir.
           "Punktfunk",
-          info.latest,
-          info.hash,
+          plugin.latest,
+          plugin.hash,
           INSTALL_TYPE_UPDATE,
         );
         toaster.toast({
           title: "Punktfunk",
           // Decky's installer also phones the plugin store first, which can hang on some
           // networks before the actual install proceeds — set expectations.
-          body: `Updating the plugin to v${info.latest} — confirm Decky’s prompt. This can take a couple of minutes.`,
+          body: `Updating the plugin to v${plugin.latest} — confirm Decky’s prompt. This can take a couple of minutes.`,
         });
         return;
       }
