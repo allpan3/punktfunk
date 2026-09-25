@@ -90,7 +90,7 @@ fn group_of(h: &HostRow, grouping: &str) -> Option<String> {
 /// Order the row as Settings asks: bands first (Online before Offline, presets by name with
 /// "No preset" last), then the sort inside each. Stable, so equal cards keep the order the
 /// host sent, which is the order they were added.
-pub(crate) fn arrange(hosts: &mut Vec<HostRow>, s: &pf_client_core::trust::Settings) {
+pub(crate) fn arrange(hosts: &mut [HostRow], s: &pf_client_core::trust::Settings) {
     let grouping = grouping(s);
     let sort = extra(s, HOST_SORT_KEY, "added");
     let band = |h: &HostRow| match (grouping, group_of(h, grouping)) {
