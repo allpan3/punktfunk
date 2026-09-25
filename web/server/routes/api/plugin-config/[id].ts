@@ -22,10 +22,11 @@ import {
 	readRawBody,
 	setResponseStatus,
 } from "h3";
+import { putAndGrant } from "../../../util/handedPaths";
 import {
-	bustCredential,
-	fetchUiCredential,
+	callPlugin,
 	PLUGIN_ID_RE,
+	pluginJson,
 } from "../../../util/pluginProxy";
 
 /** `GET` reads schema + current value; `PUT` validates and saves. Nothing else is forwarded. */
@@ -46,38 +47,15 @@ export default defineEventHandler(async (event) => {
 		setResponseStatus(event, 405);
 		return { error: "method not allowed" };
 	}
-	// Read the body BEFORE the retry below: `readRawBody` drains the stream, so a second attempt
-	// would forward an empty PUT and quietly save `{}` over the operator's config.
+	// Read once: `readRawBody` drains the stream, and an empty PUT would save `{}`.
 	const body =
 		method === "PUT"
 			? ((await readRawBody(event, false)) as Uint8Array | undefined)
 			: undefined;
-
-	const attempt = async (bustCache: boolean): Promise<Response | null> => {
-		const cred = await fetchUiCredential(id, { bustCache });
-		if (!cred) return null;
-		try {
-			return await fetch(`http://127.0.0.1:${cred.port}/__config`, {
-				method,
-				headers: {
-					authorization: `Bearer ${cred.secret}`,
-					...(method === "PUT" ? { "content-type": "application/json" } : {}),
-				},
-				body: body as BodyInit | undefined,
-			});
-		} catch {
-			return null;
-		}
-	};
-
-	// A plugin's secret rotates when its process restarts, which happens well inside the credential
-	// cache's TTL — so a 401 here means "stale credential", not "denied". Same one-shot retry the
-	// `/plugin-ui` proxy does, for the same reason.
-	let res = await attempt(false);
-	if (res?.status === 401) {
-		bustCredential(id);
-		res = await attempt(true);
-	}
+	const { res, access } =
+		method === "PUT"
+			? await putAndGrant(id, "/__config", body)
+			: { res: await callPlugin(id, "/__config", "GET"), access: undefined };
 	if (!res) {
 		setResponseStatus(event, 502);
 		return { error: `plugin ${id} is not reachable` };
@@ -93,12 +71,6 @@ export default defineEventHandler(async (event) => {
 		return { error: "plugin serves no config surface", noConfig: true };
 	}
 	setResponseStatus(event, res.status);
-	// Pass the plugin's own body through untouched: a 400 from `__config` carries the decode issue
-	// the drawer shows the operator, and rewriting it would throw away the only useful part.
-	const text = await res.text();
-	try {
-		return JSON.parse(text) as unknown;
-	} catch {
-		return { error: text || `plugin ${id} answered ${res.status}` };
-	}
+	const json = await pluginJson(res, id);
+	return access ? { ...(json as object), access } : json;
 });

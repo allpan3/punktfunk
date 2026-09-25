@@ -36,6 +36,7 @@ import {
 	toInput,
 	withPassword,
 } from "./model";
+import { usePluginTabs } from "./PluginTab";
 import { EntryView } from "./view";
 
 const route = getRouteApi("/library_/$gameId");
@@ -114,6 +115,7 @@ const EntryEditor: FC<{
 	const [draft, setDraft] = useState(initial);
 	const [baseline, setBaseline] = useState(initial);
 	const [password, setPassword] = useState("");
+	const pluginTabs = usePluginTabs(entry?.id ?? null);
 	const create = useCreateCustomGame();
 	const update = useUpdateCustomGame();
 	const remove = useDeleteCustomGame();
@@ -214,6 +216,7 @@ const EntryEditor: FC<{
 			readOnly={readOnly}
 			set={(key, value) => setDraft((d) => ({ ...d, [key]: value }))}
 			tab={tab ?? "information"}
+			pluginTabs={pluginTabs}
 			onTab={(next) =>
 				navigate({
 					to: "/library/$gameId",

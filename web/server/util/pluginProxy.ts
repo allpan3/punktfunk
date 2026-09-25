@@ -97,3 +97,47 @@ export async function fetchUiCredential(
 	// Transient (401/5xx): don't cache, let the next request retry.
 	return null;
 }
+
+/**
+ * One request to a plugin's loopback surface (`/__config`, `/__game?entry=…`) with its secret.
+ * A 401 means the secret rotated inside the cache window, so it retries once with a fresh one.
+ * `null` means unreachable. Callers read `body` before calling: a retry must not resend an
+ * emptied stream.
+ */
+export async function callPlugin(
+	id: string,
+	path: string,
+	method: "GET" | "PUT",
+	body?: Uint8Array,
+): Promise<Response | null> {
+	const attempt = async (bustCache: boolean): Promise<Response | null> => {
+		const cred = await fetchUiCredential(id, { bustCache });
+		if (!cred) return null;
+		try {
+			return await fetch(`http://127.0.0.1:${cred.port}${path}`, {
+				method,
+				headers: {
+					authorization: `Bearer ${cred.secret}`,
+					...(method === "PUT" ? { "content-type": "application/json" } : {}),
+				},
+				body: body as BodyInit | undefined,
+			});
+		} catch {
+			return null;
+		}
+	};
+	const res = await attempt(false);
+	if (res?.status !== 401) return res;
+	bustCredential(id);
+	return attempt(true);
+}
+
+/** A plugin's answer as JSON, or its text wrapped as an error. */
+export async function pluginJson(res: Response, id: string): Promise<unknown> {
+	const text = await res.text();
+	try {
+		return JSON.parse(text) as unknown;
+	} catch {
+		return { error: text || `plugin ${id} answered ${res.status}` };
+	}
+}
