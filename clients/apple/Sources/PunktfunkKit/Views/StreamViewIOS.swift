@@ -493,15 +493,12 @@ public final class StreamViewController: StreamViewControllerBase {
         }
         streamView.onPointerButton = { [weak self] button, down in
             guard let self else { return }
-            // Released → a trackpad/mouse click into the video RE-ENGAGES capture (the iPad
-            // analogue of macOS's `mouseDown → engageCapture(fromClick:)`, and the click-mirror of
-            // the ⌘⎋ / ⌃⌥⇧Q keyboard toggles). Only the button-DOWN engages; that click is the local
-            // engage gesture, so it's suppressed toward the host (`fromClick`) and never forwarded —
-            // its release is swallowed by InputCapture's suppress latch, whichever path delivers it.
-            // (Finger taps are untouched: touch always plays directly, so only the indirect pointer
-            // re-captures.) Captured already → the absolute path forwards the button as before.
+            // Released → a primary press into the video re-engages capture, like macOS's
+            // `engageCapture(fromClick:)`. It is the local gesture, never forwarded: InputCapture's
+            // latch swallows its release. Only button 1 has that latch; another button would send
+            // a lone release and eat the next click. Captured → the absolute path forwards it.
             if !self.captured {
-                if down, self.captureEnabled { self.setCaptured(true, fromClick: true) }
+                if down, button == 1, self.captureEnabled { self.setCaptured(true, fromClick: true) }
                 return
             }
             guard self.inputCapture?.gcMouseForwarding == false else { return }
