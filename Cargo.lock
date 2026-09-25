@@ -4592,6 +4592,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
+name = "scroll-probe"
+version = "0.39.0"
+dependencies = [
+ "anyhow",
+ "pf-inject",
+ "punktfunk-core",
+ "rustix",
+ "tracing-subscriber",
+ "wayland-client",
+ "wayland-protocols",
+]
+
+[[package]]
 name = "sdl3"
 version = "0.18.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
