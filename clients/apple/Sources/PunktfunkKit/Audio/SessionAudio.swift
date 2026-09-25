@@ -1067,6 +1067,16 @@ public final class SessionAudio {
     /// graph — the mixer's conversion is the correct fallback; somebody just has to say it
     /// happened.
     private func noteOutputFormat(_ engine: AVAudioEngine, wireRateHz: Int) {
+        // What the device adds behind the ring; A/V sync counts it as audio already queued.
+        #if os(macOS)
+        let latency = engine.outputNode.presentationLatency
+        #else
+        let latency = AVAudioSession.sharedInstance().outputLatency
+        #endif
+        stateLock.lock()
+        let ring = self.ring
+        stateLock.unlock()
+        ring?.noteOutputLatency(ns: Int64(max(0, latency) * 1_000_000_000))
         let outFormat = engine.outputNode.outputFormat(forBus: 0)
         let deviceRate = Int(outFormat.sampleRate)
         // 0 = the node has no device yet (a start that is about to fail) — nothing to compare.

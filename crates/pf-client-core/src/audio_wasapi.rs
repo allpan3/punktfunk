@@ -549,6 +549,9 @@ fn play(
         // alignment.
         policy.set_sync_target(sync.target());
         sync.publish_depth(ring.len());
+        // What this write lands behind: the frames the endpoint already holds.
+        let padding = u64::from(ep.client.get_current_padding().unwrap_or(0));
+        sync.publish_output_latency_ns(padding * 1_000_000_000 / u64::from(fmt.rate_hz.max(1)));
 
         let step = policy.step(ring.len(), want);
         if step.drop_front > 0 {

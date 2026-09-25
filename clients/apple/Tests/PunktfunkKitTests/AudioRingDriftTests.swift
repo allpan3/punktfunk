@@ -1556,6 +1556,21 @@ final class AudioRingDriftTests: XCTestCase {
         XCTAssertEqual(ring.bufferedSamples % channels, 0, "the trim split a frame")
     }
 
+    /// Audio that leaves the ring still has the device to cross.
+    ///
+    /// Mirrors `av_sync_counts_the_device_behind_the_ring`.
+    func testAvSyncCountsTheDeviceBehindTheRing() {
+        let depth = 30 * perMS
+        var s = AvSync(channels: channels, rateHz: 48_000)
+        var o = obs(offsetMS: -30, depth: depth)
+        o.outputLatencyNs = 150_000_000 // a Bluetooth link: 30 ms early at the ring, 120 ms late
+        for _ in 0..<400 { s.observe(o) }
+        XCTAssertEqual(s.offsetMS, 120)
+        let want = s.desiredDepth(currentDepth: depth)
+        XCTAssertNotNil(want)
+        XCTAssertLessThan(want ?? depth, depth, "late audio must aim shallower")
+    }
+
     /// Closed loop, as `AudioDrain` wires it. Video sits a steady `earlyMS` behind the ring's own
     /// audio; once the ring is deep enough the offset enters the deadband and must hold there.
     ///

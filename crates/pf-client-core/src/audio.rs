@@ -32,6 +32,23 @@ pub struct AudioDevice {
     pub description: String,
 }
 
+/// Device output latency behind a playback stream, ns: the graph's delay to the device plus
+/// what sits queued in the stream and buffered in its resampler. RT-safe; call from `process`.
+fn output_latency_ns(stream: &pipewire::stream::Stream, stride: usize) -> u64 {
+    use pipewire::sys::{pw_stream_get_time_n, pw_time};
+    // SAFETY: `pw_time` is plain integers; all-zero is a valid value.
+    let mut t: pw_time = unsafe { std::mem::zeroed() };
+    // SAFETY: `stream` is live for this callback, and `t` is exactly the size passed.
+    let r = unsafe {
+        pw_stream_get_time_n(stream.as_raw_ptr(), &mut t, std::mem::size_of::<pw_time>())
+    };
+    if r < 0 || t.rate.denom == 0 {
+        return 0;
+    }
+    let frames = t.delay.max(0) as u64 + t.queued / stride.max(1) as u64 + t.buffered;
+    frames.saturating_mul(1_000_000_000 * u64::from(t.rate.num)) / u64::from(t.rate.denom)
+}
+
 /// `(sinks, sources)` via one registry roundtrip on a private mainloop. Caller treats `Err` as no pickers.
 pub fn devices() -> Result<(Vec<AudioDevice>, Vec<AudioDevice>)> {
     use pipewire as pw;
@@ -391,6 +408,8 @@ fn pw_thread(
                 // Continuity outranks sync: the policy clamps the request to its underrun floor (`set_sync_target`).
                 ud.policy.set_sync_target(ud.sync.target());
                 ud.sync.publish_depth(ud.ring.len());
+                ud.sync
+                    .publish_output_latency_ns(output_latency_ns(stream, stride));
 
                 let step = ud.policy.step(ud.ring.len(), want);
                 if step.drop_front > 0 {

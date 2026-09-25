@@ -1269,6 +1269,27 @@ impl<'a> Plane<'a> {
 
     /// Place the packet against the picture, conceal any seq gap in front of it, decode it into
     /// the ring, and keep the 1 Hz line.
+    /// Device output latency past the ring, ns: when AAudio will play the newest frame it was
+    /// handed, less now. `0` until the stream reports a timestamp (it has just started).
+    fn output_latency_ns(&self) -> u64 {
+        let stream = &self.live.stream;
+        let Ok(ts) = stream.timestamp(ndk::audio::Clockid::Monotonic) else {
+            return 0;
+        };
+        let ahead = stream.frames_written() - ts.frame_position;
+        let heard_at =
+            ts.time_nanoseconds + ahead * 1_000_000_000 / i64::from(self.fmt.rate_hz.max(1));
+        let mut now = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `now` is a valid, writable timespec.
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+        #[allow(clippy::unnecessary_cast)] // `time_t` and `c_long` are 32-bit on armv7
+        let now_ns = now.tv_sec as i64 * 1_000_000_000 + now.tv_nsec as i64;
+        (heard_at - now_ns).max(0) as u64
+    }
+
     fn on_packet(&mut self, pkt: &AudioPacket) -> Result<(), DecodeExit> {
         // BEFORE it is queued: `buffered_ahead` is everything that must still play first, so
         // the depth read here is exactly what delays it. Published unconditionally — the ring's
@@ -1285,6 +1306,7 @@ impl<'a> Plane<'a> {
                 now_local_ns: punktfunk_core::client::now_realtime_ns(),
                 clock_offset_ns: self.client.clock_offset_now_ns(),
                 buffered_ahead: depth,
+                output_latency_ns: self.output_latency_ns(),
                 // 0 = nothing confirmed on the glass yet (no render callback below API 33, or
                 // the stream has not presented a frame); no reference, no correction.
                 video_e2e_ns: (ve2e > 0).then_some(ve2e),

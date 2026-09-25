@@ -242,6 +242,8 @@ final class AudioRing: @unchecked Sendable {
     /// no timestamps, so the drain thread (which has both a packet's `pts_ns` and the video leg)
     /// hands the number back for reporting. Mirrors `NativeClient::audio_av_offset_ms`.
     private var avOffsetMS = 0
+    /// Device output latency behind the ring, ns (`noteOutputLatency`).
+    private var outputLatencyNsValue: Int64 = 0
     /// Drought concealment the drain thread has synthesized this session, ms — STORED here for the
     /// same reason `avOffsetMS` is: the ring cannot compute it, but it is where the numbers a
     /// listener's complaint needs can be read under one lock.
@@ -436,6 +438,20 @@ final class AudioRing: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         avOffsetMS = ms
+    }
+
+    /// What the output device adds after a sample leaves the ring (HAL latency, a Bluetooth
+    /// link). Set by the engine side on every start; the drain counts it as audio already queued.
+    func noteOutputLatency(ns: Int64) {
+        lock.lock()
+        defer { lock.unlock() }
+        outputLatencyNsValue = max(0, ns)
+    }
+
+    var outputLatencyNs: Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return outputLatencyNsValue
     }
 
     /// Store the drain thread's running drought concealment (`DroughtConceal.totalMS`) for
@@ -934,6 +950,8 @@ struct AvSync {
         /// How much audio is already queued AHEAD of this frame, in interleaved samples —
         /// everything that must play before it does.
         let bufferedAhead: Int
+        /// Device output latency past the ring, ns (`AudioRing.outputLatencyNs`). 0 = unknown.
+        var outputLatencyNs: Int64 = 0
         /// The video plane's current end-to-end figure in ns: `displayed + clockOffset − pts`, as
         /// `LatencyMeter` already computes it per presented frame. `nil` while nothing has reached
         /// the glass recently — no reference, no correction.
@@ -957,7 +975,7 @@ struct AvSync {
         // keeps every 48/96 kHz session bit-identical to the shipped behaviour, and the ≤ 1 ms it
         // discards is an order of magnitude inside `deadbandMS`, which is the resolution this loop
         // acts on at all. The conversion itself is now exact at every rate.
-        let bufferedNs = Int64(samplesMs(o.bufferedAhead)) * 1_000_000
+        let bufferedNs = Int64(samplesMs(o.bufferedAhead)) * 1_000_000 + max(0, o.outputLatencyNs)
         // Overflow-reporting arithmetic, NOT the wrapping `&+`/`&-` the meters use. Every term is
         // a nanosecond count on the same epoch (~1.8e18), so the DIFFERENCE is tiny while the
         // operands sit within a factor of five of `Int64.max` — and a garbage `pts_ns` would wrap

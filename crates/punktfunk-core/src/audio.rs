@@ -1279,6 +1279,9 @@ pub struct AudioSyncCell {
     /// Concealment the decode side has synthesized this session, ms. Produced on decode, read
     /// from the callback's 10 s playback line.
     plc_ms: std::sync::atomic::AtomicU64,
+    /// Device output latency past the ring, ns ([`AvSyncObservation::output_latency_ns`]).
+    /// Produced by the backend, read on decode.
+    output_latency_ns: std::sync::atomic::AtomicU64,
 }
 
 impl Default for AudioSyncCell {
@@ -1287,6 +1290,7 @@ impl Default for AudioSyncCell {
             depth: std::sync::atomic::AtomicUsize::new(0),
             target: std::sync::atomic::AtomicUsize::new(usize::MAX),
             plc_ms: std::sync::atomic::AtomicU64::new(0),
+            output_latency_ns: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -1307,6 +1311,16 @@ impl AudioSyncCell {
 
     pub fn plc_ms(&self) -> u64 {
         self.plc_ms.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn publish_output_latency_ns(&self, ns: u64) {
+        self.output_latency_ns
+            .store(ns, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn output_latency_ns(&self) -> u64 {
+        self.output_latency_ns
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Decode side: ask the ring to aim for this depth (`None` = unsynchronised).
@@ -1373,6 +1387,9 @@ pub struct AvSyncObservation {
     pub clock_offset_ns: i64,
     /// How much audio is already queued ahead of this frame, in interleaved samples.
     pub buffered_ahead: usize,
+    /// Device output latency past the ring: from a sample leaving it to the speaker (the
+    /// graph or endpoint buffer, a Bluetooth link). `0` = unknown.
+    pub output_latency_ns: u64,
     /// Video end-to-end in ns: `displayed + clock_offset − pts`. `None` until a frame is presented.
     pub video_e2e_ns: Option<u64>,
 }
@@ -1410,7 +1427,8 @@ impl AvSync {
         // milliseconds; ≤ 1 ms is inside [`AV_DEADBAND_MS`]. The conversion itself is exact at
         // every rate.
         let buffered_ns = self.samples_ms(o.buffered_ahead) as i128 * 1_000_000;
-        let play_at_host = o.now_local_ns + buffered_ns + o.clock_offset_ns as i128;
+        let play_at_host =
+            o.now_local_ns + buffered_ns + o.output_latency_ns as i128 + o.clock_offset_ns as i128;
         let audio_e2e_ns = play_at_host - o.pts_ns as i128;
         let offset_ns = audio_e2e_ns - video_e2e_ns as i128;
 
@@ -2632,6 +2650,7 @@ mod tests {
             now_local_ns: 1_000_000_000i128 + 40 * 1_000_000,
             clock_offset_ns: 0,
             buffered_ahead: depth,
+            output_latency_ns: 0,
             video_e2e_ns: Some((video_e2e_ms.max(0) as u64) * 1_000_000),
         }
     }
@@ -2706,6 +2725,29 @@ mod tests {
         );
     }
 
+    /// Audio that leaves the ring still has the device to cross. A 150 ms Bluetooth link on a
+    /// ring that alone looks 30 ms early is audio 120 ms late: aim shallower, never deeper.
+    #[test]
+    fn av_sync_counts_the_device_behind_the_ring() {
+        let pm = per_ms(2);
+        let depth = 30 * pm;
+        let mut s = AvSync::new(2);
+        for _ in 0..AV_MIN_OBSERVATIONS * 4 {
+            s.observe(AvSyncObservation {
+                output_latency_ns: 150_000_000,
+                ..obs(-30, depth, pm)
+            });
+        }
+        assert_eq!(s.offset_ms(), 120);
+        let want = s
+            .desired_depth(depth)
+            .expect("a 120 ms offset is actionable");
+        assert!(
+            want < depth,
+            "late audio must aim shallower: {want} vs {depth}"
+        );
+    }
+
     #[test]
     fn av_sync_rejects_the_implausible_instead_of_clamping_it() {
         let pm = per_ms(2);
@@ -2721,6 +2763,7 @@ mod tests {
             now_local_ns: 5_000_000_000,
             clock_offset_ns: 0,
             buffered_ahead: depth,
+            output_latency_ns: 0,
             video_e2e_ns: Some(40_000_000),
         };
         assert!(s.observe(wild).is_none());
