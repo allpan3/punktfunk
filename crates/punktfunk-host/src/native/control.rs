@@ -19,7 +19,7 @@
 
 use super::*;
 use pf_clipboard::ClipCoordCmd;
-use punktfunk_core::abr::governor::ShareWindow;
+use punktfunk_core::abr::governor::{ShareWindow, NO_SHARE_KBPS};
 use punktfunk_core::quic::{AckReason, ClipControl, ClipOffer, ClipState};
 
 /// The ack this client can read. The reason byte goes only to a client that
@@ -460,14 +460,22 @@ pub(super) async fn run(task: Task) {
                     ) {
                         // A share under the live rate is a retarget the encoder
                         // takes now; one above it is a ceiling the client still
-                        // has to earn, so nothing is applied for it.
+                        // has to earn. A hand-back binds nothing: the path goes
+                        // as a ceiling, and the release follows it.
+                        let binds = counters.share.share_kbps() > 0;
                         let live = live_bitrate.load(Ordering::Relaxed);
-                        if share > 0 && live > share && bitrate_tx.send(share).is_err() {
+                        if binds && live > share && bitrate_tx.send(share).is_err() {
                             break;
                         }
                         let ack = bitrate_ack(share, AckReason::Governor, ack_reason);
                         if io::write_msg(&mut ctrl_send, &ack.encode()).await.is_err() {
                             break;
+                        }
+                        if !binds && ack_reason {
+                            let release = bitrate_ack(NO_SHARE_KBPS, AckReason::Governor, true);
+                            if io::write_msg(&mut ctrl_send, &release.encode()).await.is_err() {
+                                break;
+                            }
                         }
                     }
                 } else if let Ok(rep) = LinkReport::decode(&msg) {
