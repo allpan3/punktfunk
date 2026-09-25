@@ -1264,12 +1264,13 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                     .as_ref()
                     .is_some_and(|cap| cap.captured() && cap.desktop());
                 chan.pump(c, &mouse, desktop_active, cursor_scale);
-                // Tell the host who renders the pointer when the local model changes.
-                // The host may composite only while we hold a grabbed, hidden pointer —
-                // a released window cursor over a host-composited one reads as a frozen
-                // duplicate. Released counts as "we draw it".
+                // Tell the host who renders the pointer. It may composite only while we hold a
+                // grabbed, hidden pointer: a released cursor over a composited one is a frozen
+                // twin. Relative mode from the host's hint counts as ours too — its pointer is
+                // hidden, and only the state it keeps forwarding can clear the hint.
+                let hint_relative = !st.hint_override && st.last_hint == Some(true);
                 let client_draws = match st.capture.as_ref() {
-                    Some(cap) => !cap.captured() || cap.desktop(),
+                    Some(cap) => !cap.captured() || cap.desktop() || hint_relative,
                     None => true,
                 };
                 if chan.negotiated() && st.sent_client_draws != Some(client_draws) {
