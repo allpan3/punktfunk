@@ -697,9 +697,7 @@ pub(crate) fn hosts_page(props: &HostsProps, cx: &mut RenderCx) -> Element {
                         )
                         .on_click({
                             let (c, ss, st) = (ctx.clone(), set_screen.clone(), set_status.clone());
-                            // No target: the console opens its OWN host view rather than
-                            // one host's library — the couch counterpart of this page.
-                            move || open_console(&c, None, &ss, &st)
+                            move || open_console(&c, &ss, &st)
                         })
                         .into(),
                     );

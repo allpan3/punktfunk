@@ -140,16 +140,6 @@ class ScreenshotTest {
         WakeTimedOutScene()
     }
 
-    // The licences view — the one screen the console still opens as a Compose takeover. Shot on a
-    // dark AND a pale palette, because the console draws it through a ColorScheme derived from the
-    // palette's ink — and the pale one is the only place a grey-on-pastel slip can show up.
-    @Test
-    fun consoleLicenses() = shootRoot("console-licenses", statusBar = false) { ConsoleLicensesScene() }
-
-    @Test
-    fun consoleLicensesLight() =
-        shootRoot("console-licenses-light", statusBar = false) { ConsoleLicensesScene(paletteId = "paper") }
-
     /**
      * The touch presentation, pads connected — landscape, like every store frame: the app is
      * built for horizontal use, and a portrait capture shows a layout nobody streams in.

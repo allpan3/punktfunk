@@ -355,10 +355,6 @@ impl SimpleComponent for AppModel {
         let toasts = adw::ToastOverlay::new();
         toasts.set_child(Some(&nav));
         window.set_content(Some(&toasts));
-        // Gaming-mode fallback (a bare launch under gamescope): fullscreen the shell.
-        if crate::cli::fullscreen_mode() {
-            window.fullscreen();
-        }
 
         let model = AppModel {
             window: window.clone(),
@@ -1263,7 +1259,10 @@ pub fn run() -> glib::ExitCode {
     // until it's repointed).
     // `--browse` may be bare now (the console home — hosts, pairing, settings), so the
     // gate is the flag, not a value after it.
-    if crate::cli::arg_value("--connect").is_some() || crate::cli::arg_flag("--browse") {
+    if crate::cli::arg_value("--connect").is_some()
+        || crate::cli::arg_flag("--browse")
+        || crate::cli::couch_launch()
+    {
         return crate::cli::exec_session();
     }
 

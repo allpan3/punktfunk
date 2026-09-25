@@ -408,7 +408,8 @@ fn draw_glyph(
             canvas.draw_circle(center, r as f32, &fill(fg(0.10)));
             canvas.draw_circle(center, r as f32, &stroke(fg(0.32), (1.2 * k) as f32));
             if style == GlyphStyle::Shapes {
-                draw_ps_shape(canvas, face, center, (5.2 * k) as f32, (1.8 * k) as f32);
+                let (r, w) = ((5.2 * k) as f32, (1.8 * k) as f32);
+                draw_ps_shape(canvas, face, center, r, w, fg(0.92));
             } else {
                 let letter = face_letter(face, style);
                 let size = 12.0 * k;
@@ -551,9 +552,37 @@ fn draw_glyph(
     }
 }
 
+/// One face button's engraving in a `r`-radius button at `c`. `name` is its Xbox position:
+/// A south, B east, X west, Y north.
+pub(crate) fn draw_face(
+    canvas: &Canvas,
+    fonts: &Fonts,
+    name: &str,
+    style: GlyphStyle,
+    c: Point,
+    r: f32,
+    ink: Color4f,
+) {
+    let face = match name {
+        "A" => Face::A,
+        "B" => Face::B,
+        "X" => Face::X,
+        _ => Face::Y,
+    };
+    if style == GlyphStyle::Shapes {
+        draw_ps_shape(canvas, face, c, r * 0.47, r * 0.16, ink);
+        return;
+    }
+    let letter = face_letter(face, style);
+    let size = f64::from(r) * 1.1;
+    let w = f64::from(fonts.measure(letter, W::SemiBold, size));
+    let (x, y) = (f64::from(c.x) - w / 2.0, f64::from(c.y) + size * 0.36);
+    fonts.draw(canvas, letter, x, y, W::SemiBold, size, ink);
+}
+
 /// DualSense layout: Confirm=✕, Back=○, X-position=□, Y-position=△.
-fn draw_ps_shape(canvas: &Canvas, face: Face, center: Point, r: f32, width: f32) {
-    let mut p = stroke(fg(0.92), width);
+fn draw_ps_shape(canvas: &Canvas, face: Face, center: Point, r: f32, width: f32, ink: Color4f) {
+    let mut p = stroke(ink, width);
     p.set_stroke_cap(skia_safe::PaintCap::Round);
     p.set_stroke_join(skia_safe::PaintJoin::Round);
     let (cx, cy) = (center.x, center.y);

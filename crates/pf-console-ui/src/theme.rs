@@ -214,6 +214,9 @@ const PALE_INK: Ink = Ink {
     scrim: Color4f::new(1.0, 1.0, 1.0, 0.45),
 };
 
+/// A white-ink field whose ground is brighter than this takes [`VIVID_INK`].
+const VIVID_GROUND: f64 = 0.3;
+
 /// Relative luminance of an sRGB colour, for picking ink against a ground.
 pub(crate) fn luma((r, g, b): (f64, f64, f64)) -> f64 {
     0.2126 * r + 0.7152 * g + 0.0722 * b
@@ -224,7 +227,7 @@ impl Ink {
     /// foreign grey reads as a second palette) and white-frost glass.
     pub fn of(p: &crate::library::Palette) -> Ink {
         let accent = Color4f::new(p.accent.0 as f32, p.accent.1 as f32, p.accent.2 as f32, 1.0);
-        if !p.light && luma(p.ground) > 0.3 {
+        if !p.light && luma(p.ground) > VIVID_GROUND {
             return VIVID_INK;
         }
         if !p.light {
@@ -1026,6 +1029,62 @@ pub fn match_first_family(mgr: &FontMgr, families: &[&str], style: FontStyle) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `cargo test -p pf-console-ui --lib dump_theme_lab -- --ignored` refreshes
+    /// `tools/theme-lab/lab-data.json`: the palette table, the inks [`Ink::of`] picks from, and
+    /// the field shader around its gradient, which the lab rebuilds from edited stops.
+    #[test]
+    #[ignore]
+    fn dump_theme_lab() {
+        use crate::library::{field_sksl, CELL_RAMP, MESH_COLORS, PALETTES, VIOLET_FIELD};
+        use serde_json::json;
+        let rgb = |c: (f64, f64, f64)| json!([c.0, c.1, c.2]);
+        let c4 = |c: Color4f| json!([c.r, c.g, c.b, c.a]);
+        let ink = |i: &Ink| {
+            json!({
+                "fg": c4(i.fg), "accent": c4(i.accent), "glass": c4(i.glass),
+                "glass_low": c4(i.glass_low), "face": [c4(i.face[0]), c4(i.face[1])],
+                "shadow": i.shadow, "scrim": c4(i.scrim),
+            })
+        };
+        let palettes: Vec<_> = (PALETTES.iter())
+            .map(|p| {
+                json!({
+                    "id": p.id, "name": p.name, "light": p.light,
+                    "stops": p.stops.map(|s| s.iter().map(|c| rgb(*c)).collect::<Vec<_>>()),
+                    "ground": rgb(p.ground), "accent": rgb(p.accent),
+                })
+            })
+            .collect();
+        let p = &PALETTES[1];
+        let stops = p.stops.expect("the second palette has its own ramp");
+        let sksl = field_sksl(p.ground, stops);
+        let (head, rest) = (sksl.split_once("    float x = clamp(t, 0.0, 1.0) * "))
+            .expect("the gradient's first line");
+        let tail = &rest[rest
+            .find("    f = f * f * (3.0")
+            .expect("the gradient's blend")..];
+        let data = json!({
+            "palettes": palettes,
+            "violet_field": VIOLET_FIELD.iter().map(|c| rgb(*c)).collect::<Vec<_>>(),
+            "vivid_ground": VIVID_GROUND,
+            // The palette gate's inputs (`library.rs` tests): it samples this mesh, not the field.
+            "cell_ramp": CELL_RAMP,
+            "mesh_colors": MESH_COLORS.iter().map(|c| rgb(*c)).collect::<Vec<_>>(),
+            "inks": { "dark": ink(&DARK_INK), "vivid": ink(&VIVID_INK), "pale": ink(&PALE_INK) },
+            "sksl": { "head": head, "tail": tail },
+            "check": {
+                "ground": rgb(p.ground),
+                "stops": stops.iter().map(|c| rgb(*c)).collect::<Vec<_>>(),
+                "sksl": sksl,
+            },
+        });
+        let out = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tools/theme-lab/lab-data.json"
+        );
+        std::fs::write(out, serde_json::to_string_pretty(&data).unwrap() + "\n").unwrap();
+    }
 
     /// A bad embedded face takes out every console screen at init.
     #[test]

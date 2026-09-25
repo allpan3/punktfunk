@@ -8,6 +8,8 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.InputDevice
+import android.view.KeyEvent
+import android.view.MotionEvent
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -148,7 +150,6 @@ object SkiaConsole {
     private var holdsLaunch = false
     private var onSettingsChange: ((Settings) -> Unit)? = null
     private var onQuit: (() -> Unit)? = null
-    private var onPlatformScreen: ((String) -> Unit)? = null
     private var onPadAction: ((String, String) -> Unit)? = null
     private var onPulse: ((String) -> Unit)? = null
 
@@ -233,6 +234,8 @@ object SkiaConsole {
             // The touch shell exists as a fallback on phones/tablets but not on a TV —
             // gates the console's own "Controller-optimized UI" off switch.
             .put("fallback_ui", !io.unom.punktfunk.isTvDevice(app))
+            // No clipboard worth copying a link to on a TV.
+            .put("tv", io.unom.punktfunk.isTvDevice(app))
             // The same MediaCodec answer the Hello advertises by: without a real AV1
             // decoder the codec row marks AV1 unsupported instead of offering a dead pick.
             .put("av1_ok", VideoDecoders.decodableCodecBits() and 4 != 0)
@@ -441,7 +444,6 @@ object SkiaConsole {
         onConnected: (ActiveSession) -> Unit,
         onSettingsChange: (Settings) -> Unit,
         onQuit: () -> Unit,
-        onPlatformScreen: (String) -> Unit,
         onPadAction: (String, String) -> Unit,
         onPulse: (String) -> Unit,
         onAnnounce: (String) -> Unit,
@@ -449,7 +451,6 @@ object SkiaConsole {
         this.onConnected = onConnected
         this.onSettingsChange = onSettingsChange
         this.onQuit = onQuit
-        this.onPlatformScreen = onPlatformScreen
         this.onPadAction = onPadAction
         this.onPulse = onPulse
         this.onAnnounce = onAnnounce
@@ -467,7 +468,6 @@ object SkiaConsole {
         onConnected = null
         onSettingsChange = null
         onQuit = null
-        onPlatformScreen = null
         onPadAction = null
         onPulse = null
         onAnnounce = null
@@ -582,8 +582,21 @@ object SkiaConsole {
                 driving ?: Gamepad.firstPad(),
                 extras,
                 appContext?.let(::deviceBodyVibrator),
+                ConsoleJson.otherInputs(),
             ),
         )
+    }
+
+    /**
+     * The driving pad's reading while the console's input test is on (`ConsoleCmd::PadTest`),
+     * null otherwise. While set, the shell's probes feed it instead of the menu. Main-thread only.
+     */
+    internal var padTest: PadTestReading? = null
+        private set
+
+    internal fun pushPadTest() {
+        val t = padTest ?: return
+        if (handle != 0L) NativeBridge.nativeConsoleSetPadTest(handle, t.json())
     }
 
     // ---- model pushers -----------------------------------------------------------------------
@@ -823,6 +836,20 @@ object SkiaConsole {
 
     // ---- commands from the console -----------------------------------------------------
 
+    /** `ConsoleCmd::LoadLicenses`: the notices this APK bundles, for the console's Licences screen. */
+    private fun loadLicenses() {
+        val app = appContext ?: return
+        ioPool.execute {
+            val notices = runCatching {
+                app.assets.open("THIRD-PARTY-NOTICES.txt").bufferedReader().use { it.readText() }
+            }.getOrDefault("Third-party notices unavailable.")
+            val json = JSONArray()
+                .put(JSONObject().put("heading", "Third-party software").put("text", notices))
+                .toString()
+            main.post { if (handle != 0L) NativeBridge.nativeConsoleSetLicenses(handle, json) }
+        }
+    }
+
     private fun drainCommands() {
         val arr = runCatching { JSONArray(NativeBridge.nativeConsoleDrainCmds(handle)) }.getOrNull() ?: return
         for (i in 0 until arr.length()) {
@@ -830,6 +857,7 @@ object SkiaConsole {
                 is String -> when (c) {
                     "CancelWake" -> { wakeGen.incrementAndGet(); NativeBridge.nativeConsoleSetWake(handle, "null") }
                     "Probe" -> { resumeDiscovery(); pushHosts() }
+                    "LoadLicenses" -> loadLicenses()
                 }
                 is JSONObject -> {
                     c.optJSONObject("FetchLibrary")?.let { fetchLibrary(it, refreshOnly = false) }
@@ -841,14 +869,20 @@ object SkiaConsole {
                     c.optJSONObject("SaveHost")?.let(::saveHost)
                     c.optJSONObject("UpdateHost")?.let(::updateHost)
                     c.optJSONObject("ForgetHost")?.let(::forgetHost)
+                    c.optJSONObject("UnpairHost")?.let(::unpairHost)
+                    c.optJSONObject("SavePreset")?.let(::savePreset)
+                    c.optJSONObject("DeletePreset")?.let {
+                        presetStore.delete(it.optString("id"))
+                        pushPresets()
+                    }
                     c.optJSONObject("Wake")?.let(::wake)
                     c.optJSONObject("SetPin")?.let(::setPin)
                     c.optJSONObject("BindPreset")?.let(::bindPreset)
                     c.optJSONObject("SetClipboard")?.let(::setClipboard)
-                    c.optJSONObject("OpenPlatformScreen")?.let { onPlatformScreen?.invoke(it.optString("id")) }
+                    c.optJSONObject("PadTest")?.let {
+                        padTest = if (it.optBoolean("on")) PadTestReading() else null
+                    }
                     c.optJSONObject("PadAction")?.let { onPadAction?.invoke(it.optString("action"), it.optString("pad_key")) }
-                    c.optString("OpenPlatformScreen").takeIf { c.has("OpenPlatformScreen") && c.opt("OpenPlatformScreen") is String }
-                        ?.let { onPlatformScreen?.invoke(it) }
                 }
             }
         }
@@ -886,6 +920,28 @@ object SkiaConsole {
         val kh = hostForKey(c.optString("key")) ?: return
         knownHostStore.remove(kh)
         appContext?.let { LibraryCache.standard(it.cacheDir).forget(kh.id) }
+        pushHosts(); pushKnownHosts()
+    }
+
+    /** `ConsoleCmd::SavePreset`: the console saved one preset whole, merged onto the stored one. */
+    private fun savePreset(c: JSONObject) {
+        val id = c.optString("id").takeIf { it.isNotEmpty() } ?: return
+        val stored = presetStore.byId(id) ?: StreamPreset(id = id, name = "")
+        val overrides = io.unom.punktfunk.SettingsOverlay.fromConsoleJson(
+            c.optJSONObject("overrides") ?: JSONObject(), stored.overrides,
+        )
+        presetStore.save(stored.copy(name = c.optString("name"), overrides = overrides))
+        pushPresets()
+    }
+
+    private fun pushPresets() {
+        if (handle != 0L) NativeBridge.nativeConsoleSetPresets(handle, ConsoleJson.presets(presetStore.all()))
+    }
+
+    /** `ConsoleCmd::UnpairHost`: keep the record, drop its pin, so the next connect pairs again. */
+    private fun unpairHost(c: JSONObject) {
+        val kh = hostForKey(c.optString("key")) ?: return
+        knownHostStore.save(kh.copy(fpHex = "", paired = false))
         pushHosts(); pushKnownHosts()
     }
 
@@ -1229,4 +1285,60 @@ internal fun fetchArt(candidates: List<String>, client: OkHttpClient, offline: B
         if (bytes != null) return bytes
     }
     return null
+}
+
+/** One pad's held buttons and axes, by the names the console's `PadTestState` reads. */
+internal class PadTestReading {
+    private val keys = linkedSetOf<String>()
+    /** The d-pad as a HAT, which many pads report instead of keys. */
+    private val hat = linkedSetOf<String>()
+    private var axes: Map<String, Float> = emptyMap()
+
+    /** A key by its CORRECTED code ([Gamepad.padKeyCode]), as the stream reads it. */
+    fun key(code: Int, down: Boolean) {
+        val name = TEST_NAMES[code] ?: return
+        if (down) keys += name else keys -= name
+    }
+
+    fun motion(ev: MotionEvent) {
+        axes = io.unom.punktfunk.padAxes(ev)
+        val (hx, hy) = (axes["HX"] ?: 0f) to (axes["HY"] ?: 0f)
+        hat.clear()
+        if (hx < -0.5f) hat += "Left"
+        if (hx > 0.5f) hat += "Right"
+        if (hy < -0.5f) hat += "Up"
+        if (hy > 0.5f) hat += "Down"
+    }
+
+    fun json(): String {
+        val held = JSONArray()
+        (keys + hat).forEach { held.put(it) }
+        val ax = JSONArray()
+        for (n in listOf("LX", "LY", "RX", "RY", "LT", "RT")) {
+            ax.put(JSONArray().put(n).put((axes[n] ?: 0f).toDouble()))
+        }
+        return JSONObject().put("held", held).put("axes", ax).toString()
+    }
+
+    private companion object {
+        val TEST_NAMES = mapOf(
+            KeyEvent.KEYCODE_BUTTON_A to "A",
+            KeyEvent.KEYCODE_BUTTON_B to "B",
+            KeyEvent.KEYCODE_BUTTON_X to "X",
+            KeyEvent.KEYCODE_BUTTON_Y to "Y",
+            KeyEvent.KEYCODE_BUTTON_L1 to "LB",
+            KeyEvent.KEYCODE_BUTTON_R1 to "RB",
+            KeyEvent.KEYCODE_BUTTON_L2 to "LT",
+            KeyEvent.KEYCODE_BUTTON_R2 to "RT",
+            KeyEvent.KEYCODE_BUTTON_SELECT to "Back",
+            KeyEvent.KEYCODE_BUTTON_START to "Start",
+            KeyEvent.KEYCODE_BUTTON_MODE to "Guide",
+            KeyEvent.KEYCODE_BUTTON_THUMBL to "LS",
+            KeyEvent.KEYCODE_BUTTON_THUMBR to "RS",
+            KeyEvent.KEYCODE_DPAD_UP to "Up",
+            KeyEvent.KEYCODE_DPAD_DOWN to "Down",
+            KeyEvent.KEYCODE_DPAD_LEFT to "Left",
+            KeyEvent.KEYCODE_DPAD_RIGHT to "Right",
+        )
+    }
 }

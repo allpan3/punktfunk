@@ -60,6 +60,16 @@ pub fn run(target: Option<&str>) -> u8 {
             std::thread::sleep(std::time::Duration::from_secs(2));
         });
     }
+    // The desktop's reduce-motion switch, followed while it answers. A desktop that says
+    // nothing starts no thread and keeps the console's own row.
+    if let Some(reduce) = pf_client_core::os_prefs::reduce_motion() {
+        pf_console_ui::os_theme::set_os_reduce_motion(Some(reduce));
+        std::thread::spawn(|| loop {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            let reduce = pf_client_core::os_prefs::reduce_motion();
+            pf_console_ui::os_theme::set_os_reduce_motion(reduce);
+        });
+    }
     let identity = match trust::load_or_create_identity() {
         Ok(i) => i,
         Err(e) => {
@@ -787,6 +797,28 @@ impl ServiceState {
                 // DISCOVERED row — unsaved and unpaired, which is the honest state.
                 self.last_probe = Instant::now() - Duration::from_secs(60);
             }
+            ConsoleCmd::UnpairHost { key } => {
+                let mut known = trust::KnownHosts::load();
+                let Some(i) = index_for_key(&known, &key) else {
+                    tracing::warn!(%key, "unpair for an unknown host — ignoring");
+                    return;
+                };
+                let host = &mut known.hosts[i];
+                let fp = std::mem::take(&mut host.fp_hex);
+                host.paired = false;
+                let (id, name) = (host.id.clone(), host.name.clone());
+                self.save_known(&known);
+                // The catalog cache is keyed on the fingerprint just dropped; nothing reaches
+                // it again, so it goes now, as a forget's does.
+                pf_client_core::library_cache::forget(&fp);
+                // An unpaired host is no landing: the resolver skips it, and this stops a
+                // later re-pair inheriting the choice.
+                let mut settings = trust::Settings::load();
+                if start::clear_default(&mut settings, id.as_deref()) {
+                    settings.save();
+                }
+                tracing::info!(%name, "host unpaired");
+            }
             ConsoleCmd::Wake { key, then_connect } => {
                 if let Some(c) = self.wake_cancel.take() {
                     c.store(true, Ordering::SeqCst);
@@ -823,12 +855,60 @@ impl ServiceState {
                     r.request();
                 }
             }
-            // A platform-native screen (Android's Licences view) — the desktop shell has no
-            // such row, so this never arrives here.
+            // A platform-native screen (webOS) — the desktop shell has no such row, so this
+            // never arrives here.
             ConsoleCmd::OpenPlatformScreen { .. } => {}
             // Grants and rumble tests from the controllers screen. Android-only for the same
             // reason: the settings row that opens that screen is not on the desktop's list.
             ConsoleCmd::PadAction { .. } => {}
+            // The Controllers tab offers no input test on the desktop.
+            ConsoleCmd::PadTest { .. } => {}
+            // Only a host that raised a prompt hears its answer; the desktop raises none.
+            ConsoleCmd::PromptAnswer { .. } => {}
+            // The console reads the catalog straight from this file, so a save is the whole job.
+            ConsoleCmd::SavePreset {
+                id,
+                name,
+                overrides,
+            } => {
+                let mut file = pf_client_core::presets::PresetsFile::load();
+                let overrides = serde_json::from_value(overrides).unwrap_or_default();
+                match file.presets.iter_mut().find(|p| p.id == id) {
+                    Some(p) => {
+                        p.name = name;
+                        p.overrides = overrides;
+                    }
+                    None => {
+                        let mut p = pf_client_core::presets::StreamPreset::new(name);
+                        p.id = id;
+                        p.overrides = overrides;
+                        file.presets.push(p);
+                    }
+                }
+                if let Err(e) = file.save() {
+                    tracing::warn!(error = %e, "preset did not save");
+                }
+            }
+            ConsoleCmd::DeletePreset { id } => {
+                let mut file = pf_client_core::presets::PresetsFile::load();
+                file.presets.retain(|p| p.id != id);
+                if let Err(e) = file.save() {
+                    tracing::warn!(error = %e, "preset did not delete");
+                }
+            }
+            // The notices this build ships beside it, compiled in: an installed session has
+            // no reliable path to the file.
+            ConsoleCmd::LoadLicenses => {
+                #[cfg(windows)]
+                const NOTICES: &str = include_str!("../../windows/THIRD-PARTY-NOTICES.txt");
+                #[cfg(not(windows))]
+                const NOTICES: &str = include_str!("../../linux/THIRD-PARTY-NOTICES.txt");
+                self.console
+                    .set_licenses(vec![pf_console_ui::LicenseSection {
+                        heading: "Third-party software".into(),
+                        text: NOTICES.into(),
+                    }]);
+            }
             ConsoleCmd::SetPin {
                 key,
                 preset_id,

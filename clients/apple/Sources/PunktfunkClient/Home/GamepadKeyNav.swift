@@ -1,5 +1,5 @@
-// Hardware-keyboard navigation for the gamepad UI (iOS/iPadOS/macOS): arrows move, Return/Space
-// activate, Esc backs out.
+// Hardware-keyboard navigation for the library grid (iOS/iPadOS/macOS): arrows move,
+// Return/Space activate, Esc backs out.
 //
 // Asked for by a field user on an iPad ("select games with keyboard arrows, enter to launch"). An
 // iPad on a Magic Keyboard and a couch Mac are the same situation the console layout was built
