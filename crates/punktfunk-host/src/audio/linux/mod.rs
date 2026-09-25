@@ -707,6 +707,9 @@ fn mic_pw_thread(
                     let Some(mut buffer) = stream.dequeue_buffer() else {
                         return;
                     };
+                    // This cycle's quantum. The mapped buffer is sized for `quantum-limit`
+                    // (8192 ≈ 170 ms); filling it primes and queues 170 ms a cycle. 0 → capacity.
+                    let requested = usize::try_from(buffer.requested()).unwrap_or(0);
                     // Before pulling new frames: drop the ring on flush (uplink
                     // gap) or when this callback has not run for `MIC_STALE`
                     // (idle, no recorder). A recorder must not hear old audio.
@@ -730,13 +733,18 @@ fn mic_pw_thread(
                         return;
                     }
                     let data = &mut datas[0];
-                    let want_frames = data.data().map(|s| s.len() / stride).unwrap_or(0);
+                    let max_frames = data.data().map(|s| s.len() / stride).unwrap_or(0);
+                    let want_frames = match requested {
+                        0 => max_frames,
+                        r => r.min(max_frames),
+                    };
                     let want = want_frames * ud.channels;
                     static FIRST: std::sync::atomic::AtomicBool =
                         std::sync::atomic::AtomicBool::new(true);
                     if FIRST.swap(false, std::sync::atomic::Ordering::Relaxed) {
                         tracing::info!(
                             quantum_frames = want_frames,
+                            capacity_frames = max_frames,
                             quantum_ms = want_frames as f32 / 48.0,
                             "virtual-mic consumer connected"
                         );
