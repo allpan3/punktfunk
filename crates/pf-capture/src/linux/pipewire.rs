@@ -3,9 +3,10 @@
 use super::pw_cursor::{composite_cursor, update_cursor_meta, CursorState};
 use super::pw_pods::{
     build_cursor_meta_param, build_default_format_obj, build_dmabuf_buffers, build_dmabuf_format,
-    build_hdr_dmabuf_format, build_mappable_buffers, build_shm_only_buffers, serialize_pod, Pacing,
-    HDR_FORMAT_ORDER,
+    build_hdr_dmabuf_format, build_mappable_buffers, build_shm_only_buffers,
+    build_sync_timeline_meta_param, serialize_pod, Pacing, HDR_FORMAT_ORDER,
 };
+use super::sync_timeline::{hand_back, plane_count, SyncDevice, SyncPoints};
 use super::{CapturedFrame, DmabufFrame, FramePayload, PixelFormat, ZeroCopyPolicy};
 use anyhow::{Context, Result};
 use pipewire as pw;
@@ -82,6 +83,9 @@ struct UserData {
     pacer: Option<std::rc::Rc<Pacer>>,
     /// Arrivals dropped because every hold was out (the slot kept an older frame).
     held_drops: u64,
+    /// Explicit-sync device; `None` when the lane cannot offer it. Whether a buffer carries
+    /// sync points is the producer's call at negotiation.
+    sync: Option<std::sync::Arc<SyncDevice>>,
 }
 
 impl UserData {
@@ -954,6 +958,8 @@ struct DeferredRequeue {
     wake: pw::channel::Sender<()>,
     logged_active: std::sync::atomic::AtomicBool,
     logged_shallow: std::sync::atomic::AtomicBool,
+    /// Signals a buffer's release point as it rejoins; `None` without explicit sync.
+    sync: Option<std::sync::Arc<SyncDevice>>,
 }
 
 impl DeferredRequeue {
@@ -974,8 +980,7 @@ impl DeferredRequeue {
             // and no `remove_buffer` has freed it since (that purges the book), so the pointer
             // is a live buffer of `stream` that we own (dequeued, never requeued). The caller
             // guarantees `stream` is live and that we are on its loop thread.
-            let _ =
-                unsafe { pw::sys::pw_stream_queue_buffer(stream, buf as *mut pw::sys::pw_buffer) };
+            unsafe { hand_back(self.sync.as_deref(), stream, buf as *mut pw::sys::pw_buffer) };
         }
         requeue
     }
@@ -988,8 +993,7 @@ impl DeferredRequeue {
         self.drain_with(|buf| {
             // SAFETY: `drain_with` hands over only buffers the book still listed under the
             // dropping hold's generation (see `release`); the caller's contract is `release`'s.
-            let _ =
-                unsafe { pw::sys::pw_stream_queue_buffer(stream, buf as *mut pw::sys::pw_buffer) };
+            unsafe { hand_back(self.sync.as_deref(), stream, buf as *mut pw::sys::pw_buffer) };
         })
     }
 
@@ -1184,11 +1188,12 @@ fn consume_frame(
         return;
     }
     // SAFETY: the dequeued buffer stays held for this callback. We reject counts outside the
-    // one/two-plane formats this function supports before using PipeWire's array pointer.
+    // one/two-plane formats this function supports before using PipeWire's array pointer;
+    // the sync datas behind the planes never enter the slice.
     let datas: &mut [pw::spa::buffer::Data] = unsafe {
         if spa_buf.is_null() || (*spa_buf).datas.is_null() {
             &mut []
-        } else if let Some(len) = supported_data_plane_count((*spa_buf).n_datas) {
+        } else if let Some(len) = supported_data_plane_count(plane_count(spa_buf)) {
             std::slice::from_raw_parts_mut((*spa_buf).datas as *mut pw::spa::buffer::Data, len)
         } else {
             &mut []
@@ -1255,12 +1260,22 @@ fn consume_frame(
         ud.rt_minus_mono_ns = realtime_minus_monotonic_ns();
     }
 
-    // Mutter hands the dmabuf at GPU-submit; without producer explicit sync (Mutter+NVIDIA)
-    // wait the implicit fence before sampling, or the CPU/GPU path reads a stale frame.
-    // No-op when the driver attaches no fence. 100 ms is a guard for a producer that does fence.
+    // The render is fenced at the acquire point when the stream negotiated explicit sync, else
+    // by the dmabuf's implicit fence (none on NVIDIA: a stale frame can be read). 100 ms is a
+    // guard: past it the producer is wedged, not slow. A CPU wait on the loop thread; a GPU
+    // semaphore import would free it, and the perf line below says whether that is owed.
     if datas[0].type_() == pw::spa::buffer::DataType::DmaBuf {
         let t0 = std::time::Instant::now();
-        let waited = pf_zerocopy::dmabuf_fence::wait_read_ready(datas[0].fd(), 100);
+        // SAFETY: `spa_buf` is the buffer this callback holds.
+        let explicit = ud.sync.as_ref().zip(unsafe { SyncPoints::of(spa_buf) });
+        let waited = match &explicit {
+            Some((dev, p)) => dev.wait(
+                p.acquire_fd,
+                p.acquire_point,
+                std::time::Duration::from_millis(100),
+            ),
+            None => pf_zerocopy::dmabuf_fence::wait_read_ready(datas[0].fd(), 100),
+        };
         ud.fence_wait.record(t0.elapsed().as_micros() as u64);
         match waited {
             Ok(outcome) => {
@@ -1270,8 +1285,17 @@ fn consume_frame(
                     WaitOutcome::NoFence => ud.fence_wait.no_fence += 1,
                     WaitOutcome::TimedOut => ud.fence_wait.timed_out += 1,
                 }
+                static F0: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+                if explicit.is_some() && F0.swap(false, Ordering::Relaxed) {
+                    tracing::info!(
+                        ?outcome,
+                        "dmabuf explicit sync active (SyncTimeline): the producer's acquire \
+                         point is waited here and its release point signalled on hand-back — \
+                         it no longer finishes the GPU for this stream"
+                    );
+                }
                 static F1: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
-                if F1.swap(false, Ordering::Relaxed) {
+                if explicit.is_none() && F1.swap(false, Ordering::Relaxed) {
                     tracing::info!(
                         ?outcome,
                         "dmabuf implicit-fence sync active (Signaled → driver fences the \
@@ -1932,12 +1956,19 @@ pub fn pipewire_thread(
     // this channel; a withheld buffer rejoins only on the loop thread — the receiver (attached
     // after the stream exists) or `try_defer` drains the parked releases.
     let (requeue_tx, requeue_rx) = pw::channel::channel::<()>();
+    // Explicit sync needs a dmabuf lane and a DRM node that serves syncobjs; whether a buffer
+    // then carries sync points is the producer's call at negotiation.
+    let sync = (crate::explicit_sync() && (want_hdr || want_dmabuf))
+        .then(SyncDevice::open)
+        .flatten()
+        .map(std::sync::Arc::new);
     let defer = std::sync::Arc::new(DeferredRequeue {
         book: std::sync::Mutex::new(HoldBook::default()),
         pending: std::sync::Mutex::new(Vec::new()),
         wake: requeue_tx,
         logged_active: std::sync::atomic::AtomicBool::new(false),
         logged_shallow: std::sync::atomic::AtomicBool::new(false),
+        sync: sync.clone(),
     });
 
     // The heartbeat timer reads `driving` after `signals` moves into the listener's state.
@@ -1985,6 +2016,7 @@ pub fn pipewire_thread(
         defer: defer.clone(),
         pacer: pacer.clone(),
         held_drops: 0,
+        sync: sync.clone(),
     };
 
     let mut props = properties! {
@@ -2136,7 +2168,7 @@ pub fn pipewire_thread(
                 }
                 // SAFETY: `newest` was dequeued from this stream and not yet requeued; we immediately
                 // overwrite it, so the requeued pointer is never touched again.
-                unsafe { stream.queue_raw_buffer(newest) };
+                unsafe { hand_back(ud.sync.as_deref(), stream.as_raw_ptr(), newest) };
                 newest = next;
                 drained += 1;
             }
@@ -2199,7 +2231,7 @@ pub fn pipewire_thread(
                     }
                     // SAFETY: `newest` was dequeued from this stream and not yet requeued;
                     // requeued exactly once here, then never touched (mirrors the null path).
-                    unsafe { stream.queue_raw_buffer(newest) };
+                    unsafe { hand_back(ud.sync.as_deref(), stream.as_raw_ptr(), newest) };
                     return;
                 }
             }
@@ -2320,7 +2352,7 @@ pub fn pipewire_thread(
                 // completed inside the closure above; `newest` was dequeued from this stream,
                 // not yet requeued, and — per the `withheld` check — carries no hold that would
                 // requeue it a second time.
-                unsafe { stream.queue_raw_buffer(newest) };
+                unsafe { hand_back(ud.sync.as_deref(), stream.as_raw_ptr(), newest) };
             }
             if outcome.is_err() {
                 // `.process` is per-frame; a deterministic panic would flood. Power-of-two throttle.
@@ -2478,7 +2510,7 @@ pub fn pipewire_thread(
     let buffers_values = if want_hdr || want_dmabuf {
         // Dmabuf-only. HDR: Mutter's SHM path paints 8-bit ARGB32 regardless of format, so a
         // MemFd buffer under a 10-bit format would carry mislabeled bytes.
-        Some(build_dmabuf_buffers(pool_min)?)
+        Some(build_dmabuf_buffers(pool_min, false)?)
     } else if force_shm {
         // Exclude DmaBuf so Mutter must download (glReadPixels orders against render).
         Some(build_shm_only_buffers()?)
@@ -2493,14 +2525,30 @@ pub fn pipewire_thread(
     } else {
         None
     };
+    // Explicit sync: a Buffers twin that demands the meta, ahead of the plain one, and the
+    // meta itself. Both sides listing the meta is what puts the two syncobj datas on a buffer.
+    let sync_buffers = match &sync {
+        Some(_) => Some(build_dmabuf_buffers(pool_min, true)?),
+        None => None,
+    };
+    let sync_meta = match &sync {
+        Some(_) => Some(build_sync_timeline_meta_param()?),
+        None => None,
+    };
     let mut byte_slices: Vec<&[u8]> = Vec::new();
     for pod in &format_pods {
         byte_slices.push(pod);
+    }
+    if let Some(b) = &sync_buffers {
+        byte_slices.push(b);
     }
     if let Some(b) = &buffers_values {
         byte_slices.push(b);
     }
     if let Some(m) = &cursor_meta {
+        byte_slices.push(m);
+    }
+    if let Some(m) = &sync_meta {
         byte_slices.push(m);
     }
     let mut params: Vec<&Pod> = byte_slices
@@ -3905,6 +3953,7 @@ mod tests {
             wake,
             logged_active: std::sync::atomic::AtomicBool::new(false),
             logged_shallow: std::sync::atomic::AtomicBool::new(false),
+            sync: None,
         });
         let hold = |buf: usize| {
             let generation = defer.book.lock().unwrap().try_hold(buf, pool).unwrap();

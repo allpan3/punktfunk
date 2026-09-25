@@ -35,6 +35,16 @@ pub fn unpaced_capture() -> bool {
     !pf_host_config::env_on("PUNKTFUNK_KWIN_PACED").unwrap_or(false)
 }
 
+/// Offer PipeWire explicit sync (`SPA_META_SyncTimeline`) on the dmabuf lane.
+///
+/// A producer that takes it hands over a fence at each buffer's acquire point and waits on
+/// the release point this side signals, instead of finishing the GPU itself. KWin on NVIDIA
+/// `glFinish()`es its compositor thread per cast frame otherwise — ~9 ms under a game's
+/// load, the whole 120 → 111 fps gap. `PUNKTFUNK_EXPLICIT_SYNC=0` keeps the implicit path.
+pub fn explicit_sync() -> bool {
+    pf_host_config::env_on("PUNKTFUNK_EXPLICIT_SYNC").unwrap_or(true)
+}
+
 /// Whether to capture a compositor's output directly with `ext-image-copy-capture-v1`
 /// instead of going through the xdg ScreenCast portal.
 ///

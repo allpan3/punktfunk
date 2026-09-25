@@ -1144,6 +1144,8 @@ mod wl_capture;
 // to unit-test without a compositor.
 mod pw_cursor;
 mod pw_pods;
+// Explicit sync (`SPA_META_SyncTimeline`): syncobj waits and release signals.
+mod sync_timeline;
 
 #[cfg(test)]
 mod first_frame_timeout_tests {
