@@ -16,11 +16,14 @@ use std::sync::Arc;
 
 /// Latest cursor parsed from `SPA_META_Cursor`. Position refreshes on every
 /// buffer that carries the meta (including cursor-only buffers whose frame is
-/// otherwise skipped); the RGBA bitmap is replaced only when `bitmap_offset != 0`.
+/// otherwise skipped); the RGBA bitmap and hotspot change only when `bitmap_offset != 0`.
 #[derive(Default)]
 pub(super) struct CursorState {
-    /// `spa_meta_cursor.id != 0`.
+    /// `spa_meta_cursor.id != 0` and the last bitmap draws something.
     visible: bool,
+    /// The last bitmap was 0×0 (Mutter's null cursor) or fully transparent (an Xwayland
+    /// blank cursor): a hide that position-only updates must not undo.
+    bitmap_hidden: bool,
     /// Bitmap top-left = reported position − hotspot.
     x: i32,
     y: i32,
@@ -32,8 +35,8 @@ pub(super) struct CursorState {
     /// Bitmap identity. Stable across position-only moves so the GPU path
     /// re-uploads the cursor texture only on change.
     serial: u64,
-    /// Compositor hotspot, for the cursor-forward channel. The blend path
-    /// uses pre-adjusted `x`/`y` and never reads this.
+    /// Hotspot of the cached bitmap. SPA gives it meaning only beside a bitmap;
+    /// Mutter's position-only meta writes 0.
     hot_x: i32,
     hot_y: i32,
     /// This stream observed a `SPA_META_Cursor` region. Per-stream: a
@@ -94,7 +97,8 @@ pub(super) fn decode_bitmap_pixel(vfmt: u32, s: &[u8]) -> (u8, u8, u8, u8) {
 /// honour it or the composited arrow outlives every hide. A stale-meta
 /// producer (Mutter) only rewrites the region when the cursor changed;
 /// recycled buffers carry a stale id-0, so last-known state holds. A real
-/// leave/hide simply stops producing updates.
+/// leave/hide simply stops producing updates. Any other id shows the pointer
+/// unless its last bitmap was a hide.
 fn note_cursor_id(cursor: &mut CursorState, id: u32) -> bool {
     if id == 0 {
         if cursor.id0_hides {
@@ -102,14 +106,15 @@ fn note_cursor_id(cursor: &mut CursorState, id: u32) -> bool {
         }
         return false;
     }
-    cursor.visible = true;
+    cursor.visible = !cursor.bitmap_hidden;
     true
 }
 
 /// Read the newest `SPA_META_Cursor` into `cursor`. Runs before stale-frame
 /// filtering so metadata-only pointer moves still update position.
 /// Producer offsets and bitmap geometry are bounded before every read.
-/// `bitmap_offset == 0` keeps the last complete bitmap.
+/// `bitmap_offset == 0` keeps the last complete bitmap and its hotspot; a 0×0
+/// or fully transparent bitmap is a hide.
 pub(super) fn update_cursor_meta(cursor: &mut CursorState, spa_buf: *mut spa::sys::spa_buffer) {
     // SAFETY: `spa_buf` is the live dequeued buffer (not yet requeued).
     // `find_meta` (not `find_meta_data`) yields the region's real `size`.
@@ -145,10 +150,8 @@ pub(super) fn update_cursor_meta(cursor: &mut CursorState, spa_buf: *mut spa::sy
     if !note_cursor_id(cursor, id) {
         return;
     }
-    cursor.x = pos_x - hot_x;
-    cursor.y = pos_y - hot_y;
-    cursor.hot_x = hot_x;
-    cursor.hot_y = hot_y;
+    cursor.x = pos_x - cursor.hot_x;
+    cursor.y = pos_y - cursor.hot_y;
     if bmp_off == 0 {
         // Position-only update — keep the cached bitmap.
         return;
@@ -172,8 +175,14 @@ pub(super) fn update_cursor_meta(cursor: &mut CursorState, spa_buf: *mut spa::sy
         bmp.stride.max(0) as usize,
         bmp.offset as usize,
     );
-    // Empty or >1024 (the meta-size request cap).
-    if bw == 0 || bh == 0 || bw > 1024 || bh > 1024 {
+    // An empty sprite is the producer's hide (Mutter's null cursor).
+    if bw == 0 || bh == 0 {
+        cursor.bitmap_hidden = true;
+        cursor.visible = false;
+        return;
+    }
+    // Over the meta-size request cap.
+    if bw > 1024 || bh > 1024 {
         return;
     }
     // Distinct from `bitmap_offset == 0` (position-only): `spa_meta_bitmap.offset
@@ -204,6 +213,12 @@ pub(super) fn update_cursor_meta(cursor: &mut CursorState, spa_buf: *mut spa::sy
             rgba[d + 3] = a;
         }
     }
+    cursor.bitmap_hidden = rgba.chunks_exact(4).all(|p| p[3] == 0);
+    cursor.visible = !cursor.bitmap_hidden;
+    cursor.hot_x = hot_x;
+    cursor.hot_y = hot_y;
+    cursor.x = pos_x - hot_x;
+    cursor.y = pos_y - hot_y;
     cursor.rgba = Arc::new(rgba);
     cursor.bw = bw;
     cursor.bh = bh;
@@ -362,6 +377,7 @@ mod tests {
         }
         CursorState {
             visible: true,
+            bitmap_hidden: false,
             x,
             y,
             rgba: Arc::new(px),
@@ -394,6 +410,79 @@ mod tests {
             mutter.overlay().expect("cached").visible,
             "a stale-meta producer's id 0 must NOT hide"
         );
+    }
+
+    /// One buffer carrying `SPA_META_Cursor` laid out as the producers write it: the cursor
+    /// header, then (for a bitmap) the bitmap header and tightly packed RGBA.
+    fn feed(c: &mut CursorState, pos: (i32, i32), hot: (i32, i32), bmp: Option<(u32, u32, &[u8])>) {
+        use spa::sys::{spa_buffer, spa_meta, spa_meta_bitmap, spa_meta_cursor};
+        let (head, bmp_head) = (
+            std::mem::size_of::<spa_meta_cursor>(),
+            std::mem::size_of::<spa_meta_bitmap>(),
+        );
+        let mut region = vec![0u8; head + bmp_head + bmp.map_or(0, |b| b.2.len())];
+        // SAFETY: plain C structs; all-zero is a valid value for each.
+        let mut cur: spa_meta_cursor = unsafe { std::mem::zeroed() };
+        cur.id = 1;
+        (cur.position.x, cur.position.y) = pos;
+        (cur.hotspot.x, cur.hotspot.y) = hot;
+        if let Some((w, h, px)) = bmp {
+            cur.bitmap_offset = head as u32;
+            // SAFETY: as above.
+            let mut b: spa_meta_bitmap = unsafe { std::mem::zeroed() };
+            b.format = spa::sys::SPA_VIDEO_FORMAT_RGBA;
+            (b.size.width, b.size.height) = (w, h);
+            b.stride = (w * 4) as i32;
+            b.offset = bmp_head as u32;
+            // SAFETY: `region` holds `head + bmp_head` bytes before the pixels.
+            unsafe {
+                region
+                    .as_mut_ptr()
+                    .add(head)
+                    .cast::<spa_meta_bitmap>()
+                    .write_unaligned(b)
+            };
+            region[head + bmp_head..].copy_from_slice(px);
+        }
+        // SAFETY: `region` starts with `head` bytes for the cursor header.
+        unsafe {
+            region
+                .as_mut_ptr()
+                .cast::<spa_meta_cursor>()
+                .write_unaligned(cur)
+        };
+        let mut meta = spa_meta {
+            type_: spa::sys::SPA_META_Cursor,
+            size: region.len() as u32,
+            data: region.as_mut_ptr().cast(),
+        };
+        // SAFETY: as above; the one meta outlives the call.
+        let mut buf: spa_buffer = unsafe { std::mem::zeroed() };
+        buf.n_metas = 1;
+        buf.metas = &mut meta;
+        update_cursor_meta(c, &mut buf);
+    }
+
+    #[test]
+    fn an_empty_or_clear_sprite_hides_until_a_real_bitmap_returns() {
+        let arrow = [255u8; 2 * 2 * 4];
+        let mut c = CursorState::new(false);
+        feed(&mut c, (10, 10), (1, 1), Some((2, 2, &arrow)));
+        let o = c.overlay().expect("bitmap");
+        assert!(o.visible);
+        assert_eq!((o.x, o.hot_x), (9, 1));
+        // Mutter's position-only meta writes hotspot 0; the bitmap's own hotspot stays.
+        feed(&mut c, (20, 20), (0, 0), None);
+        assert_eq!(c.overlay().expect("bitmap").x, 19);
+        // Mutter's null cursor: a 0×0 sprite. Later position-only moves keep it hidden.
+        feed(&mut c, (20, 20), (0, 0), Some((0, 0, &[])));
+        feed(&mut c, (30, 30), (0, 0), None);
+        assert!(!c.overlay().expect("cached").visible);
+        feed(&mut c, (30, 30), (1, 1), Some((2, 2, &arrow)));
+        assert!(c.overlay().expect("bitmap").visible);
+        // An Xwayland blank cursor: a real-size bitmap with nothing in it.
+        feed(&mut c, (30, 30), (0, 0), Some((2, 2, &[0; 16])));
+        assert!(!c.overlay().expect("bitmap").visible);
     }
 
     #[test]
