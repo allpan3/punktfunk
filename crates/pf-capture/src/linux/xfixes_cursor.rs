@@ -696,14 +696,20 @@ fn pick_active(
 }
 
 /// A hidden (all-transparent) pointer keeps the last bitmap for instant
-/// re-show but flips visibility; the serial still bumps.
+/// re-show but flips visibility; the serial still bumps. A bitmap past the
+/// overlay cap is cropped to it.
 fn update_shape(shape: &mut Shape, img: &GetCursorImageReply) {
     let visible =
         img.width > 0 && img.height > 0 && img.cursor_image.iter().any(|&p| (p >> 24) & 0xff != 0);
     if visible {
-        shape.rgba = Arc::new(argb_premul_to_straight_rgba(&img.cursor_image));
-        shape.w = u32::from(img.width);
-        shape.h = u32::from(img.height);
+        let (rgba, w, h) = pf_frame::crop_cursor_rgba(
+            argb_premul_to_straight_rgba(&img.cursor_image),
+            u32::from(img.width),
+            u32::from(img.height),
+        );
+        shape.rgba = Arc::new(rgba);
+        shape.w = w;
+        shape.h = h;
         shape.hot_x = u32::from(img.xhot);
         shape.hot_y = u32::from(img.yhot);
     }

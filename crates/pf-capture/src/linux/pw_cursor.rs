@@ -213,6 +213,7 @@ pub(super) fn update_cursor_meta(cursor: &mut CursorState, spa_buf: *mut spa::sy
             rgba[d + 3] = a;
         }
     }
+    let (rgba, bw, bh) = pf_frame::crop_cursor_rgba(rgba, bw, bh);
     cursor.bitmap_hidden = rgba.chunks_exact(4).all(|p| p[3] == 0);
     cursor.visible = !cursor.bitmap_hidden;
     cursor.hot_x = hot_x;
