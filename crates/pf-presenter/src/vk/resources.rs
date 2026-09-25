@@ -180,7 +180,7 @@ impl Presenter {
             self.device.create_image(
                 &vk::ImageCreateInfo::default()
                     .image_type(vk::ImageType::TYPE_2D)
-                    .format(self.video_format)
+                    .format(super::VIDEO_FORMAT)
                     .extent(vk::Extent3D {
                         width,
                         height,
@@ -212,7 +212,7 @@ impl Presenter {
                 &vk::ImageViewCreateInfo::default()
                     .image(image)
                     .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(self.video_format)
+                    .format(super::VIDEO_FORMAT)
                     .subresource_range(subresource_range()),
                 None,
             )

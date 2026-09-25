@@ -1193,6 +1193,9 @@ pub unsafe fn apply_low_latency_config(cfg: &mut nv::NV_ENC_CONFIG, c: LowLatenc
                 av1.transferCharacteristics = trc;
                 av1.matrixCoefficients = mat;
                 av1.colorRange = u32::from(c.full_range);
+                // 4:2:0 here is left-sited, HEVC's unsignalled default; AV1 has no default, so
+                // name it: 1 = CSP_VERTICAL. 4:4:4 never codes the field.
+                av1.chromaSamplePosition = 1;
             }
             Codec::PyroWave => unreachable!("PyroWave never opens the direct-NVENC backend"),
         }

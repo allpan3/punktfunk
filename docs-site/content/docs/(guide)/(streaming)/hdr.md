@@ -29,6 +29,8 @@ and forces it off for an SDR session; Windows' own **Use HDR** switch doesn't ma
   a software-encoding host streams SDR.
 - If Windows refuses to turn HDR on, the host logs an error and streams SDR although the client
   was told HDR. This is the one case where the client's `HDR` label is wrong.
+- Switching HDR off on the virtual display during a session (**Win+Alt+B** on the host) turns
+  the stream SDR until HDR is back on.
 - Vulkan games need the installer's **HDR Vulkan layer** (on by default); see
   [the troubleshooting entry](#a-vulkan-game-on-windows-says-hdr-isnt-supported).
 
@@ -78,7 +80,7 @@ The toggle sits with the other [video settings](/docs/client-settings#video).
 | Client | Setting | Asks for HDR when |
 |---|---|---|
 | Linux, Steam Deck | **10-bit HDR** | the setting is on. Shows HDR10 where the display offers it, otherwise tone-maps to SDR |
-| Windows | **HDR (10-bit, BT.2020 PQ)** | the same as Linux |
+| Windows | **HDR (10-bit, BT.2020 PQ)** | the setting is on **and** Windows HDR is on for the monitor the stream window is on |
 | macOS, iPhone, iPad | **10-bit HDR** | the setting is on **and** the display is HDR-capable |
 | Apple TV | **10-bit HDR** | the setting is on **and** the TV is HDR-capable. The TV switches to HDR10 only with tvOS **Match Content** on; otherwise the stream is tone-mapped to SDR |
 | Android, Android TV | **HDR** | the setting is on. It is greyed out on a panel without HDR10 |
@@ -140,8 +142,8 @@ restart.
 
 NVIDIA and AMD Vulkan drivers hide HDR from games on a virtual display. The installer's **HDR
 Vulkan layer** option (`VK_LAYER_PUNKTFUNK_hdr_inject`) shows it to them again; re-run the
-installer with it ticked. The layer does nothing in an SDR session and skips a built-in list of
-anti-cheat titles. To turn it off for one game, set `DISABLE_PF_VKHDR=1` in its environment, or
+installer with it ticked. The layer does nothing in an SDR session or on a physical monitor, and
+skips a built-in list of anti-cheat titles. To turn it off for one game, set `DISABLE_PF_VKHDR=1` in its environment, or
 list executables in `PF_VKHDR_EXCLUDE=foo.exe,bar.exe`. D3D11 and D3D12 games don't need it.
 
 ### An HDR stream is green on a Windows client with an AMD GPU

@@ -2181,9 +2181,10 @@ pub(crate) async fn run_admitted(
     // (GetDesc1) on capture start and keyframes. This covers synthetic + the pre-capture gap.
     if welcome.color.is_hdr() {
         // Client display volume (Hello::display_hdr) — EDID advertises it. Generic HDR10 for old clients.
-        let meta = hello
-            .display_hdr
-            .unwrap_or_else(|| crate::encode::hdr_meta_to_wire(pf_frame::hdr::generic_hdr10()));
+        let meta = crate::encode::hdr_meta_to_wire(hello.display_hdr.map_or_else(
+            pf_frame::hdr::generic_hdr10,
+            crate::encode::hdr_meta_from_wire,
+        ));
         let _ = conn.send_datagram(punktfunk_core::quic::encode_hdr_meta_datagram(&meta));
         tracing::info!(
             client_volume = hello.display_hdr.is_some(),

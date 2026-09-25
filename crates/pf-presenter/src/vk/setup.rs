@@ -456,11 +456,10 @@ impl Presenter {
             ext_mem_win32: ash::khr::external_memory_win32::Device::new(&instance, &device),
             imports: crate::d3d11::ImportCache::default(),
         });
-        let csc = CscPass::new(&device, vk::Format::R8G8B8A8_UNORM)?;
-        // Starts SDR like `csc`; an HDR session rebuilds it at 10-bit via `set_hdr_mode`.
-        // Always built: the software decode rung renders through it. Gating on the
-        // pyrowave probe would hide software frames.
-        let csc_planar = CscPass::new_planar(&device, vk::Format::R8G8B8A8_UNORM)?;
+        let csc = CscPass::new(&device, super::VIDEO_FORMAT)?;
+        // Writes the same intermediate as `csc`. Always built: the software decode rung
+        // renders through it. Gating on the pyrowave probe would hide software frames.
+        let csc_planar = CscPass::new_planar(&device, super::VIDEO_FORMAT)?;
 
         // Export the selected device facts when any consumer needs the handles —
         // on Linux always: the presenter has a selected device and every consumer
@@ -650,7 +649,6 @@ impl Presenter {
             hdr_downgrade_warned: false,
             hdr_metadata_d,
             hdr_meta: None,
-            video_format: vk::Format::R8G8B8A8_UNORM,
             present_mode,
             swapchain: vk::SwapchainKHR::null(),
             images: Vec::new(),

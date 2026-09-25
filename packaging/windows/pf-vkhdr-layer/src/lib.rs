@@ -1,9 +1,9 @@
 //! Vulkan implicit layer `VK_LAYER_PUNKTFUNK_hdr_inject` for IddCx displays.
 //!
 //! Some Windows ICDs accept HDR swapchains on indirect displays but omit their HDR surface formats.
-//! The layer intercepts both surface-format queries and appends HDR10/scRGB formats when Windows
-//! reports advanced color enabled for that surface's monitor. Existing formats are deduplicated;
-//! SDR and already-HDR surfaces pass through unchanged.
+//! The layer intercepts both surface-format queries and appends HDR10/scRGB formats when that
+//! surface's monitor is a Punktfunk virtual display in HDR (advanced color on, not ACM). Existing
+//! formats are deduplicated; physical, SDR and already-HDR surfaces pass through unchanged.
 //!
 //! `vkCreateWin32SurfaceKHR` supplies the `VkSurfaceKHR -> HWND` association used by the HDR gate.
 //! Every other command follows the Vulkan loader's normal dispatch chain. Win32 query structures
@@ -375,6 +375,18 @@ mod hdr {
         pub header: Header,
         pub gdi: [u16; 32],
     }
+    /// `DISPLAYCONFIG_TARGET_DEVICE_NAME`.
+    #[repr(C)]
+    pub struct TargetName {
+        pub header: Header,
+        pub flags: u32,
+        pub tech: i32,
+        pub edid_manufacture_id: u16,
+        pub edid_product_code_id: u16,
+        pub connector_instance: u32,
+        pub friendly: [u16; 64],
+        pub path: [u16; 128],
+    }
 
     #[link(name = "user32")]
     unsafe extern "system" {
@@ -393,7 +405,10 @@ mod hdr {
     }
     const QDC_ONLY_ACTIVE_PATHS: u32 = 2;
     const GET_SOURCE_NAME: i32 = 1;
+    const GET_TARGET_NAME: i32 = 2;
     const GET_ADVANCED_COLOR_INFO: i32 = 9;
+    /// The EDID manufacturer the Punktfunk virtual display carries (pf-win-display's match).
+    const PF_EDID_MANUFACTURER: &str = "PNK";
     const MONITOR_DEFAULTTONEAREST: u32 = 2;
 
     // Safe fn: every invariant below is local (out-params point at live locals / exact-length
@@ -443,8 +458,36 @@ mod hdr {
         if unsafe { DisplayConfigGetDeviceInfo(&mut ai as *mut _ as *mut c_void) } != 0 {
             return false;
         }
-        // value bitfield: bit0 advancedColorSupported, bit1 advancedColorEnabled.
-        (ai.value & 0b10) != 0
+        // value bitfield: bit1 advancedColorEnabled, bit2 wideColorEnforced. Enabled with wide
+        // colour enforced is ACM on an SDR panel, not HDR.
+        (ai.value & 0b110) == 0b010
+    }
+
+    /// The target is a Punktfunk virtual display; its monitor path names our EDID manufacturer.
+    fn target_is_ours(p: &PathInfo) -> bool {
+        // SAFETY: TargetName is a #[repr(C)] aggregate of integers — all-zero is a valid value.
+        let mut tn: TargetName = unsafe { std::mem::zeroed() };
+        tn.header.typ = GET_TARGET_NAME;
+        tn.header.size = std::mem::size_of::<TargetName>() as u32;
+        tn.header.adapter = p.tgt.adapter;
+        tn.header.id = p.tgt.id;
+        // SAFETY: the request header carries this struct's exact size, which is the documented
+        // bound for DisplayConfigGetDeviceInfo's write; `tn` is a live local across the call.
+        if unsafe { DisplayConfigGetDeviceInfo(&mut tn as *mut _ as *mut c_void) } != 0 {
+            return false;
+        }
+        let end = tn
+            .path
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(tn.path.len());
+        String::from_utf16_lossy(&tn.path[..end])
+            .to_ascii_uppercase()
+            .contains(PF_EDID_MANUFACTURER)
+    }
+
+    fn inject_for(p: &PathInfo) -> bool {
+        target_is_ours(p) && target_hdr_enabled(p)
     }
 
     fn source_gdi(p: &PathInfo) -> [u16; 32] {
@@ -460,8 +503,9 @@ mod hdr {
         sn.gdi
     }
 
-    /// Is HDR (Windows advanced color) currently enabled on the display this surface lives on?
-    /// `hwnd == 0`/unknown falls back to "any active display has HDR enabled".
+    /// Is the display this surface lives on a Punktfunk virtual display in HDR? Physical panels
+    /// and ACM never qualify: their ICD lists its own formats. `hwnd == 0`/unknown falls back to
+    /// "any of our displays is in HDR".
     ///
     /// Safe fn: `MonitorFromWindow` with `DEFAULTTONEAREST` tolerates any HWND value — including
     /// a destroyed or foreign one (our map can be stale) — so callers carry no obligations.
@@ -479,12 +523,12 @@ mod hdr {
             if unsafe { GetMonitorInfoW(mon, &mut mi) } != 0 {
                 for p in &paths {
                     if source_gdi(p) == mi.sz_device {
-                        return target_hdr_enabled(p);
+                        return inject_for(p);
                     }
                 }
             }
         }
-        paths.iter().any(target_hdr_enabled)
+        paths.iter().any(inject_for)
     }
 }
 

@@ -49,12 +49,26 @@ pub fn chroma_idc(chroma: ChromaFormat) -> u8 {
 
 /// Wire volume ([`punktfunk_core::quic::HdrMeta`]) → the encoders'
 /// [`pf_frame::HdrMeta`]. Same seven fields; both types are foreign here, so
-/// a field copy stands in for `From`.
+/// a field copy stands in for `From`. A client panel that reports zero primaries,
+/// white point or peak keeps the generic HDR10 value there: a 0-nit mastering
+/// display tone-maps to black.
 pub fn hdr_meta_from_wire(m: punktfunk_core::quic::HdrMeta) -> pf_frame::HdrMeta {
+    let g = pf_frame::hdr::generic_hdr10();
     pf_frame::HdrMeta {
-        display_primaries: m.display_primaries,
-        white_point: m.white_point,
-        max_display_mastering_luminance: m.max_display_mastering_luminance,
+        display_primaries: if m.display_primaries == [[0; 2]; 3] {
+            g.display_primaries
+        } else {
+            m.display_primaries
+        },
+        white_point: if m.white_point == [0; 2] {
+            g.white_point
+        } else {
+            m.white_point
+        },
+        max_display_mastering_luminance: match m.max_display_mastering_luminance {
+            0 => g.max_display_mastering_luminance,
+            v => v,
+        },
         min_display_mastering_luminance: m.min_display_mastering_luminance,
         max_cll: m.max_cll,
         max_fall: m.max_fall,
@@ -1839,6 +1853,24 @@ mod tests {
             hdr_meta_to_wire(pf_frame::HdrMeta::default()),
             punktfunk_core::quic::HdrMeta::default()
         );
+    }
+
+    /// A panel that reports no volume must not master the stream at 0 nits.
+    #[test]
+    fn hdr_meta_from_wire_fills_an_unreported_volume() {
+        let g = pf_frame::hdr::generic_hdr10();
+        let frame = hdr_meta_from_wire(punktfunk_core::quic::HdrMeta {
+            max_cll: 700,
+            ..Default::default()
+        });
+        assert_eq!(frame.display_primaries, g.display_primaries);
+        assert_eq!(frame.white_point, g.white_point);
+        assert_eq!(
+            frame.max_display_mastering_luminance,
+            g.max_display_mastering_luminance
+        );
+        assert_eq!(frame.min_display_mastering_luminance, 0);
+        assert_eq!((frame.max_cll, frame.max_fall), (700, 0));
     }
 
     /// [`TerminalEncoderError`] must stay downcastable through `context` layers.

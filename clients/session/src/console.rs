@@ -207,8 +207,9 @@ pub fn run(target: Option<&str>) -> u8 {
         video_fit: punktfunk_core::video_fit::VideoFit::from_name(&settings_at_start.video_fit),
     };
 
-    let result =
-        pf_presenter::run_browse(opts, |action, gamepad, native, force_software, vulkan| {
+    let result = pf_presenter::run_browse(
+        opts,
+        |action, gamepad, native, hdr, force_software, vulkan| {
             match action {
                 OverlayAction::Launch {
                     addr,
@@ -251,6 +252,7 @@ pub fn run(target: Option<&str>) -> u8 {
                         launch,
                         gamepad,
                         native,
+                        hdr,
                         force_software,
                         vulkan,
                     );
@@ -283,7 +285,8 @@ pub fn run(target: Option<&str>) -> u8 {
                 OverlayAction::ShowStream => ActionOutcome::Handled,
                 OverlayAction::Quit => ActionOutcome::Quit,
             }
-        });
+        },
+    );
 
     service.stop();
 

@@ -124,8 +124,8 @@ impl IddPushCapturer {
                             pyrowave = self.pyrowave,
                             "IDD push: could not pin the display to the NEGOTIATED depth — following what \
                              it actually composes instead (a physical display forcing HDR, or a driver that \
-                             refuses the flip). The stream's depth will not match the negotiation; the \
-                             encoder's caps cross-check reports the truth to the client"
+                             refuses the flip). The stream's depth will not match the negotiation, \
+                             and nothing tells the client"
                         );
                     }
                 } else {
