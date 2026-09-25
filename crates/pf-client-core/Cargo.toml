@@ -285,8 +285,12 @@ desktop = [
     "dep:libc", "dep:opus", "discovery", "dep:ureq", "dep:pf-update-check", "dep:rustls",
     "dep:tracing-subscriber", "dep:tracing-log",
     "dep:pipewire", "dep:sdl3", "dep:zbus", "dep:pf-vaapi", "dep:pf-libva", "dep:libloading", "dep:x11rb",
-    "dep:wasapi", "dep:pf-dxvadec", "dep:winreg", "dep:windows",
+    "dep:wasapi", "dep:winreg", "d3d11va",
 ]
+# DXVA device and native rung. `desktop` includes it. The `windows` header list
+# stays the full set, because clipboard.rs needs `winuser` and `winbase`.
+# `pf-dxvadec` also links `pf-vkdecode` for `SlotMap` — bindings, loaded at runtime.
+d3d11va = ["dep:pf-dxvadec", "dep:windows"]
 # `discovery` is the mDNS browse (`mdns-sd`, `async-channel`) without the rest of `desktop`.
 # `desktop` includes it, so every desktop consumer is unchanged, and still names
 # `async-channel` for the session and gamepad paths. A shell that only looks for hosts says
