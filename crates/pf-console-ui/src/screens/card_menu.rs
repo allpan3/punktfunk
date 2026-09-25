@@ -822,7 +822,6 @@ impl CardMenu {
                     .into()
             }
             (Subject::Host(h), _) if !h.saved => "Found on this network.".into(),
-            (Subject::Host(h), Mode::Details) => format!("{}:{}", h.addr, h.port),
             (Subject::Host(_), _) => String::new(),
             (Subject::Game { .. }, Mode::Details) => String::new(),
             (Subject::Game { host, .. }, _) => format!("On {}.", host.name),
@@ -858,7 +857,18 @@ impl CardMenu {
         let actions = self.actions(ctx.store, ctx.tv);
         let rows: Vec<RowSpec> = actions
             .iter()
-            .map(|&a| RowSpec::action(self.label(a, ctx), self.enabled(a)).with_icon(self.icon(a)))
+            .map(|&a| {
+                let row =
+                    RowSpec::action(self.label(a, ctx), self.enabled(a)).with_icon(self.icon(a));
+                // The address sits on the row that edits it.
+                match (a, &self.subject) {
+                    (Action::Edit, Subject::Host(h)) => RowSpec {
+                        value: Some(format!("{}:{}", h.addr, h.port)),
+                        ..row
+                    },
+                    _ => row,
+                }
+            })
             .collect();
         let active = !self.strip_focus;
         self.list
