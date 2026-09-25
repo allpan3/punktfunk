@@ -362,29 +362,63 @@ pub(super) fn build_shm_only_buffers() -> Result<Vec<u8>> {
 const POOL_DEFAULT: i32 = 8;
 const POOL_MAX: i32 = 16;
 
-pub(super) fn build_dmabuf_buffers(pool_min: i32) -> Result<Vec<u8>> {
+/// `explicit_sync` adds a MANDATORY `metaType` naming `SPA_META_SyncTimeline`: a producer
+/// without the meta fails this pod and takes the plain twin listed behind it, instead of a
+/// pool this side would wait on for fences that never come.
+pub(super) fn build_dmabuf_buffers(pool_min: i32, explicit_sync: bool) -> Result<Vec<u8>> {
+    let mut properties = vec![
+        pw::spa::pod::Property {
+            key: pw::spa::sys::SPA_PARAM_BUFFERS_dataType,
+            flags: pw::spa::pod::PropertyFlags::empty(),
+            value: pw::spa::pod::Value::Int(1i32 << pw::spa::sys::SPA_DATA_DmaBuf),
+        },
+        pw::spa::pod::Property {
+            key: pw::spa::sys::SPA_PARAM_BUFFERS_buffers,
+            flags: pw::spa::pod::PropertyFlags::empty(),
+            value: pw::spa::pod::Value::Choice(pw::spa::pod::ChoiceValue::Int(
+                pw::spa::utils::Choice(
+                    pw::spa::utils::ChoiceFlags::empty(),
+                    pw::spa::utils::ChoiceEnum::Range {
+                        default: POOL_DEFAULT,
+                        min: pool_min,
+                        max: POOL_MAX,
+                    },
+                ),
+            )),
+        },
+    ];
+    if explicit_sync {
+        properties.push(pw::spa::pod::Property {
+            key: pw::spa::sys::SPA_PARAM_BUFFERS_metaType,
+            flags: pw::spa::pod::PropertyFlags::MANDATORY,
+            value: pw::spa::pod::Value::Int(1i32 << spa::sys::SPA_META_SyncTimeline),
+        });
+    }
     serialize_pod(pw::spa::pod::Object {
         type_: pw::spa::utils::SpaTypes::ObjectParamBuffers.as_raw(),
         id: pw::spa::param::ParamType::Buffers.as_raw(),
+        properties,
+    })
+}
+
+/// `SPA_META_SyncTimeline` on each buffer. PipeWire adds it, and the two syncobj datas the
+/// Buffers pod's `metaType` names, only when both sides list this meta.
+pub(super) fn build_sync_timeline_meta_param() -> Result<Vec<u8>> {
+    serialize_pod(pw::spa::pod::Object {
+        type_: pw::spa::utils::SpaTypes::ObjectParamMeta.as_raw(),
+        id: pw::spa::param::ParamType::Meta.as_raw(),
         properties: vec![
             pw::spa::pod::Property {
-                key: pw::spa::sys::SPA_PARAM_BUFFERS_dataType,
+                key: pw::spa::sys::SPA_PARAM_META_type,
                 flags: pw::spa::pod::PropertyFlags::empty(),
-                value: pw::spa::pod::Value::Int(1i32 << pw::spa::sys::SPA_DATA_DmaBuf),
+                value: pw::spa::pod::Value::Id(pw::spa::utils::Id(spa::sys::SPA_META_SyncTimeline)),
             },
             pw::spa::pod::Property {
-                key: pw::spa::sys::SPA_PARAM_BUFFERS_buffers,
+                key: pw::spa::sys::SPA_PARAM_META_size,
                 flags: pw::spa::pod::PropertyFlags::empty(),
-                value: pw::spa::pod::Value::Choice(pw::spa::pod::ChoiceValue::Int(
-                    pw::spa::utils::Choice(
-                        pw::spa::utils::ChoiceFlags::empty(),
-                        pw::spa::utils::ChoiceEnum::Range {
-                            default: POOL_DEFAULT,
-                            min: pool_min,
-                            max: POOL_MAX,
-                        },
-                    ),
-                )),
+                value: pw::spa::pod::Value::Int(
+                    std::mem::size_of::<spa::sys::spa_meta_sync_timeline>() as i32,
+                ),
             },
         ],
     })
@@ -472,7 +506,7 @@ mod tests {
             "PUNKTFUNK_FORCE_SHM must exclude DmaBuf"
         );
         assert_eq!(
-            buffers_data_type(&build_dmabuf_buffers(crate::POOL_MIN).unwrap()),
+            buffers_data_type(&build_dmabuf_buffers(crate::POOL_MIN, false).unwrap()),
             DMABUF,
             "the zero-copy/HDR path must exclude SHM"
         );
@@ -486,11 +520,19 @@ mod tests {
             ("shm-only buffers", build_shm_only_buffers().unwrap()),
             (
                 "dmabuf buffers",
-                build_dmabuf_buffers(crate::POOL_MIN).unwrap(),
+                build_dmabuf_buffers(crate::POOL_MIN, false).unwrap(),
             ),
             (
                 "kwin dmabuf buffers",
-                build_dmabuf_buffers(crate::KWIN_POOL_MIN).unwrap(),
+                build_dmabuf_buffers(crate::KWIN_POOL_MIN, false).unwrap(),
+            ),
+            (
+                "explicit-sync dmabuf buffers",
+                build_dmabuf_buffers(crate::KWIN_POOL_MIN, true).unwrap(),
+            ),
+            (
+                "sync timeline meta",
+                build_sync_timeline_meta_param().unwrap(),
             ),
             ("cursor meta", build_cursor_meta_param().unwrap()),
             (
@@ -701,7 +743,7 @@ mod tests {
     #[test]
     fn the_dmabuf_pool_request_is_a_range_not_a_fixed_count() {
         for pool_min in [crate::POOL_MIN, crate::KWIN_POOL_MIN] {
-            let pod = build_dmabuf_buffers(pool_min).unwrap();
+            let pod = build_dmabuf_buffers(pool_min, false).unwrap();
             let key = spa::sys::SPA_PARAM_BUFFERS_buffers.to_ne_bytes();
             let at = pod
                 .windows(4)
@@ -738,6 +780,28 @@ mod tests {
         const { assert!(crate::POOL_MIN <= 2) };
         // KWin ≥ 6.2 caps its pool at 4; a higher minimum fails negotiation outright.
         const { assert!(crate::KWIN_POOL_MAX == 4 && crate::KWIN_POOL_MIN <= crate::KWIN_POOL_MAX) };
+    }
+
+    /// Without MANDATORY a producer lacking the meta would still match, and this side would
+    /// then wait on sync datas that never arrive.
+    #[test]
+    fn the_explicit_sync_pod_demands_the_sync_meta() {
+        let key = spa::sys::SPA_PARAM_BUFFERS_metaType.to_ne_bytes();
+        let plain = build_dmabuf_buffers(crate::POOL_MIN, false).unwrap();
+        assert!(
+            !plain.windows(4).any(|w| w == key),
+            "the plain twin must leave metaType to the producer"
+        );
+        let pod = build_dmabuf_buffers(crate::POOL_MIN, true).unwrap();
+        let at = pod
+            .windows(4)
+            .position(|w| w == key)
+            .expect("the explicit-sync pod must carry metaType");
+        let word = |off: usize| u32::from_ne_bytes(pod[off..off + 4].try_into().unwrap());
+        // Property = { key, flags, value_pod }; value_pod = { size, type, body }.
+        assert_eq!(word(at + 4), spa::sys::SPA_POD_PROP_FLAG_MANDATORY);
+        assert_eq!(word(at + 12), spa::sys::SPA_TYPE_Int);
+        assert_eq!(word(at + 16), 1 << spa::sys::SPA_META_SyncTimeline);
     }
 
     #[test]
