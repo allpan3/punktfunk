@@ -1,7 +1,9 @@
 package io.unom.punktfunk
 
+import android.os.Build
 import android.view.InputDevice
 import android.view.MotionEvent
+import androidx.annotation.RequiresApi
 import io.unom.punktfunk.kit.NativeBridge
 import io.unom.punktfunk.kit.isExternalDevice
 
@@ -137,6 +139,18 @@ class MouseForwarder(
     fun onTouchEvent(ev: MotionEvent): Boolean {
         if (suspended) return false // the ring's clickable slots take it
         if (!pointerGranted) return true // inert: consumed over the stream, nothing forwards
+        // An Android 14+ touchpad reports its gestures as a fake finger on this stream: two-finger
+        // scroll carries its distance on the gesture axes, a pinch is not the host's. Neither is
+        // pointer motion, and neither engages capture.
+        if (Build.VERSION.SDK_INT >= 34) {
+            when (ev.classification) {
+                MotionEvent.CLASSIFICATION_TWO_FINGER_SWIPE -> {
+                    gestureScroll(ev)
+                    return true
+                }
+                MotionEvent.CLASSIFICATION_PINCH -> return true
+            }
+        }
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 if (captureWanted && !captured && !userReleased) {
@@ -272,6 +286,29 @@ class MouseForwarder(
         // edge is the honest answer for it.
         val (x, y, w, h) = frameAt(ev.x, ev.y) ?: return
         NativeBridge.nativeSendPointerAbs(handle, x, y, w, h)
+    }
+
+    /**
+     * One two-finger swipe sample, batched history included. The gesture axes hold the negated
+     * finger travel in pixels (AOSP `GestureConverter`): fingers up is a positive Y distance,
+     * the content scrolling down, so the wheel's vertical sign flips and its horizontal does not.
+     */
+    @RequiresApi(34)
+    private fun gestureScroll(ev: MotionEvent) {
+        if (ev.actionMasked != MotionEvent.ACTION_MOVE) return
+        val axes = MotionEvent.AXIS_GESTURE_SCROLL_X_DISTANCE to MotionEvent.AXIS_GESTURE_SCROLL_Y_DISTANCE
+        var dx = ev.getAxisValue(axes.first)
+        var dy = ev.getAxisValue(axes.second)
+        for (i in 0 until ev.historySize) {
+            dx += ev.getHistoricalAxisValue(axes.first, i)
+            dy += ev.getHistoricalAxisValue(axes.second, i)
+        }
+        listOfNotNull(
+            scrollNorm.event(ScrollWire.SOURCE_FINGER, ScrollWire.PHASE_NONE, ScrollWire.AXIS_VERTICAL, -dy / density.toDouble()),
+            scrollNorm.event(ScrollWire.SOURCE_FINGER, ScrollWire.PHASE_NONE, ScrollWire.AXIS_HORIZONTAL, dx / density.toDouble()),
+        ).forEach {
+            NativeBridge.nativeSendNormalizedScroll(handle, it.axis, it.delta, it.source, it.phase)
+        }
     }
 
     private fun wheel(ev: MotionEvent) {
