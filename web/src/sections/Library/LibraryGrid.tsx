@@ -20,15 +20,13 @@ import { customId } from "./helpers";
 import { useSourceNames } from "./Sources";
 
 /**
- * Container: the library OVERVIEW — owns the listing query and per-card delete.
- * Editing is escalated to the parent (it opens the separate add/edit form), so
- * this subsection knows nothing about the form beyond firing `onEdit`.
+ * Container: the library OVERVIEW — owns the listing query, per-card delete and hide. A card
+ * opens the entry's own page.
  */
 export const LibraryGridSection: FC<{
-	onEdit: (entry: OperatorGameEntry) => void;
 	/** Show only entries owned by this provider, or everything when null. */
 	providerFilter?: string | null;
-}> = ({ onEdit, providerFilter }) => {
+}> = ({ providerFilter }) => {
 	const qc = useQueryClient();
 	const { confirm } = useDialogs();
 	const library = useGetLibrary();
@@ -89,7 +87,6 @@ export const LibraryGridSection: FC<{
 	return (
 		<LibraryGrid
 			library={filtered}
-			onEdit={onEdit}
 			onDelete={onDelete}
 			// The custom id whose delete is in flight (if any), so only that card's button disables.
 			deletingId={remove.isPending ? (remove.variables?.id ?? null) : null}
@@ -104,7 +101,6 @@ export const LibraryGridSection: FC<{
 /** The poster grid (with empty + loading/error states). */
 export const LibraryGrid: FC<{
 	library: Loadable<OperatorGameEntry[]>;
-	onEdit: (entry: OperatorGameEntry) => void;
 	onDelete: (entry: OperatorGameEntry) => void;
 	/** Custom id of the card whose delete is in flight, or null — only that card disables. */
 	deletingId: string | null;
@@ -113,15 +109,7 @@ export const LibraryGrid: FC<{
 	hidingId: string | null;
 	/** A source's display name by id, for the store and owner badges. */
 	nameOf?: (id: string) => string | undefined;
-}> = ({
-	library,
-	onEdit,
-	onDelete,
-	deletingId,
-	onToggleHidden,
-	hidingId,
-	nameOf,
-}) => {
+}> = ({ library, onDelete, deletingId, onToggleHidden, hidingId, nameOf }) => {
 	const all = library.data ?? [];
 	// Launcher entries (design D4) open the launcher itself — Steam Big Picture, Heroic — rather than
 	// a title. They launch and lease exactly like games; grouping them into their own rail is purely
@@ -132,7 +120,6 @@ export const LibraryGrid: FC<{
 		<GameCard
 			key={game.id}
 			game={game}
-			onEdit={() => onEdit(game)}
 			onDelete={() => onDelete(game)}
 			deleting={deletingId === customId(game)}
 			onToggleHidden={() => onToggleHidden(game)}

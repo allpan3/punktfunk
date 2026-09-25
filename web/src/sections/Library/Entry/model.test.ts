@@ -6,6 +6,7 @@ import { carriesCommandExecution } from "../../../../server/util/libraryConfirm"
 import {
 	emptyForm,
 	formFrom,
+	formFromStored,
 	needsPassword,
 	toInput,
 	withPassword,
@@ -86,6 +87,20 @@ describe("entry model", () => {
 		expect("detect" in unread).toBe(false);
 		expect("prep" in unread).toBe(false);
 		expect("audio" in unread).toBe(false);
+	});
+
+	test("a stored row seeds the raw art, not the proxy path", () => {
+		const f = formFromStored({
+			...stored,
+			art: { portrait: "https://cdn/p.jpg", hero: "/games/c/hero.png" },
+			icon: "gog",
+			launch: { kind: "exec", value: "celeste" },
+		});
+		expect(f.portrait).toBe("https://cdn/p.jpg");
+		expect(f.hero).toBe("/games/c/hero.png");
+		expect(f.hintsLoaded).toBe(true);
+		expect(toInput(f).launch).toEqual({ kind: "exec", value: "celeste" });
+		expect(toInput(f).icon).toBe("gog");
 	});
 
 	test("an empty icon clears it", () => {

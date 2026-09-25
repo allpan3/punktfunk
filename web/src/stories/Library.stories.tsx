@@ -1,18 +1,23 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import type { PluginAccessSnapshot } from "@/api/gen/model/pluginAccessSnapshot";
-import { emptyForm } from "@/sections/Library/Entry/model";
-import { GameForm } from "@/sections/Library/GameForm";
 import { LibraryGrid } from "@/sections/Library/LibraryGrid";
 import { MigrationBanner, SourcesCard } from "@/sections/Library/Sources";
 import { library } from "./lib/fixtures";
+import { Routed } from "./lib/routed";
 
 const noop = () => {};
 const idle = { isLoading: false, error: null, refetch: noop };
-// The overview grid and the add/edit form are separate components now, so the stories
-// render each on its own (no combined page view).
+// Cards link to the entry page, so every story renders inside a router.
 const meta = {
 	title: "Pages/Library",
 	parameters: { layout: "padded" },
+	decorators: [
+		(Story) => (
+			<Routed>
+				<Story />
+			</Routed>
+		),
+	],
 } satisfies Meta;
 
 export default meta;
@@ -22,7 +27,6 @@ export const Populated: Story = {
 	render: () => (
 		<LibraryGrid
 			library={{ data: library, ...idle }}
-			onEdit={noop}
 			onDelete={noop}
 			deletingId={null}
 			onToggleHidden={noop}
@@ -49,7 +53,6 @@ export const WithLaunchers: Story = {
 				],
 				...idle,
 			}}
-			onEdit={noop}
 			onDelete={noop}
 			deletingId={null}
 			onToggleHidden={noop}
@@ -70,7 +73,6 @@ export const WithHidden: Story = {
 				data: library.map((g, i) => (i === 1 ? { ...g, hidden: true } : g)),
 				...idle,
 			}}
-			onEdit={noop}
 			onDelete={noop}
 			deletingId={null}
 			onToggleHidden={noop}
@@ -83,7 +85,6 @@ export const Empty: Story = {
 	render: () => (
 		<LibraryGrid
 			library={{ data: [], ...idle }}
-			onEdit={noop}
 			onDelete={noop}
 			deletingId={null}
 			onToggleHidden={noop}
@@ -289,18 +290,6 @@ export const Migration: Story = {
 			]}
 			busy={false}
 			onInstall={noop}
-		/>
-	),
-};
-
-export const AddForm: Story = {
-	render: () => (
-		<GameForm
-			initial={emptyForm}
-			mode="add"
-			onSubmit={noop}
-			onCancel={noop}
-			isSaving={false}
 		/>
 	),
 };
