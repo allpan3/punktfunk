@@ -1,11 +1,15 @@
 package io.unom.punktfunk
 
 import android.os.Build
+import android.os.SystemClock
 import android.view.InputDevice
 import android.view.MotionEvent
 import androidx.annotation.RequiresApi
 import io.unom.punktfunk.kit.NativeBridge
 import io.unom.punktfunk.kit.isExternalDevice
+
+/** How long after a mouse Back edge a system Back is that button's own echo. */
+private const val BACK_ECHO_MS = 300L
 
 /** True when any connected input device is a pointer (USB/BT mouse, or a touchpad driving one). */
 fun hasPhysicalMouse(): Boolean = InputDevice.getDeviceIds().any { id ->
@@ -356,7 +360,18 @@ class MouseForwarder(
         press(b, down)
     }
 
+    /** When the last mouse Back edge went to the host ([SystemClock.uptimeMillis]). */
+    @Volatile
+    private var lastBackAt = 0L
+
+    /**
+     * Android 16+ also turns a mouse's Back button into a system Back, which reaches the ring's
+     * BackHandler right after the edge already went to the host as X1: that Back is the mouse's.
+     */
+    fun backIsMouseEcho(): Boolean = SystemClock.uptimeMillis() - lastBackAt < BACK_ECHO_MS
+
     private fun press(b: Int, down: Boolean) {
+        if (b == 4) lastBackAt = SystemClock.uptimeMillis()
         if (down) {
             // add() is false when the button is already held — the second delivery of a button
             // this device reports on two paths at once. Sending the down again would double-press

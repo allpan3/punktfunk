@@ -441,6 +441,7 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
     // Back never falls through: an edge swipe mid-game must not tear the session down.
     BackHandler {
         when {
+            activity?.mouseForwarder?.backIsMouseEcho() == true -> {}
             ring.sheet -> ring.sheet = false
             ring.committed -> ring.close()
             backOpensRing -> ring.openAt(Offset(containerSize.width / 2f, containerSize.height / 2f))
