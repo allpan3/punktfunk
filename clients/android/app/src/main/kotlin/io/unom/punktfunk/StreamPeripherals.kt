@@ -171,7 +171,11 @@ internal class StreamPeripherals(
         remote = if (isTv) {
             RemotePointer(
                 handle,
-                surfaceWidth = { videoView()?.width?.takeIf { it > 0 } ?: decor?.width ?: 1920 },
+                // Moves are host pixels, so the glide scales with the stream's width, not the TV's.
+                surfaceWidth = {
+                    video().width.takeIf { it > 0 }
+                        ?: videoView()?.width?.takeIf { it > 0 } ?: decor?.width ?: 1920
+                },
                 onActiveChanged = { on -> ui.remotePointerOn = on },
                 // The toggle TYPES — summoning also needs the KEYBOARD grant (hiding is free).
                 onKeyboardToggle = {
