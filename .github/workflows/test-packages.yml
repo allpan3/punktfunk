@@ -38,6 +38,9 @@ jobs:
 
       - name: Archive and package the app
         shell: bash
+        env:
+          MACOS_SIGNING_P12: ${{ secrets.MACOS_SIGNING_P12 }}
+          MACOS_SIGNING_P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
         run: |
           set -euo pipefail
           VERSION="$(awk -F'"' '/^version = / { print $2; exit }' Cargo.toml)"
@@ -63,9 +66,42 @@ jobs:
           /usr/libexec/PlistBuddy -c 'Delete :keychain-access-groups' "$ENTITLEMENTS"
           /usr/libexec/PlistBuddy -c 'Delete :com.apple.security.application-groups' "$ENTITLEMENTS"
           /usr/libexec/PlistBuddy -c 'Add :PunktfunkUseAppLocalDefaults bool true' "$APP/Contents/Info.plist"
-          codesign --force --deep --timestamp=none --sign - \
+          # Sign with the fork's own certificate when the secret is set. The identity is the
+          # same on every build, so TCC keeps the Microphone/Accessibility/Input Monitoring
+          # grants across updates; ad-hoc signing (-) changes identity per build and loses them.
+          IDENTITY="-"
+          REQUIREMENTS=()
+          if [[ -n "${MACOS_SIGNING_P12:-}" ]]; then
+            KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+            KEYCHAIN_PASSWORD="$(uuidgen)"
+            P12="$RUNNER_TEMP/signing.p12"
+            echo "$MACOS_SIGNING_P12" | base64 --decode > "$P12"
+            security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+            security set-keychain-settings -lut 3600 "$KEYCHAIN"
+            security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+            security import "$P12" -k "$KEYCHAIN" -P "$MACOS_SIGNING_P12_PASSWORD" \
+              -T /usr/bin/codesign -T /usr/bin/security
+            security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" \
+              "$KEYCHAIN" >/dev/null
+            security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+            # codesign builds a trust chain; a self-signed leaf is its own anchor, so trust it.
+            openssl pkcs12 -in "$P12" -clcerts -nokeys -passin env:MACOS_SIGNING_P12_PASSWORD \
+              -out "$RUNNER_TEMP/signing.pem"
+            sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain \
+              "$RUNNER_TEMP/signing.pem"
+            IDENTITY="$(security find-identity -p codesigning "$KEYCHAIN" \
+              | awk '/\) [0-9A-F]{40} /{print $2; exit}')"
+            [[ -n "$IDENTITY" ]] || { echo "no code-signing identity in the imported .p12" >&2; exit 1; }
+            # Pin the designated requirement TCC keys grants by: bundle id + this certificate.
+            REQUIREMENTS=(--requirements "=designated => identifier \"io.unom.punktfunk\" and certificate leaf = H\"$IDENTITY\"")
+            rm -f "$P12"
+          fi
+          # bash 3.2 (the runner's) rejects an empty "${REQUIREMENTS[@]}" under set -u.
+          codesign --force --deep --timestamp=none --sign "$IDENTITY" \
+            ${REQUIREMENTS[@]+"${REQUIREMENTS[@]}"} \
             --entitlements "$ENTITLEMENTS" "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
+          codesign -d -r- "$APP" 2>&1 | grep designated || true
 
           STAGE="$RUNNER_TEMP/dmg-stage"
           mkdir -p "$STAGE"
@@ -143,6 +179,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          MACOS_SIGNING_P12: ${{ secrets.MACOS_SIGNING_P12 }}
         run: |
           set -euo pipefail
           VERSION="$(awk -F'"' '/^version = / { print $2; exit }' Cargo.toml)"
@@ -166,7 +203,11 @@ jobs:
             echo '```'
             echo "xattr -dr com.apple.quarantine /Applications/Punktfunk.app"
             echo '```'
-            echo "The build is ad-hoc signed, not notarized, so without this macOS refuses the first launch until you allow it in Privacy & Security. Microphone and input permissions may ask again after an update."
+            if [[ -n "${MACOS_SIGNING_P12:-}" ]]; then
+              echo "The build is signed with the fork's own certificate, not notarized, so without this macOS refuses the first launch until you allow it in Privacy & Security. The certificate is the same on every build, so Microphone, Accessibility and Input Monitoring grants carry over from the previous build."
+            else
+              echo "The build is ad-hoc signed, not notarized, so without this macOS refuses the first launch until you allow it in Privacy & Security. Microphone and input permissions may ask again after an update."
+            fi
           } > "$NOTES"
           gh release create "test-${PKG_VERSION}" \
             --target "$GITHUB_SHA" --prerelease \
