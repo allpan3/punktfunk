@@ -192,6 +192,15 @@ export const StreamStopped = S.Struct({
 	stream: StreamRef,
 });
 /**
+ * A launched game is about to start. The host waits for plugins and automations that hold this
+ * stage, each up to its own deadline. It fires only when the host spawns the game, not on adopt.
+ */
+export const GameLaunching = S.Struct({
+	...envelope,
+	kind: S.Literal("game.launching"),
+	game: GameRef,
+});
+/**
  * A launched game's process was seen running — not merely its launcher spawned. Fires once per
  * session that launched a title.
  */
@@ -211,6 +220,16 @@ export const GameExited = S.Struct({
 	game: GameRef,
 	reason: GameEndReason,
 });
+/** The game's own window reached the screen, often well after its process. */
+export const GameWindow = S.Struct({
+	...envelope,
+	kind: S.Literal("game.window"),
+	game: GameRef,
+	/** Title the compositor or the desktop reports for that window. */
+	title: S.String,
+	/** Wayland `app_id` or X11 class; empty on Windows. */
+	app_id: S.String,
+});
 export const PairingPending = S.Struct({
 	...envelope,
 	kind: S.Literal("pairing.pending"),
@@ -224,6 +243,27 @@ export const PairingCompleted = S.Struct({
 export const PairingDenied = S.Struct({
 	...envelope,
 	kind: S.Literal("pairing.denied"),
+	device: DeviceRef,
+});
+/** The operator chose a device's access at pairing. `grants` holds `GRANT_*` bits. */
+export const AccessGranted = S.Struct({
+	...envelope,
+	kind: S.Literal("access.granted"),
+	device: DeviceRef,
+	grants: S.Number,
+	/** Unix seconds; absent means permanent. */
+	expires_unix: S.optional(S.Number),
+});
+export const AccessChanged = S.Struct({
+	...envelope,
+	kind: S.Literal("access.changed"),
+	device: DeviceRef,
+	grants: S.Number,
+	expires_unix: S.optional(S.Number),
+});
+export const AccessExpired = S.Struct({
+	...envelope,
+	kind: S.Literal("access.expired"),
 	device: DeviceRef,
 });
 export const DisplayCreated = S.Struct({
@@ -241,6 +281,42 @@ export const LibraryChanged = S.Struct({
 	...envelope,
 	kind: S.Literal("library.changed"),
 	source: S.String,
+});
+export const UpdateAvailable = S.Struct({
+	...envelope,
+	kind: S.Literal("update.available"),
+	version: S.String,
+	channel: S.String,
+	install_kind: S.String,
+});
+export const UpdateApplied = S.Struct({
+	...envelope,
+	kind: S.Literal("update.applied"),
+	from: S.String,
+	to: S.String,
+});
+/** A plugin registered, restarted, deregistered or expired. Re-read `GET /api/v1/plugins`. */
+export const PluginsChanged = S.Struct({
+	...envelope,
+	kind: S.Literal("plugins.changed"),
+	id: S.String,
+});
+export const StoreChanged = S.Struct({
+	...envelope,
+	kind: S.Literal("store.changed"),
+});
+export const SettingsChanged = S.Struct({
+	...envelope,
+	kind: S.Literal("settings.changed"),
+	ids: S.Array(S.String),
+});
+/** A console or device action was accepted, or later failed (`failed: <cause>`). */
+export const ActionInvoked = S.Struct({
+	...envelope,
+	kind: S.Literal("action.invoked"),
+	id: S.String,
+	device: S.optional(DeviceRef),
+	outcome: S.String,
 });
 export const HostStarted = S.Struct({
 	...envelope,
@@ -261,14 +337,25 @@ export const HostEvent = S.Union([
 	SessionEnded,
 	StreamStarted,
 	StreamStopped,
+	GameLaunching,
 	GameRunning,
+	GameWindow,
 	GameExited,
 	PairingPending,
 	PairingCompleted,
 	PairingDenied,
+	AccessGranted,
+	AccessChanged,
+	AccessExpired,
 	DisplayCreated,
 	DisplayReleased,
 	LibraryChanged,
+	UpdateAvailable,
+	UpdateApplied,
+	PluginsChanged,
+	StoreChanged,
+	SettingsChanged,
+	ActionInvoked,
 	HostStarted,
 	HostStopping,
 ]);
