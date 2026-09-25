@@ -532,7 +532,7 @@ fn run(
         return stream_body(
             &mut capturer,
             Some(&rebuild),
-            host_composites_metadata_cursor(compositor, &cfg),
+            gs_cursor_blend(compositor, gamescope_route.as_ref(), &cfg),
             &sock,
             cfg,
             running,
@@ -756,8 +756,8 @@ fn resolve_gs_app(app: Option<&super::apps::AppEntry>) -> Option<GsApp> {
 }
 
 /// Cursor-as-metadata only where the encoder composites `frame.cursor` and the compositor
-/// cannot embed the pointer itself. Gamescope carries no cursor either way. Shared by
-/// `set_hw_cursor`, the plan and `stream_body`'s blend flag on both sources so they cannot drift.
+/// cannot embed the pointer itself. Gamescope carries no metadata cursor either way. Shared by
+/// `set_hw_cursor`, the pooled mirror and [`gs_cursor_blend`] so they cannot drift.
 fn host_composites_metadata_cursor(
     compositor: crate::vdisplay::Compositor,
     cfg: &StreamConfig,
@@ -765,6 +765,20 @@ fn host_composites_metadata_cursor(
     compositor != crate::vdisplay::Compositor::Gamescope
         && !crate::session_plan::compositor_embeds_pointer(compositor)
         && blend_capable_metadata_cursor(cfg)
+}
+
+/// The encoder draws the pointer: a metadata cursor the compositor cannot embed, or gamescope's
+/// XFixes pointer when its node carries none. One rule for the plan, the reader and `stream_body`.
+fn gs_cursor_blend(
+    compositor: crate::vdisplay::Compositor,
+    route: Option<&crate::vdisplay::GamescopeRoute>,
+    cfg: &StreamConfig,
+) -> bool {
+    host_composites_metadata_cursor(compositor, cfg)
+        || crate::session_plan::gamescope_cursor_for(
+            compositor == crate::vdisplay::Compositor::Gamescope,
+            route,
+        )
 }
 
 /// Cursor-as-metadata only where this session's encode backend composites `frame.cursor`.
@@ -860,7 +874,12 @@ fn open_gs_virtual_source(
         None,
     )
     .context("create virtual output at client resolution")?;
-    let plan = gs_session_plan(&cfg, host_composites_metadata_cursor(compositor, &cfg));
+    let plan = gs_session_plan(
+        &cfg,
+        gs_cursor_blend(compositor, gamescope_route.as_ref(), &cfg),
+    );
+    #[cfg(target_os = "linux")]
+    let cursor_seat = vout.seat.clone();
     let mut capturer = capture::capture_virtual_output(
         vout,
         capture::VirtualCaptureRequest {
@@ -872,6 +891,15 @@ fn open_gs_virtual_source(
         },
     )
     .context("capture virtual output")?;
+    #[cfg(target_os = "linux")]
+    if crate::session_plan::gamescope_cursor_for(
+        compositor == crate::vdisplay::Compositor::Gamescope,
+        gamescope_route.as_ref(),
+    ) {
+        capturer.attach_gamescope_cursor(Arc::new(move || {
+            pf_vdisplay::gamescope_xwayland_cursor_targets(cursor_seat.as_deref())
+        }));
+    }
     capturer.set_active(true);
     Ok((capturer, compositor, gamescope_route))
 }
@@ -1440,6 +1468,16 @@ fn stream_body(
             }
         }
         let t_cap = tick.elapsed();
+        // Blend the live pointer, not the one this frame was captured with: a still desktop
+        // repeats its frame while pointer-only buffers (Mutter) or XFixes move it.
+        #[cfg(target_os = "linux")]
+        if cursor_blend {
+            capturer.set_cursor_forward(false);
+            frame.cursor = capturer.cursor();
+        }
+        if frame.cursor.as_ref().is_some_and(|c| !c.visible) {
+            frame.cursor = None;
+        }
         // Source changed size/format with nothing negotiating it. The encoder cannot follow a
         // resolution change in place; reopen at the delivered size. GameStream has no mid-stream
         // mode message — the client is not told.
