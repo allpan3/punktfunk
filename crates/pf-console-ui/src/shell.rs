@@ -397,6 +397,8 @@ pub(crate) struct Shell {
     screen: Option<DeviceScreen>,
     hosts: Vec<HostRow>,
     hosts_gen: u64,
+    /// The `host_sort` / `host_grouping` values `hosts` was last arranged by.
+    hosts_order: (Option<serde_json::Value>, Option<serde_json::Value>),
     device_name: String,
     deck: bool,
     tv: bool,
@@ -534,6 +536,7 @@ impl Shell {
             screen: opts.screen,
             hosts: Vec::new(),
             hosts_gen: u64::MAX,
+            hosts_order: (None, None),
             device_name: opts.device_name,
             deck: opts.deck,
             tv: opts.tv,
@@ -976,8 +979,21 @@ impl Shell {
             self.mesh_os = None;
             self.mesh_palette = self.settings.ui_palette.clone();
         }
-        if self.console.hosts_gen() != self.hosts_gen {
+        // The row's order is a setting too: re-arrange when either the list or it moves.
+        let order = (
+            self.settings
+                .extra
+                .get(crate::screens::home::HOST_SORT_KEY)
+                .cloned(),
+            self.settings
+                .extra
+                .get(crate::screens::home::HOST_GROUPING_KEY)
+                .cloned(),
+        );
+        if self.console.hosts_gen() != self.hosts_gen || order != self.hosts_order {
             (self.hosts, self.hosts_gen) = self.console.hosts_snapshot();
+            crate::screens::home::arrange(&mut self.hosts, &self.settings);
+            self.hosts_order = order;
         }
 
         if let Some(text) = self.console.take_notice() {

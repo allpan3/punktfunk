@@ -742,6 +742,31 @@ fn the_licences_page_through_a_hosts_notices() {
     assert!(matches!(s.stack.last(), Some(Screen::Home(_))));
 }
 
+/// A grouped row draws its band captions, and the shell re-arranges the hosts when the
+/// setting moves, with no new host list to prompt it.
+#[test]
+fn a_grouped_host_row_rasters_in_its_new_order() {
+    let fonts = crate::theme::build_fonts().unwrap();
+    let mut surface = skia_safe::surfaces::raster_n32_premul((1280, 800)).unwrap();
+    let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    let mut frame = |s: &mut Shell| s.render(surface.canvas(), 1280, 800, &fonts, None, None, &[]);
+    frame(&mut s);
+    let before: Vec<String> = s.hosts.iter().map(|h| h.name.clone()).collect();
+    s.settings.extra.insert("host_sort".into(), "name".into());
+    s.settings
+        .extra
+        .insert("host_grouping".into(), "status".into());
+    for _ in 0..3 {
+        frame(&mut s);
+    }
+    let after: Vec<String> = s.hosts.iter().map(|h| h.name.clone()).collect();
+    assert_eq!(after.len(), before.len());
+    assert!(
+        s.hosts.windows(2).all(|w| w[0].online >= w[1].online),
+        "online before offline: {after:?}"
+    );
+}
+
 /// The search screen draws with its keyboard up, and a search that found nothing draws its
 /// state line rather than an empty field.
 #[test]

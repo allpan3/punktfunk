@@ -152,6 +152,8 @@ public enum ConsoleSettings {
         .bool("background_keep_alive", DefaultsKey.backgroundKeepAlive, false),
         .int("background_timeout_minutes", DefaultsKey.backgroundTimeoutMinutes, 10),
         .string("hud_placement", DefaultsKey.hudPlacement, "topTrailing"),
+        .string("host_sort", DefaultsKey.hostSort, "added"),
+        .string("host_grouping", DefaultsKey.hostGrouping, "none"),
         .string("gamepad_ui_mode", DefaultsKey.gamepadUIMode, GamepadUIEnvironment.modeWhenConnected),
         // `Settings::extra` (flattened, so plain top-level keys). The `android.` prefix is
         // where these were first written; the console reads the same names here.

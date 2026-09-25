@@ -47,6 +47,68 @@ const VERB_GAP: f64 = 12.0;
 /// Air between the verbs and the games.
 const GAMES_AIR: f64 = 12.0;
 
+/// Air over the row for a group's caption, when the hosts are grouped.
+const GROUP_AIR: f64 = 24.0;
+const GROUP_CAPTION: f64 = 12.0;
+
+/// The `Settings::extra` keys and values the Apple app's own home stores its order under.
+pub(crate) const HOST_SORT_KEY: &str = "host_sort";
+pub(crate) const HOST_GROUPING_KEY: &str = "host_grouping";
+pub(crate) const HOST_SORTS: [(&str, &str); 3] = [
+    ("added", "Date added"),
+    ("name", "Name"),
+    ("lastConnected", "Last connected"),
+];
+pub(crate) const HOST_GROUPINGS: [(&str, &str); 3] =
+    [("none", "None"), ("preset", "Preset"), ("status", "Status")];
+
+fn extra<'s>(s: &'s pf_client_core::trust::Settings, key: &str, default: &'s str) -> &'s str {
+    s.extra.get(key).and_then(|v| v.as_str()).unwrap_or(default)
+}
+
+/// The grouping in force; Apple's store may still say `profile`, the old name for presets.
+fn grouping(s: &pf_client_core::trust::Settings) -> &str {
+    match extra(s, HOST_GROUPING_KEY, "none") {
+        "profile" => "preset",
+        g => g,
+    }
+}
+
+/// The band a card sits in under `grouping`, or `None` ungrouped. A pinned card goes with
+/// the preset it connects with, the host's own card with its binding.
+fn group_of(h: &HostRow, grouping: &str) -> Option<String> {
+    match grouping {
+        "status" => Some(if h.online { "Online" } else { "Offline" }.into()),
+        "preset" => Some(match (&h.pin, &h.bound_preset) {
+            (Some(p), _) | (None, Some(p)) => p.name.clone(),
+            (None, None) => "No preset".into(),
+        }),
+        _ => None,
+    }
+}
+
+/// Order the row as Settings asks: bands first (Online before Offline, presets by name with
+/// "No preset" last), then the sort inside each. Stable, so equal cards keep the order the
+/// host sent, which is the order they were added.
+pub(crate) fn arrange(hosts: &mut Vec<HostRow>, s: &pf_client_core::trust::Settings) {
+    let grouping = grouping(s);
+    let sort = extra(s, HOST_SORT_KEY, "added");
+    let band = |h: &HostRow| match (grouping, group_of(h, grouping)) {
+        ("status", _) => (u8::from(!h.online), String::new()),
+        (_, Some(name)) if name == "No preset" => (1, String::new()),
+        (_, Some(name)) => (0, name.to_lowercase()),
+        (_, None) => (0, String::new()),
+    };
+    hosts.sort_by(|a, b| {
+        band(a).cmp(&band(b)).then_with(|| match sort {
+            "name" => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            // Most recent first; a host never connected to goes last.
+            "lastConnected" => b.last_used.cmp(&a.last_used),
+            _ => std::cmp::Ordering::Equal,
+        })
+    });
+}
+
 /// Sentinel. Host keys are fingerprints or `addr:port`; neither starts with `\0`.
 const ADD_KEY: &str = "\0add";
 /// Sentinel for the trailing Rescan tile; same `\0` prefix as [`ADD_KEY`].
@@ -646,7 +708,9 @@ impl HomeScreen {
             self.page.settle(page_to, 0.25, 4.0);
         }
         let top = f64::from(rect.top) - self.page.pos;
-        let row_y = top + ROW_AIR * k;
+        let grouping = grouping(ctx.settings);
+        let captions = grouping != "none";
+        let row_y = top + (ROW_AIR + if captions { GROUP_AIR } else { 0.0 }) * k;
 
         // The focused card rests on the margin until the row's end reaches the screen's.
         let span = (len as f64 - 1.0) * pitch + tile_w;
@@ -704,7 +768,37 @@ impl HomeScreen {
                     k,
                 };
                 let slot = slot_at(i, ctx.hosts);
-                El::paint(move |canvas, _| look.paint(canvas, fonts, &slot))
+                // The first card of each band carries its name above it.
+                let caption = match (&slot, i.checked_sub(1).map(|j| slot_at(j, ctx.hosts))) {
+                    (Slot::Host(h), prev) if captions => {
+                        let here = group_of(h, grouping);
+                        let before = match prev {
+                            Some(Slot::Host(p)) => group_of(p, grouping),
+                            _ => None,
+                        };
+                        (here != before).then_some(here).flatten()
+                    }
+                    _ => None,
+                };
+                El::paint(move |canvas, _| {
+                    if let Some(text) = &caption {
+                        let (x, y) = (f64::from(tile.left), f64::from(tile.top) - 10.0 * k);
+                        let size = GROUP_CAPTION * k;
+                        let tracking = 1.2 * k;
+                        let upper = text.to_uppercase();
+                        fonts.draw_tracked(
+                            canvas,
+                            &upper,
+                            x,
+                            y,
+                            W::SemiBold,
+                            size,
+                            tracking,
+                            fg(0.55),
+                        );
+                    }
+                    look.paint(canvas, fonts, &slot)
+                })
             };
             row = row.child(
                 node.id(Self::tile_id(&self.keys[i]))
@@ -1523,5 +1617,50 @@ mod tests {
             landed,
             "the plate lands and its sweep ends within two seconds"
         );
+    }
+
+    /// The row follows Settings: a sort inside bands, Online before Offline, presets by name
+    /// with "No preset" last, and a host never connected to last under Last connected. Ties
+    /// keep the order the host sent.
+    #[test]
+    fn the_row_follows_the_order_settings() {
+        let chip = |name: &str| crate::model::PresetChip {
+            id: name.into(),
+            name: name.into(),
+            accent: None,
+            bitrate_kbps: None,
+        };
+        let row = || {
+            let mut c = host("charlie", true, false, false);
+            c.last_used = Some(30);
+            c.bound_preset = Some(chip("Travel"));
+            let mut a = host("alpha", true, true, false);
+            a.last_used = Some(10);
+            let b = host("Bravo", true, true, false);
+            vec![c, a, b]
+        };
+        let order = |sort: &str, grouping: &str| -> Vec<String> {
+            let mut s = pf_client_core::trust::Settings::default();
+            s.extra.insert(HOST_SORT_KEY.into(), sort.into());
+            s.extra.insert(HOST_GROUPING_KEY.into(), grouping.into());
+            let mut hosts = row();
+            arrange(&mut hosts, &s);
+            hosts.into_iter().map(|h| h.key).collect()
+        };
+        assert_eq!(order("added", "none"), ["charlie", "alpha", "Bravo"]);
+        assert_eq!(order("name", "none"), ["alpha", "Bravo", "charlie"]);
+        assert_eq!(
+            order("lastConnected", "none"),
+            ["charlie", "alpha", "Bravo"]
+        );
+        assert_eq!(order("name", "status"), ["alpha", "Bravo", "charlie"]);
+        assert_eq!(order("added", "status"), ["alpha", "Bravo", "charlie"]);
+        assert_eq!(order("name", "preset"), ["charlie", "alpha", "Bravo"]);
+        // Apple's older spelling of the preset grouping still groups.
+        assert_eq!(order("name", "profile"), ["charlie", "alpha", "Bravo"]);
+        let travel = row().remove(0);
+        assert_eq!(group_of(&travel, "preset").as_deref(), Some("Travel"));
+        assert_eq!(group_of(&travel, "status").as_deref(), Some("Offline"));
+        assert_eq!(group_of(&travel, "none"), None);
     }
 }

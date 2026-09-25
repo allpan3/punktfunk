@@ -13,7 +13,7 @@
 
 use crate::glyphs::{Hint, HintKey};
 use crate::pointer::Pointer;
-use crate::screens::{Ctx, Outbox, Screen};
+use crate::screens::{home, Ctx, Outbox, Screen};
 use crate::theme::Fonts;
 use crate::widgets::{
     column, permits, Charset, KeyMsg, Keyboard, ListMsg, MenuList, RowSpec, TabStrip, TAB_STRIP_H,
@@ -114,6 +114,10 @@ pub enum RowId {
     BackgroundTimeout,
     /// The statistics overlay's corner. Apple draws that overlay itself.
     StatsPosition,
+    /// The host row's order ([`super::home::arrange`]).
+    HostSort,
+    /// Bands in the host row: none, by preset, or by online status.
+    HostGrouping,
     /// Which path decodes the stream's audio on a TV — see `WEBOS_AUDIO_ROUTES`. webOS only:
     /// the offload route is that client's NDL audio plane, which no other platform has.
     AudioRoute,
@@ -208,6 +212,14 @@ fn set_extra_bool(s: &mut pf_client_core::trust::Settings, key: &str, value: boo
 
 fn extra_str<'a>(s: &'a pf_client_core::trust::Settings, key: &str, default: &'a str) -> &'a str {
     s.extra.get(key).and_then(|v| v.as_str()).unwrap_or(default)
+}
+
+/// Apple's store may still hold `profile`, the old name for grouping by preset.
+fn host_grouping(s: &pf_client_core::trust::Settings) -> &str {
+    match extra_str(s, home::HOST_GROUPING_KEY, "none") {
+        "profile" => "preset",
+        g => g,
+    }
 }
 
 fn background_timeout(s: &pf_client_core::trust::Settings) -> u64 {
@@ -344,6 +356,8 @@ const TABS: [(&str, &[RowId]); 8] = [
             RowId::LibraryView,
             RowId::LibraryCollections,
             RowId::StartIn,
+            RowId::HostSort,
+            RowId::HostGrouping,
             RowId::ReduceUiResolution,
             RowId::GamepadUi,
             RowId::GamepadUiMode,
@@ -1368,6 +1382,8 @@ fn row_icon(id: RowId) -> &'static str {
         RowId::GamepadUi | RowId::GamepadUiMode => "tv",
         RowId::Stats | RowId::AdvancedStats => "chart-column",
         RowId::StatsPosition => "panel-right",
+        RowId::HostSort => "grip-vertical",
+        RowId::HostGrouping => "square",
         RowId::BackgroundKeepAlive => "moon",
         RowId::BackgroundTimeout => "clock",
         RowId::ReduceMotion => "eye",
@@ -1722,6 +1738,20 @@ fn row_spec_base(id: RowId, ctx: &Ctx, presets: &[(String, String)]) -> RowSpec 
             s.stats_verbosity().label().into(),
         ),
         RowId::AdvancedStats => (None, "Advanced statistics", on_off(s.advanced_stats).into()),
+        RowId::HostSort => (
+            None,
+            "Host order",
+            label_for(
+                &home::HOST_SORTS,
+                extra_str(s, home::HOST_SORT_KEY, "added"),
+            )
+            .into(),
+        ),
+        RowId::HostGrouping => (
+            None,
+            "Group hosts by",
+            label_for(&home::HOST_GROUPINGS, host_grouping(s)).into(),
+        ),
         RowId::StatsPosition => (
             None,
             "Stats position",
@@ -2026,6 +2056,14 @@ pub fn detail(id: RowId, ctx: &Ctx) -> &'static str {
         }
         RowId::Fullscreen => "Streams open fullscreen instead of windowed.",
         RowId::StatsPosition => "Which corner the statistics overlay sits in.",
+        RowId::HostSort => {
+            "The order of the host row: as you added them, by name, or most \
+             recently connected first."
+        }
+        RowId::HostGrouping => {
+            "Split the host row into bands, each named over its first \
+             card: by the preset a card connects with, or online before offline."
+        }
         RowId::BackgroundKeepAlive => {
             "Audio and the connection stay live when you switch away; video pauses."
         }
@@ -2404,6 +2442,24 @@ pub fn adjust(id: RowId, delta: i32, wrap: bool, ctx: &mut Ctx) -> bool {
                 let minutes: u64 = v.parse().unwrap_or(BACKGROUND_TIMEOUT_DEFAULT);
                 s.extra
                     .insert(BACKGROUND_TIMEOUT_KEY.to_string(), minutes.into());
+            })
+        }
+        RowId::HostSort => {
+            let mut v = extra_str(s, home::HOST_SORT_KEY, "added").to_string();
+            step_str(&home::HOST_SORTS, &mut v, delta, wrap).map(|()| {
+                s.extra.insert(
+                    home::HOST_SORT_KEY.to_string(),
+                    serde_json::Value::String(v),
+                );
+            })
+        }
+        RowId::HostGrouping => {
+            let mut v = host_grouping(s).to_string();
+            step_str(&home::HOST_GROUPINGS, &mut v, delta, wrap).map(|()| {
+                s.extra.insert(
+                    home::HOST_GROUPING_KEY.to_string(),
+                    serde_json::Value::String(v),
+                );
             })
         }
         RowId::StatsPosition => {
@@ -3890,7 +3946,7 @@ pub(crate) mod tests {
                 seen.push(*id);
             }
         }
-        assert_eq!(seen.len(), 60, "{seen:?}");
+        assert_eq!(seen.len(), 62, "{seen:?}");
         assert!(seen.contains(&RowId::StartIn));
         assert!(seen.contains(&RowId::AdvancedStats));
         assert!(seen.contains(&RowId::FollowOsTheme));
