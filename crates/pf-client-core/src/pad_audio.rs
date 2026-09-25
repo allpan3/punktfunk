@@ -13,8 +13,8 @@
 use punktfunk_core::audio::{AudioGapTracker, SAMPLE_RATE_HZ};
 use punktfunk_core::client::NativeClient;
 use punktfunk_core::quic::{PAD_AUDIO_KIND_HAPTICS, PAD_AUDIO_KIND_SPEAKER};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Speaker FL/FR on 0/1, voice coils on 2/3. Matches the DualSense USB audio function.
@@ -91,6 +91,39 @@ pub(crate) fn register_tier_a(index: u8, hid_path: Option<String>) {
 
 pub(crate) fn unregister_tier_a(index: u8) {
     TIER_A_PADS.lock().unwrap().retain(|p| p.index != index);
+}
+
+/// Last rendered haptics frame per wire pad, ms on [`seen_clock`]; 0 = never.
+static HAPTICS_SEEN_MS: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
+
+/// The host gates haptics at −60 dBFS with a 250 ms hangover, so a title that only rumbles
+/// sends no frames at all. Twice the hangover covers wire jitter.
+const HAPTICS_IDLE_MS: u64 = 500;
+
+/// Process-clock ms, 1-based so 0 stays "never".
+fn seen_clock() -> u64 {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    EPOCH.get_or_init(Instant::now).elapsed().as_millis() as u64 + 1
+}
+
+fn note_haptics_frame(pad: u8) {
+    HAPTICS_SEEN_MS[(pad & 0x0f) as usize].store(seen_clock(), Ordering::Relaxed);
+}
+
+/// Slot teardown: wire indices are reused, and a stale stamp would take the next pad's rumble.
+pub(crate) fn clear_haptics_liveness(pad: u8) {
+    HAPTICS_SEEN_MS[(pad & 0x0f) as usize].store(0, Ordering::Relaxed);
+}
+
+/// Whether haptics frames drive `pad`'s coils right now, so wire rumble must stand down. Judged
+/// on arrival: a title that renders no haptics audio keeps its rumble.
+pub(crate) fn haptics_live(pad: u8) -> bool {
+    let seen = HAPTICS_SEEN_MS[(pad & 0x0f) as usize].load(Ordering::Relaxed);
+    haptics_live_at(seen, seen_clock())
+}
+
+fn haptics_live_at(seen_ms: u64, now_ms: u64) -> bool {
+    seen_ms != 0 && now_ms.saturating_sub(seen_ms) < HAPTICS_IDLE_MS
 }
 
 /// First registered pad's HID path — v1 renders one DualSense.
@@ -1276,6 +1309,11 @@ fn run(connector: &NativeClient, stop: &AtomicBool, haptics: bool, speaker: bool
             }
             _ => {}
         }
+        // Rendered haptics take the coils from wire rumble (`haptics_live`); concealment is
+        // not evidence, and nothing renders without an output.
+        if f.kind == PAD_AUDIO_KIND_HAPTICS && !f.opus.is_empty() && out.is_some() {
+            note_haptics_frame(f.pad);
+        }
         let k = f.kind as usize;
         if streams[k].is_none() {
             match opus::Decoder::new(48_000, opus::Channels::Stereo) {
@@ -2205,6 +2243,19 @@ mod tests {
         m.push(PAD_AUDIO_KIND_HAPTICS, &chunk, t);
         m.discard();
         assert_eq!(m.ready_frames(), 0);
+    }
+
+    /// Haptics own the coils only while frames arrive; never-stamped is never live.
+    #[test]
+    fn haptics_own_the_coils_only_while_frames_arrive() {
+        assert!(!haptics_live_at(0, 10));
+        assert!(haptics_live_at(100, 100));
+        assert!(haptics_live_at(100, 100 + HAPTICS_IDLE_MS - 1));
+        assert!(!haptics_live_at(100, 100 + HAPTICS_IDLE_MS));
+        assert!(
+            haptics_live_at(200, 100),
+            "a stamp ahead of now is live, not wrapped"
+        );
     }
 
     /// Seq-gap PLC: 0 for first/in-order, exact gap for a loss, 50 ms of frames for a burst.
