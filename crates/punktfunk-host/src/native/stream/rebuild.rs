@@ -75,6 +75,8 @@ impl StreamState {
             let mut new_vd = crate::vdisplay::open(sw.compositor)?;
             new_vd.set_gamescope_route(switched_route.clone());
             new_vd.set_join_live(self.join_live);
+            // The HDR verdict, as at session start: a switched-to gamescope launches in it.
+            new_vd.set_hdr(self.plan.hdr);
             #[cfg(target_os = "linux")]
             new_vd.set_session_isolation(self.isolation.clone());
             let pipe = build_pipeline_with_retry(
@@ -494,6 +496,7 @@ impl StreamState {
                         composite_plan(&self.plan, self.cursor_fwd.is_some(), gamescope);
                     self.vd
                         .set_hw_cursor(self.plan.cursor_forward || self.metadata_composite);
+                    self.vd.set_hdr(self.plan.hdr);
                 }
                 Err(e2) => tracing::warn!(error = %format!("{e2:#}"),
                     "capture loss: opening the newly-detected compositor failed — retrying"),
