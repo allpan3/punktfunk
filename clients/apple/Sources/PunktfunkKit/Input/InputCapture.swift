@@ -99,6 +99,9 @@ public final class InputCapture {
     /// key held down for the rest of the session.
     /// A keyUp that DOES arrive drops its VK here (`takeCommandChordRelease`).
     private var commandChordVKs: Set<UInt32> = []
+    /// The ⌘ VK that the chord passthrough pressed because the host held none. Released after the
+    /// chord key (`releaseChordCommand`).
+    private var chordCommandVK: UInt32?
 
     #endif
 
@@ -307,6 +310,7 @@ public final class InputCapture {
                     event, forwarding: self.forwarding, trackedVKs: &self.commandChordVKs)
                 else { return event }
                 self.sendKey(vk, down: false)
+                self.releaseChordCommand()
                 return nil // The monitor owns this release; the responder must not send it again
             }
             let flags = Self.chordFlags(event)
@@ -369,7 +373,7 @@ public final class InputCapture {
             }
             // Every OTHER ⌘ chord is the HOST's while captured, or the menu takes ⌘Q first. It is
             // sent from here, since returning nil also skips StreamLayerView's keyDown; a chord
-            // with no host VK is swallowed. The ⌘ itself already went out as a flagsChanged.
+            // with no host VK is swallowed. `sendCommandChordKey` adds a ⌘ if the host holds none.
             if self.forwarding, flags.contains(.command), Self.forwardsCommandChord(
                 keyCode: event.keyCode, flags: flags, forwarding: self.forwarding,
                 inhibitShortcuts: self.connection.settings.inhibitShortcuts
@@ -418,9 +422,9 @@ public final class InputCapture {
 
     deinit { stop() }
 
-    /// Send release events for everything currently held, and drop the motion residuals
-    /// and modifier/latch tracking (GC delivers nothing while inactive, so a ⌘ released
-    /// in another app would otherwise stay "held" here forever — hijacking Esc).
+    /// Release every key and button the host holds, and clear the motion residuals and the
+    /// modifier and latch state. The app gets no key events while inactive, so a ⌘ released in
+    /// another app stays in `cmdKeysDown` until this runs.
     private func releaseAll() {
         #if !os(macOS)
         stopAutoRepeat() // before the releases below, so the ticker can't outlive the key-up
@@ -434,6 +438,7 @@ public final class InputCapture {
         suppressedVK = nil
         #if os(macOS)
         commandChordVKs.removeAll() // their releases are in `pressedVKs`, flushed just below
+        chordCommandVK = nil // its release is in `pressedVKs` too
         #endif
         for vk in pressedVKs {
             emitKey(vk, down: false)
@@ -596,26 +601,30 @@ public final class InputCapture {
         emitKey(vk, down: down)
     }
 
-    /// NSEvent modifier path (macOS): modifier keys never fire keyDown/keyUp — they arrive
-    /// as flagsChanged, which carries no down-vs-up. `keyCode` names the key that changed
-    /// (kVK_Control & co., already L/R-specific); `resolveModifier` recovers the direction
-    /// from the flags. Fed `event.keyCode` + `UInt(event.modifierFlags.rawValue)` — LOW 16
-    /// bits intact, they carry the device-dependent L/R bits (the .deviceIndependentFlagsMask
-    /// the ⌘⎋ monitor uses deliberately strips exactly these — do NOT pre-mask here).
+    /// NSEvent modifier path (macOS). Modifier keys arrive as flagsChanged, which has no down/up
+    /// field: `keyCode` names the changed key (already L/R-specific), and `resolveModifier` gets
+    /// the direction from the flags. `rawFlags` is the unmasked `event.modifierFlags.rawValue`;
+    /// its low 16 bits are the L/R device bits that `.deviceIndependentFlagsMask` removes.
+    /// A physical ⌘ press takes over the ⌘ that `sendCommandChordKey` pressed on the same side.
     public func handleFlagsChanged(keyCode: UInt16, rawFlags: UInt) {
         if inputDebug {
             inputLog.debug(
                 "flagsChanged keyCode \(keyCode, privacy: .public) flags 0x\(String(rawFlags, radix: 16), privacy: .public) forwarding \(self.forwarding, privacy: .public)")
         }
         guard forwarding else { return }
+        // The chord path's ⌘ is not physically down. Without device bits, `resolveModifier` would
+        // otherwise read a physical press of that ⌘ as its release.
         guard let (vk, down) = Self.resolveModifier(
-            keyCode: keyCode, rawFlags: rawFlags, isDown: { pressedVKs.contains($0) })
+            keyCode: keyCode, rawFlags: rawFlags,
+            isDown: { pressedVKs.contains($0) && $0 != chordCommandVK })
         else { return } // Fn / Caps Lock / unknown — nothing the host consumes on this path
         // Keep cmdKeysDown in step (the ⌘⎋ toggle + Esc suppression read it); sendKey
         // adds the VK to pressedVKs so releaseAll/blur flushes a held modifier cleanly.
         if vk == 0x5B || vk == 0x5C {
             if down {
                 cmdKeysDown.insert(vk)
+                // If the chord path already holds this ⌘ on the host, send no second press.
+                if Self.physicalCommandTakesOver(vk, pressed: &chordCommandVK) { return }
             } else {
                 cmdKeysDown.remove(vk)
                 // Last ⌘ up: release the chord keys whose own keyUp macOS never delivered. BEFORE
@@ -695,11 +704,39 @@ public final class InputCapture {
         return !isClientReservedChord(keyCode: keyCode, flags: flags)
     }
 
-    /// Forward one key of a ⌘ chord the monitor just took off AppKit, remembering it so its
-    /// release can be synthesized (see `commandChordVKs`).
+    /// Forward one key of a ⌘ chord that the monitor took off AppKit, and track it in
+    /// `commandChordVKs` for its release. If the host holds no ⌘, press one first: a synthetic ⌘V
+    /// (dictation paste) has `.command` in its flags but sends no ⌘ flagsChanged.
     private func sendCommandChordKey(_ vk: UInt32) {
+        if let command = Self.pressCommandForChord(heldVKs: pressedVKs, pressed: &chordCommandVK) {
+            sendKey(command, down: true)
+        }
         commandChordVKs.insert(vk)
         sendKey(vk, down: true)
+    }
+
+    /// The ⌘ to press before a chord key, or nil when the host holds a ⌘ on either side. The
+    /// press is VK_LWIN, the VK `handleFlagsChanged` sends for the left ⌘; `pressed` records it.
+    static func pressCommandForChord(heldVKs: Set<UInt32>, pressed: inout UInt32?) -> UInt32? {
+        guard !heldVKs.contains(0x5B), !heldVKs.contains(0x5C) else { return nil }
+        pressed = 0x5B
+        return 0x5B
+    }
+
+    /// Whether a physical ⌘ press is the ⌘ that `pressCommandForChord` holds on the host. If so,
+    /// the host needs no second press, and the physical key's release replaces the chord path's.
+    static func physicalCommandTakesOver(_ vk: UInt32, pressed: inout UInt32?) -> Bool {
+        guard vk == pressed else { return false }
+        pressed = nil
+        return true
+    }
+
+    /// Release the ⌘ that `sendCommandChordKey` pressed. Called when a chord key goes up, so the ⌘
+    /// is held no longer than the key it was pressed for.
+    private func releaseChordCommand() {
+        guard let vk = chordCommandVK else { return }
+        chordCommandVK = nil
+        sendKey(vk, down: false)
     }
 
     // Take one release owed by a forwarded Command press, even when its modifiers have changed
@@ -712,14 +749,12 @@ public final class InputCapture {
         return vk
     }
 
-    /// Release whatever the ⌘-chord passthrough sent down and is still held — called when the last
-    /// physical ⌘ comes up. A keyUp that DID arrive has already taken its VK out of `pressedVKs`,
-    /// so this only fires for the ones macOS swallowed.
+    /// Called when the last physical ⌘ comes up. Releases the chord keys that the host still holds
+    /// because macOS did not deliver their keyUp, then the ⌘ that `sendCommandChordKey` pressed.
     private func flushCommandChord() {
-        // Same cause, different victim: a one-shot latch whose key-up never arrived goes on to eat
-        // the NEXT press of that key (⌃⌘F's F, ⌘⎋'s Esc). Once ⌘ is up, a pending latch is stale.
+        // A latch whose keyUp did not arrive drops the next press of its key (⌃⌘F's F, ⌘⎋'s Esc).
+        // With ⌘ up, a pending latch is stale.
         suppressedVK = nil
-        guard !commandChordVKs.isEmpty else { return }
         for vk in commandChordVKs where pressedVKs.contains(vk) {
             pressedVKs.remove(vk)
             emitKey(vk, down: false)
@@ -728,6 +763,7 @@ public final class InputCapture {
             }
         }
         commandChordVKs.removeAll()
+        releaseChordCommand()
     }
 
     // MARK: - System shortcuts

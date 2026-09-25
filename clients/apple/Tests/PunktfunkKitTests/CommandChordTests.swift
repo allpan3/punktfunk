@@ -185,6 +185,38 @@ final class CommandChordTests: XCTestCase {
         XCTAssertEqual(tracked, [0x57])
     }
 
+    // A synthetic ⌘V arrives with no ⌘ held on the host: the chord path presses the left ⌘
+    func testChordWithoutHeldCommandPressesOne() {
+        for held: Set<UInt32> in [[], [0xA0], [0xA2, 0xA4]] { // none, ⇧, ⌃⌥
+            var pressed: UInt32?
+            XCTAssertEqual(
+                InputCapture.pressCommandForChord(heldVKs: held, pressed: &pressed), 0x5B)
+            XCTAssertEqual(pressed, 0x5B)
+        }
+    }
+
+    // A ⌘ the host holds, physical on either side or pressed by this path, gets no second press
+    func testHeldCommandIsNotPressedAgain() {
+        for held: Set<UInt32> in [[0x5B], [0x5C], [0x5B, 0x5C], [0x5C, 0x56]] {
+            var pressed: UInt32?
+            XCTAssertNil(InputCapture.pressCommandForChord(heldVKs: held, pressed: &pressed))
+            XCTAssertNil(pressed)
+        }
+        var pressed: UInt32? = 0x5B
+        XCTAssertNil(InputCapture.pressCommandForChord(heldVKs: [0x5B, 0x56], pressed: &pressed))
+        XCTAssertEqual(pressed, 0x5B)
+    }
+
+    // A physical left ⌘ takes over the chord path's press; a right ⌘ leaves it to the chord key
+    func testPhysicalCommandTakesOverTheSameSide() {
+        var pressed: UInt32? = 0x5B
+        XCTAssertFalse(InputCapture.physicalCommandTakesOver(0x5C, pressed: &pressed))
+        XCTAssertEqual(pressed, 0x5B)
+        XCTAssertTrue(InputCapture.physicalCommandTakesOver(0x5B, pressed: &pressed))
+        XCTAssertNil(pressed)
+        XCTAssertFalse(InputCapture.physicalCommandTakesOver(0x5B, pressed: &pressed))
+    }
+
     // Construct physical key events without keyboard layout or window dependencies
     private func keyEvent(
         _ keyCode: UInt16, _ flags: NSEvent.ModifierFlags,
