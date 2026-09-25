@@ -122,6 +122,8 @@ mod gamestream;
 #[path = "linux/gpuclocks.rs"]
 mod gpuclocks;
 mod hooks;
+// Launch holds: plugins and hooks that act before a game starts.
+mod holds;
 // Network-facing; same `forbid` as `mod mgmt`. Tests mutate process env (`set_var` is unsafe in 2024).
 #[cfg_attr(not(test), forbid(unsafe_code))]
 mod identity;

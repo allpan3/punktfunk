@@ -331,6 +331,18 @@ fn run(
             cfg.width, cfg.height, cfg.fps, cfg.hdr,
         ));
         let _prep = (!prep_cmds.is_empty()).then(|| crate::hooks::run_prep(&prep_cmds, &prep_env));
+        // A spawn waits for whoever holds `game.launching`. An adopted game is already running.
+        if let Some(t) = target.as_ref().filter(|_| !adopt_launch) {
+            crate::holds::launching(crate::events::GameRefPayload {
+                app: t.game.id.clone(),
+                title: t.game.title.clone(),
+                store: t.game.store.clone(),
+                client: client_label.clone(),
+                fingerprint: life.fingerprint.clone(),
+                plane: crate::events::Plane::Gamestream,
+                preset: None,
+            });
+        }
         // Re-runnable: the encode loop calls it again on a mid-stream capture loss.
         let (mut capturer, compositor, gamescope_route) =
             open_gs_virtual_source(cfg, app, target.as_ref(), &life.quit)?;
