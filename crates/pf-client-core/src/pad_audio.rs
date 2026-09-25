@@ -1484,13 +1484,20 @@ fn pad_pw_thread(
                     chunk.clear();
                     let _ = ud.recycle.try_send(chunk);
                 }
+                // This cycle's quantum, as in the playback stream: the mapped buffer is sized
+                // for `quantum-limit` (8192 ≈ 170 ms), which would lag every hit. 0 → capacity.
+                let requested = usize::try_from(buffer.requested()).unwrap_or(0);
                 let stride = 4 * PAD_CHANNELS; // F32LE interleaved
                 let datas = buffer.datas_mut();
                 if datas.is_empty() {
                     return;
                 }
                 let data = &mut datas[0];
-                let want_frames = data.data().map(|s| s.len() / stride).unwrap_or(0);
+                let max_frames = data.data().map(|s| s.len() / stride).unwrap_or(0);
+                let want_frames = match requested {
+                    0 => max_frames,
+                    r => r.min(max_frames),
+                };
                 let want = want_frames * PAD_CHANNELS;
 
                 // Prime ~3 quanta in [240, 2400] frames; cap ~1 quantum of slack; re-prime after a drain.
