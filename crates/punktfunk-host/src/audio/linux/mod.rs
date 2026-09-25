@@ -306,9 +306,9 @@ impl Drop for PwAudioCapturer {
         // Receiver dies with us; remaining producer pushes must not count as
         // encode-thread-behind.
         self.active.store(false, Ordering::Relaxed);
-        if self.claimed {
+        if let (true, Some(name)) = (self.claimed, &self.sink_name) {
             self.claimed = false;
-            stream_sink::release();
+            stream_sink::release(name);
         }
         // Failed send means the thread already exited — nothing to tear down.
         let _ = self.quit.send(Terminate);
@@ -363,9 +363,9 @@ impl AudioCapturer for PwAudioCapturer {
     fn idle(&mut self) {
         // Parked: channel fills and stays full; those drops are nobody's fault.
         self.active.store(false, Ordering::Relaxed);
-        if self.claimed {
+        if let (true, Some(name)) = (self.claimed, &self.sink_name) {
             self.claimed = false;
-            stream_sink::release();
+            stream_sink::release(name);
         }
     }
 }
