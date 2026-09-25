@@ -434,7 +434,7 @@ pub struct Palette {
 
 /// Per-cell ramp offset on top of the diagonal `0.5·(x + y)`. Nudges stop a pure diagonal from banding.
 #[rustfmt::skip]
-const CELL_RAMP: [f64; 16] = [
+pub(crate) const CELL_RAMP: [f64; 16] = [
      0.10, -0.06,  0.04, -0.12,
     -0.08,  0.14, -0.10,  0.06,
      0.06, -0.12,  0.16, -0.04,
