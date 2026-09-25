@@ -304,7 +304,6 @@ fn capture_thread(
                 }
             }
             Err(e) => {
-                mode = TargetMode::Assert;
                 if let Some(unsat) = e.downcast_ref::<PlanUnsatisfiable>() {
                     // Same endpoints → same verdict. Wait on the fingerprint; a wiring retry
                     // would IPolicyConfig-stomp an operator recording-default change.
@@ -328,6 +327,12 @@ fn capture_thread(
                         backoff = REOPEN_BACKOFF_START;
                     }
                     failures += 1;
+                    // Follow keeps following the output the operator chose: one invalidated
+                    // stream (a Bluetooth profile switch) must not take the default back. A
+                    // second miss in a row re-plans.
+                    if failures > 1 {
+                        mode = TargetMode::Assert;
+                    }
                     if failures.is_power_of_two() {
                         tracing::warn!(error = %format!("{e:#}"), count = failures,
                             backoff_secs = backoff.as_secs(),
