@@ -32,6 +32,7 @@ pub(crate) fn register_all(reg: &Diagnostics) {
     reg.register(vdisplay_driver);
     reg.register(pad_audio);
     reg.register(pad_driver);
+    reg.register(encoder_sharing);
     reg.register(plugin_sandbox);
     reg.register(restart_pending);
 }
@@ -274,6 +275,38 @@ fn pad_audio() -> HostCheck {
         ids::PAD_AUDIO,
         "The controller speaker endpoint is a Windows component.",
     )
+}
+
+/// Another app on the NVENC engine right now. Only NVIDIA reports its sessions.
+fn encoder_sharing() -> HostCheck {
+    let id = ids::ENCODER_SHARING;
+    if !crate::encoder_sessions::available() {
+        return HostCheck::inapplicable(id, "Only NVIDIA GPUs report who uses the video encoder.");
+    }
+    let others = crate::encoder_sessions::foreign();
+    if others.is_empty() {
+        return HostCheck::ok(id, "No other app is using the video encoder right now.");
+    }
+    let who = crate::encoder_sessions::describe(&others);
+    HostCheck::problem(
+        id,
+        CheckStatus::Warn,
+        Severity::Warning,
+        "Another app is using the video encoder",
+        format!(
+            "{who} shares the encoder with the stream, so stream frames wait behind its frames \
+             and the picture stutters."
+        ),
+    )
+    .with_remedy(Remedy {
+        text: "Close or pause the other recorder (NVIDIA Instant Replay, OBS, Discord) while you \
+               stream. On Windows, Pause Instant Replay in the host settings handles Instant \
+               Replay by itself."
+            .to_string(),
+        command: None,
+        relogin_required: false,
+    })
+    .with_param("sessions", who)
 }
 
 /// What the last virtual pad saw of the Windows gamepad driver. A stale package still attaches,

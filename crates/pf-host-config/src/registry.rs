@@ -250,6 +250,7 @@ pub fn find(id: &str) -> Option<&'static Setting> {
 }
 
 const LINUX: &[&str] = &["linux"];
+const WINDOWS: &[&str] = &["windows"];
 const LINUX_WINDOWS: &[&str] = &["linux", "windows"];
 /// Row `pyrowave_bpp`'s default: Themaister's clean point for 4:2:0, 200 Mbps at 1080p60.
 pub const PYROWAVE_BPP: f64 = 1.6;
@@ -433,6 +434,9 @@ pub static SETTINGS: &[Setting] = &[
     row("kwin_paced", "PUNKTFUNK_KWIN_PACED", Kind::Bool, D::Bool(false), Video, NextSession, "KWin capture pacing", "kde").advanced().only(LINUX),
     row("pyrowave_bpp", "PUNKTFUNK_PYROWAVE_BPP", Kind::Decimal { min: 0.25, max: 4.0, unit: "bits/pixel" }, D::Decimal(PYROWAVE_BPP), Video, NextSession, "PyroWave quality", "pyrowave"),
     row("pyrowave_max_mbps", "PUNKTFUNK_PYROWAVE_MAX_MBPS", Kind::Int { min: 0, max: 10_000, unit: "Mbps" }, D::Int(0), Video, NextSession, "PyroWave bitrate cap", "pyrowave").advanced(),
+    // NVIDIA Instant Replay shares the NVENC engine with the stream. `auto` pauses it once a
+    // stream falls behind while another app encodes; `on` pauses it for every stream.
+    row("instant_replay_pause", "PUNKTFUNK_INSTANT_REPLAY_PAUSE", TRI, D::Str("auto"), Video, Now, "Pause Instant Replay", "troubleshooting-stream").only(WINDOWS).spellings(TRI_SPELLINGS),
     // --- Audio
     row("audio_output_mode", "PUNKTFUNK_AUDIO_OUTPUT_MODE", Kind::Enum(&["client_only", "host_and_client", "follow_default"]), D::Str("client_only"), Audio, NextSession, "Where audio plays", "configuration")
         .only(LINUX_WINDOWS)

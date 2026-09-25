@@ -8,6 +8,8 @@ pub(crate) mod devtest;
 pub(crate) mod entry;
 // The IDD-push manager's session touch points; every other OS gets the no-op twin in `main.rs`.
 pub(crate) mod idd;
+// Pause NVIDIA Instant Replay while it shares the encoder with a stream; resume after.
+pub(crate) mod instant_replay;
 // WM_CLOSE on the interactive desktop, then TerminateProcess.
 pub(crate) mod game_term;
 pub(crate) mod install;

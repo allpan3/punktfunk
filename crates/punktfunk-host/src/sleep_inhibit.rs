@@ -7,7 +7,8 @@
 //! stream is indistinguishable from idle and stays blocked.
 //!
 //! Acquisition is best-effort, shared by native and GameStream sessions, and
-//! a no-op off Linux.
+//! a no-op off Linux. The hold count's 0↔1 edges also drive the Windows
+//! Instant Replay pause ([`crate::windows::instant_replay`]).
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -79,6 +80,10 @@ pub fn hold() -> StreamHold {
     LAST_INPUT_MS.store(now_ms(), Ordering::Relaxed);
     let mut st = state().lock().unwrap_or_else(|e| e.into_inner());
     st.count += 1;
+    #[cfg(windows)]
+    if st.count == 1 {
+        crate::windows::instant_replay::on_stream_start();
+    }
     #[cfg(target_os = "linux")]
     if !st.watching {
         st.watching = true;
@@ -102,6 +107,10 @@ impl Drop for StreamHold {
     fn drop(&mut self) {
         let mut st = state().lock().unwrap_or_else(|e| e.into_inner());
         st.count = st.count.saturating_sub(1);
+        #[cfg(windows)]
+        if st.count == 0 {
+            crate::windows::instant_replay::on_stream_end();
+        }
         #[cfg(target_os = "linux")]
         if st.count == 0 {
             release_locked(&mut st, "no live sessions");

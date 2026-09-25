@@ -699,6 +699,8 @@ impl StreamState {
                         flips_suppressed = self.cadence_flips_suppressed,
                         "encode behind cadence — ABR climbs will be refused until it recovers"
                     );
+                    // Name any other encoder on the engine; Windows pauses Instant Replay there.
+                    crate::encoder_sessions::on_behind_cadence();
                 } else {
                     tracing::info!(
                         behind_score = self.behind_score,

@@ -48,6 +48,7 @@ restart*.
 | KWin capture pacing (Linux) | `PUNKTFUNK_KWIN_PACED` | `on` · `off` | `off` | next session |
 | PyroWave quality | `PUNKTFUNK_PYROWAVE_BPP` | 0.25–4 bits/pixel | `1.6` | next session |
 | PyroWave bitrate cap | `PUNKTFUNK_PYROWAVE_MAX_MBPS` | 0–10000 Mbps | `0` | next session |
+| Pause Instant Replay (Windows) | `PUNKTFUNK_INSTANT_REPLAY_PAUSE` | `auto` · `on` · `off` | `auto` | at once |
 | Where audio plays (Linux, Windows) | `PUNKTFUNK_AUDIO_OUTPUT_MODE` | `client_only` · `host_and_client` · `follow_default` | `client_only` | next session |
 | Audio quality | `PUNKTFUNK_AUDIO_QUALITY` | `low` · `standard` · `high` | `high` | next session |
 | Lossless audio | `PUNKTFUNK_AUDIO_HIRES` | `on` · `off` | `on` | next session |
@@ -100,6 +101,7 @@ The table shows the Linux values. On Windows, **Encoder** takes `auto` · `nvenc
 | **On-demand capture** | GNOME 49+: the virtual monitor paints once per streamed frame instead of on a timer. |
 | **KWin capture pacing** | KWin 6.7+: keep KWin's own recording throttle. |
 | **PyroWave bitrate cap** | A ceiling on every [PyroWave](/docs/pyrowave) session's bitrate, over what the link measurement found. |
+| **Pause Instant Replay** | Windows, NVIDIA. Instant Replay shares the encoder with the stream. `auto` pauses it once a stream falls behind while another app encodes; `on` pauses it for every stream. Both turn it back on after the last stream. [Stutter while Instant Replay is on](/docs/troubleshooting-stream#stutter-while-nvidia-instant-replay-is-on-windows). |
 | **Where audio plays** | **Device only**: the host goes quiet while streaming. **Device and host**: the host's speakers play too. **Host's own output**: the host leaves its audio devices alone and captures what plays there — a client asks for this per session with **Keep host audio playing**. |
 | **Audio quality** | `high` is stereo 256 kbps Opus, `standard` 128 kbps, `low` for tight links. |
 | **Lossless audio** | Serves uncompressed audio (1.4–8.5 Mbps in stereo) to a client that asks, when it fits a quarter of the video bitrate. The desktop clients read the same variable to ask — see [Client-side](#client-side-native-clients). |

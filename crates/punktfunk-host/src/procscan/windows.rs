@@ -210,6 +210,11 @@ fn snapshot_parents() -> Vec<(u32, u32)> {
     out
 }
 
+/// Full image path of a live process; `None` if unopenable or exited.
+pub(crate) fn process_image(pid: u32) -> Option<PathBuf> {
+    process_start_and_image(pid).map(|(_, image)| image)
+}
+
 /// Creation time (`FILETIME` ticks) and full image path.
 /// `PROCESS_QUERY_LIMITED_INFORMATION` is the least privilege that answers both
 /// and works on elevated processes without VM read. `None` if unopenable or exited.

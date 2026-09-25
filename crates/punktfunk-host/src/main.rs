@@ -114,6 +114,8 @@ mod encode {
         Ok(())
     }
 }
+// Who else holds an NVENC session (NVML); names the neighbour when a stream falls behind.
+mod encoder_sessions;
 mod events;
 // Session⇄game lifetime — design/session-game-lifetime.md.
 mod gamelease;
