@@ -437,9 +437,21 @@ fn ensure_role(
         Ok((render, capture))
     })();
 
-    // A fresh endpoint can grab a default; routing policy belongs to the wiring plan.
+    // A fresh endpoint can grab a default; routing policy belongs to the wiring plan. Undo only
+    // that grab: a capture that parked the default meanwhile made its own choice.
+    let grabbed = |now: Option<String>, prev: &str| {
+        now.is_some_and(|now| {
+            now != prev
+                && match &endpoints {
+                    Ok((render, capture)) => {
+                        now == *render || capture.as_deref() == Some(now.as_str())
+                    }
+                    Err(_) => !super::wasapi_cap::capture_live(),
+                }
+        })
+    };
     if let Some(prev) = prev_render {
-        if audio_control::default_render_id().as_deref() != Some(prev.as_str())
+        if grabbed(audio_control::default_render_id(), &prev)
             && audio_control::set_default_endpoint(&prev).is_ok()
         {
             tracing::info!(
@@ -450,7 +462,7 @@ fn ensure_role(
         }
     }
     if let Some(prev) = prev_capture {
-        if audio_control::default_capture_id().as_deref() != Some(prev.as_str())
+        if grabbed(audio_control::default_capture_id(), &prev)
             && audio_control::set_default_endpoint(&prev).is_ok()
         {
             tracing::info!(

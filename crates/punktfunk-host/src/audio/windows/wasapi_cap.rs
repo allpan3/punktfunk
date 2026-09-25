@@ -195,6 +195,11 @@ fn live_captures() -> std::sync::MutexGuard<'static, usize> {
     LIVE_CAPTURES.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// A loopback capture is running, so the parked defaults are its to manage.
+pub(crate) fn capture_live() -> bool {
+    *live_captures() > 0
+}
+
 /// One [`LIVE_CAPTURES`] slot, with the voice pins it owns. Drop runs on every exit, a panic
 /// included: a leaked count would keep the parked defaults until the host restarts.
 struct LiveCapture {
@@ -741,6 +746,10 @@ fn capture_once(
                     let info = capture_client
                         .read_from_device_to_deque(&mut bytes)
                         .context("read loopback")?;
+                    // WASAPI: a SILENT packet's data is not defined; it is silence.
+                    if info.flags.silent {
+                        bytes.range_mut(before..).for_each(|b| *b = 0);
+                    }
                     let now = Instant::now();
                     // Before the stamp moves: discontinuity on the first packet after a quiet
                     // stretch is idle-resume, not a hole in anything that was playing.

@@ -123,14 +123,16 @@ impl VoiceRoute {
                 let apps = &pf_host_config::config().audio_voice_apps;
                 let (mut pinned, mut refused) = (Vec::new(), Vec::new());
                 for (pid, exe) in voice_processes(apps) {
-                    if known.contains(&exe) {
+                    if known.contains(&exe) || pinned.contains(&exe) {
                         continue;
                     }
                     let pid = pid.to_string();
                     // A process that never played audio has no pin to read or write. Nothing
-                    // is owed for it.
+                    // is owed for it; the app's next process may be the one that plays.
                     if !run_helper(&["probe", &target, &pid, &exe]) {
-                        refused.push(exe);
+                        if !refused.contains(&exe) {
+                            refused.push(exe);
+                        }
                         continue;
                     }
                     // Owed before the write and after it: a clear that ran in between
@@ -139,8 +141,9 @@ impl VoiceRoute {
                     let ok = run_helper(&["set", &target, &pid, &exe]);
                     owe(&exe, &target);
                     if ok {
+                        refused.retain(|r| *r != exe);
                         pinned.push(exe);
-                    } else {
+                    } else if !refused.contains(&exe) {
                         refused.push(exe);
                     }
                 }
@@ -265,10 +268,11 @@ fn owe(exe: &str, target: &str) {
     }
 }
 
-/// `(pid, lowercase exe name)`: one process per voice app, in this host's session. Toolhelp,
-/// as `procscan` does. Never on the capture thread.
+/// `(pid, lowercase exe name)`: every process of each voice app, in this host's session.
+/// Toolhelp, as `procscan` does. Never on the capture thread.
 ///
-/// The pin is keyed by the app, so one pid is enough. Another session's process is left
+/// The pin is keyed by the app, so one pid that answers is enough, but it may not be the
+/// first: an Electron app plays from a child process. Another session's process is left
 /// out: the console user's helper can't pin it.
 fn voice_processes(apps: &[String]) -> Vec<(u32, String)> {
     use windows::Win32::Foundation::CloseHandle;
@@ -287,7 +291,6 @@ fn voice_processes(apps: &[String]) -> Vec<(u32, String)> {
     };
     // SAFETY: takes no arguments and returns this process's id by value.
     let ours = session_of(unsafe { GetCurrentProcessId() });
-    let mut seen = BTreeSet::new();
     let mut out = Vec::new();
     // SAFETY: `entry` is zeroed with `dwSize` set before the first read; the snapshot handle
     // is closed on every exit path; `szExeFile` is read up to its first NUL.
@@ -308,11 +311,9 @@ fn voice_processes(apps: &[String]) -> Vec<(u32, String)> {
                     .unwrap_or(entry.szExeFile.len());
                 let exe = String::from_utf16_lossy(&entry.szExeFile[..len]).to_ascii_lowercase();
                 let pid = entry.th32ProcessID;
-                if !seen.contains(&exe)
-                    && pf_host_config::voice_app_matches([exe.as_str()], apps)
+                if pf_host_config::voice_app_matches([exe.as_str()], apps)
                     && (ours.is_none() || session_of(pid) == ours)
                 {
-                    seen.insert(exe.clone());
                     out.push((pid, exe));
                 }
                 if Process32NextW(snap, &mut entry).is_err() {
