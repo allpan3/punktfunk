@@ -55,8 +55,8 @@ bash ~/punktfunk/scripts/steamdeck/install.sh --gamestream     # also serve stoc
 bash ~/punktfunk/scripts/steamdeck/update.sh             # after pulling new source
 ```
 
-Note: the Deck install matches a bare `serve` — native-only, PIN pairing required. Pass `--gamestream`
-to also serve stock Moonlight clients; `--no-gamestream` is kept for old command lines / re-runs.
+Note: the Deck install matches a bare `serve` — native-only, PIN pairing required. `--gamestream` and
+`--no-gamestream` set the console's **GameStream** setting; change it later under Host → Settings.
 
 Env overrides: `PUNKTFUNK_SRC` (source dir, default `~/punktfunk`), `PUNKTFUNK_BOX` (container name,
 default `pf2`), `PUNKTFUNK_MGMT_PORT` (47990), `PUNKTFUNK_WEB_PORT` (47992).
@@ -68,8 +68,8 @@ default `pf2`), `PUNKTFUNK_MGMT_PORT` (47990), `PUNKTFUNK_WEB_PORT` (47992).
   password + session secret). Trust material (`cert.pem`, `mgmt-token`, `punktfunk1-paired.json`) lives
   here too and persists across updates.
 - **Services:** `~/.config/systemd/user/punktfunk-host.service` (runs `serve --mgmt-bind
-  0.0.0.0:47990`, `+ --gamestream` / `+ --open` if chosen — the native `punktfunk/1` plane is always
-  on; `--gamestream` adds the Moonlight-compat planes so Game Mode also streams to stock Moonlight),
+  0.0.0.0:47990`, `+ --open` if chosen — the native `punktfunk/1` plane is always on; GameStream
+  follows the console's setting, and `update.sh` moves an older unit's `--gamestream` into it),
   `punktfunk-web.service`, `punktfunk-rebuild-check.service` (post-OS-update self-heal, enabled), and
   `punktfunk-scripting.service` (plugin runner, **opt-in** — enable it once you use plugins/scripts).
   Linger is enabled so they run without a login session.

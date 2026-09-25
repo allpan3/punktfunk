@@ -355,6 +355,7 @@ fn is_management_cli(args: &[String]) -> bool {
         | Some("tray")
         // Loopback API client; `watch` is long-lived — do not take GPU clocks or the DXGI hook.
         | Some("ctl")
+        | Some("settings")
         | Some("openapi")
         | Some("library")
         | Some("detect-conflicts")
@@ -452,6 +453,7 @@ fn real_main() -> Result<()> {
             Ok(())
         }
         Some("ctl") => ctl::main(&args[1..]),
+        Some("settings") => settings_cli(&args[1..]),
         Some("plugins") => plugins::main(&args[1..]),
         Some("openapi") => {
             print!("{}", mgmt::openapi_json());
@@ -681,6 +683,23 @@ fn real_main() -> Result<()> {
             None => bail!("unknown command '{other}' (try --help)"),
         },
     }
+}
+
+/// `settings set <id> <value>` writes the console's settings store without a running host, so an
+/// installer's choice stays the console's to change. The value is JSON (`true`, `30`; `null`
+/// clears), else a bare string.
+fn settings_cli(args: &[String]) -> Result<()> {
+    let [verb, id, raw] = args else {
+        bail!("usage: punktfunk-host settings set <id> <value>");
+    };
+    if verb != "set" {
+        bail!("unknown settings verb '{verb}' (try: set)");
+    }
+    let value = serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::from(raw.as_str()));
+    let patch = serde_json::Map::from_iter([(id.clone(), value.clone())]);
+    pf_host_config::save(&patch).context("save host settings")?;
+    println!("{id}={value} → {}", pf_host_config::store_path().display());
+    Ok(())
 }
 
 /// Native plane + management API always run. `--gamestream` is trusted-LAN only.
@@ -996,6 +1015,8 @@ USAGE:
     punktfunk-host ctl <VERB>                 operator control over the local management API —
                                               pairing, devices, sessions, `watch` (line-JSON for a
                                               shell widget); `ctl --help` for the verb list
+    punktfunk-host settings set <ID> <VALUE>  write one console setting to host-settings.json;
+                                              restart the host to apply it
     punktfunk-host plugins <CMD>              install/run host plugins (add, remove, list, enable,
                                               disable, status) — `plugins --help` for details
     punktfunk-host tray <CMD>                 status-tray lifecycle (start, stop, status) — Windows;
@@ -1021,8 +1042,8 @@ SERVE OPTIONS:
                                  RTSP, ENet control, _nvstream mDNS). OFF by default — they carry
                                  inherent on-path weaknesses (plain-HTTP pairing + legacy GCM nonce
                                  reuse, security-review #5/#9); enable only on a TRUSTED LAN.
-                                 Also PUNKTFUNK_GAMESTREAM=1 in host.env (how a packaged install
-                                 opts in — the shipped units run native-only)
+                                 The flag locks the console's GameStream setting; an install sets
+                                 that setting instead (`settings set gamestream true`)
     --native                     no-op (the native punktfunk/1 plane always runs in `serve` now)
     --native-port <PORT>         native QUIC port (or PUNKTFUNK_NATIVE_PORT in host.env, which
                                  this flag overrides). Default 9777. Clients follow via mDNS, and

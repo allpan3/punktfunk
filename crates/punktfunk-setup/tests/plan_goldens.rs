@@ -761,8 +761,8 @@ fn trap_the_steamos_build_is_announced_before_it_runs() {
     );
 }
 
-/// The build script takes `--gamestream`; there is no host.env route to the Moonlight planes
-/// before the units it starts already exist.
+/// The build script takes `--gamestream` and stores it before it starts the host; a setting
+/// written after the script would wait for a restart.
 #[test]
 fn trap_steamos_forwards_the_gamestream_choice_to_the_script() {
     let on = Pins {

@@ -72,7 +72,7 @@ then **Restart Punktfunk**. If the setting shows as locked, remove the pin where
 |---|---|
 | `PUNKTFUNK_GAMESTREAM=1` in `host.env` | Delete the line. |
 | `serve --gamestream` in a unit drop-in or `PUNKTFUNK_HOST_CMD` | Drop the flag. See [What the unit starts](/docs/running-as-a-service#what-the-unit-starts). |
-| The SteamOS installer's `--gamestream` | Re-run the installer without it. |
+| The SteamOS installer's `--gamestream`, on an older install | Update the host; the update moves it into the console setting. |
 | NixOS | `services.punktfunk.host.gamestream = false;` — this also closes the GameStream ports. |
 
 If you need Moonlight, pair it on a network you trust — not one you share with strangers.

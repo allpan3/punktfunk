@@ -20,6 +20,9 @@ turn on **GameStream**, then click **Restart Punktfunk**. Or:
 | `serve` by hand | `punktfunk-host serve --gamestream` |
 | `host.env` | `PUNKTFUNK_GAMESTREAM=1`, then restart the host |
 
+The installers set the console's setting, so you can turn it off there later. NixOS,
+`serve --gamestream` and the `host.env` line lock it.
+
 GameStream pairs over plain HTTP, so use it on a network you trust. Video, audio and input are
 encrypted.
 
