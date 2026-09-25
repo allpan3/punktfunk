@@ -490,7 +490,7 @@ private fun TouchLibrary(
     resumeAt: String? = null,
 ) {
     Box(Modifier.fillMaxSize()) {
-        Column(Modifier.fillMaxSize().consoleSafeArea()) {
+        Column(Modifier.fillMaxSize().safeArea()) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, top = 8.dp),
@@ -741,7 +741,7 @@ private fun TouchPoster(
                                     "From ${game.storeLabel}"
                                 }
                             }
-                            .clip(ConsoleShape.Pill)
+                            .clip(PillShape)
                             .background(
                                 if (game.isLauncher) {
                                     MaterialTheme.colorScheme.primary
@@ -821,7 +821,7 @@ private fun RunningBadge(compact: Boolean = false) {
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .semantics { contentDescription = "Running on the host \u2014 resume" }
-            .clip(ConsoleShape.Pill)
+            .clip(PillShape)
             .background(RESUME_GREEN)
             .padding(horizontal = if (compact) 6.dp else 8.dp, vertical = 3.dp),
     ) {

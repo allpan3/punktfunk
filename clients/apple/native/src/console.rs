@@ -14,7 +14,8 @@ use pf_console_ui::bridge::{
 use pf_console_ui::console::FrameCost;
 use pf_console_ui::{
     Console, ConsoleEntry, ConsoleHandles, HostRow, InputSource, Insets, Key, LibraryGame,
-    LibraryPhase, PairPhase, Platform, SnapshotStore, SpeedPhase, Stale, Viewport, WakeStatus,
+    LibraryPhase, LicenseSection, PadTestState, PairPhase, Platform, Prompt, SnapshotStore,
+    SpeedPhase, Stale, Viewport, WakeStatus,
 };
 use skia_safe::gpu::{self, mtl, DirectContext, SurfaceOrigin};
 use skia_safe::ColorType;
@@ -72,6 +73,14 @@ pub const PUNKTFUNK_CONSOLE_PUSH_KNOWN_HOSTS: u8 = 13;
 pub const PUNKTFUNK_CONSOLE_PUSH_PADS: u8 = 14;
 /// `{}` for Home, `{"library": HostRow}` for a shelf — re-roots on the next frame.
 pub const PUNKTFUNK_CONSOLE_PUSH_NAVIGATE: u8 = 15;
+/// `{"id", "title", "message", "choices": [..]}` — a question over the top screen; the
+/// answer comes back as the `PromptAnswer` command.
+pub const PUNKTFUNK_CONSOLE_PUSH_PROMPT: u8 = 16;
+/// `[{"heading", "text"}]` — what this app bundles, for the Licences screen. The answer to
+/// the `LoadLicenses` command.
+pub const PUNKTFUNK_CONSOLE_PUSH_LICENSES: u8 = 17;
+/// `{"held": [..], "axes": [[name, v]]}` — the pad's reading while the `PadTest` command is on.
+pub const PUNKTFUNK_CONSOLE_PUSH_PAD_TEST: u8 = 18;
 
 /// One console. Opaque to C.
 pub struct PunktfunkConsole {
@@ -83,6 +92,7 @@ pub struct PunktfunkConsole {
     /// Pushed from any thread, read by the next frame.
     pads: Mutex<Pads>,
     navigate: Mutex<Option<ConsoleEntry>>,
+    prompt: Mutex<Option<Prompt>>,
 }
 
 struct Shell {
@@ -210,6 +220,7 @@ pub unsafe extern "C" fn punktfunk_console_new(
             events: Mutex::new(VecDeque::new()),
             pads: Mutex::new((None, None, Vec::new())),
             navigate: Mutex::new(None),
+            prompt: Mutex::new(None),
         }))
     })
 }
@@ -263,6 +274,9 @@ pub unsafe extern "C" fn punktfunk_console_frame(
         }
         if let Some(entry) = lock(&c.navigate).take() {
             shell.console.navigate(entry);
+        }
+        if let Some(prompt) = lock(&c.prompt).take() {
+            shell.console.prompt(prompt);
         }
         let now = Instant::now();
         if let Some((at, w, h)) = shell.drawn {
@@ -614,11 +628,21 @@ pub unsafe extern "C" fn punktfunk_console_push(
             PUNKTFUNK_CONSOLE_PUSH_PRESETS => json::<Vec<PresetJson>>(text)
                 .map(|v| c.store.set_presets(v.into_iter().map(Into::into).collect())),
             PUNKTFUNK_CONSOLE_PUSH_KNOWN_HOSTS => json(text).map(|v| c.store.set_known_hosts(v)),
-            PUNKTFUNK_CONSOLE_PUSH_PADS => {
-                json::<PadsJson>(text).map(|v| *lock(&c.pads) = v.into_pads())
-            }
+            PUNKTFUNK_CONSOLE_PUSH_PADS => json::<PadsJson>(text).map(|mut v| {
+                c.handles.console.set_other_devices(v.take_others());
+                *lock(&c.pads) = v.into_pads();
+            }),
             PUNKTFUNK_CONSOLE_PUSH_NAVIGATE => {
                 json::<EntryJson>(text).map(|v| *lock(&c.navigate) = Some(v.into_entry()))
+            }
+            PUNKTFUNK_CONSOLE_PUSH_PROMPT => {
+                json::<Prompt>(text).map(|v| *lock(&c.prompt) = Some(v))
+            }
+            PUNKTFUNK_CONSOLE_PUSH_LICENSES => {
+                json::<Vec<LicenseSection>>(text).map(|v| c.handles.console.set_licenses(v))
+            }
+            PUNKTFUNK_CONSOLE_PUSH_PAD_TEST => {
+                json::<PadTestState>(text).map(|v| c.handles.console.set_pad_test(v))
             }
             _ => {
                 tracing::error!("console: unknown push kind {kind}");
@@ -688,7 +712,20 @@ pub unsafe extern "C" fn punktfunk_console_drain_cmds(c: *const PunktfunkConsole
     })
 }
 
-/// Free a string from `punktfunk_console_next_event` or `punktfunk_console_drain_cmds`.
+/// The console's background palettes in cycle order, as `[{"id", "name"}]`: what a native
+/// picker offers for `ui_palette`. Free with `punktfunk_console_string_free`.
+#[unsafe(no_mangle)]
+pub extern "C" fn punktfunk_console_palettes() -> *mut c_char {
+    guard(std::ptr::null_mut(), || {
+        let list: Vec<_> = (pf_console_ui::library::PALETTES.iter())
+            .map(|p| serde_json::json!({ "id": p.id, "name": p.name }))
+            .collect();
+        out_string(serde_json::Value::from(list).to_string())
+    })
+}
+
+/// Free a string from `punktfunk_console_next_event`, `punktfunk_console_drain_cmds` or
+/// `punktfunk_console_palettes`.
 ///
 /// # Safety
 /// `s` is NULL or one of those strings, freed once.

@@ -168,6 +168,7 @@ mod tests {
             screen: None,
             pads: &pads,
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,

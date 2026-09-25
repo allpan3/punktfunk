@@ -415,6 +415,13 @@ impl ShortcutEditorScreen {
         self.editing_name
     }
 
+    pub(crate) fn edit_field(&self) -> Option<crate::screens::EditField> {
+        let name = self.draft.label.as_str();
+        self.editing_name
+            .then(|| crate::screens::EditField::new("Name", name, false))
+            .flatten()
+    }
+
     /// The field list, while neither tray covers it.
     pub(super) fn pan_list(&mut self) -> Option<&mut MenuList> {
         (!self.editing_name && !self.picking_key).then_some(&mut self.list)

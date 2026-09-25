@@ -110,9 +110,9 @@ GPU driver. `nix fmt` formats the `.nix` files.
   which the network-less build sandbox forbids, and a from-source build pulls the whole
   gn/ninja/python toolchain. The feature is explicitly droppable, so the Nix build compiles the
   session `--no-default-features --features pyrowave`. Everything streams; only the optional
-  on-glass stats overlay is absent, and the GTK shell is skia-free and fully featured. For the same
-  reason this build does **not** install `io.unom.Punktfunk.Console.desktop` — it runs `--browse`,
-  which needs that feature, so the entry would be a launcher that only prints an error.
+  on-glass stats overlay and the console are absent. The GTK shell builds without its `console`
+  feature too, so it shows no Console button, and this build does **not** install
+  `io.unom.Punktfunk.Console.desktop`.
 
 - **Commit `flake.lock`.** It pins nixpkgs, crane, rust-overlay and bun2nix.
 

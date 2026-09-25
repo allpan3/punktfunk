@@ -804,6 +804,12 @@ object NativeBridge {
     /** A one-shot toast from a service worker. */
     external fun nativeConsoleNotice(handle: Long, text: String)
 
+    /** `[{"heading", "text"}]`: what this app bundles, for the console's Licences screen. */
+    external fun nativeConsoleSetLicenses(handle: Long, json: String)
+
+    /** `{"held": [..], "axes": [[name, v]]}`: the pad's reading while the input test is on. */
+    external fun nativeConsoleSetPadTest(handle: Long, json: String)
+
     /** A library fetch is starting for the shelf on screen (bumps the epoch, sets Loading). */
     external fun nativeConsoleLibraryBegin(handle: Long)
 

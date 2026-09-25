@@ -744,16 +744,18 @@ fn client_install(facts: &WinFacts, choices: &WinChoices) -> WinPlan {
     plan.push("Registry", std::mem::take(&mut registry));
 
     let [start, console, desktop] = CLIENT_LINKS;
-    let mut shortcuts = vec![
-        WinAction::Shortcut {
-            link: start.into(),
-            target: client_exe.clone(),
-        },
-        WinAction::Shortcut {
+    let mut shortcuts = vec![WinAction::Shortcut {
+        link: start.into(),
+        target: client_exe.clone(),
+    }];
+    // The ARM64 session is built without the console (no Skia for the target), so its
+    // shortcut would open nothing.
+    if facts.arch != "arm64" {
+        shortcuts.push(WinAction::Shortcut {
             link: console.into(),
             target: format!("{app}\\punktfunk-console.exe"),
-        },
-    ];
+        });
+    }
     if choices.desktop_icon {
         shortcuts.push(WinAction::Shortcut {
             link: desktop.into(),
@@ -808,4 +810,46 @@ fn client_uninstall(choices: &WinChoices) -> WinPlan {
             .collect(),
     );
     plan
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::choices::WinChoices;
+    use super::*;
+
+    fn facts(arch: &str) -> WinFacts {
+        WinFacts {
+            os_build: 26200,
+            arch: arch.into(),
+            installed: None,
+            host_env_present: false,
+            web_password_present: false,
+            mgmt_bind_set: false,
+            competing_hosts: vec![],
+            mgmt_port_in_use: false,
+            networks: vec![],
+            steam_audio_drivers: true,
+            tray_autostart: false,
+            vulkan_layer_registered: false,
+            web_task: super::super::TaskState::Absent,
+            scripting_task: super::super::TaskState::Absent,
+            inno_uninstaller: false,
+            client_installed: None,
+        }
+    }
+
+    fn console_shortcut(arch: &str) -> bool {
+        let f = facts(arch);
+        let choices = WinChoices::derive(&f, Artifact::Client);
+        build(&f, &choices, Artifact::Client, false)
+            .steps()
+            .any(|s| matches!(s, WinAction::Shortcut { link, .. } if link == CLIENT_LINKS[1]))
+    }
+
+    /// The ARM64 session has no console, so its install offers no shortcut to one.
+    #[test]
+    fn only_a_build_with_the_console_links_it() {
+        assert!(console_shortcut("x64"));
+        assert!(!console_shortcut("arm64"));
+    }
 }

@@ -134,8 +134,8 @@ sdl3 = { version = "0.18", features = ["hidapi", "ash"], optional = true }
 [target.'cfg(windows)'.dependencies]
 sdl3 = { version = "0.18", features = ["hidapi", "ash", "build-from-source"], optional = true }
 
-# The shared console parity vectors (`clients/shared/console-vectors.json`) are read by three
-# tests here — the palette table, the tab names and the transition motion — and the library
+# The shared console parity vectors (`clients/shared/console-vectors.json`) are read by tests
+# here — the tab names and the transition motion — and the library
 # collation vectors (`clients/shared/library-collate-vectors.json`) by a fourth (`collate.rs`).
 # Dev-only: nothing in the shipping crate parses JSON. `pf-client-core` reads its own deeplink
 # vectors the same way.

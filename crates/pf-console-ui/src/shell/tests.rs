@@ -704,6 +704,151 @@ fn next_section(s: &mut Shell) {
     s.handle_menu(MenuEvent::Move(MenuDir::Down));
 }
 
+/// The licences take a host's full notices once they arrive, draw them, and page with
+/// Right; Back leaves.
+#[test]
+fn the_licences_page_through_a_hosts_notices() {
+    let fonts = crate::theme::build_fonts().unwrap();
+    let mut surface = skia_safe::surfaces::raster_n32_premul((1280, 800)).unwrap();
+    let mut fx = crate::screens::Outbox::default();
+    let licenses = crate::screens::licenses::LicensesScreen::new(&mut fx);
+    let (mut s, console, _library) = shell(vec![
+        Screen::Home(HomeScreen::new()),
+        Screen::Licenses(licenses),
+    ]);
+    let notices: String = (0..12_000)
+        .map(|i| format!("crate-{i} 1.0.0 — MIT OR Apache-2.0 — https://example.com/{i}\n"))
+        .collect();
+    console.set_licenses(vec![crate::model::LicenseSection {
+        heading: "Third-party software".into(),
+        text: notices,
+    }]);
+    let mut frame = |s: &mut Shell| s.render(surface.canvas(), 1280, 800, &fonts, None, None, &[]);
+    frame(&mut s);
+    let Some(Screen::Licenses(l)) = s.stack.last() else {
+        panic!("the licences are on top");
+    };
+    assert!(!l.waiting(), "the host's sections reached the screen");
+    for _ in 0..3 {
+        s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    }
+    frame(&mut s);
+    let Some(Screen::Licenses(l)) = s.stack.last() else {
+        panic!("paging stays on the licences");
+    };
+    assert!(l.scrolled() > 1000.0, "three pages down: {}", l.scrolled());
+    s.handle_menu(MenuEvent::Back);
+    finish_motion(&mut s);
+    assert!(matches!(s.stack.last(), Some(Screen::Home(_))));
+}
+
+/// The host's test mode follows the test screen: on while it is on top, drawn from the
+/// host's readings, and off again once a held B takes it away.
+#[test]
+fn the_input_test_turns_the_hosts_test_mode_on_and_off() {
+    use crate::model::{ConsoleCmd, PadTestState};
+    let fonts = crate::theme::build_fonts().unwrap();
+    let mut surface = skia_safe::surfaces::raster_n32_premul((1280, 800)).unwrap();
+    let test = crate::screens::input_test::InputTestScreen::new();
+    let (mut s, console, _library) = shell(vec![
+        Screen::Home(HomeScreen::new()),
+        Screen::InputTest(test),
+    ]);
+    s.fake_clock = Some((100.0, 1.0 / 60.0));
+    let mut frame = |s: &mut Shell| s.render(surface.canvas(), 1280, 800, &fonts, None, None, &[]);
+    frame(&mut s);
+    assert!(s.bus.drain().contains(&ConsoleCmd::PadTest { on: true }));
+    for _ in 0..80 {
+        console.set_pad_test(PadTestState {
+            held: vec!["B".into()],
+            axes: vec![("LX".into(), 0.5)],
+        });
+        frame(&mut s);
+    }
+    finish_motion(&mut s);
+    frame(&mut s);
+    assert!(
+        matches!(s.stack.last(), Some(Screen::Home(_))),
+        "a held B finished"
+    );
+    assert!(s.bus.drain().contains(&ConsoleCmd::PadTest { on: false }));
+}
+
+/// A preset's editor draws every row it can hold, and a step saves the override; the global
+/// settings stay as they were.
+#[test]
+fn a_preset_editor_rasters_and_saves_over_the_global() {
+    let fonts = crate::theme::build_fonts().unwrap();
+    let mut surface = skia_safe::surfaces::raster_n32_premul((1280, 800)).unwrap();
+    let edit =
+        crate::screens::preset::PresetEdit::new("p1".into(), "Couch".into(), Default::default());
+    let (mut s, _console, _library) = shell(vec![
+        Screen::Home(HomeScreen::new()),
+        Screen::PresetEdit(edit),
+    ]);
+    let mut frame = |s: &mut Shell| s.render(surface.canvas(), 1280, 800, &fonts, None, None, &[]);
+    frame(&mut s);
+    let global = s.settings.clone();
+    s.handle_menu(MenuEvent::Move(MenuDir::Right));
+    frame(&mut s);
+    assert_eq!(s.settings, global, "the preset changes, not Settings");
+}
+
+/// A grouped row draws its band captions, and the shell re-arranges the hosts when the
+/// setting moves, with no new host list to prompt it.
+#[test]
+fn a_grouped_host_row_rasters_in_its_new_order() {
+    let fonts = crate::theme::build_fonts().unwrap();
+    let mut surface = skia_safe::surfaces::raster_n32_premul((1280, 800)).unwrap();
+    let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    let mut frame = |s: &mut Shell| s.render(surface.canvas(), 1280, 800, &fonts, None, None, &[]);
+    frame(&mut s);
+    let before: Vec<String> = s.hosts.iter().map(|h| h.name.clone()).collect();
+    s.settings.extra.insert("host_sort".into(), "name".into());
+    s.settings
+        .extra
+        .insert("host_grouping".into(), "status".into());
+    for _ in 0..3 {
+        frame(&mut s);
+    }
+    let after: Vec<String> = s.hosts.iter().map(|h| h.name.clone()).collect();
+    assert_eq!(after.len(), before.len());
+    assert!(
+        s.hosts.windows(2).all(|w| w[0].online >= w[1].online),
+        "online before offline: {after:?}"
+    );
+}
+
+/// The search screen draws with its keyboard up, and a search that found nothing draws its
+/// state line rather than an empty field.
+#[test]
+fn a_search_and_its_empty_result_raster() {
+    let fonts = crate::theme::build_fonts().unwrap();
+    let mut surface = skia_safe::surfaces::raster_n32_premul((1280, 800)).unwrap();
+    let host = hosts().remove(0);
+    let search = crate::screens::search::SearchScreen::new(&host, 0, &Default::default());
+    let (mut s, _console, library) = shell(vec![
+        Screen::Home(HomeScreen::new()),
+        Screen::Search(search),
+    ]);
+    library.set_games(Vec::new());
+    library.set_phase(crate::library::LibraryPhase::Ready);
+    let mut frame = |s: &mut Shell| s.render(surface.canvas(), 1280, 800, &fonts, None, None, &[]);
+    for _ in 0..3 {
+        frame(&mut s);
+    }
+    s.text_input("zz");
+    s.handle_menu(MenuEvent::Back);
+    s.handle_menu(MenuEvent::Move(MenuDir::Down));
+    s.handle_menu(MenuEvent::Confirm);
+    finish_motion(&mut s);
+    frame(&mut s);
+    let Some(Screen::Library(shelf)) = s.stack.last() else {
+        panic!("the results replace the search");
+    };
+    assert!(shelf.no_match());
+}
+
 #[test]
 fn every_settings_tab_rasters() {
     let fonts = crate::theme::build_fonts().unwrap();
@@ -1395,6 +1540,7 @@ fn reduce_motion_freezes_the_field_and_shortens_the_transition() {
     let (w, h) = (1280u32, 800u32);
     let mut surface = skia_safe::surfaces::raster_n32_premul((w as i32, h as i32)).unwrap();
     let (mut s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    let _slot = crate::os_theme::REDUCE_MOTION_TEST.lock().unwrap();
 
     assert!(!s.settings.reduce_motion, "off by default");
     assert_eq!(s.field_clock(12.5), 12.5);
@@ -1420,6 +1566,20 @@ fn reduce_motion_freezes_the_field_and_shortens_the_transition() {
     s.settings.reduce_motion = false;
     s.store.save(&s.settings);
     assert!(!s.store.load().reduce_motion, "and back off again");
+}
+
+/// An OS that answers wins over the console's own row, which then leaves Settings; one that
+/// stops answering hands both back.
+#[test]
+fn the_os_reduce_motion_wins_and_hides_the_row() {
+    let (s, _console, _library) = shell(vec![Screen::Home(HomeScreen::new())]);
+    let _slot = crate::os_theme::REDUCE_MOTION_TEST.lock().unwrap();
+    assert!(!s.reduce_motion());
+    crate::os_theme::set_os_reduce_motion(Some(true));
+    assert!(s.reduce_motion(), "the OS asked for less motion");
+    assert_eq!(s.field_clock(12.5), 0.0);
+    crate::os_theme::set_os_reduce_motion(None);
+    assert!(!s.reduce_motion(), "no answer: the stored setting again");
 }
 
 /// The backdrop keeps its offscreen and re-renders only when an input moves: a frame

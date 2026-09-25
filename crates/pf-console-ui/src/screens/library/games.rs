@@ -242,7 +242,7 @@ impl LibraryScreen {
         if field {
             out.push(Line::Grid);
         }
-        if !ready {
+        if !ready || self.no_match() {
             out.push(Line::State);
         }
         out.extend((before..bands.len()).map(Line::Band));
@@ -381,7 +381,7 @@ impl LibraryScreen {
                     });
                     Some(MenuPulse::Confirm)
                 }
-                Zone::Bar(i) => self.apply_pill(i, ctx),
+                Zone::Bar(i) => self.apply_pill(i, ctx, fx),
                 Zone::State => self.state_confirm(fx),
                 _ => self.chip_confirm(ctx, fx),
             }),
@@ -415,8 +415,15 @@ impl LibraryScreen {
     }
 
     /// Pill `i`'s sort or arrangement, written to the setting; the screen adopts it next.
-    fn apply_pill(&mut self, i: usize, ctx: &mut Ctx) -> Option<MenuPulse> {
+    /// Search opens its own screen, handing over the covers this shelf already decoded.
+    fn apply_pill(&mut self, i: usize, ctx: &mut Ctx, fx: &mut Outbox) -> Option<MenuPulse> {
         match Pill::all(true)[i] {
+            Pill::Search => {
+                let epoch = ctx.library.fetch_epoch();
+                let search = super::super::search::SearchScreen::new(&self.host, epoch, &self.art);
+                fx.push(crate::screens::Screen::Search(search));
+                Some(MenuPulse::Confirm)
+            }
             Pill::Sort(s) if s == self.sort => Some(MenuPulse::Boundary),
             Pill::View(v) if v == self.view_mode => Some(MenuPulse::Boundary),
             Pill::Sort(s) => {
@@ -961,6 +968,7 @@ mod tests {
             screen: None,
             pads: &[],
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,

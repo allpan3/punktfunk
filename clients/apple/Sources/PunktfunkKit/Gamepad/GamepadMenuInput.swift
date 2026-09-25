@@ -1,5 +1,4 @@
-// Explicit left-stick/dpad-driven menu navigation for the gamepad UI's host carousel and library
-// coverflow (iOS/iPadOS only — see GamepadUIEnvironment).
+// Left-stick/dpad menu navigation outside a stream: the console, and the trust card.
 //
 // Polls the active controller at 60 Hz rather than installing `valueChangedHandler`/
 // `pressedChangedHandler` callbacks — mirroring `ControllerTestView`'s "Input" card (see its own

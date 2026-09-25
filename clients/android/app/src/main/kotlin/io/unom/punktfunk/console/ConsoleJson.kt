@@ -13,6 +13,7 @@ import io.unom.punktfunk.kit.library.DEFAULT_MGMT_PORT
 import io.unom.punktfunk.kit.library.GameEntry
 import io.unom.punktfunk.kit.library.RunningGame
 import io.unom.punktfunk.kit.security.KnownHost
+import io.unom.punktfunk.deviceDetail
 import io.unom.punktfunk.padInfoOf
 import org.json.JSONArray
 import org.json.JSONObject
@@ -327,6 +328,7 @@ internal object ConsoleJson {
         driving: InputDevice?,
         extras: List<ExtraPad> = emptyList(),
         body: Vibrator? = null,
+        others: List<InputDevice> = emptyList(),
     ): String {
         val arr = JSONArray()
         for (d in pads) {
@@ -368,11 +370,32 @@ internal object ConsoleJson {
             )
         }
         val extra = extras.firstOrNull()
+        val otherRows = JSONArray()
+        for (d in others) {
+            otherRows.put(JSONObject().put("name", d.name).put("kind", kindOf(d)).put("detail", deviceDetail(d)))
+        }
         return JSONObject()
             .put("label", driving?.name ?: extra?.name ?: JSONObject.NULL)
             .put("pref", driving?.let { Gamepad.prefFor(it) } ?: extra?.pref ?: JSONObject.NULL)
             .put("pads", arr)
+            .put("others", otherRows)
             .toString()
+    }
+
+    /**
+     * Real, plugged-in input devices that are not controllers — a pad Android misreads lands
+     * here, so it is listed somewhere. Below API 29 there is no `isExternal`; all are listed.
+     */
+    fun otherInputs(): List<InputDevice> = InputDevice.getDeviceIds().toList()
+        .mapNotNull { InputDevice.getDevice(it) }
+        .filter { !it.isVirtual && !Gamepad.looksLikeController(it) }
+        .filter { android.os.Build.VERSION.SDK_INT < 29 || it.isExternal }
+
+    private fun kindOf(d: InputDevice): String = when {
+        d.supportsSource(InputDevice.SOURCE_MOUSE) -> "mouse"
+        d.keyboardType == InputDevice.KEYBOARD_TYPE_ALPHABETIC -> "keyboard"
+        d.supportsSource(InputDevice.SOURCE_DPAD) -> "remote"
+        else -> "other"
     }
 
     // ---- settings (`trust::Settings`) -------------------------------------------------------

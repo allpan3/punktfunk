@@ -292,6 +292,8 @@ pub struct ConsoleOptions {
     pub device_name: String,
     /// Steam Deck: Steam's keyboard types; this shell never draws one.
     pub deck: bool,
+    /// A TV (Apple TV, Android TV): rows for a clipboard or a phone's sensors do nothing.
+    pub tv: bool,
     /// Host has another UI when the console is off (phone/tablet touch shell).
     /// False on desktop and Android TV — offering "off" would strand the user.
     pub fallback_ui: bool,
@@ -329,6 +331,7 @@ impl ConsoleOptions {
         ConsoleOptions {
             device_name,
             deck,
+            tv: false,
             fallback_ui: false,
             // The desktop probe reads the session's Vulkan device, which the console does
             // not own yet. A GPU that runs this shell is a Vulkan 1.3 one, so it is yes.
@@ -394,8 +397,13 @@ pub(crate) struct Shell {
     screen: Option<DeviceScreen>,
     hosts: Vec<HostRow>,
     hosts_gen: u64,
+    /// The host was last told the input test is on.
+    pad_testing: bool,
+    /// The `host_sort` / `host_grouping` values `hosts` was last arranged by.
+    hosts_order: (Option<serde_json::Value>, Option<serde_json::Value>),
     device_name: String,
     deck: bool,
+    tv: bool,
     fallback_ui: bool,
     pyrowave_ok: bool,
     pub(crate) av1_ok: bool,
@@ -530,8 +538,11 @@ impl Shell {
             screen: opts.screen,
             hosts: Vec::new(),
             hosts_gen: u64::MAX,
+            hosts_order: (None, None),
+            pad_testing: false,
             device_name: opts.device_name,
             deck: opts.deck,
+            tv: opts.tv,
             fallback_ui: opts.fallback_ui,
             pyrowave_ok: opts.pyrowave_ok,
             av1_ok: opts.av1_ok,
@@ -578,6 +589,11 @@ impl Shell {
     /// The screen on top of the stack.
     pub(crate) fn top(&self) -> Option<&Screen> {
         self.stack.last()
+    }
+
+    /// Push a screen the host asked for ([`crate::console::Console::prompt`]).
+    pub(crate) fn push_screen(&mut self, screen: Screen) {
+        self.apply_nav(Nav::Push(Box::new(screen)));
     }
 
     /// Replace the stack (deep link, return-to-shelf). Cut, no transition:
@@ -659,6 +675,13 @@ impl Shell {
             && self.stack.last().is_some_and(Screen::editing)
     }
 
+    pub(crate) fn edit_field(&self) -> Option<crate::screens::EditField> {
+        if !self.editing() {
+            return None;
+        }
+        self.stack.last()?.edit_field()
+    }
+
     /// What a screen reader should speak for the focused row. `None` while a takeover owns
     /// the input, or on a screen that names no focus.
     /// `&mut` only to hand `Ctx` the settings it wants by `&mut`; nothing on this
@@ -689,6 +712,7 @@ impl Shell {
             screen: self.screen,
             pads: &self.pads,
             deck: self.deck,
+            tv: self.tv,
             fallback_ui: self.fallback_ui,
             pyrowave_ok: self.pyrowave_ok,
             av1_ok: self.av1_ok,
@@ -860,6 +884,15 @@ impl Shell {
         }
     }
 
+    pub(crate) fn device_name(&self) -> &str {
+        &self.device_name
+    }
+
+    /// The OS's answer when the host read one, else the console's own row.
+    pub(crate) fn reduce_motion(&self) -> bool {
+        crate::os_theme::os_reduce_motion().unwrap_or(self.settings.reduce_motion)
+    }
+
     pub(crate) fn session_ended(&mut self, reason: Option<&str>) {
         self.connecting = None;
         self.launching = None;
@@ -956,12 +989,50 @@ impl Shell {
             self.mesh_os = None;
             self.mesh_palette = self.settings.ui_palette.clone();
         }
-        if self.console.hosts_gen() != self.hosts_gen {
+        // The row's order is a setting too: re-arrange when either the list or it moves.
+        let order = (
+            self.settings
+                .extra
+                .get(crate::screens::home::HOST_SORT_KEY)
+                .cloned(),
+            self.settings
+                .extra
+                .get(crate::screens::home::HOST_GROUPING_KEY)
+                .cloned(),
+        );
+        if self.console.hosts_gen() != self.hosts_gen || order != self.hosts_order {
             (self.hosts, self.hosts_gen) = self.console.hosts_snapshot();
+            crate::screens::home::arrange(&mut self.hosts, &self.settings);
+            self.hosts_order = order;
         }
 
         if let Some(text) = self.console.take_notice() {
             self.show_toast(text);
+        }
+        // The host's test mode follows the test screen, whatever took it off the top.
+        let testing = matches!(self.stack.last(), Some(Screen::InputTest(_))) && !self.in_stream;
+        if testing != self.pad_testing {
+            self.pad_testing = testing;
+            self.bus.send(ConsoleCmd::PadTest { on: testing });
+        }
+        let t = self.t();
+        if let Some(Screen::InputTest(test)) = self.stack.last_mut() {
+            if let Some(state) = self.console.take_pad_test() {
+                test.set_state(state, t);
+            }
+            if test.done {
+                self.apply_nav(Nav::Pop);
+            }
+        }
+        if let Some(Screen::Players(p)) = self.stack.last_mut() {
+            p.others = self.console.other_devices();
+        }
+        if let Some(Screen::Licenses(l)) = self.stack.last_mut() {
+            if l.waiting() {
+                if let Some(sections) = self.console.licenses() {
+                    l.set_host(sections.as_ref().clone());
+                }
+            }
         }
 
         let pair = self.console.pair();
@@ -1522,6 +1593,7 @@ impl Shell {
                 screen: self.screen,
                 pads: &self.pads,
                 deck: self.deck,
+                tv: self.tv,
                 fallback_ui: self.fallback_ui,
                 pyrowave_ok: self.pyrowave_ok,
                 av1_ok: self.av1_ok,
@@ -1663,6 +1735,7 @@ impl Shell {
                 screen: self.screen,
                 pads: &self.pads,
                 deck: self.deck,
+                tv: self.tv,
                 fallback_ui: self.fallback_ui,
                 pyrowave_ok: self.pyrowave_ok,
                 av1_ok: self.av1_ok,
@@ -1700,6 +1773,7 @@ impl Shell {
                 screen: self.screen,
                 pads: &self.pads,
                 deck: self.deck,
+                tv: self.tv,
                 fallback_ui: self.fallback_ui,
                 pyrowave_ok: self.pyrowave_ok,
                 av1_ok: self.av1_ok,
@@ -1865,7 +1939,7 @@ impl Shell {
     /// Reduced motion stays a spring (`REDUCED_NAV`); `render.rs` flattens
     /// geometry into the crossfade the setting promises.
     fn nav_spec(&self) -> crate::anim::SpringSpec {
-        if self.settings.reduce_motion {
+        if self.reduce_motion() {
             REDUCED_NAV
         } else {
             springs::NAV
@@ -2024,7 +2098,7 @@ impl Shell {
     /// is the picked palette and a still gradient is what an OLED can hold.
     /// Calm mix is not frozen — that tracks which screen is up.
     fn field_clock(&self, t: f64) -> f64 {
-        if self.settings.reduce_motion {
+        if self.reduce_motion() {
             0.0
         } else {
             t
