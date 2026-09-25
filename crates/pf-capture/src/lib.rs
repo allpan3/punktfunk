@@ -225,7 +225,9 @@ pub trait Capturer: Send {
 
     /// Cursor-render flip: `true` keeps the pointer out of the video (client
     /// draws it); `false` puts it back in. A declared IddCx hardware cursor is
-    /// irrevocable — DWM cannot take the job back. Default no-op.
+    /// irrevocable — DWM cannot take the job back. On Linux either call means
+    /// the host places [`cursor`](Self::cursor), so a CPU copy stops baking it.
+    /// Default no-op.
     fn set_cursor_forward(&mut self, _on: bool) {}
 
     /// Attach a gamescope cursor source. gamescope paints no `SPA_META_Cursor`,

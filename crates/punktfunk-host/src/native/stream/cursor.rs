@@ -99,7 +99,8 @@ const PARK_ATTEMPTS_MAX: u32 = 10;
 
 impl StreamState {
     /// Route this tick's cursor: forward it when the client draws, else put the live overlay on
-    /// the frame for the encoder blend. An invisible cursor never reaches the encoder.
+    /// the frame for the encoder blend. Either way the capturer hears the host places it, so it
+    /// bakes no second copy. An invisible cursor never reaches the encoder.
     pub(super) fn tick_cursor(&mut self) {
         if let Some(fwd) = self.cursor_fwd.as_mut() {
             let client_draws = self.cursor_client_draws.load(Ordering::Relaxed);
@@ -141,10 +142,13 @@ impl StreamState {
             }
         } else if self.gamescope_composite || self.metadata_composite {
             #[cfg(not(target_os = "windows"))]
-            self.composite_live_cursor(
-                "host-composite active but the capture has no live cursor overlay yet (no \
-                 SPA_META_Cursor bitmap) — the stream is cursorless until one arrives",
-            );
+            {
+                self.capturer.set_cursor_forward(false);
+                self.composite_live_cursor(
+                    "host-composite active but the capture has no live cursor overlay yet (no \
+                     SPA_META_Cursor bitmap) — the stream is cursorless until one arrives",
+                );
+            }
         }
         if self.frame.cursor.as_ref().is_some_and(|c| !c.visible) {
             self.frame.cursor = None;

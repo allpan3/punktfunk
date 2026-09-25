@@ -1682,9 +1682,12 @@ fn consume_frame(
     for y in 0..h {
         tight[y * row..y * row + row].copy_from_slice(&region[y * stride..y * stride + row]);
     }
-    // Blit the latched pointer (no-op when hidden or not packed RGB). The producer's hardware
-    // cursor plane stays out of the captured buffer.
-    composite_cursor(&mut tight, w, h, fmt, &ud.cursor);
+    // Blit the latched pointer (no-op when hidden or not packed RGB) unless the host places it:
+    // a baked copy would double the forwarded or blended one. The producer's hardware cursor
+    // plane stays out of the captured buffer.
+    if !ud.signals.host_places_cursor.load(Ordering::Relaxed) {
+        composite_cursor(&mut tight, w, h, fmt, &ud.cursor);
+    }
     let frame = CapturedFrame {
         provenance: Default::default(),
         width: w as u32,

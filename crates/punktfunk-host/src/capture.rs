@@ -296,6 +296,9 @@ impl Capturer for KeptAlive {
     fn cursor(&mut self) -> Option<pf_frame::CursorOverlay> {
         self.inner.cursor()
     }
+    fn set_cursor_forward(&mut self, on: bool) {
+        self.inner.set_cursor_forward(on)
+    }
     fn attach_gamescope_cursor(&mut self, t: pf_capture::GamescopeCursorTargets) {
         self.inner.attach_gamescope_cursor(t)
     }
