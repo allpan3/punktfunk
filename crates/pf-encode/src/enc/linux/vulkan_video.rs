@@ -1039,11 +1039,12 @@ impl VulkanVideoEncoder {
     }
 
     /// Reopen the session on EFC (`rgb`) or the CSC, keeping what the caller already set.
-    /// Finished AUs carry over; the new session starts on an IDR.
+    /// Finished AUs carry over; the new session starts on an IDR. A reopen that fails (video
+    /// memory while sessions overlap) keeps the current session and stops switching.
     fn reopen(&mut self, rgb: bool) -> Result<()> {
         self.flush()?;
         let t0 = std::time::Instant::now();
-        let mut next = Self::open_opts_inner(
+        let opened = Self::open_opts_inner(
             self.codec,
             self.render_w,
             self.render_h,
@@ -1059,7 +1060,20 @@ impl VulkanVideoEncoder {
             } else {
                 vk::Format::B8G8R8A8_UNORM
             },
-        )?;
+        );
+        let mut next = match opened {
+            Ok(next) => next,
+            Err(e) => {
+                tracing::warn!(
+                    efc = rgb,
+                    error = %format!("{e:#}"),
+                    "vulkan-encode: cursor switch could not reopen the session — staying on the \
+                     current one for the rest of it"
+                );
+                self.cursor_switch = false;
+                return Ok(());
+            }
+        };
         if rgb && next.rgb.is_none() {
             // The probe refused EFC on this mode: stay on the CSC for good.
             self.cursor_switch = false;
@@ -4459,8 +4473,16 @@ impl Encoder for VulkanVideoEncoder {
         while let Some(slot) = self.in_flight.pop_front() {
             // SAFETY: wait this slot's fence, then read back its own owned bitstream objects.
             unsafe {
-                self.device
-                    .wait_for_fences(&[self.frames[slot].fence], true, u64::MAX)?;
+                // Bounded like every other wait here: a wedged GPU must leave the thread that
+                // can `reset()`. The slot stays owed.
+                if let Err(e) = self.device.wait_for_fences(
+                    &[self.frames[slot].fence],
+                    true,
+                    ENCODE_FENCE_TIMEOUT_NS,
+                ) {
+                    self.in_flight.push_front(slot);
+                    return Err(e).context("vulkan-encode: flush fence wait");
+                }
                 // The fence also covers the source release; the producer may rewrite now.
                 self.frames[slot].src_hold = None;
                 let done = self.read_slot(slot)?;
