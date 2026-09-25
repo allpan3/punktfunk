@@ -188,6 +188,13 @@ pub(super) struct StreamState {
     /// is about that retarget. What a pipeline opened at is the build's own
     /// business (`Pipeline::bitrate_kbps`), and is not re-litigated here.
     pub(super) retargeted: bool,
+    /// A FEC proposal an asynchronous encoder was asked to make room for: the
+    /// parity and the encoder rate it implies, kbps. Parity waits for the
+    /// encoder to settle.
+    pub(super) fec_pending: Option<(u8, u32)>,
+    /// The proposal a hold was last logged for, so a refusal the control task
+    /// re-proposes every window logs once.
+    pub(super) fec_hold_logged: u8,
     pub(super) cadence_degraded: Arc<AtomicBool>,
     pub(super) cadence_behind_score: Arc<AtomicU32>,
     pub(super) client_packets_received: Arc<AtomicU32>,
@@ -249,6 +256,7 @@ impl StreamState {
                 .clear();
         }
         self.retargeted = false;
+        self.fec_pending = None;
         self.adopt_reframe(p.reframe);
         self.capturer = p.capturer;
         self.enc = p.enc;
@@ -1000,6 +1008,8 @@ impl StreamState {
             live_bitrate,
             encoder_ceiling,
             retargeted: false,
+            fec_pending: None,
+            fec_hold_logged: 0,
             cadence_degraded,
             cadence_behind_score,
             client_packets_received,
