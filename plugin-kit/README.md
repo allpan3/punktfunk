@@ -39,7 +39,8 @@ export default plugin.def; // what the runner loads; `plugin.cli()` is the CLI e
 ```
 
 Any other plugin uses `definePluginKit({ name, layer, main })`, and `serveUi(...)` for a page in the
-web console.
+web console, a settings form (`config`) or a tab on each library entry's page (`game`, with
+`handedPath()` for folders the operator types in).
 
 | Import | Holds |
 |---|---|

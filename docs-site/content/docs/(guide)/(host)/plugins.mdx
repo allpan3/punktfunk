@@ -37,7 +37,8 @@ launcher you use, and its titles appear on every client.
 2. **Browse** → pick a plugin → **Install**. The host installs it and restarts the runner.
 
 A plugin with its own page shows up under **Plugins** → **Plugin interfaces**; pin it to keep it in
-the sidebar.
+the sidebar. A plugin that keeps something per game adds a tab to each game's page in
+**Library** instead.
 
 ### Badges and catalogs
 
@@ -124,6 +125,10 @@ home.
 
 On Windows the runner can't read your user profile, so a launcher installed there looks like it
 isn't installed until you allow its folder.
+
+A folder you type into a plugin's form, on its settings or on a game's tab, is allowed when you
+save. The form says so under the field. Only folders you add count, and the host still refuses
+your whole home, `~/.ssh` and its own config folder.
 
 **Plugins** → **Installed** lists every grant and denial: remove a grant there, or choose
 **Ask again**. The CLI does the same with `grant`, `access` and `revoke`. Use `--write` only when

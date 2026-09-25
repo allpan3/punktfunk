@@ -33,28 +33,34 @@ A source marked **Stopped** has a plugin that isn't running: see
   so you can **Show on your devices again**.
 - **For good:** uninstall the source's plugin.
 
-A title a plugin syncs has no **Edit** or **Delete**. Change it in the launcher and the plugin
-syncs it again.
+## A game's page
+
+Click a poster to open its page: **Information**, **Media** and **Launch**, plus a tab for each
+plugin that keeps something per game. A title a plugin syncs is read-only there, marked
+**Managed by** its source: change it in the launcher and the plugin syncs it again.
 
 ## Adding a game by hand
 
 For anything no plugin knows, such as an emulator, a DRM-free build or a tool:
 
 1. On **Library**, click **Add custom game**.
-2. Enter a **Title**.
-3. Optionally, enter a **Launch command**: what the host runs for this title. Saving a command asks
-   for your **Console password**. Without one, the entry is a poster with nothing to launch.
-4. Click **Add**.
+2. On **Information**, enter a **Title**.
+3. Optionally, on **Launch**, enter a **Launch command**: what the host runs for this title. Without
+   one, the entry is a poster with nothing to launch.
+4. Click **Add**. The page stays open on the new entry.
 
-Everything else in the form is optional:
+Saving a command, or an entry with prep commands, asks for your **Console password**. To change
+the entry later, open its page and **Save**; **Delete** is there too. Everything but the title is
+optional:
 
-| Field | What it does |
-|---|---|
-| **Portrait art URL**, **Hero art URL**, **Header art URL**, **Logo art URL** | The title's art. See [Cover art](#cover-art). |
-| **This entry opens a launcher** | Puts it in the **Launchers** row above your games. |
-| **Process (optional)**: **Executable path**, **Install directory** or **Process name** | How the host recognizes the running game. Without one it can't see the game exit, end it on disconnect or count play time. |
-| **Who hears this title** | On a [shared display](/docs/virtual-displays): **Everyone**, **The display owner only**, **Joined sessions only** or **The session that launched it**. |
-| **Details (optional)** | Platform, description, developer, publisher, release year, players, region, genres and tags. Free text. A poster shows the platform unless it is `PC`. |
+| Tab | Field | What it does |
+|---|---|---|
+| **Information** | Platform, description, developer, publisher, release year, players, region, genres, tags | Free text. A poster shows the platform unless it is `PC`. |
+| **Media** | **Portrait**, **Hero**, **Header**, **Logo** | The title's art, previewed as you type. See [Cover art](#cover-art). |
+| **Media** | **Brand mark** | Drawn on a launcher tile that has no cover art. |
+| **Launch** | **This entry opens a launcher** | Puts it in the **Launchers** row above your games. |
+| **Launch** | **Executable path**, **Install directory** or **Process name** | How the host recognizes the running game. Without one it can't see the game exit, end it on disconnect or count play time. |
+| **Launch** | **Who hears this title** | On a [shared display](/docs/virtual-displays): **Everyone**, **The display owner only**, **Joined sessions only** or **The session that launched it**. |
 
 Hand-added entries live in `library.json` in the host config directory (`~/.config/punktfunk/`
 on Linux, `%ProgramData%\punktfunk\` on Windows), readable by the host user only. Steps that run
@@ -63,7 +69,8 @@ before a title and undo after it go in that file: see
 
 ### Cover art
 
-Enter an `http://` or `https://` URL, or the path of an image file on the host.
+Enter an `http://` or `https://` URL, or the path of an image file on the host. A URL previews
+right away; a path previews after you save.
 
 - **A URL:** the host downloads it the first time a client asks, keeps it, and serves it to every
   client from then on. A redirect, a file over 16 MiB or a file that isn't an image goes to
