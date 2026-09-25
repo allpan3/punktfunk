@@ -150,10 +150,42 @@ tell when the game quits.
 | Your own state | `pluginStateDir("<id>")`; writable on every platform |
 | Data from a desktop app | `pluginIngestDir("<id>")`, an inbox any local user may write. Treat its contents as untrusted |
 | A console page | `definePluginKit` with `serveUi({ title, icon, staticDir, api })` |
+| A tab on each game's page | `serveUi({ title, game })`; see [below](#a-tab-on-each-games-page) |
 | Reacting to events only | `definePlugin({ name, main: async (pf) => … })` from `@punktfunk/host` |
 
 Keep Effect values inside the plugin: the runner bundles its own copy of Effect, so the default
 export must be a plain async `main`. `definePluginKit` and `defineLibraryPlugin` build that for you.
+
+## A tab on each game's page
+
+Something a plugin keeps per game, like the files it swaps or a per-game switch, belongs on that
+game's page in the console. Pass `game` to `serveUi`:
+
+```ts
+import { Effect, Schema } from "effect";
+import { handedPath, serveUi } from "@punktfunk/plugin-kit";
+
+const Section = Schema.Struct({
+  enabled: Schema.Boolean.annotate({ title: "Swap this game's files" }),
+  paths: Schema.Array(handedPath({ write: true })).annotate({ title: "Folders" }),
+});
+
+yield* serveUi({
+  title: "Game slots",
+  game: {
+    schema: Section,
+    load: (entryId) => Effect.succeed(store.get(entryId) ?? { enabled: false, paths: [] }),
+    save: (entryId, value) => Effect.sync(() => store.set(entryId, value)),
+    status: (entryId) => Effect.succeed([{ level: "info", text: "No slot active." }]),
+  },
+});
+```
+
+- `entryId` is the library id, `steam:570` or `custom:<id>`. `load` returning `undefined` means
+  no tab on that entry.
+- `save` receives the value decoded against `schema`; a body that doesn't decode never reaches it.
+- `status` returns up to eight short lines shown above the form.
+- A plugin with a `game` section and no `staticDir` gets no nav entry.
 
 ## Folders you can't know in advance
 
@@ -165,6 +197,11 @@ A plugin that doesn't use `defineLibraryPlugin` yields `requestAccess(paths, rea
 `@punktfunk/plugin-kit`. A request only creates a pending row: the operator allows it on the
 library source in the console, or with `punktfunk-host plugins grant`. A grant restarts the plugin.
 Don't tell users to widen the runner unit or change ACLs by hand.
+
+When the operator is the one who knows the folder, a save folder or a config directory, make it a
+`handedPath()` field in `game` or `config`. The console grants each folder the operator adds there
+when the form saves, read-only unless `handedPath({ write: true })`. A folder the plugin fills in
+itself is never granted that way. Write access on a Windows host is refused either way.
 
 ## Test it
 
