@@ -1,5 +1,7 @@
-//! Controllers: the connected pads as cards, and on Android a last "Not showing?" card that
-//! opens the grants and tests only the host can perform ([`super::grants`]). The fourth tab.
+//! Controllers: the connected pads as cards, a Test card for the live input test where the
+//! host can run it ([`super::input_test`]), the keyboards and mice the host sees, and on
+//! Android a last "Not showing?" card that opens the grants and tests only the host can
+//! perform ([`super::grants`]). The fourth tab.
 //!
 //! Cards are one focus row. OK on a pad is its rumble test. Only devices the OS classifies
 //! as a gamepad are forwarded; adapters often enumerate as something else, so each card's
@@ -11,7 +13,7 @@
 
 use crate::el::{Axis, El, Group, Id, Tree};
 use crate::glyphs::{device_icon, Hint};
-use crate::model::ConsoleCmd;
+use crate::model::{ConsoleCmd, OtherDevice};
 use crate::platform::Platform;
 use crate::pointer::{Pointer, PointerKind};
 use crate::screens::{Ctx, Outbox, Screen};
@@ -73,16 +75,29 @@ enum Target {
     Pad(usize),
     /// The inert card that stands in for no pads, so the row is never empty.
     NoPads,
+    /// The live input test, after the pads.
+    Test,
+    /// A keyboard, mouse or other device the host reports. Never a pad to the host.
+    Other(usize),
     /// The last card on Android: OK opens the grants and tests.
     Grants,
 }
 
-fn targets(ctx: &Ctx) -> Vec<Target> {
+/// The hosts that send a pad's readings for the input test.
+fn can_test(platform: Platform) -> bool {
+    matches!(platform, Platform::Android | Platform::Apple)
+}
+
+fn targets(ctx: &Ctx, others: &[OtherDevice]) -> Vec<Target> {
     let mut all: Vec<Target> = if ctx.pads.is_empty() {
         vec![Target::NoPads]
     } else {
         (0..ctx.pads.len()).map(Target::Pad).collect()
     };
+    if !ctx.pads.is_empty() && can_test(ctx.platform) {
+        all.push(Target::Test);
+    }
+    all.extend((0..others.len()).map(Target::Other));
     if ctx.platform == Platform::Android {
         all.push(Target::Grants);
     }
@@ -94,6 +109,8 @@ fn target_id(t: Target, pads: &[PadInfo]) -> Id {
     match t {
         Target::Pad(i) => Id::new(&pads[i].key, 0),
         Target::NoPads => Id::new("no-pads", 0),
+        Target::Test => Id::new("pad-test", 0),
+        Target::Other(i) => Id::new("other-device", i),
         Target::Grants => Id::new("grants", 0),
     }
 }
@@ -105,16 +122,21 @@ fn can_rumble(pad: &PadInfo, platform: Platform) -> bool {
 
 pub(crate) struct PlayersScreen {
     tree: Tree,
+    /// Set by the shell each frame from what the host reports.
+    pub(crate) others: Vec<OtherDevice>,
 }
 
 impl PlayersScreen {
     pub(crate) fn new() -> PlayersScreen {
-        PlayersScreen { tree: Tree::new() }
+        PlayersScreen {
+            tree: Tree::new(),
+            others: Vec::new(),
+        }
     }
 
     /// The focused target: the tree's, or the first when focus left with its pad.
     fn focused(&self, ctx: &Ctx) -> Target {
-        let all = targets(ctx);
+        let all = targets(ctx, &self.others);
         self.tree
             .focus()
             .and_then(|id| all.iter().copied().find(|t| target_id(*t, ctx.pads) == id))
@@ -149,7 +171,7 @@ impl PlayersScreen {
         let Some(id) = self.tree.hit(p.x as f32, p.y as f32) else {
             return false;
         };
-        let Some(t) = targets(ctx)
+        let Some(t) = targets(ctx, &self.others)
             .into_iter()
             .find(|t| target_id(*t, ctx.pads) == id)
         else {
@@ -166,6 +188,8 @@ impl PlayersScreen {
         Some(match self.focused(ctx) {
             Target::Pad(i) => format!("{}, {}", ctx.pads[i].name, pad_detail(&ctx.pads[i])),
             Target::NoPads => "No controller connected".into(),
+            Target::Test => "Test controller".into(),
+            Target::Other(i) => self.others.get(i)?.name.clone(),
             Target::Grants => "Controller not showing? Opens the access list".into(),
         })
     }
@@ -183,7 +207,7 @@ impl PlayersScreen {
         fonts: &Fonts,
         ctx: &mut Ctx,
     ) {
-        let all = targets(ctx);
+        let all = targets(ctx, &self.others);
         // The first target takes focus once; a card that goes reseats it in the tree.
         if self.tree.focus().is_none() {
             self.tree.set_focus(Some(target_id(all[0], ctx.pads)));
@@ -220,7 +244,8 @@ impl PlayersScreen {
                     ch as f32,
                 );
                 let t = *t;
-                El::paint(move |canvas, r| card(canvas, fonts, t, pads, platform, r, k))
+                let others = &self.others;
+                El::paint(move |canvas, r| card(canvas, fonts, t, pads, others, platform, r, k))
                     .id(target_id(t, pads))
                     .focusable((CARD_CORNER * k) as f32)
                     .place(r)
@@ -252,7 +277,7 @@ impl PlayersScreen {
         fonts: &Fonts,
         ctx: &Ctx,
     ) {
-        let detail = detail(self.focused(ctx), ctx);
+        let detail = detail(self.focused(ctx), ctx, &self.others);
         let h = (crate::widgets::FOOT_DETAIL_H * k) as f32;
         crate::widgets::Foot {
             detail: Some(&detail),
@@ -282,7 +307,11 @@ fn activate(t: Target, ctx: &Ctx, fx: &mut Outbox) -> Option<MenuPulse> {
             });
             Some(MenuPulse::Confirm)
         }
-        Target::Pad(_) | Target::NoPads => Some(MenuPulse::Boundary),
+        Target::Pad(_) | Target::NoPads | Target::Other(_) => Some(MenuPulse::Boundary),
+        Target::Test => {
+            fx.push(Screen::InputTest(super::input_test::InputTestScreen::new()));
+            Some(MenuPulse::Confirm)
+        }
         Target::Grants => {
             fx.push(Screen::Grants(super::grants::GrantsScreen::new()));
             Some(MenuPulse::Confirm)
@@ -291,11 +320,13 @@ fn activate(t: Target, ctx: &Ctx, fx: &mut Outbox) -> Option<MenuPulse> {
 }
 
 /// A pad card: its family mark, name, what it streams as, battery, and the test OK runs.
+#[allow(clippy::too_many_arguments)]
 fn card(
     canvas: &Canvas,
     fonts: &Fonts,
     t: Target,
     pads: &[PadInfo],
+    others: &[OtherDevice],
     platform: Platform,
     r: Rect,
     k: f64,
@@ -314,6 +345,47 @@ fn card(
     let max_w = f64::from(r.width()) - 2.0 * pad;
     let base = f64::from(r.bottom) - pad;
     let mark_cy = t0 + 16.0 * k;
+    // An icon, a title and a line: the Test card, a device that is not a pad.
+    let plain = |icon: &str, title: &str, line: &str, ink| {
+        if let Some(icon) = crate::icons::by_name(icon) {
+            let box_px = (MARK * 0.62 * k) as f32;
+            let x = (l + f64::from(box_px) / 2.0) as f32;
+            crate::icons::draw_icon(canvas, icon, x, mark_cy as f32, box_px, ink);
+        }
+        let size = 21.0 * k;
+        fonts.draw_clipped(
+            canvas,
+            title,
+            l,
+            base - 22.0 * k,
+            W::Bold,
+            size,
+            fg(1.0),
+            max_w,
+        );
+        fonts.draw_clipped(canvas, line, l, base, W::Regular, 13.0 * k, fg(0.55), max_w);
+    };
+    match t {
+        Target::Test => {
+            return plain(
+                "gamepad-2",
+                "Test controller",
+                "See every button and stick",
+                accent(1.0),
+            );
+        }
+        Target::Other(i) => {
+            let Some(d) = others.get(i) else { return };
+            let icon = match d.kind.as_str() {
+                "keyboard" => "keyboard",
+                "mouse" => "mouse",
+                "remote" => "tv",
+                _ => "pointer",
+            };
+            return plain(icon, &d.name, "Not a controller", fg(0.5));
+        }
+        _ => {}
+    }
     if t == Target::Grants {
         if let Some(icon) = crate::icons::by_name("circle-help") {
             let box_px = (MARK * 0.62 * k) as f32;
@@ -430,8 +502,21 @@ fn card(
     );
 }
 
-fn detail(t: Target, ctx: &Ctx) -> String {
+fn detail(t: Target, ctx: &Ctx, others: &[OtherDevice]) -> String {
     match t {
+        Target::Test => "Shows every button, trigger and stick as the controller sends it, to \
+                         tell a worn button from a setting. Hold B to finish."
+            .into(),
+        Target::Other(i) => (others.get(i))
+            .map(|d| {
+                let what = "Streams take it as keyboard or mouse input, not as a pad.";
+                if d.detail.is_empty() {
+                    what.into()
+                } else {
+                    format!("{} \u{2014} {what}", d.detail)
+                }
+            })
+            .unwrap_or_default(),
         Target::NoPads => "Punktfunk only forwards devices the system classifies as a gamepad or \
                            joystick — a pad behind an adapter or hub may enumerate with the \
                            adapter's identity, or not at all."
@@ -578,10 +663,10 @@ mod tests {
         );
     }
 
-    /// Right past the last pad lands on the "Not showing?" card, Android's alone; OK on it
-    /// opens the grants list rather than asking the host for anything.
+    /// Right past the last pad lands on Test, whose OK opens the input test; on Android the
+    /// "Not showing?" card follows and opens the grants list. Off Android, Test ends the row.
     #[test]
-    fn right_from_the_cards_reaches_the_grants_card() {
+    fn right_from_the_cards_reaches_test_then_the_grants_card() {
         let pads = [pad("DualSense", true)];
         let mut s = PlayersScreen::new();
         let out = drive(
@@ -592,12 +677,18 @@ mod tests {
                 MenuEvent::Move(MenuDir::Up),
                 MenuEvent::Move(MenuDir::Right),
                 MenuEvent::Confirm,
+                MenuEvent::Move(MenuDir::Right),
+                MenuEvent::Confirm,
             ],
         );
         assert!(matches!(out[0].1, Some(MenuPulse::Boundary)));
-        assert!(out[2].0.cmds.is_empty());
         assert!(
             matches!(out[2].0.nav, Some(crate::screens::Nav::Push(ref b))
+            if matches!(**b, Screen::InputTest(_)))
+        );
+        assert!(out[4].0.cmds.is_empty());
+        assert!(
+            matches!(out[4].0.nav, Some(crate::screens::Nav::Push(ref b))
             if matches!(**b, Screen::Grants(_)))
         );
         let mut s = PlayersScreen::new();
@@ -605,10 +696,14 @@ mod tests {
             &mut s,
             Platform::Apple,
             &pads,
-            &[MenuEvent::Move(MenuDir::Right)],
+            &[
+                MenuEvent::Move(MenuDir::Right),
+                MenuEvent::Move(MenuDir::Right),
+            ],
         );
+        assert!(matches!(out[0].1, Some(MenuPulse::Move)), "onto Test");
         assert!(
-            matches!(out[0].1, Some(MenuPulse::Boundary)),
+            matches!(out[1].1, Some(MenuPulse::Boundary)),
             "no grants off Android"
         );
     }

@@ -76,8 +76,8 @@ pub use input::Key;
 pub use library::decode_poster_off_thread;
 pub use library::{DecodedPoster, LibraryGame, LibraryPhase, LibraryShared, Stale};
 pub use model::{
-    ConsoleBus, ConsoleCmd, ConsoleShared, HostAction, HostRow, LicenseSection, PairPhase,
-    PresetChip, SpeedPhase, SpeedStatus, WakeStatus,
+    ConsoleBus, ConsoleCmd, ConsoleShared, HostAction, HostRow, LicenseSection, OtherDevice,
+    PadTestState, PairPhase, PresetChip, SpeedPhase, SpeedStatus, WakeStatus,
 };
 pub use platform::{Platform, PlatformScreen};
 pub use ring::Ring;

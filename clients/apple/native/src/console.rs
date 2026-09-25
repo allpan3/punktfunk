@@ -14,8 +14,8 @@ use pf_console_ui::bridge::{
 use pf_console_ui::console::FrameCost;
 use pf_console_ui::{
     Console, ConsoleEntry, ConsoleHandles, HostRow, InputSource, Insets, Key, LibraryGame,
-    LibraryPhase, LicenseSection, PairPhase, Platform, Prompt, SnapshotStore, SpeedPhase, Stale,
-    Viewport, WakeStatus,
+    LibraryPhase, LicenseSection, PadTestState, PairPhase, Platform, Prompt, SnapshotStore,
+    SpeedPhase, Stale, Viewport, WakeStatus,
 };
 use skia_safe::gpu::{self, mtl, DirectContext, SurfaceOrigin};
 use skia_safe::ColorType;
@@ -79,6 +79,8 @@ pub const PUNKTFUNK_CONSOLE_PUSH_PROMPT: u8 = 16;
 /// `[{"heading", "text"}]` — what this app bundles, for the Licences screen. The answer to
 /// the `LoadLicenses` command.
 pub const PUNKTFUNK_CONSOLE_PUSH_LICENSES: u8 = 17;
+/// `{"held": [..], "axes": [[name, v]]}` — the pad's reading while the `PadTest` command is on.
+pub const PUNKTFUNK_CONSOLE_PUSH_PAD_TEST: u8 = 18;
 
 /// One console. Opaque to C.
 pub struct PunktfunkConsole {
@@ -626,9 +628,10 @@ pub unsafe extern "C" fn punktfunk_console_push(
             PUNKTFUNK_CONSOLE_PUSH_PRESETS => json::<Vec<PresetJson>>(text)
                 .map(|v| c.store.set_presets(v.into_iter().map(Into::into).collect())),
             PUNKTFUNK_CONSOLE_PUSH_KNOWN_HOSTS => json(text).map(|v| c.store.set_known_hosts(v)),
-            PUNKTFUNK_CONSOLE_PUSH_PADS => {
-                json::<PadsJson>(text).map(|v| *lock(&c.pads) = v.into_pads())
-            }
+            PUNKTFUNK_CONSOLE_PUSH_PADS => json::<PadsJson>(text).map(|mut v| {
+                c.handles.console.set_other_devices(v.take_others());
+                *lock(&c.pads) = v.into_pads();
+            }),
             PUNKTFUNK_CONSOLE_PUSH_NAVIGATE => {
                 json::<EntryJson>(text).map(|v| *lock(&c.navigate) = Some(v.into_entry()))
             }
@@ -637,6 +640,9 @@ pub unsafe extern "C" fn punktfunk_console_push(
             }
             PUNKTFUNK_CONSOLE_PUSH_LICENSES => {
                 json::<Vec<LicenseSection>>(text).map(|v| c.handles.console.set_licenses(v))
+            }
+            PUNKTFUNK_CONSOLE_PUSH_PAD_TEST => {
+                json::<PadTestState>(text).map(|v| c.handles.console.set_pad_test(v))
             }
             _ => {
                 tracing::error!("console: unknown push kind {kind}");

@@ -83,6 +83,8 @@ extension ConsoleModel {
                 label: a["label"] as? String ?? "")
         case "PadAction":
             padAction(a["action"] as? String ?? "", key: a["pad_key"] as? String ?? "")
+        case "PadTest":
+            padTest(a["on"] as? Bool ?? false)
         case "PromptAnswer":
             answerPrompt(id: a["id"] as? String ?? "", choice: a["choice"] as? Int)
         case "SpeedTest":

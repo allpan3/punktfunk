@@ -388,7 +388,7 @@ private fun rememberUsbGeneration(context: Context): MutableState<Int> {
  * reads it while streaming — on a pad Android has no key layout for, the right stick and the
  * triggers are not on the axes their names suggest.
  */
-private fun padAxes(event: MotionEvent): Map<String, Float> {
+internal fun padAxes(event: MotionEvent): Map<String, Float> {
     val map = Gamepad.padMap(event.device)
     fun trigger(mapped: Int, a: Int, b: Int) = if (mapped == Gamepad.AXIS_NONE) {
         maxOf(event.getAxisValue(a), event.getAxisValue(b))
@@ -937,7 +937,7 @@ private fun padButtonsNote(buttons: Gamepad.PadButtons): String? = when (buttons
         "Android has no button layout for this controller — face buttons corrected"
 }
 
-private fun deviceDetail(dev: InputDevice): String =
+internal fun deviceDetail(dev: InputDevice): String =
     "%04X:%04X · %s".format(dev.vendorId, dev.productId, sourcesLabel(dev.sources))
 
 private fun sourcesLabel(sources: Int): String {

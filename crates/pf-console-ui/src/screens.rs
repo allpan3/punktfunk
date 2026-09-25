@@ -10,6 +10,7 @@ pub(crate) mod card_menu;
 pub(crate) mod collections;
 pub(crate) mod grants;
 pub(crate) mod home;
+pub(crate) mod input_test;
 pub(crate) mod library;
 pub(crate) mod licenses;
 
@@ -215,6 +216,8 @@ pub(crate) enum Screen {
     PresetName(preset::PresetName),
     /// A preset's settings over the global ones.
     PresetEdit(preset::PresetEdit),
+    /// The live controller test. Raised by the Controllers tab's Test card.
+    InputTest(input_test::InputTestScreen),
 }
 
 impl Screen {
@@ -255,6 +258,7 @@ impl Screen {
             Screen::PresetMenu(s) => s.menu(ev, ctx, fx),
             Screen::PresetName(s) => s.menu(ev, ctx, fx),
             Screen::PresetEdit(s) => s.menu(ev, ctx, fx),
+            Screen::InputTest(s) => s.menu(ev, ctx, fx),
         }
     }
 
@@ -316,7 +320,7 @@ impl Screen {
             Screen::RingEditor(s) => s.pan_list().pan(p),
             Screen::Library(s) => s.pan(p),
             Screen::Home(s) => s.pan(p),
-            Screen::Collections(_) | Screen::Players(_) => false,
+            Screen::Collections(_) | Screen::Players(_) | Screen::InputTest(_) => false,
         }
     }
 
@@ -346,6 +350,7 @@ impl Screen {
             Screen::PresetMenu(s) => s.pointer(p, ctx, fx),
             Screen::PresetName(s) => s.pointer(p, ctx, fx),
             Screen::PresetEdit(s) => s.pointer(p, ctx, fx),
+            Screen::InputTest(_) => true,
         }
     }
 
@@ -466,6 +471,7 @@ impl Screen {
             Screen::PresetMenu(s) => s.title(),
             Screen::PresetName(s) => s.title(),
             Screen::PresetEdit(s) => s.title(),
+            Screen::InputTest(_) => "Controller test".into(),
         }
     }
 
@@ -509,6 +515,7 @@ impl Screen {
             Screen::PresetMenu(s) => s.hints(ctx),
             Screen::PresetName(s) => s.hints(ctx),
             Screen::PresetEdit(s) => s.hints(ctx),
+            Screen::InputTest(s) => s.hints(ctx),
         }
     }
 
@@ -548,6 +555,7 @@ impl Screen {
             Screen::PresetMenu(s) => s.render(canvas, rect, k, dt, fonts, ctx),
             Screen::PresetName(s) => s.render(canvas, rect, k, dt, fonts, ctx),
             Screen::PresetEdit(s) => s.render(canvas, rect, k, dt, fonts, ctx),
+            Screen::InputTest(s) => s.render(canvas, rect, k, dt, fonts, ctx),
         }
     }
 }

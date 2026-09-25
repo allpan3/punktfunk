@@ -92,6 +92,9 @@ impl Shell {
         ));
         self.pads = pads.to_vec();
         self.glyphs = glyph_style(self.input_source, pad_pref, self.platform);
+        if let Some(Screen::InputTest(test)) = self.stack.last_mut() {
+            test.pref = pad_pref;
+        }
         // The chip names the connected pad, rebuilt only when it changes; with none there
         // is nothing to say. `PadInfo` has no `PartialEq` in its crate.
         if self.chip.as_deref() != pad {

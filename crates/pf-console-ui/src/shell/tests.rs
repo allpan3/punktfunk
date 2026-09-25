@@ -742,6 +742,38 @@ fn the_licences_page_through_a_hosts_notices() {
     assert!(matches!(s.stack.last(), Some(Screen::Home(_))));
 }
 
+/// The host's test mode follows the test screen: on while it is on top, drawn from the
+/// host's readings, and off again once a held B takes it away.
+#[test]
+fn the_input_test_turns_the_hosts_test_mode_on_and_off() {
+    use crate::model::{ConsoleCmd, PadTestState};
+    let fonts = crate::theme::build_fonts().unwrap();
+    let mut surface = skia_safe::surfaces::raster_n32_premul((1280, 800)).unwrap();
+    let test = crate::screens::input_test::InputTestScreen::new();
+    let (mut s, console, _library) = shell(vec![
+        Screen::Home(HomeScreen::new()),
+        Screen::InputTest(test),
+    ]);
+    s.fake_clock = Some((100.0, 1.0 / 60.0));
+    let mut frame = |s: &mut Shell| s.render(surface.canvas(), 1280, 800, &fonts, None, None, &[]);
+    frame(&mut s);
+    assert!(s.bus.drain().contains(&ConsoleCmd::PadTest { on: true }));
+    for _ in 0..80 {
+        console.set_pad_test(PadTestState {
+            held: vec!["B".into()],
+            axes: vec![("LX".into(), 0.5)],
+        });
+        frame(&mut s);
+    }
+    finish_motion(&mut s);
+    frame(&mut s);
+    assert!(
+        matches!(s.stack.last(), Some(Screen::Home(_))),
+        "a held B finished"
+    );
+    assert!(s.bus.drain().contains(&ConsoleCmd::PadTest { on: false }));
+}
+
 /// A preset's editor draws every row it can hold, and a step saves the override; the global
 /// settings stay as they were.
 #[test]

@@ -8,6 +8,8 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.InputDevice
+import android.view.KeyEvent
+import android.view.MotionEvent
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -580,8 +582,21 @@ object SkiaConsole {
                 driving ?: Gamepad.firstPad(),
                 extras,
                 appContext?.let(::deviceBodyVibrator),
+                ConsoleJson.otherInputs(),
             ),
         )
+    }
+
+    /**
+     * The driving pad's reading while the console's input test is on (`ConsoleCmd::PadTest`),
+     * null otherwise. While set, the shell's probes feed it instead of the menu. Main-thread only.
+     */
+    internal var padTest: PadTestReading? = null
+        private set
+
+    internal fun pushPadTest() {
+        val t = padTest ?: return
+        if (handle != 0L) NativeBridge.nativeConsoleSetPadTest(handle, t.json())
     }
 
     // ---- model pushers -----------------------------------------------------------------------
@@ -864,6 +879,9 @@ object SkiaConsole {
                     c.optJSONObject("SetPin")?.let(::setPin)
                     c.optJSONObject("BindPreset")?.let(::bindPreset)
                     c.optJSONObject("SetClipboard")?.let(::setClipboard)
+                    c.optJSONObject("PadTest")?.let {
+                        padTest = if (it.optBoolean("on")) PadTestReading() else null
+                    }
                     c.optJSONObject("PadAction")?.let { onPadAction?.invoke(it.optString("action"), it.optString("pad_key")) }
                 }
             }
@@ -1267,4 +1285,60 @@ internal fun fetchArt(candidates: List<String>, client: OkHttpClient, offline: B
         if (bytes != null) return bytes
     }
     return null
+}
+
+/** One pad's held buttons and axes, by the names the console's `PadTestState` reads. */
+internal class PadTestReading {
+    private val keys = linkedSetOf<String>()
+    /** The d-pad as a HAT, which many pads report instead of keys. */
+    private val hat = linkedSetOf<String>()
+    private var axes: Map<String, Float> = emptyMap()
+
+    /** A key by its CORRECTED code ([Gamepad.padKeyCode]), as the stream reads it. */
+    fun key(code: Int, down: Boolean) {
+        val name = TEST_NAMES[code] ?: return
+        if (down) keys += name else keys -= name
+    }
+
+    fun motion(ev: MotionEvent) {
+        axes = io.unom.punktfunk.padAxes(ev)
+        val (hx, hy) = (axes["HX"] ?: 0f) to (axes["HY"] ?: 0f)
+        hat.clear()
+        if (hx < -0.5f) hat += "Left"
+        if (hx > 0.5f) hat += "Right"
+        if (hy < -0.5f) hat += "Up"
+        if (hy > 0.5f) hat += "Down"
+    }
+
+    fun json(): String {
+        val held = JSONArray()
+        (keys + hat).forEach { held.put(it) }
+        val ax = JSONArray()
+        for (n in listOf("LX", "LY", "RX", "RY", "LT", "RT")) {
+            ax.put(JSONArray().put(n).put((axes[n] ?: 0f).toDouble()))
+        }
+        return JSONObject().put("held", held).put("axes", ax).toString()
+    }
+
+    private companion object {
+        val TEST_NAMES = mapOf(
+            KeyEvent.KEYCODE_BUTTON_A to "A",
+            KeyEvent.KEYCODE_BUTTON_B to "B",
+            KeyEvent.KEYCODE_BUTTON_X to "X",
+            KeyEvent.KEYCODE_BUTTON_Y to "Y",
+            KeyEvent.KEYCODE_BUTTON_L1 to "LB",
+            KeyEvent.KEYCODE_BUTTON_R1 to "RB",
+            KeyEvent.KEYCODE_BUTTON_L2 to "LT",
+            KeyEvent.KEYCODE_BUTTON_R2 to "RT",
+            KeyEvent.KEYCODE_BUTTON_SELECT to "Back",
+            KeyEvent.KEYCODE_BUTTON_START to "Start",
+            KeyEvent.KEYCODE_BUTTON_MODE to "Guide",
+            KeyEvent.KEYCODE_BUTTON_THUMBL to "LS",
+            KeyEvent.KEYCODE_BUTTON_THUMBR to "RS",
+            KeyEvent.KEYCODE_DPAD_UP to "Up",
+            KeyEvent.KEYCODE_DPAD_DOWN to "Down",
+            KeyEvent.KEYCODE_DPAD_LEFT to "Left",
+            KeyEvent.KEYCODE_DPAD_RIGHT to "Right",
+        )
+    }
 }

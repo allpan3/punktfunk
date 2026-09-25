@@ -68,6 +68,9 @@
 // the `LoadLicenses` command.
 #define PUNKTFUNK_CONSOLE_PUSH_LICENSES 17
 
+// `{"held": [..], "axes": [[name, v]]}` — the pad's reading while the `PadTest` command is on.
+#define PUNKTFUNK_CONSOLE_PUSH_PAD_TEST 18
+
 // One console. Opaque to C.
 typedef struct PunktfunkConsole PunktfunkConsole;
 

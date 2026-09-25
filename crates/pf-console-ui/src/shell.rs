@@ -397,6 +397,8 @@ pub(crate) struct Shell {
     screen: Option<DeviceScreen>,
     hosts: Vec<HostRow>,
     hosts_gen: u64,
+    /// The host was last told the input test is on.
+    pad_testing: bool,
     /// The `host_sort` / `host_grouping` values `hosts` was last arranged by.
     hosts_order: (Option<serde_json::Value>, Option<serde_json::Value>),
     device_name: String,
@@ -537,6 +539,7 @@ impl Shell {
             hosts: Vec::new(),
             hosts_gen: u64::MAX,
             hosts_order: (None, None),
+            pad_testing: false,
             device_name: opts.device_name,
             deck: opts.deck,
             tv: opts.tv,
@@ -1005,6 +1008,24 @@ impl Shell {
 
         if let Some(text) = self.console.take_notice() {
             self.show_toast(text);
+        }
+        // The host's test mode follows the test screen, whatever took it off the top.
+        let testing = matches!(self.stack.last(), Some(Screen::InputTest(_))) && !self.in_stream;
+        if testing != self.pad_testing {
+            self.pad_testing = testing;
+            self.bus.send(ConsoleCmd::PadTest { on: testing });
+        }
+        let t = self.t();
+        if let Some(Screen::InputTest(test)) = self.stack.last_mut() {
+            if let Some(state) = self.console.take_pad_test() {
+                test.set_state(state, t);
+            }
+            if test.done {
+                self.apply_nav(Nav::Pop);
+            }
+        }
+        if let Some(Screen::Players(p)) = self.stack.last_mut() {
+            p.others = self.console.other_devices();
         }
         if let Some(Screen::Licenses(l)) = self.stack.last_mut() {
             if l.waiting() {

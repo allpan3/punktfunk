@@ -115,7 +115,8 @@ impl EntryJson {
 }
 
 /// The connected controllers: `{"label": "DualSense", "pref": 1, "pads": [{name, key, pref,
-/// steam_virtual, battery: {percent, charging} | null, detail, forwarded, rumble}]}`.
+/// steam_virtual, battery: {percent, charging} | null, detail, forwarded, rumble}], "others":
+/// [{name, kind, detail}]}`.
 #[derive(serde::Deserialize)]
 pub struct PadsJson {
     #[serde(default)]
@@ -125,6 +126,9 @@ pub struct PadsJson {
     pref: Option<u8>,
     #[serde(default)]
     pads: Vec<PadJson>,
+    /// Keyboards, mice and the like, for [`crate::ConsoleShared::set_other_devices`].
+    #[serde(default)]
+    others: Vec<crate::OtherDevice>,
 }
 
 #[derive(serde::Deserialize)]
@@ -155,6 +159,10 @@ struct BatteryJson {
 pub type Pads = (Option<String>, Option<GamepadPref>, Vec<PadInfo>);
 
 impl PadsJson {
+    pub fn take_others(&mut self) -> Vec<crate::OtherDevice> {
+        std::mem::take(&mut self.others)
+    }
+
     pub fn into_pads(self) -> Pads {
         let pads = self
             .pads

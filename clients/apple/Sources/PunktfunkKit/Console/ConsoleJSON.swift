@@ -198,8 +198,11 @@ public enum ConsoleJSON {
         }
     }
 
-    /// The pads push: the legend's pad and its glyph family, then every pad.
-    public static func pads(_ pads: [Pad], active: Pad?) -> String {
+    /// The pads push: the legend's pad and its glyph family, then every pad, then the inputs
+    /// that are not pads (`kind` is `keyboard`, `mouse` or `remote`).
+    public static func pads(
+        _ pads: [Pad], active: Pad?, others: [(name: String, kind: String)] = []
+    ) -> String {
         var doc: [String: Any] = [
             "pads": pads.map { pad -> [String: Any] in
                 [
@@ -211,6 +214,7 @@ public enum ConsoleJSON {
                 ]
             }
         ]
+        doc["others"] = others.map { ["name": $0.name, "kind": $0.kind] }
         if let active {
             doc["label"] = active.name
             doc["pref"] = active.pref

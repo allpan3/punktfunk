@@ -3,7 +3,10 @@ package io.unom.punktfunk.console
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.hardware.input.InputManager
 import android.hardware.usb.UsbManager
+import android.os.Handler
+import android.os.Looper
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -213,6 +216,14 @@ fun SkiaConsoleShell(
     }
     DisposableEffect(handle, activity) {
         if (activity == null || handle == 0L) return@DisposableEffect onDispose {}
+        // The input test takes the pad; the menu forgets what was held when it starts or ends.
+        var testing = false
+        fun followTest() {
+            if ((SkiaConsole.padTest != null) == testing) return
+            testing = !testing
+            padState.reset()
+            padState.push(handle)
+        }
         val keyProbe: (KeyEvent) -> Boolean = probe@{ ev ->
             val down = ev.action == KeyEvent.ACTION_DOWN
             if (ev.action != KeyEvent.ACTION_DOWN && ev.action != KeyEvent.ACTION_UP) return@probe false
@@ -220,6 +231,12 @@ fun SkiaConsoleShell(
             // and an SC2 in lizard mode, both belong here. [Gamepad.eventFromPad] draws the line.
             val fromPad = Gamepad.eventFromPad(ev)
             if (fromPad) {
+                followTest()
+                SkiaConsole.padTest?.let { test ->
+                    test.key(Gamepad.padKeyCode(ev), down)
+                    SkiaConsole.pushPadTest()
+                    return@probe true
+                }
                 // The CORRECTED keycode: a pad Android has no key layout for delivers its buttons
                 // under other buttons' names, so read raw this console answered ✕ with whatever
                 // sat in BUTTON_A's scancode slot. Same resolution the stream uses — the console
@@ -316,6 +333,12 @@ fun SkiaConsoleShell(
             if (!ev.isFromSource(InputDevice.SOURCE_JOYSTICK) && !ev.isFromSource(InputDevice.SOURCE_GAMEPAD)) {
                 return@probe false
             }
+            followTest()
+            SkiaConsole.padTest?.let { test ->
+                test.motion(ev)
+                SkiaConsole.pushPadTest()
+                return@probe true
+            }
             val lx = ev.getAxisValue(MotionEvent.AXIS_X)
             val ly = ev.getAxisValue(MotionEvent.AXIS_Y)
             val hx = ev.getAxisValue(MotionEvent.AXIS_HAT_X)
@@ -328,7 +351,16 @@ fun SkiaConsoleShell(
         val probes = MainActivity.PadProbes(keyProbe, motionProbe)
         activity.pushPadProbes(probes)
         SkiaConsole.padsChanged(Gamepad.firstPad(), sc2Extras(activity))
+        // Hot-plug: a pad, keyboard or mouse arriving or leaving re-sends the list.
+        val im = activity.getSystemService(InputManager::class.java)
+        val plug = object : InputManager.InputDeviceListener {
+            override fun onInputDeviceAdded(deviceId: Int) = SkiaConsole.padsChanged(null, sc2Extras(activity))
+            override fun onInputDeviceRemoved(deviceId: Int) = SkiaConsole.padsChanged(null, sc2Extras(activity))
+            override fun onInputDeviceChanged(deviceId: Int) = SkiaConsole.padsChanged(null, sc2Extras(activity))
+        }
+        im.registerInputDeviceListener(plug, Handler(Looper.getMainLooper()))
         onDispose {
+            im.unregisterInputDeviceListener(plug)
             // Remove OUR claim only — a platform screen pushed over us keeps its own, and when it
             // pops, this one resurfaces (the stack is what fixed the pad dying after Controllers).
             activity.removePadProbes(probes)

@@ -7,6 +7,7 @@
 
 import Combine
 import Foundation
+import GameController
 import Metal
 import PunktfunkKit
 import PunktfunkShared
@@ -60,6 +61,8 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
     }
     /// The field the console named just before it raised `editing`.
     private var openedField: SystemEntry?
+    /// Sends the pad's reading while the console's input test is up; the menu poller rests.
+    private var padTestTimer: Timer?
 
     struct SystemEntry: Identifiable, Equatable {
         let id = UUID()
@@ -130,10 +133,20 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
             GamepadManager.shared.objectWillChange.receive(on: RunLoop.main).sink { [weak self] _ in
                 self?.pushPads()
             })
+        let plugs: [Notification.Name] = [
+            .GCKeyboardDidConnect, .GCKeyboardDidDisconnect, .GCMouseDidConnect,
+            .GCMouseDidDisconnect, .GCControllerDidConnect, .GCControllerDidDisconnect,
+        ]
+        for name in plugs {
+            watching.append(
+                NotificationCenter.default.publisher(for: name).receive(on: RunLoop.main)
+                    .sink { [weak self] _ in self?.pushPads() })
+        }
     }
 
     func detach() {
         watching.removeAll()
+        padTest(false)
         pads.stop()
         haptics.stop()
         fetching?.cancel()
@@ -296,7 +309,56 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
         let pad = { (c: GamepadManager.DiscoveredController) in
             ConsoleJSON.Pad(c, forwarded: forwarded.contains(c.id))
         }
-        bridge.push(.pads, ConsoleJSON.pads(m.controllers.map(pad), active: m.active.map(pad)))
+        var others: [(name: String, kind: String)] = []
+        if let keyboard = GCKeyboard.coalesced {
+            others.append((keyboard.vendorName ?? "Keyboard", "keyboard"))
+        }
+        others += GCMouse.mice().map { ($0.vendorName ?? "Mouse", "mouse") }
+        // A controller with no extended profile is a remote: the Siri Remote on a TV.
+        others += GCController.controllers()
+            .filter { $0.extendedGamepad == nil && $0.microGamepad != nil }
+            .map { ($0.vendorName ?? "Remote", "remote") }
+        bridge.push(
+            .pads,
+            ConsoleJSON.pads(m.controllers.map(pad), active: m.active.map(pad), others: others))
+    }
+
+    /// The console's input test is up (`true`) or gone. While up, the pad's every button and
+    /// axis goes to the console at 30 Hz, and the pad moves no menu.
+    func padTest(_ on: Bool) {
+        padTestTimer?.invalidate()
+        padTestTimer = nil
+        guard on else {
+            if systemEntry == nil { pads.start() }
+            return
+        }
+        pads.stop()
+        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.pushPadTest() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        padTestTimer = timer
+    }
+
+    private func pushPadTest() {
+        guard let g = GamepadManager.shared.active?.controller.extendedGamepad else { return }
+        let buttons: [(String, GCControllerButtonInput?)] = [
+            ("A", g.buttonA), ("B", g.buttonB), ("X", g.buttonX), ("Y", g.buttonY),
+            ("LB", g.leftShoulder), ("RB", g.rightShoulder),
+            ("LT", g.leftTrigger), ("RT", g.rightTrigger),
+            ("Back", g.buttonOptions), ("Start", g.buttonMenu), ("Guide", g.buttonHome),
+            ("LS", g.leftThumbstickButton), ("RS", g.rightThumbstickButton),
+            ("Up", g.dpad.up), ("Down", g.dpad.down), ("Left", g.dpad.left),
+            ("Right", g.dpad.right),
+        ]
+        // GameController's +y is up; the console's is down.
+        let axes: [[Any]] = [
+            ["LX", g.leftThumbstick.xAxis.value], ["LY", -g.leftThumbstick.yAxis.value],
+            ["RX", g.rightThumbstick.xAxis.value], ["RY", -g.rightThumbstick.yAxis.value],
+            ["LT", g.leftTrigger.value], ["RT", g.rightTrigger.value],
+        ]
+        let held = buttons.filter { $0.1?.isPressed == true }.map(\.0)
+        bridge.push(.padTest, ConsoleJSON.string(["held": held, "axes": axes]))
     }
 
     private func pushKnownHosts() {

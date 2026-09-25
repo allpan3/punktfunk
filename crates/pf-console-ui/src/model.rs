@@ -188,6 +188,31 @@ struct ConsoleState {
     notice: Option<String>,
     /// What the host bundles, for the Licences screen. Kept once sent.
     licenses: Option<Arc<Vec<LicenseSection>>>,
+    /// The latest controller reading while the input test is on.
+    pad_test: Option<PadTestState>,
+    /// Keyboards, mice and the like: listed on the Controllers tab, never sent as a pad.
+    other_devices: Vec<OtherDevice>,
+}
+
+/// One reading of the controller under test. `held` names buttons by Xbox position: `A` `B`
+/// `X` `Y` `LB` `RB` `LT` `RT` `Back` `Start` `Guide` `LS` `RS` `Up` `Down` `Left` `Right`.
+/// `axes` are `LX` `LY` `RX` `RY` (−1…1, +y down) and `LT` `RT` (0…1).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PadTestState {
+    #[serde(default)]
+    pub held: Vec<String>,
+    #[serde(default)]
+    pub axes: Vec<(String, f32)>,
+}
+
+/// An input device that is not a controller: `kind` is `keyboard`, `mouse` or `other`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OtherDevice {
+    pub name: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub detail: String,
 }
 
 /// One block of a host's bundled licences: a heading, then its text as the file has it.
@@ -217,6 +242,22 @@ impl ConsoleShared {
     pub(crate) fn hosts_snapshot(&self) -> (Vec<HostRow>, u64) {
         let s = self.0.lock().unwrap();
         (s.hosts.clone(), s.hosts_gen)
+    }
+
+    pub fn set_pad_test(&self, state: PadTestState) {
+        self.0.lock().unwrap().pad_test = Some(state);
+    }
+
+    pub(crate) fn take_pad_test(&self) -> Option<PadTestState> {
+        self.0.lock().unwrap().pad_test.take()
+    }
+
+    pub fn set_other_devices(&self, devices: Vec<OtherDevice>) {
+        self.0.lock().unwrap().other_devices = devices;
+    }
+
+    pub(crate) fn other_devices(&self) -> Vec<OtherDevice> {
+        self.0.lock().unwrap().other_devices.clone()
     }
 
     pub fn set_licenses(&self, sections: Vec<LicenseSection>) {
@@ -411,6 +452,11 @@ pub enum ConsoleCmd {
     /// Remove one preset; a host bound or pinned to it falls back as a dangling id does.
     DeletePreset {
         id: String,
+    },
+    /// The input test is on screen (`true`) or gone. While on, the host sends
+    /// [`PadTestState`]s and keeps the pad out of menu moves, so every button can be tried.
+    PadTest {
+        on: bool,
     },
     /// The Licences screen opened: send this host's [`LicenseSection`]s.
     LoadLicenses,
