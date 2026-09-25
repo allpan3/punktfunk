@@ -174,9 +174,10 @@ pub fn capture_virtual_output(
 
     // Aim absolute input at THIS head: EXTEND backends sit beside the operator's
     // screens. `None` (Mutter/gamescope) CLEARS a stale name, e.g. after a Game-Mode
-    // switch Hyprland → gamescope has removed `PF-…`.
-    crate::inject::set_stream_output(vout.output_name.clone().or(vout.input_output.clone()));
+    // switch Hyprland → gamescope has removed `PF-…`. The extent goes first: the output bumps
+    // the aim generation, and a warp that reads it must find this head's size.
     crate::inject::set_stream_extent(head_extent(vout.preferred_mode));
+    crate::inject::set_stream_output(vout.output_name.clone().or(vout.input_output.clone()));
     // The encoder modifier probe keys on bit depth: HDR and 10-bit SDR both ride
     // the packed 10-bit fourccs.
     let bit_depth = if want.hdr || want.ten_bit_sdr { 10 } else { 8 };
@@ -363,12 +364,13 @@ pub fn capture_virtual_output(
     // Aim the injectors' absolute mapping (pen/touch/abs-mouse) at THIS display: the wire
     // normalizes over the streamed frame, and mapping it over the whole virtual desktop is wrong
     // the moment a physical monitor shares the desktop (Extend topology, or an Exclusive isolate
-    // degraded to the keep-physicals fallback) — the pen-offset field bug.
+    // degraded to the keep-physicals fallback) — the pen-offset field bug. Extent first, as on
+    // Linux: the target bumps the aim generation.
+    crate::inject::set_stream_extent(head_extent(vout.preferred_mode));
     crate::inject::set_stream_target(Some(pf_win_display::win_display::CcdTargetKey::new(
         target.adapter_luid,
         target.target_id,
     )));
-    crate::inject::set_stream_extent(head_extent(vout.preferred_mode));
     let pref = vout.preferred_mode;
     let keep = vout.keepalive;
     // Resolve the pf-vdisplay control device once and wrap its cursor IOCTLs for the
