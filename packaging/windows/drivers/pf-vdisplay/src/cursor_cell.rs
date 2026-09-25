@@ -98,7 +98,9 @@ impl CursorCell {
         self.dirty.swap(false, Ordering::AcqRel)
     }
 
-    fn mark_dirty(&self) {
+    /// Mark the pointer changed and wake the pool's encode thread. Also how a pointer-only
+    /// frame that could not be sent asks to be tried again.
+    pub fn mark_dirty(&self) {
         self.dirty.store(true, Ordering::Release);
         let pool = crate::registry::lock(&self.waker)
             .as_ref()

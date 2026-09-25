@@ -368,6 +368,11 @@ impl Pool {
         Some((slot, qpc_now(), seq))
     }
 
+    /// A cursor-only re-encode was dropped: mark the pointer changed so it is tried again.
+    pub fn cursor_changed(&self) {
+        self.cursor.mark_dirty();
+    }
+
     /// Hand a slot back, whether its AU was published or it was skipped. In bypass this is
     /// also where the acquired surface is given up, which releases the drain worker's hold —
     /// a surface the drain worker already took back on timeout signals nothing.
