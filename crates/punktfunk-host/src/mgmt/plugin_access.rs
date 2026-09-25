@@ -60,6 +60,10 @@ pub(crate) struct DecideRequest {
     /// The path as it appears in the request or grant list.
     pub path: String,
     pub decision: DecisionInput,
+    /// With `allow`: grant the path directly, pending request or not, read-write when true.
+    /// A file grants its folder. The same refusals apply as to a request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write: Option<bool>,
 }
 
 fn store_err(e: std::io::Error, what: &str) -> Response {
@@ -190,7 +194,8 @@ pub(crate) async fn get_plugin_access(State(st): State<Arc<MgmtState>>) -> Respo
 /// Grant, deny, or forget an access request
 ///
 /// `allow` turns a pending request into a grant (the platform ACL lands first, so a failed
-/// grant stores nothing); `deny` remembers the no; `forget` removes a grant or denial.
+/// grant stores nothing), or with `write` set grants a path the operator handed over;
+/// `deny` remembers the no; `forget` removes a grant or denial.
 #[utoipa::path(
     post,
     path = "/plugin-access/{plugin}/decide",
@@ -217,7 +222,24 @@ pub(crate) async fn decide_plugin_access(
         DecisionInput::Deny => Decision::Deny,
         DecisionInput::Forget => Decision::Forget,
     };
-    match st.access.decide(&plugin, &req.path, decision, "console") {
+    let outcome = match (decision, req.write) {
+        (Decision::Allow, Some(write)) => {
+            let path = std::path::Path::new(&req.path);
+            let dir = match path.parent() {
+                Some(parent) if path.is_file() => parent,
+                _ => path,
+            };
+            st.access
+                .grant(&plugin, dir, write, "console")
+                .and_then(|_| st.access.snapshot_for(&plugin))
+                .map(|value| crate::plugins::access::Mutation {
+                    value,
+                    changed: true,
+                })
+        }
+        (decision, _) => st.access.decide(&plugin, &req.path, decision, "console"),
+    };
+    match outcome {
         Ok(m) => {
             // Not awaited: a changed root restarts the runner, which this answer need not wait on.
             tokio::task::spawn_blocking(crate::plugins::converge_runner_roots);
