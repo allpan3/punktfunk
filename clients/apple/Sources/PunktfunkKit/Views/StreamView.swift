@@ -57,19 +57,38 @@ private final class CursorCapture {
     /// `disassociate: false` (cursor-visible mode) it always engages — there is no grab to
     /// be refused, the cursor stays free and visible.
     func capture(in view: NSView, disassociate: Bool) -> Bool {
-        guard !captured, let window = view.window, view.bounds.width > 0 else { return false }
+        guard !captured, view.window != nil, view.bounds.width > 0 else { return false }
         if disassociate {
             // Park the cursor mid-view so a click can't land in (and activate) another app.
-            let rectOnScreen = window.convertToScreen(view.convert(view.bounds, to: nil))
-            let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
-            CGWarpMouseCursorPosition(
-                CGPoint(x: rectOnScreen.midX, y: primaryHeight - rectOnScreen.midY))
+            park(in: view)
             guard CGAssociateMouseAndMouseCursorPosition(0) == .success else { return false }
             NSCursor.hide()
         }
         captured = true
         disassociated = disassociate
         return true
+    }
+
+    /// The view moved under a frozen cursor (a resize, leaving fullscreen): park it mid-view
+    /// again, or the next click lands on whatever window is under the old spot. Only on a
+    /// real move: every warp suppresses local mouse events for a moment.
+    func repark(in view: NSView) {
+        guard disassociated, let window = view.window else { return }
+        if window.convertToScreen(view.convert(view.bounds, to: nil)) != parkedRect {
+            park(in: view)
+        }
+    }
+
+    /// The view's screen rect at the last park.
+    private var parkedRect: NSRect?
+
+    private func park(in view: NSView) {
+        guard let window = view.window, view.bounds.width > 0 else { return }
+        let rectOnScreen = window.convertToScreen(view.convert(view.bounds, to: nil))
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+        CGWarpMouseCursorPosition(
+            CGPoint(x: rectOnScreen.midX, y: primaryHeight - rectOnScreen.midY))
+        parkedRect = rectOnScreen
     }
 
     func release() {
@@ -208,6 +227,8 @@ public final class StreamLayerView: NSView {
     /// flipped live by ⌃⌥⇧M. A live flip re-engages capture in the new model so
     /// disassociation + the abs/rel choice swap atomically. Main-thread only.
     private var desktopMouse = false
+    /// Wire buttons whose press reached the host; only their releases follow. Main-thread only.
+    private var pressedButtons = Set<UInt32>()
     /// Cursor channel (M2): the host forwards shape/state and WE draw the pointer. Active
     /// when the Welcome carried `HOST_CAP_CURSOR` (only sessions that advertised the client
     /// cap get it). Shapes cache by serial; state is latest-wins. Main-thread only.
@@ -364,6 +385,7 @@ public final class StreamLayerView: NSView {
         super.layout()
         attemptPendingCapture() // bounds become real here on first presentation
         layoutPresenter() // keep the stage-2 sublayer aspect-fit to the view
+        cursorCapture.repark(in: self) // a frozen cursor must stay over the moved view
     }
 
     public override func setFrameSize(_ newSize: NSSize) {
@@ -818,7 +840,8 @@ public final class StreamLayerView: NSView {
     ///
     /// In the desktop mouse model the cursor is NOT frozen, so bare `.mouseMoved` events are
     /// only generated while `window.acceptsMouseMovedEvents` is true — we enable it here and
-    /// restore it on removal so absolute hover-motion keeps flowing without a click held.
+    /// restore it on removal so absolute hover-motion keeps flowing without a click held. A
+    /// press there reaches the host only on the video.
     private func installMouseMonitor() {
         guard mouseEventMonitor == nil else { return }
         if desktopMouse {
@@ -843,12 +866,22 @@ public final class StreamLayerView: NSView {
                 } else {
                     ic.sendMotion(dx: Float(event.deltaX), dy: Float(event.deltaY)) // no y-negation
                 }
-            case .leftMouseDown: ic.sendMouseButton(1, pressed: true)
-            case .leftMouseUp: ic.sendMouseButton(1, pressed: false)
-            case .rightMouseDown: ic.sendMouseButton(3, pressed: true)
-            case .rightMouseUp: ic.sendMouseButton(3, pressed: false)
-            case .otherMouseDown: ic.sendMouseButton(self.wireButton(for: event), pressed: true)
-            case .otherMouseUp: ic.sendMouseButton(self.wireButton(for: event), pressed: false)
+            case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+                if self.desktopMouse {
+                    // The pointer is free: a press on the title bar, a bar or a HUD button is
+                    // the local UI's. One on the video lands where it was pressed.
+                    guard let p = self.hostPoint(from: event) else { break }
+                    ic.sendMouseAbs(x: p.x, y: p.y, surfaceWidth: p.w, surfaceHeight: p.h)
+                }
+                let button = self.wireButton(for: event)
+                self.pressedButtons.insert(button)
+                ic.sendMouseButton(button, pressed: true)
+            case .leftMouseUp, .rightMouseUp, .otherMouseUp:
+                // Only the release of a press the host saw.
+                let button = self.wireButton(for: event)
+                if self.pressedButtons.remove(button) != nil {
+                    ic.sendMouseButton(button, pressed: false)
+                }
             default: break
             }
             return event
@@ -857,6 +890,7 @@ public final class StreamLayerView: NSView {
     }
 
     private func removeMouseMonitor() {
+        pressedButtons.removeAll() // the release flushes them host-side
         if let monitor = mouseEventMonitor {
             NSEvent.removeMonitor(monitor)
             mouseEventMonitor = nil
@@ -899,10 +933,12 @@ public final class StreamLayerView: NSView {
         return HostPoint(x: hx, y: hy, w: v.width, h: v.height)
     }
 
-    /// NSEvent `buttonNumber` → GameStream wire id for the "other" buttons: 2 = middle,
-    /// 3 = first side (X1), 4 = second side (X2). Unknown extras fall back to middle.
+    /// NSEvent `buttonNumber` → GameStream wire id: 1 = left, 3 = right, 2 = middle,
+    /// 4 = first side (X1), 5 = second side (X2). Unknown extras fall back to middle.
     private func wireButton(for event: NSEvent) -> UInt32 {
         switch event.buttonNumber {
+        case 0: return 1 // left
+        case 1: return 3 // right
         case 2: return 2 // middle
         case 3: return 4 // X1
         case 4: return 5 // X2
@@ -1142,6 +1178,7 @@ public final class StreamLayerView: NSView {
         cursorChannelActive = false
         cursorState = nil
         hostCursors.removeAll()
+        lastWornShape = nil
         sentClientDraws = nil
         window?.invalidateCursorRects(for: self)
     }

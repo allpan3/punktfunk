@@ -241,7 +241,8 @@ impl StreamState {
         self.enc_derive(self.fec_target.load(Ordering::Relaxed))
     }
 
-    /// Swap the built pipeline in and forget every owed AU. The caller retires the old lease,
+    /// Swap the built pipeline in and forget every owed AU and the last forwarded cursor shape:
+    /// a new capturer numbers its shapes from 1 again. The caller retires the old lease,
     /// re-arms the IDR clock, and re-reads `enc_src` as its path requires.
     pub(super) fn adopt_pipeline(&mut self, p: Pipeline) {
         // A ceiling was learned from the encoder this one replaces. It survives
@@ -259,6 +260,9 @@ impl StreamState {
         self.fec_pending = None;
         self.adopt_reframe(p.reframe);
         self.capturer = p.capturer;
+        if let Some(fwd) = self.cursor_fwd.as_mut() {
+            *fwd = super::super::cursor_fwd::CursorForwarder::new();
+        }
         self.enc = p.enc;
         self.frame = p.frame;
         self.interval = p.interval;

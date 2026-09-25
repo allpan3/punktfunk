@@ -106,6 +106,9 @@ struct CaptureSignals {
     /// Overlay from every buffer's `SPA_META_Cursor`, including cursor-only
     /// buffers that never become frames. Gamescope XFixes publishes here too.
     cursor_live: Arc<std::sync::Mutex<Option<pf_frame::CursorOverlay>>>,
+    /// The host forwards or blends [`Self::cursor_live`] itself, so the CPU copy must not
+    /// bake the pointer into its pixels as well. Set by [`Capturer::set_cursor_forward`].
+    host_places_cursor: Arc<AtomicBool>,
     /// Packed `(w << 32) | h`; `0` until `param_changed`. Gamescope cursor
     /// maps root-space into frame space (`-w/-h` vs `-W/-H` are independent).
     frame_size: Arc<std::sync::atomic::AtomicU64>,
@@ -143,6 +146,7 @@ impl CaptureSignals {
             hdr_negotiated: Arc::new(AtomicBool::new(false)),
             gpu_dmabuf_offer: Arc::new(AtomicBool::new(false)),
             cursor_live: Arc::new(std::sync::Mutex::new(None)),
+            host_places_cursor: Arc::new(AtomicBool::new(false)),
             frame_size: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             importer: Arc::new(std::sync::Mutex::new(None)),
             has_importer: Arc::new(AtomicBool::new(false)),
@@ -531,6 +535,14 @@ impl Capturer for PortalCapturer {
             .lock()
             .ok()
             .and_then(|slot| slot.clone())
+    }
+
+    fn set_cursor_forward(&mut self, _on: bool) {
+        // Either way the host places the pointer from `cursor()`: forwarded, or on the frame
+        // for the encoder blend.
+        self.signals
+            .host_places_cursor
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn attach_gamescope_cursor(&mut self, targets: crate::GamescopeCursorTargets) {

@@ -150,8 +150,8 @@ public final class StreamViewController: StreamViewControllerBase {
     /// The decoded frames are HDR — what the display-mode request follows.
     private var frameHDR = false
     #endif
-    #if os(iOS)
     private var inputCapture: InputCapture?
+    #if os(iOS)
     fileprivate var captured = false
     private var pointerInteraction: UIPointerInteraction?
     /// Capture state at the last resign, restored on the next foreground — otherwise the
@@ -220,6 +220,8 @@ public final class StreamViewController: StreamViewControllerBase {
             guard captureEnabled != oldValue else { return }
             #if os(iOS)
             setCaptured(captureEnabled)
+            #else
+            inputCapture?.setForwarding(captureEnabled)
             #endif
         }
     }
@@ -491,15 +493,12 @@ public final class StreamViewController: StreamViewControllerBase {
         }
         streamView.onPointerButton = { [weak self] button, down in
             guard let self else { return }
-            // Released → a trackpad/mouse click into the video RE-ENGAGES capture (the iPad
-            // analogue of macOS's `mouseDown → engageCapture(fromClick:)`, and the click-mirror of
-            // the ⌘⎋ / ⌃⌥⇧Q keyboard toggles). Only the button-DOWN engages; that click is the local
-            // engage gesture, so it's suppressed toward the host (`fromClick`) and never forwarded —
-            // its release is swallowed by InputCapture's suppress latch, whichever path delivers it.
-            // (Finger taps are untouched: touch always plays directly, so only the indirect pointer
-            // re-captures.) Captured already → the absolute path forwards the button as before.
+            // Released → a primary press into the video re-engages capture, like macOS's
+            // `engageCapture(fromClick:)`. It is the local gesture, never forwarded: InputCapture's
+            // latch swallows its release. Only button 1 has that latch; another button would send
+            // a lone release and eat the next click. Captured → the absolute path forwards it.
             if !self.captured {
-                if down, self.captureEnabled { self.setCaptured(true, fromClick: true) }
+                if down, button == 1, self.captureEnabled { self.setCaptured(true, fromClick: true) }
                 return
             }
             guard self.inputCapture?.gcMouseForwarding == false else { return }
@@ -540,14 +539,6 @@ public final class StreamViewController: StreamViewControllerBase {
         }
         capture.start()
         inputCapture = capture
-        #if os(tvOS)
-        // tvOS has no click-to-capture and no pointer lock, so nothing here ever flips these the
-        // way `setCaptured` does on iOS — an attached Bluetooth mouse or keyboard had its motion,
-        // buttons, scroll and every key dropped while the handlers sat installed. A session IS the
-        // capture on this platform, so forwarding runs for as long as one does.
-        capture.setForwarding(true)
-        capture.gcMouseForwarding = true
-        #endif
         // Match-window (C3): when ON, follow the scene's pixel size so a resizable iPad scene
         // streams 1:1 (pixel-exact) instead of the presenter resampling a fixed-mode frame into it.
         // `viewDidLayoutSubviews` feeds it — covers Stage Manager / Split View resizes and rotation.
@@ -671,6 +662,13 @@ public final class StreamViewController: StreamViewControllerBase {
         #endif
 
         #if os(tvOS)
+        // No click-to-capture and no pointer lock here: a session IS the capture, so an attached
+        // Bluetooth mouse or keyboard forwards for as long as one runs — once it is trusted.
+        let capture = InputCapture(connection: connection)
+        capture.start()
+        capture.gcMouseForwarding = true
+        capture.setForwarding(captureEnabled)
+        inputCapture = capture
         // The TV's mode switch (requested in applyDisplayCriteriaIfNeeded) completes
         // asynchronously, and a dynamic-range-only switch doesn't re-layout by itself —
         // re-layout on the switch/mode notifications so the presenter sees the new EDR
@@ -713,6 +711,8 @@ public final class StreamViewController: StreamViewControllerBase {
         }
         #endif
         #if os(tvOS)
+        inputCapture?.stop()
+        inputCapture = nil
         // Return the TV to the user's preferred mode — the home screen must not stay in the
         // session's HDR10/refresh mode.
         sessionDisplayManager?.preferredDisplayCriteria = nil

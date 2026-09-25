@@ -408,6 +408,8 @@ fn spawn(state: Arc<AppState>) -> Result<Running> {
             // SS_PEN/SS_TOUCH → tablet / wire touch. Clients send these only after seeing
             // `SS_FF_PEN_TOUCH_EVENTS` (rtsp.rs).
             let mut pointer = super::pen::GsPointer::new();
+            // The injector outlives the peer: whatever it still holds is released when it goes.
+            let mut held = crate::inject::held::HeldInput::default();
             // One host→client seq for every outbound message (rumble + HDR). The GCM nonce
             // is derived from `seq`; a per-type counter would reuse (key, nonce) pairs.
             let mut host_seq: u32 = 0;
@@ -517,6 +519,9 @@ fn spawn(state: Arc<AppState>) -> Result<Running> {
                                 // held tool/tip kernel-side.
                                 pads = SessionPads::new();
                                 pointer = super::pen::GsPointer::new();
+                                for ev in held.release() {
+                                    let _ = inj_tx.send(ev);
+                                }
                                 drops.end_of_session();
                                 // This stream is the session's liveness. Moonlight holds it
                                 // for the whole stream; a quit or drop often sends no RTSP
@@ -546,6 +551,7 @@ fn spawn(state: Arc<AppState>) -> Result<Running> {
                                     &mut detected,
                                     &mut decrypt_fails,
                                     &inj_tx,
+                                    &mut held,
                                     &mut pads,
                                     &mut pointer,
                                     access.as_ref().map(|a| a.mask).unwrap_or(GRANT_ALL),
@@ -592,6 +598,9 @@ fn spawn(state: Arc<AppState>) -> Result<Running> {
                         hdr_signalled = None;
                         pads = SessionPads::new();
                         pointer = super::pen::GsPointer::new();
+                        for ev in held.release() {
+                            let _ = inj_tx.send(ev);
+                        }
                         drops.end_of_session();
                     }
                 }
@@ -670,6 +679,7 @@ fn on_receive(
     detected: &mut Option<Scheme>,
     decrypt_fails: &mut u64,
     inj_tx: &Sender<InputEvent>,
+    held: &mut crate::inject::held::HeldInput,
     pads: &mut SessionPads,
     pointer: &mut super::pen::GsPointer,
     grants: u32,
@@ -774,6 +784,7 @@ fn on_receive(
         if permitted(grants, GrantClass::Pointer, drops) {
             state.counters.input_rich.fetch_add(1, Ordering::Relaxed);
             pointer.apply(&p, |ev| {
+                held.note(&ev);
                 let _ = inj_tx.send(ev);
             });
         }
@@ -811,6 +822,7 @@ fn on_receive(
     for ev in events {
         if permitted(grants, classify(ev.kind), drops) {
             state.counters.input_events.fetch_add(1, Ordering::Relaxed);
+            held.note(&ev);
             let _ = inj_tx.send(ev);
         }
     }

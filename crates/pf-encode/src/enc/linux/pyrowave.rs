@@ -1981,8 +1981,11 @@ impl PyroWaveEncoder {
         })();
         if let Err(e) = record_and_submit {
             // SAFETY: every closure error arm is RECORDING/INVALID/EXECUTABLE — never PENDING
-            // (nothing was enqueued) — and the pool allows the reset.
+            // (nothing was enqueued) — and the pool allows the reset. The reset discards any
+            // cursor upload recorded here, so the slot forgets it had one.
             let _ = dev.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty());
+            self.slots[slot].cursor_serial = u64::MAX;
+            self.slots[slot].cursor_ready = false;
             return Err(e);
         }
         // GPU may be executing: do not touch `cmd`, y/uv, or `csc_set` until retired.
