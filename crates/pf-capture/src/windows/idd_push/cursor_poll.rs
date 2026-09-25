@@ -185,10 +185,15 @@ fn run(
         }
 
         let flags = ci.flags.0;
-        let showing = flags & CURSOR_SHOWING != 0 && flags & CURSOR_SUPPRESSED == 0;
+        // Touch or pen input: Windows stops drawing the pointer, but no app hid it. Publishing
+        // a hide would read as a grab and flip the client to relative; keep the last snapshot.
+        if flags & CURSOR_SUPPRESSED != 0 {
+            continue;
+        }
+        let showing = flags & CURSOR_SHOWING != 0;
 
-        // Rasterise on handle change only. Hidden cursors keep the cached shape
-        // (hidden-but-known needs a seen bitmap). Animated cursors publish frame 0.
+        // Rasterise on handle change only. Hidden cursors keep the cached shape.
+        // Animated cursors publish frame 0.
         let handle = ci.hCursor.0 as isize;
 
         // Handle identity cannot see a re-render. Windows rebuilds system cursors
