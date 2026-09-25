@@ -323,6 +323,12 @@ public final class SessionAudio {
                 try? session.setPreferredOutputNumberOfChannels(wireChannels)
             }
             try session.setActive(true)
+            // Apple validates the channel ask against the ACTIVE route's maximum, so the ask
+            // above can come back as 2. Ask again, clamped: an 8-channel wire on a 5.1 AVR gets 6.
+            let reachable = min(wireChannels, session.maximumOutputNumberOfChannels)
+            if reachable > 2, session.outputNumberOfChannels < reachable {
+                try? session.setPreferredOutputNumberOfChannels(reachable)
+            }
             // What we were actually GRANTED, not what we asked for. All three are best-effort, and
             // the ring's behaviour depends on the quantum it really gets — without this, a report of
             // audio jitter arrives with no way to tell a 10 ms session from a 5 ms or a 23 ms one,
