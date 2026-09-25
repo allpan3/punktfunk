@@ -192,7 +192,12 @@ char *punktfunk_console_next_event(const PunktfunkConsole *c);
 // `c` is live.
 char *punktfunk_console_drain_cmds(const PunktfunkConsole *c);
 
-// Free a string from `punktfunk_console_next_event` or `punktfunk_console_drain_cmds`.
+// The console's background palettes in cycle order, as `[{"id", "name"}]`: what a native
+// picker offers for `ui_palette`. Free with `punktfunk_console_string_free`.
+char *punktfunk_console_palettes(void);
+
+// Free a string from `punktfunk_console_next_event`, `punktfunk_console_drain_cmds` or
+// `punktfunk_console_palettes`.
 //
 // # Safety
 // `s` is NULL or one of those strings, freed once.

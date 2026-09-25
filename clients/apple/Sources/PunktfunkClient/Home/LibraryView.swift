@@ -888,7 +888,7 @@ struct LibraryView: View {
             if Task.isCancelled { break }
             do {
                 // `launchersFirst` groups launcher entries ahead of titles once, here, so the grid
-                // and the gamepad coverflow both inherit the D4 ordering.
+                // inherits the D4 ordering.
                 let fetched = try await LibraryClient.fetch(
                     address: current.address,
                     port: current.effectiveMgmtPort,
@@ -997,7 +997,7 @@ struct LibraryView: View {
     }
 
     /// Every launch from this shelf goes through here, so the player's position is recorded on
-    /// exactly one path however they picked the title — a tap, the keyboard, or the coverflow.
+    /// exactly one path however they picked the title — a tap or the keyboard.
     /// `nil` in browse-only mode, which is what keeps the tiles untappable there.
     private var launchAndRemember: ((String) -> Void)? {
         guard onLaunch != nil else { return nil }
@@ -1026,9 +1026,7 @@ struct LibraryView: View {
 
     /// The catalog in display order — `LibraryOrder.display`, the desktop's `order()`: launcher
     /// entries lead, and anything already running leads WITHIN its band, so getting back into it
-    /// is the first thing on the screen rather than something to scroll for. (Its predecessor put
-    /// every running entry first, over `launchersFirst`, so a running game jumped ahead of the
-    /// launcher prefix and the coverflow's heading read GAMES · LAUNCHERS · GAMES along the strip.)
+    /// is the first thing on the screen rather than something to scroll for.
     private var ordered: [GameEntry] {
         // …and the desktop tile leads all of it, so streaming the host itself is one press
         // rather than a menu — and a host with no plugins still has something to press.
@@ -1206,7 +1204,7 @@ struct GameCard: View {
             }
             // Opposite corner from the store badge so the two never collide on a narrow tile.
             .overlay(alignment: .topTrailing) {
-                if isRunning { RunningBadge(compact: true) }
+                if isRunning { RunningBadge() }
             }
     }
 }

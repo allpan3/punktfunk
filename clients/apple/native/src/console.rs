@@ -712,7 +712,20 @@ pub unsafe extern "C" fn punktfunk_console_drain_cmds(c: *const PunktfunkConsole
     })
 }
 
-/// Free a string from `punktfunk_console_next_event` or `punktfunk_console_drain_cmds`.
+/// The console's background palettes in cycle order, as `[{"id", "name"}]`: what a native
+/// picker offers for `ui_palette`. Free with `punktfunk_console_string_free`.
+#[unsafe(no_mangle)]
+pub extern "C" fn punktfunk_console_palettes() -> *mut c_char {
+    guard(std::ptr::null_mut(), || {
+        let list: Vec<_> = (pf_console_ui::library::PALETTES.iter())
+            .map(|p| serde_json::json!({ "id": p.id, "name": p.name }))
+            .collect();
+        out_string(serde_json::Value::from(list).to_string())
+    })
+}
+
+/// Free a string from `punktfunk_console_next_event`, `punktfunk_console_drain_cmds` or
+/// `punktfunk_console_palettes`.
 ///
 /// # Safety
 /// `s` is NULL or one of those strings, freed once.

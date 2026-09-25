@@ -53,15 +53,12 @@ import io.unom.punktfunk.testRumble
 import kotlin.math.roundToInt
 
 /**
- * The gamepad/console UI drawn by the Skia shell (`crates/pf-console-ui`), hosted on a
- * `SurfaceView` this composable owns and driven through [SkiaConsole]. Same call shape as the
- * Compose `GamepadShell` it replaces (`App.kt` picks one by [SkiaConsole.wanted]).
+ * The console UI drawn by the Skia shell (`crates/pf-console-ui`), hosted on a `SurfaceView` this
+ * composable owns and driven through [SkiaConsole]. `App.kt` shows it when [SkiaConsole.wanted].
  *
  * What lives here is only what needs a composition: the surface lifecycle, the safe-area insets,
- * the pad probes (raw pad → the shared menu synthesizer, over JNI), the system Back, the
- * platform-native sub-screen the console can open (Licences — Compose, drawn over the surface;
- * Connected controllers is the console's own Skia screen now), and the two intents the app hands
- * over on the way in (a deep link, "come back to this shelf").
+ * the pad probes (raw pad → the shared menu synthesizer, over JNI), the system Back, and the two
+ * intents the app hands over on the way in (a deep link, "come back to this shelf").
  */
 @Composable
 fun SkiaConsoleShell(

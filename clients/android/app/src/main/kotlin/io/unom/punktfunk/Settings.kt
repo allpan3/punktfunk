@@ -180,14 +180,9 @@ data class Settings(
      */
     val gamepadUiMode: String = GAMEPAD_UI_WHEN_CONNECTED,
     /**
-     * Which colour family the console (gamepad) UI's living backdrop drifts through — the
-     * cross-client `ui_palette` key: `"violet"` (the brand default), then the other dark
-     * fields, then the six pale ones. See
-     * [GamepadPalette], whose table and maths mirror the desktop console's and the Apple
-     * client's under the same names. Presentation only: nothing
-     * about a stream depends on it, so it is a device preference and never part of a preset.
-     * An unknown value reads as the default rather than failing — a newer client may have shipped
-     * a palette this build doesn't know.
+     * The console's backdrop palette — the cross-client `ui_palette` key, named by the table in
+     * `pf-console-ui`'s `theme.rs`. A device preference, never part of a preset. An unknown value
+     * reads as the default: a newer client may have shipped a palette this build doesn't know.
      */
     val uiPalette: String = "violet",
     /**

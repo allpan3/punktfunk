@@ -18,7 +18,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -273,11 +272,8 @@ private fun rememberInputTest(
     // The console's refusal thud, on whatever actuator the driving pad or this device has.
     val haptics by rememberUpdatedState(rememberConsoleHaptics())
     DisposableEffect(Unit) {
-        // One entry on the MainActivity probe stack, removed by identity on the way out — the rule
-        // GamepadNavEffect2D follows. During the console shell's push/pop BOTH screens are briefly
-        // composed, and only the identity removal keeps this screen's teardown from taking the
-        // arriving screen's claim with it. The same teardown also runs when this screen hands the
-        // pad to its own input test and back.
+        // One entry on the MainActivity probe stack, removed by identity on the way out, so a
+        // teardown never takes another screen's claim with it.
         val keyProbe: (KeyEvent) -> Boolean = probe@{ event ->
             if (!Gamepad.isPad(event.device)) return@probe false
             // Read ONCE, up front: the test can end inside this very event, and the release that

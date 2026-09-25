@@ -412,10 +412,6 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
         }
     }
 
-    /// A remote or keyboard Back (tvOS `.onExitCommand`). `false` = the system's press.
-    @discardableResult
-    func back() -> Bool { bridge.menu(.back, from: .keys) }
-
     // MARK: - what the console raises
 
     private func handle(event raw: String) {

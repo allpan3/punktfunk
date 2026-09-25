@@ -1,7 +1,6 @@
 package io.unom.punktfunk.screenshots
 
 import android.content.Context
-import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.BlendMode
@@ -64,18 +63,10 @@ import io.unom.punktfunk.ConnectPhase
 import io.unom.punktfunk.OsdScaled
 import coil.ImageLoader
 import coil.test.FakeImageLoaderEngine
-import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.hazeSource
 import io.unom.punktfunk.AddHostSheet
-import io.unom.punktfunk.ConsoleHeader
-import io.unom.punktfunk.ConsoleLegendInset
 import io.unom.punktfunk.ControllersScreen
 import io.unom.punktfunk.TouchGrid
-import io.unom.punktfunk.GamepadHintBar
-import io.unom.punktfunk.PadGlyph
 import io.unom.punktfunk.PadInfo
-import io.unom.punktfunk.consoleLegendInsets
-import io.unom.punktfunk.consoleSafeArea
 import io.unom.punktfunk.kit.Gamepad
 import io.unom.punktfunk.kit.library.Artwork
 import io.unom.punktfunk.kit.library.GameEntry
