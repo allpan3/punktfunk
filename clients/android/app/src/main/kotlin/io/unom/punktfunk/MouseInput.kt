@@ -122,6 +122,10 @@ class MouseForwarder(
     /** Chord-released: no auto re-engage (start / click) until the user opts back in. */
     private var userReleased = false
 
+    /** The quick-action ring is up: the mouse is the ring's, uncaptured, and forwards nothing. */
+    private var suspended = false
+    private var regrabAfterSuspend = false
+
     private val heldButtons = mutableSetOf<Int>()
     private val scrollNorm = ScrollNormalizer()
     private var moveAccX = 0f
@@ -129,6 +133,7 @@ class MouseForwarder(
 
     /** Uncaptured mouse events on the TOUCH stream (position while a button is down). */
     fun onTouchEvent(ev: MotionEvent): Boolean {
+        if (suspended) return false // the ring's clickable slots take it
         if (!pointerGranted) return true // inert: consumed over the stream, nothing forwards
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
@@ -151,6 +156,7 @@ class MouseForwarder(
 
     /** Uncaptured mouse events on the GENERIC stream (hover motion, wheel, button edges). */
     fun onGenericMotion(ev: MotionEvent): Boolean {
+        if (suspended) return false
         if (!pointerGranted) return true // inert: consumed over the stream, nothing forwards
         when (ev.actionMasked) {
             MotionEvent.ACTION_HOVER_MOVE -> sendAbs(ev)
@@ -170,7 +176,8 @@ class MouseForwarder(
      * gesture layer is the touchpad story); returning false leaves those to the framework.
      */
     fun onCapturedPointer(ev: MotionEvent): Boolean {
-        if (!pointerGranted) return true // a revocation is racing the release of the grab
+        // A revocation or the ring is racing the release of the grab.
+        if (!pointerGranted || suspended) return true
         if (ev.actionMasked == MotionEvent.ACTION_SCROLL && ev.isFromSource(InputDevice.SOURCE_TOUCHPAD)) {
             wheel(ev)
             return true
@@ -226,6 +233,20 @@ class MouseForwarder(
         captured = has
         // Losing the grab (focus loss, chord) must not leave buttons held on the host.
         if (!has) flushButtons()
+    }
+
+    /** The ring opens (`true`) or closes: lift what is held, hand the pointer to it, take it back. */
+    fun setSuspended(on: Boolean) {
+        if (on == suspended) return
+        suspended = on
+        if (on) {
+            flushButtons()
+            regrabAfterSuspend = captured
+            if (captured) onReleaseCapture?.invoke()
+        } else if (regrabAfterSuspend) {
+            regrabAfterSuspend = false
+            if (pointerGranted) onRequestCapture?.invoke()
+        }
     }
 
     /** Stream teardown: lift anything held and let the grab go. */

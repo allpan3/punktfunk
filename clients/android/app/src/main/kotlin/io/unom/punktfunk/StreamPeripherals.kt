@@ -57,6 +57,8 @@ internal class StreamPeripherals(
     private var dsUsbReceiver: BroadcastReceiver? = null
     private var decor: android.view.View? = null
     private var priorPointerIcon: android.view.PointerIcon? = null
+    private val hiddenPointer =
+        android.view.PointerIcon.getSystemIcon(context, android.view.PointerIcon.TYPE_NULL)
 
     fun start() {
         activity?.streamHandle = handle // route hardware keys to this session
@@ -114,6 +116,9 @@ internal class StreamPeripherals(
         ring.onOpenChange = { open ->
             router.setRingOpen(open)
             activity?.ringKeys = if (open) ({ nav -> ring.nav(nav) }) else null
+            // A mouse drives the ring like a finger: its own pointer, and no click lands in the game.
+            mouse.setSuspended(open)
+            decor?.pointerIcon = if (open) priorPointerIcon else hiddenPointer
         }
         // Physical mouse: uncaptured hover/click/wheel forwards as absolute pointing; captured
         // (setting or the Ctrl+Alt+Shift+Q chord) raw deltas forward as relative mouse-look.
@@ -121,10 +126,7 @@ internal class StreamPeripherals(
         // the video, is the one the user sees (twin of the desktop clients' hidden cursor).
         decor = activity?.window?.decorView
         priorPointerIcon = decor?.pointerIcon
-        decor?.pointerIcon = android.view.PointerIcon.getSystemIcon(
-            context,
-            android.view.PointerIcon.TYPE_NULL,
-        )
+        decor?.pointerIcon = hiddenPointer
         val viewConfig = android.view.ViewConfiguration.get(context)
         mouse = MouseForwarder(
             handle,
