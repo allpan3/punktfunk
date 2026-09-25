@@ -405,7 +405,8 @@ pub fn privileged_field(
 /// so the entry names a title rather than carrying a program. `exec` names a template in the
 /// publishing plugin's manifest, which the host resolves ([`crate::library::exec`]).
 /// Fail closed: a kind added to `launch.rs` and forgotten here is operator-only.
-/// `gog` is listed because `launch::gog_spawn` confines the exe to a GOG install;
+/// `gog` is listed because `launch::gog_spawn` confines the exe to a GOG install, `gamebar`
+/// because the exe must be on a signed-in user's Game Bar list;
 /// `command` is never listed (`cmd.exe /c` / `sh -c`).
 const UNPRIVILEGED_LAUNCH_KINDS: &[&str] = &[
     "steam_appid",
@@ -423,6 +424,7 @@ const UNPRIVILEGED_LAUNCH_KINDS: &[&str] = &[
     "battlenet",
     "exec",
     "desktop_id",
+    "gamebar",
 ];
 
 /// Path segment / event source / console label. `manual` is reserved (the no-provider sentinel
@@ -553,6 +555,10 @@ fn entry_fault(
             "battlenet" => bad(
                 valid_battlenet_code(&launch.value),
                 "must be a launch code of [A-Za-z0-9_]",
+            ),
+            "gamebar" => bad(
+                valid_gamebar_exe(&launch.value),
+                "must be an absolute path to an `.exe`",
             ),
             #[cfg(not(windows))]
             "desktop_id" => bad(
@@ -1219,6 +1225,7 @@ mod tests {
                 "battlenet",
                 "exec",
                 "desktop_id",
+                "gamebar",
             ],
             "widening this set hands the plugin lane a new launch kind — do it on purpose"
         );

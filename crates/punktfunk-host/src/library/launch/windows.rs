@@ -179,6 +179,8 @@ fn windows_launch_for(spec: &LaunchSpec) -> Option<WinRecipe> {
             .map(|uri| WinRecipe::handoff(format!("explorer.exe \"{uri}\""))),
         // Direct exe spawn (not a Galaxy hand-off). `gog_spawn` re-confines the plugin triple.
         "gog" => gog_spawn(&spec.value).map(|(cmdline, workdir)| WinRecipe::game(cmdline, workdir)),
+        // Direct exe spawn, only of a path a signed-in user's Game Bar list names.
+        "gamebar" => gamebar_spawn_in(&spec.value, &gamebar_exes()),
         // shell:AppsFolder AUMID. UWP activation fails as SYSTEM/session-0; spawn uses the user token.
         "aumid" => valid_aumid(&spec.value).then(|| {
             WinRecipe::handoff(format!("explorer.exe \"shell:AppsFolder\\{}\"", spec.value))
@@ -590,6 +592,63 @@ fn gog_install_dirs() -> Vec<String> {
         .collect()
 }
 
+/// A `gamebar` exe, run from its own folder, when `listed` names that exact path. The list
+/// decides what may run; the plugin only picks from it.
+fn gamebar_spawn_in(exe: &str, listed: &[String]) -> Option<WinRecipe> {
+    if !valid_gamebar_exe(exe) {
+        return None;
+    }
+    if !listed.iter().any(|l| l.eq_ignore_ascii_case(exe)) {
+        tracing::warn!(
+            exe,
+            "gamebar launch: no signed-in user's Game Bar list names the exe — refusing it"
+        );
+        return None;
+    }
+    let workdir = Path::new(exe).parent().map(Path::to_path_buf);
+    Some(WinRecipe::game(format!("\"{exe}\""), workdir))
+}
+
+/// A signed-in person's hive. Service hives are writable by their service, and the plugin
+/// runner is LocalService (`S-1-5-19`).
+fn user_sid(name: &str) -> bool {
+    name.strip_prefix("S-1-5-21-").is_some_and(|rest| {
+        !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit() || b == b'-')
+    })
+}
+
+/// Every `MatchedExeFullPath` under each loaded user hive's `System\GameConfigStore\Children`:
+/// the exes Game Bar recorded as games. A signed-out user's hive is not loaded.
+fn gamebar_exes() -> Vec<String> {
+    use winreg::enums::{HKEY_USERS, KEY_READ};
+    use winreg::RegKey;
+
+    let users = RegKey::predef(HKEY_USERS);
+    users
+        .enum_keys()
+        .flatten()
+        .filter(|sid| user_sid(sid))
+        .filter_map(|sid| {
+            users
+                .open_subkey_with_flags(format!(r"{sid}\System\GameConfigStore\Children"), KEY_READ)
+                .ok()
+        })
+        .flat_map(|children| {
+            children
+                .enum_keys()
+                .flatten()
+                .filter_map(|n| {
+                    children
+                        .open_subkey_with_flags(&n, KEY_READ)
+                        .ok()?
+                        .get_value::<String, _>("MatchedExeFullPath")
+                        .ok()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 /// Windows path containment: case-insensitive, either separator, `..` refused
 /// (it climbs out of the prefix the test just accepted). String compare, not
 /// [`Path::starts_with`], which is case-sensitive — plugin spelling may differ.
@@ -773,6 +832,35 @@ mod tests {
         assert!(wd2.is_none());
         assert!(spawn("").is_none());
     }
+    /// The exe arrives over the provider API: Game Bar's list, read by the host, decides.
+    #[test]
+    fn gamebar_spawn_runs_only_a_listed_exe_from_its_folder() {
+        let listed = [r"D:\Games\Hollow Knight\hollow_knight.exe".to_string()];
+        let r = gamebar_spawn_in(r"d:\games\hollow knight\HOLLOW_KNIGHT.exe", &listed).unwrap();
+        assert_eq!(r.cmdline, r#""d:\games\hollow knight\HOLLOW_KNIGHT.exe""#);
+        assert_eq!(r.workdir, Some(PathBuf::from(r"d:\games\hollow knight")));
+        assert!(r.owns_game);
+        // Not on the list, or on it but no longer one quoted argv element: nothing runs.
+        assert!(gamebar_spawn_in(r"C:\Windows\System32\cmd.exe", &listed).is_none());
+        assert!(gamebar_spawn_in(r"D:\Games\Hollow Knight\hollow_knight.exe", &[]).is_none());
+        let quoted = [r#"C:\x.exe" /c calc"#.to_string()];
+        assert!(gamebar_spawn_in(&quoted[0], &quoted).is_none());
+    }
+
+    #[test]
+    fn gamebar_reads_only_the_hives_of_people() {
+        assert!(user_sid("S-1-5-21-2040749213-3813789928-2098397110-1001"));
+        for sid in [
+            "S-1-5-19",
+            "S-1-5-18",
+            ".DEFAULT",
+            "S-1-5-21-",
+            "S-1-5-21-2040749213-3813789928-2098397110-1001_Classes",
+        ] {
+            assert!(!user_sid(sid), "{sid}");
+        }
+    }
+
     /// Triple arrives over the provider API: exe must sit in a host-found GOG install.
     #[test]
     fn gog_spawn_refuses_an_exe_outside_every_gog_install() {
