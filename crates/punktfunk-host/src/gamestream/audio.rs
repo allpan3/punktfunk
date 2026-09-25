@@ -270,7 +270,10 @@ fn run(
     };
     let result = audio_body(&mut *cap, &sock, aes_key, rikeyid, params, running, on_lost);
     cap.idle(); // release the Linux stream-sink routing claim between sessions
-    audio::park_audio_capture(audio_cap, cap); // drop on Windows (restores default); keep on Linux
+                // A failed body may mean a dead capture thread; parked, every later session would reuse it.
+    if result.is_ok() {
+        audio::park_audio_capture(audio_cap, cap); // drop on Windows (restores default); keep on Linux
+    }
     result
 }
 
