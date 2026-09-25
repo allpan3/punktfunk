@@ -1158,6 +1158,7 @@ public final class StreamLayerView: NSView {
         cursorChannelActive = false
         cursorState = nil
         hostCursors.removeAll()
+        lastWornShape = nil
         sentClientDraws = nil
         window?.invalidateCursorRects(for: self)
     }
