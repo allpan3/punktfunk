@@ -160,7 +160,9 @@ internal class StreamPeripherals(
                 }
             }
         }
-        mouse.onReleaseCapture = { keyCapture()?.releasePointerCapture() }
+        // Capture is the window's, so the decor view releases it too — and unlike the capture
+        // view it is still attached when stop() runs from the composable's dispose.
+        mouse.onReleaseCapture = { decor?.releasePointerCapture() }
         activity?.mouseForwarder = mouse
         // TV remote-as-pointer: hold SELECT ≈ 0.8 s to toggle; the D-pad then glides the host
         // cursor (see RemotePointer). TV only — a phone's remote-less keys stay on the VK path.
