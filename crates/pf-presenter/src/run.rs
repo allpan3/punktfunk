@@ -312,6 +312,11 @@ struct StreamState {
     last_hint: Option<bool>,
     /// When `last_hint` last changed; the flip waits out [`HINT_SETTLE`] from here.
     hint_since: std::time::Instant,
+    /// When the user last moved the mouse; the local cursor follows host-driven motion only
+    /// after [`FOLLOW_HOST_AFTER`] of stillness.
+    last_user_motion: std::time::Instant,
+    /// Motion events before this are the echo of a follow-warp.
+    warp_echo_until: std::time::Instant,
     /// User flipped the model manually. The standing hint stops driving until the
     /// host's intent next changes (a fresh hint edge clears this and applies).
     hint_override: bool,
@@ -378,6 +383,8 @@ impl StreamState {
             touch_mouse: crate::touch::SteamTouchMouse::new(in_gamescope()),
             last_hint: None,
             hint_since: std::time::Instant::now(),
+            last_user_motion: std::time::Instant::now(),
+            warp_echo_until: std::time::Instant::now(),
             hint_override: false,
             sent_client_draws: None,
             force_software,
@@ -1047,6 +1054,10 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                 } => {
                     if let Some(st) = stream.as_mut() {
                         let video = st.last_video;
+                        // The echo of our own follow-warp is not the user moving.
+                        if Instant::now() >= st.warp_echo_until {
+                            st.last_user_motion = Instant::now();
+                        }
                         if let Some(cap) = st.capture.as_mut() {
                             if cap.desktop() {
                                 // Desktop model: window position through the placement.
@@ -1334,6 +1345,35 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                                 "host cursor hint: mouse model flipped"
                             );
                         }
+                    }
+                }
+                // Something else moved the pointer we draw (controller mouse, a trackpad
+                // gesture, an app warping it): once the user's own mouse has been still for
+                // longer than a round trip, the local cursor goes where the host put it.
+                let over_us = mouse.focused_window_id() == Some(window.id());
+                let still = st.last_user_motion.elapsed() >= FOLLOW_HOST_AFTER;
+                if let (Some(cap), Some(video)) = (st.capture.as_mut(), st.last_video) {
+                    let drifted = cap.last_abs().is_some_and(|(x, y)| {
+                        (x - hs.x).abs() > FOLLOW_SLACK_PX || (y - hs.y).abs() > FOLLOW_SLACK_PX
+                    });
+                    if cap.captured()
+                        && cap.desktop()
+                        && hs.visible()
+                        && over_us
+                        && still
+                        && drifted
+                    {
+                        let (wx, wy) = content_to_window(
+                            opts.video_fit,
+                            window.size(),
+                            window.size_in_pixels(),
+                            video,
+                            hs.x,
+                            hs.y,
+                        );
+                        st.warp_echo_until = Instant::now() + WARP_ECHO;
+                        mouse.warp_mouse_in_window(&window, wx, wy);
+                        cap.followed_host((hs.x, hs.y));
                     }
                 }
             }
@@ -3265,6 +3305,16 @@ const ACCESS_NOTICE_S: u64 = 6;
 /// How long the host's relative hint must hold before the mouse model follows it: longer
 /// than the hide Windows does for a click, short against a game grabbing the pointer.
 const HINT_SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Mouse stillness before the local cursor follows host-driven motion: past a round trip, so
+/// the host's echo of the user's own motion is never mistaken for someone else's.
+const FOLLOW_HOST_AFTER: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How long motion events after a follow-warp are its echo, not the user.
+const WARP_ECHO: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Rounding between window and frame pixels; a smaller difference is the same spot.
+const FOLLOW_SLACK_PX: i32 = 2;
 
 /// Capture hints (`ui_stream` parity — the words the user reads while released).
 const HINT_KEYBOARD: &str = "Click the stream to capture input · Ctrl+Alt+Shift+Q releases · \

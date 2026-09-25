@@ -83,6 +83,8 @@ pub struct Capture {
     pending_rel: (f32, f32),
     /// Desktop-model position not yet on the wire, latest-wins per loop iteration.
     pending_abs: Option<Abs>,
+    /// See [`Self::last_abs`].
+    last_abs: Option<(i32, i32)>,
     /// Never true unless `abs_ok`.
     desktop: bool,
     /// Host injector accepts `MouseMoveAbs` (any compositor but gamescope).
@@ -148,6 +150,7 @@ impl Capture {
             held_buttons: HashSet::new(),
             pending_rel: (0.0, 0.0),
             pending_abs: None,
+            last_abs: None,
             desktop: abs_ok && mouse_mode == MouseMode::Desktop,
             abs_ok,
             scroll_acc: ScrollAccumulator::new(),
@@ -387,8 +390,20 @@ impl Capture {
     /// (deltas must sum).
     pub fn on_motion_abs(&mut self, abs: Abs) {
         if self.captured && self.desktop {
+            self.last_abs = Some((abs.x, abs.y));
             self.pending_abs = Some(abs);
         }
+    }
+
+    /// Where this client last put the host pointer, in frame pixels; `None` before any
+    /// desktop-model motion. The local cursor follows the host from here when they differ.
+    pub fn last_abs(&self) -> Option<(i32, i32)> {
+        self.last_abs
+    }
+
+    /// The local cursor was moved to the host's `pos`: that is now where we put it.
+    pub fn followed_host(&mut self, pos: (i32, i32)) {
+        self.last_abs = Some(pos);
     }
 
     pub fn on_key_down(&mut self, sc: sdl3::keyboard::Scancode) {
