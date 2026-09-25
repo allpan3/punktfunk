@@ -1250,13 +1250,12 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
         // Drain forwarded cursor shape/state and drive the local OS cursor — only
         // meaningful in the desktop mouse model (capture's relative lock hides it).
         if let Some(st) = stream.as_mut() {
-            // Host-framebuffer px → cursor-surface px: the placement scale times the
-            // content scale the backend does not already apply ([`cursor_density`]). SDL
-            // shows a custom cursor at ~1:1 physical pixels, so without density a 200 %
-            // client draws ours at half native size. Stretch keeps the shape undistorted.
+            // Host-framebuffer px → cursor-surface px: the placement scale (physical px per
+            // host px) over what the backend scales a cursor by itself, so the pointer is the
+            // size it has in the picture, as on Apple. Stretch keeps the shape undistorted.
             let cursor_scale = st.last_video.map_or(1.0, |video| {
                 let p = video_fit::place(opts.video_fit, window.size_in_pixels(), video);
-                p.scale_x.min(p.scale_y) as f32 * cursor_density(&window)
+                p.scale_x.min(p.scale_y) as f32 / cursor_surface_scale(&window)
             });
             if let (Some(chan), Some(c)) = (st.cursor_chan.as_mut(), st.connector.as_ref()) {
                 let desktop_active = st
@@ -3210,23 +3209,19 @@ fn content_to_window(
     (lx as f32, ly as f32)
 }
 
-/// Content scale to build the forwarded cursor bitmap at, 1.0 where the backend
-/// scales the cursor surface itself.
+/// The scale the backend applies to a custom cursor surface on its own. Wayland applies the
+/// display scale: SDL hands the compositor the bitmap's pixel size as a surface-local viewport
+/// destination. X11 and Windows show the surface at 1:1 physical pixels.
 ///
-/// Wayland is that exception: SDL hands the compositor the bitmap's pixel size as a
-/// viewport DESTINATION, which is surface-local, so the display scale is applied
-/// once already — folding it in here squares it (2.25× at 150 %). X11, Windows and
-/// macOS present the surface at ~1:1 physical pixels and need it.
-///
-/// `SDL_GetWindowDisplayScale` returns `0.0` when it cannot resolve the display; a 0
-/// would collapse the cursor to nothing.
-fn cursor_density(window: &sdl3::video::Window) -> f32 {
-    if window.subsystem().current_video_driver() == "wayland" {
+/// `SDL_GetWindowDisplayScale` returns `0.0` when it cannot resolve the display; dividing by 0
+/// would blow the cursor up to nothing usable.
+fn cursor_surface_scale(window: &sdl3::video::Window) -> f32 {
+    if window.subsystem().current_video_driver() != "wayland" {
         return 1.0;
     }
-    let density = window.display_scale();
-    if density.is_finite() && density > 0.0 {
-        density
+    let scale = window.display_scale();
+    if scale.is_finite() && scale > 0.0 {
+        scale
     } else {
         1.0
     }
