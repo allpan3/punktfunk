@@ -21,6 +21,12 @@ import { apiFetch } from "@/api/fetcher";
 export interface PluginUiSummary {
 	port: number;
 	icon?: string;
+	/** Serves a page to open. Absent on an older host, which means yes. */
+	page?: boolean;
+	/** Serves `/__config`, the settings form. */
+	config?: boolean;
+	/** Serves `/__game?entry=<id>`, a tab on each library entry's page. */
+	game?: boolean;
 }
 
 export interface PluginSummary {
@@ -108,11 +114,18 @@ export function usePlugins() {
 }
 
 /**
- * The plugins that get a **nav entry**: those serving a UI, minus the library-category ones.
+ * The plugins that get a **nav entry**: those serving a page, minus the library-category ones.
  *
- * A library plugin still serves a UI port (that is how `__config` is reached) and its
- * `/plugins/$pluginId/$` route still resolves, so an existing deep link keeps working — it simply
- * isn't advertised in the sidebar.
+ * A plugin with only a settings form or an entry tab still serves a UI port, and its
+ * `/plugins/$pluginId/$` route still resolves, so a deep link keeps working — it simply isn't
+ * advertised in the sidebar.
  */
 export const uiPlugins = (list: PluginSummary[] | undefined): PluginSummary[] =>
-	(list ?? []).filter((p) => p.ui && p.category !== LIBRARY_CATEGORY);
+	(list ?? []).filter(
+		(p) => p.ui && p.ui.page !== false && p.category !== LIBRARY_CATEGORY,
+	);
+
+/** The plugins that add a tab to every library entry's page. */
+export const gamePlugins = (
+	list: PluginSummary[] | undefined,
+): PluginSummary[] => (list ?? []).filter((p) => p.ui?.game === true);

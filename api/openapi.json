@@ -10291,11 +10291,23 @@
           "secret"
         ],
         "properties": {
+          "config": {
+            "type": "boolean",
+            "description": "Serves `GET/PUT /__config`, the plugin-wide settings form."
+          },
+          "game": {
+            "type": "boolean",
+            "description": "Serves `GET/PUT /__game?entry=<id>`, a tab on each library entry's page."
+          },
           "icon": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "page": {
+            "type": "boolean",
+            "description": "Serves a page the console opens and lists in the nav. Absent means yes, as before the flag."
           },
           "port": {
             "type": "integer",
@@ -10313,14 +10325,29 @@
         "type": "object",
         "description": "Secret-free UI view for the listing. The secret never goes here.",
         "required": [
-          "port"
+          "port",
+          "page",
+          "config",
+          "game"
         ],
         "properties": {
+          "config": {
+            "type": "boolean",
+            "description": "See [`PluginUi::config`]."
+          },
+          "game": {
+            "type": "boolean",
+            "description": "See [`PluginUi::game`]."
+          },
           "icon": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "page": {
+            "type": "boolean",
+            "description": "See [`PluginUi::page`]."
           },
           "port": {
             "type": "integer",
