@@ -362,7 +362,6 @@
 	"library_source_settings_refused": "der Host hat abgelehnt",
 	"library_source_settings_own_page": "{source} verwaltet seine Einstellungen auf einer eigenen Seite.",
 	"library_source_settings_open_page": "{source} öffnen",
-	"library_source_settings_json_hint": "Die Einstellungen dieser Quelle passen in kein einfaches Formular — bearbeite sie als JSON. Sie werden vor dem Speichern geprüft.",
 	"library_migrate_title": "Spielquellen werden zu Plugins",
 	"library_migrate_help": "Jeder Launcher wird ein eigenes Add-on. Installierst du eines, übernimmt es; Kacheln bleiben.",
 	"library_migrate_install": "Quelle {source} installieren",
