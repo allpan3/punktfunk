@@ -921,6 +921,7 @@ class MainActivity : ComponentActivity() {
                 device.supportsSource(InputDevice.SOURCE_MOUSE_RELATIVE),
             dpad = device.supportsSource(InputDevice.SOURCE_DPAD),
             mousePresent = hasPhysicalMouse(),
+            gestureIsKey = android.os.Build.VERSION.SDK_INT < 36,
         )
         return if (claimed) back else null
     }

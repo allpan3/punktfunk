@@ -28,8 +28,9 @@ fun hasPhysicalKeyboard(): Boolean = InputDevice.getDeviceIds().any { id ->
  *
  * A side button the system maps to Back (One UI 8 does, with no setting) never reaches us as a
  * button: Android injects a Back key from a virtual device of its own, stamped like the nav
- * bar's. The Back gesture takes the newer dispatch path and is no key at all, so with a mouse
- * attached a Back from no external device is the mouse's.
+ * bar's. From Android 16 the Back gesture takes the predictive dispatch path and is no key at
+ * all, so with a mouse attached a Back from no external device is the mouse's. Before that
+ * ([gestureIsKey]) the gesture and the nav bar send that same key, and it stays the ring's.
  */
 fun isMouseSideKey(
     tv: Boolean,
@@ -39,9 +40,10 @@ fun isMouseSideKey(
     mouse: Boolean,
     dpad: Boolean,
     mousePresent: Boolean = false,
+    gestureIsKey: Boolean = false,
 ): Boolean = when {
     fallback || pad -> false
-    !external -> mousePresent && !tv
+    !external -> mousePresent && !tv && !gestureIsKey
     !tv -> true
     else -> mouse && !dpad
 }
