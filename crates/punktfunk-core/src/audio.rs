@@ -388,6 +388,31 @@ impl AudioGapTracker {
     }
 }
 
+/// Drops audio a later packet already superseded. A reordered or duplicate datagram lands after
+/// its slot was concealed or rebuilt from `0xD2`; decoding it plays that slot twice, out of order,
+/// and feeds the decoder a stale packet.
+#[derive(Debug, Default)]
+pub struct AudioSeqGate {
+    newest: Option<u32>,
+}
+
+impl AudioSeqGate {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `true` for the first packet and anything newer than the newest passed (wrap-aware).
+    pub fn fresh(&mut self, seq: u32) -> bool {
+        let fresh = self
+            .newest
+            .is_none_or(|n| (1..=u32::MAX / 2).contains(&seq.wrapping_sub(n)));
+        if fresh {
+            self.newest = Some(seq);
+        }
+        fresh
+    }
+}
+
 /// Rebuilds the stream from the redundant `0xD2` plane so a single lost datagram is recovered,
 /// not concealed.
 ///
@@ -1576,6 +1601,19 @@ mod tests {
     }
 
     // ---- redundant-plane recovery ---------------------------------------------------------
+
+    #[test]
+    fn a_superseded_audio_packet_is_dropped() {
+        let mut g = AudioSeqGate::new();
+        assert!(g.fresh(100));
+        assert!(g.fresh(102), "a gap is concealed downstream");
+        assert!(!g.fresh(101), "late: its slot was already concealed");
+        assert!(!g.fresh(102), "duplicate");
+        assert!(g.fresh(103));
+        let mut w = AudioSeqGate::new();
+        assert!(w.fresh(u32::MAX));
+        assert!(w.fresh(0), "a wrap is newer");
+    }
 
     #[test]
     fn red_recovery_rebuilds_exactly_the_single_missing_frame() {
