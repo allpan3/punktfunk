@@ -2125,6 +2125,12 @@ pub(crate) async fn run_admitted(
         )
     };
 
+    // `CLIENT_CAP_KEEP_HOST_AUDIO`: taken before the audio thread spawns, which opens
+    // capture straight away and reads this to pick its topology. RAII.
+    let _keep_host_audio = (hello.client_caps & punktfunk_core::quic::CLIENT_CAP_KEEP_HOST_AUDIO
+        != 0)
+        .then(crate::audio::capture_policy::keep_host_audio_guard);
+
     // Not for the two frame-arithmetic sources: their clients want nothing else on the wire,
     // and the rig's budget carries the audio reservation without a capture behind it.
     // Best-effort: a spawn error must not early-return (threads already up).
@@ -2306,10 +2312,6 @@ pub(crate) async fn run_admitted(
         (!cmds.is_empty())
             .then(|| tokio::task::block_in_place(|| crate::hooks::run_prep(&cmds, &env)))
     });
-    // `CLIENT_CAP_KEEP_HOST_AUDIO`: hold the wiring override before capture opens. RAII.
-    let _keep_host_audio = (hello.client_caps & punktfunk_core::quic::CLIENT_CAP_KEEP_HOST_AUDIO
-        != 0)
-        .then(crate::audio::capture_policy::keep_host_audio_guard);
     // Welcome/acks/HUD speak wire budget. Encoder opens get the derived video rate (`EncDerive`).
     // PyroWave: budget == encoder rate (bpp pin).
     let bitrate_kbps = welcome.bitrate_kbps;
