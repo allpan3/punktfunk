@@ -201,13 +201,13 @@ pub extern "system" fn Java_io_unom_punktfunk_kit_NativeBridge_nativeVideoCodecL
     handle: jlong,
 ) -> JString<'local> {
     env.with_env(|env| -> jni::errors::Result<JString<'local>> {
-        if handle == 0 {
-            return Ok(JString::default());
-        }
-        let Some(h) = get_session(handle) else {
-            return Ok(JString::default());
+        // `JString::default()` is Java null, which the Kotlin `String` return does not allow.
+        let session = if handle == 0 {
+            None
+        } else {
+            get_session(handle)
         };
-        env.new_string(crate::decode::codec_label(h.client.codec))
+        env.new_string(session.map_or("", |h| crate::decode::codec_label(h.client.codec)))
     })
     .resolve::<LogErrorAndDefault>()
 }
