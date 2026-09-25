@@ -108,6 +108,19 @@ class ScreenshotTest {
     @Config(sdk = [36], qualifiers = "w800dp-h360dp-xxhdpi")
     fun streamBannerTouch() = shootRoot("stream-banner-touch", statusBar = false) { StreamBannerScene(pad = false) }
 
+    // The companion panel at an Ayn Thor lower screen's size (1240×1080 at about 420 dpi).
+    @Test
+    @Config(sdk = [36], qualifiers = "w472dp-h411dp-xxhdpi")
+    fun companionStats() = shootRoot("companion-stats", statusBar = false) {
+        CompanionScene(io.unom.punktfunk.CompanionPage.STATS)
+    }
+
+    @Test
+    @Config(sdk = [36], qualifiers = "w472dp-h411dp-xxhdpi")
+    fun companionActions() = shootRoot("companion-actions", statusBar = false) {
+        CompanionScene(io.unom.punktfunk.CompanionPage.ACTIONS)
+    }
+
     // The touch flow is a Material dialog over the host grid (a separate window → shootScreen).
     @Test
     fun connecting() = shootScreen("connecting") {

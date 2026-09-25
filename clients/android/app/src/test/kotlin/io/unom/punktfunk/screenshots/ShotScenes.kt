@@ -568,6 +568,27 @@ internal fun StreamBannerScene(pad: Boolean) {
 }
 
 /**
+ * The companion panel on a dual-screen handheld's lower screen: the real [CompanionPanel] on
+ * [page], with the stream scene's Normal lines and a session where every action is available.
+ */
+@Composable
+internal fun CompanionScene(page: io.unom.punktfunk.CompanionPage) {
+    io.unom.punktfunk.CompanionPanel(
+        pages = io.unom.punktfunk.CompanionPage.entries,
+        page = page,
+        onPage = {},
+        stats = shotLines(StatsVerbosity.NORMAL, 1920, 1080, 120, 119.0, 92.1, loss = false),
+        tier = StatsVerbosity.NORMAL,
+        onTier = {},
+        cfg = io.unom.punktfunk.OverlayConfig.platformDefault(),
+        actions = io.unom.punktfunk.fakeRingActions(),
+        haptics = remember { io.unom.punktfunk.ConsoleHaptics(null) },
+        trackpad = {},
+        pad = {},
+    )
+}
+
+/**
  * Publish the palette locals `App` would normally provide. A scene that calls a console screen
  * directly gets the DEFAULT dark ink without this, and a pale-palette shot would then silently
  * prove nothing at all.
