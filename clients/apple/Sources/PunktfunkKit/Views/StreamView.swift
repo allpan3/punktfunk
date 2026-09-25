@@ -57,19 +57,38 @@ private final class CursorCapture {
     /// `disassociate: false` (cursor-visible mode) it always engages — there is no grab to
     /// be refused, the cursor stays free and visible.
     func capture(in view: NSView, disassociate: Bool) -> Bool {
-        guard !captured, let window = view.window, view.bounds.width > 0 else { return false }
+        guard !captured, view.window != nil, view.bounds.width > 0 else { return false }
         if disassociate {
             // Park the cursor mid-view so a click can't land in (and activate) another app.
-            let rectOnScreen = window.convertToScreen(view.convert(view.bounds, to: nil))
-            let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
-            CGWarpMouseCursorPosition(
-                CGPoint(x: rectOnScreen.midX, y: primaryHeight - rectOnScreen.midY))
+            park(in: view)
             guard CGAssociateMouseAndMouseCursorPosition(0) == .success else { return false }
             NSCursor.hide()
         }
         captured = true
         disassociated = disassociate
         return true
+    }
+
+    /// The view moved under a frozen cursor (a resize, leaving fullscreen): park it mid-view
+    /// again, or the next click lands on whatever window is under the old spot. Only on a
+    /// real move: every warp suppresses local mouse events for a moment.
+    func repark(in view: NSView) {
+        guard disassociated, let window = view.window else { return }
+        if window.convertToScreen(view.convert(view.bounds, to: nil)) != parkedRect {
+            park(in: view)
+        }
+    }
+
+    /// The view's screen rect at the last park.
+    private var parkedRect: NSRect?
+
+    private func park(in view: NSView) {
+        guard let window = view.window, view.bounds.width > 0 else { return }
+        let rectOnScreen = window.convertToScreen(view.convert(view.bounds, to: nil))
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+        CGWarpMouseCursorPosition(
+            CGPoint(x: rectOnScreen.midX, y: primaryHeight - rectOnScreen.midY))
+        parkedRect = rectOnScreen
     }
 
     func release() {
@@ -366,6 +385,7 @@ public final class StreamLayerView: NSView {
         super.layout()
         attemptPendingCapture() // bounds become real here on first presentation
         layoutPresenter() // keep the stage-2 sublayer aspect-fit to the view
+        cursorCapture.repark(in: self) // a frozen cursor must stay over the moved view
     }
 
     public override func setFrameSize(_ newSize: NSSize) {
