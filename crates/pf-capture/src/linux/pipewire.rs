@@ -2105,9 +2105,9 @@ pub fn pipewire_thread(
             }
         })
         .process(|stream, ud| {
-            // Latest-frame-only: Mutter bursts, older queued buffers are stale. Drain, requeue
-            // older, keep newest. Dequeue/requeue stay outside `catch_unwind` — a panic inside
-            // would strand `newest` and shrink the fixed pool until capture wedged.
+            // Latest-frame-only: Mutter bursts, older queued buffers are stale. Drain, read the
+            // older ones' cursor meta, requeue them, keep newest. Dequeue/requeue stay outside
+            // `catch_unwind` — a panic inside would strand `newest` and shrink the fixed pool.
 
             // SAFETY: `stream` is the live stream PipeWire passes into this `.process` callback on the
             // loop thread; `dequeue_raw_buffer` returns a stream-owned `*mut pw_buffer` or null
@@ -2122,6 +2122,14 @@ pub fn pipewire_thread(
                 let next = unsafe { stream.dequeue_raw_buffer() };
                 if next.is_null() {
                     break;
+                }
+                // A new cursor bitmap rides only the buffer of the shape change; read it before
+                // the stale pixels go back. Not while gated: that meta is in the doomed size.
+                if ud.expect_dims.is_none() {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        // SAFETY: `newest` is dequeued and not yet requeued, as below.
+                        update_cursor_meta(&mut ud.cursor, unsafe { (*newest).buffer });
+                    }));
                 }
                 // SAFETY: `newest` was dequeued from this stream and not yet requeued; we immediately
                 // overwrite it, so the requeued pointer is never touched again.
