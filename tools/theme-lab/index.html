@@ -166,9 +166,8 @@ header.top p { margin: 0; color: var(--muted); font-size: 13px; max-width: 70ch;
 .note { font-size: 12px; color: var(--muted); margin: 0; }
 .note.warn { color: var(--warn); }
 .swatch { display: grid; grid-template-columns: 34px 1fr auto; align-items: center; gap: 8px; }
-.swatch input[type="color"] { width: 34px; height: 28px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: none; }
-.swatch input[type="color"]::-webkit-color-swatch-wrapper { padding: 2px; }
-.swatch input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 4px; }
+.sw-btn { width: 34px; height: 28px; padding: 0; border: 1px solid var(--line); border-radius: 6px; box-shadow: inset 0 0 0 2px var(--panel); }
+.sw-btn[aria-expanded="true"] { outline: 2px solid var(--focus); outline-offset: 2px; }
 .swatch input[type="text"] { font-family: var(--mono); font-size: 12.5px; padding: 5px 8px; }
 .iconbtns { display: inline-flex; gap: 2px; }
 .iconbtns button { border: 1px solid var(--line); background: var(--bg); border-radius: 6px; width: 26px; height: 26px; font-size: 12px; color: var(--muted); padding: 0; }
@@ -182,6 +181,36 @@ textarea#rust {
   border-radius: 8px; padding: 10px; font: 12px/1.5 var(--mono); white-space: pre; overflow: auto; color: var(--text);
 }
 .copied { font-size: 12px; color: var(--pass); }
+
+/* --- colour picker --- */
+.picker {
+  position: absolute; z-index: 20; width: min(312px, calc(100vw - 32px));
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55); display: flex; flex-direction: column; gap: 10px;
+}
+.pk-plane, .pk-hue { position: relative; touch-action: none; cursor: crosshair; border-radius: 6px; }
+.pk-plane canvas, .pk-hue canvas { display: block; width: 100%; border-radius: 6px; }
+.pk-plane canvas { height: 176px; }
+.pk-hue canvas { height: 18px; }
+.pk-dot { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%;
+  border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6); pointer-events: none; }
+.pk-bar { position: absolute; top: -3px; bottom: -3px; width: 6px; margin-left: -3px; border-radius: 3px;
+  border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6); pointer-events: none; }
+.pk-axis { display: flex; justify-content: space-between; font: 10.5px var(--mono); color: var(--faint); margin-top: 3px; }
+.pk-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.pk-fields label { display: flex; flex-direction: column; gap: 3px; font-size: 10.5px; font-weight: 600;
+  letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); }
+.pk-fields input { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px;
+  font: 12px var(--mono); width: 100%; min-width: 0; }
+.pk-fields .wide { grid-column: span 2; }
+.pk-compare { display: grid; grid-template-columns: 1fr 1fr; height: 30px; border-radius: 6px; overflow: hidden;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1); }
+.pk-compare button { border: 0; font-size: 11px; font-weight: 600; padding: 0; }
+.pk-read { margin: 0; font: 11.5px var(--mono); color: var(--muted); }
+.pk-quick { display: flex; flex-wrap: wrap; gap: 5px; }
+.pk-quick button { width: 22px; height: 22px; border-radius: 5px; border: 1px solid var(--line); padding: 0; }
+.pk-foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.pk-gamut { font-size: 11.5px; color: var(--warn); }
 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
@@ -292,6 +321,35 @@ textarea#rust {
   </aside>
 </div>
 
+<div class="picker" id="picker" role="dialog" aria-label="Colour picker" hidden>
+  <div>
+    <div class="pk-plane" id="pk-plane" tabindex="0" role="slider" aria-label="Lightness and chroma">
+      <canvas></canvas><span class="pk-dot" id="pk-dot"></span>
+    </div>
+    <div class="pk-axis"><span>grey</span><span>lightness ↑ · chroma →</span><span>vivid</span></div>
+  </div>
+  <div class="pk-hue" id="pk-hue" tabindex="0" role="slider" aria-label="Hue" aria-valuemin="0" aria-valuemax="360">
+    <canvas></canvas><span class="pk-bar" id="pk-bar"></span>
+  </div>
+  <div class="pk-fields">
+    <label for="pk-l">Light %<input id="pk-l" type="number" min="0" max="100" step="0.5"></label>
+    <label for="pk-c">Chroma<input id="pk-c" type="number" min="0" max="0.37" step="0.002"></label>
+    <label for="pk-h">Hue °<input id="pk-h" type="number" min="0" max="360" step="1"></label>
+    <label for="pk-hex">Hex<input id="pk-hex" type="text" spellcheck="false" autocomplete="off"></label>
+    <label for="pk-rgb" class="wide">Rust tuple<input id="pk-rgb" type="text" spellcheck="false" autocomplete="off"></label>
+  </div>
+  <div class="pk-compare">
+    <button type="button" id="pk-before" title="Go back to this colour">Before</button>
+    <button type="button" id="pk-now" tabindex="-1" aria-hidden="true">Now</button>
+  </div>
+  <p class="pk-read" id="pk-read"></p>
+  <div><p class="label">From this palette</p><div class="pk-quick" id="pk-quick"></div></div>
+  <div class="pk-foot">
+    <span class="pk-gamut" id="pk-gamut" hidden>Held at the sRGB edge</span>
+    <button type="button" class="btn primary" id="pk-done">Done</button>
+  </div>
+</div>
+
 <script>
 "use strict";
 const $ = (s) => document.querySelector(s);
@@ -363,12 +421,21 @@ function sameShader(a, b) {
   return a.replace(re, "#") === b.replace(re, "#") && na.length === nb.length && na.every((x, i) => Math.abs(+x - +nb[i]) < 1e-9);
 }
 
-function glslOf(sksl) {
-  const body = sksl
+// The Rust shader around a gradient that reads its stops from uniforms, so an edit redraws
+// without a recompile. Same segments and blend as `fieldSksl`'s if-chain.
+const GRADIENT = [
+  "    float x = clamp(t, 0.0, 1.0) * (u_n - 1.0);",
+  "    vec3 a = u_stops[0]; vec3 b = u_stops[1]; float f = x;",
+  "    for (int i = 1; i < 7; i++) {",
+  "        if (float(i) < u_n - 1.0 && x >= float(i)) { a = u_stops[i]; b = u_stops[i + 1]; f = x - float(i); }",
+  "    }",
+].join("\n") + "\n";
+function fieldGlsl() {
+  const conv = (src) => src
     .replace(/\bfloat2\b/g, "vec2").replace(/\bfloat3\b/g, "vec3").replace(/\bfloat4\b/g, "vec4")
-    .replace(/\bhalf4\b/g, "vec4").replace(/\bhalf3\b/g, "vec3").replace(/\bhalf\b/g, "float")
-    .replace(/vec4 main\(vec2 xy\)/, "vec4 field(vec2 xy)");
-  return "precision highp float;\n" + body +
+    .replace(/\bhalf4\b/g, "vec4").replace(/\bhalf3\b/g, "vec3").replace(/\bhalf\b/g, "float");
+  const body = (conv(D.sksl.head) + GRADIENT + conv(D.sksl.tail)).replace(/vec4 main\(vec2 xy\)/, "vec4 field(vec2 xy)");
+  return "precision highp float;\nuniform vec3 u_stops[8];\nuniform float u_n;\n" + body +
     "\nvoid main() { gl_FragColor = field(vec2(gl_FragCoord.x, u_res.y - gl_FragCoord.y)); }\n";
 }
 
@@ -421,14 +488,12 @@ class FieldGL {
     if (!gl) throw new Error("This browser has no WebGL, which the field needs.");
     this.gl = gl;
     this.canvas = canvas;
-    this.programs = new Map();
     const buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    this.prog = this.program();
   }
-  program(sksl) {
-    let prog = this.programs.get(sksl);
-    if (prog) return prog;
+  program() {
     const gl = this.gl;
     const shader = (type, src) => {
       const s = gl.createShader(type);
@@ -439,18 +504,19 @@ class FieldGL {
     };
     const p = gl.createProgram();
     gl.attachShader(p, shader(gl.VERTEX_SHADER, "attribute vec2 pos; void main() { gl_Position = vec4(pos, 0.0, 1.0); }"));
-    gl.attachShader(p, shader(gl.FRAGMENT_SHADER, glslOf(sksl)));
+    gl.attachShader(p, shader(gl.FRAGMENT_SHADER, fieldGlsl()));
     gl.linkProgram(p);
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
     const u = {};
-    for (const n of ["u_res", "u_tc", "u_lift", "u_scrim", "u_cam", "u_rot0", "u_rot1", "u_rot2", "u_mot", "u_wmot"]) u[n] = gl.getUniformLocation(p, n);
-    prog = { p, u, pos: gl.getAttribLocation(p, "pos") };
-    this.programs.set(sksl, prog);
-    return prog;
+    for (const n of ["u_res", "u_tc", "u_lift", "u_scrim", "u_cam", "u_rot0", "u_rot1", "u_rot2", "u_mot", "u_wmot", "u_stops", "u_n"]) u[n] = gl.getUniformLocation(p, n);
+    return { p, u, pos: gl.getAttribLocation(p, "pos") };
   }
   draw(pal, t, calmMix) {
     const gl = this.gl, w = this.canvas.width, h = this.canvas.height;
-    const prog = this.program(fieldSksl(pal.ground, stopsOf(pal)));
+    const prog = this.prog;
+    const st = stopsOf(pal).length < 2 ? [pal.ground, pal.ground] : stopsOf(pal);
+    const lab = new Float32Array(24);
+    for (let i = 0; i < 8; i++) lab.set(oklab(st[Math.min(i, st.length - 1)]), i * 3);
     const ink = inkOf(pal);
     const [focal, scale] = fieldCamera(w / h);
     const m = fieldMotion(t);
@@ -469,6 +535,8 @@ class FieldGL {
     gl.uniform4fv(u.u_rot2, m.rows[2]);
     gl.uniform4fv(u.u_mot, m.primary);
     gl.uniform4fv(u.u_wmot, m.warp);
+    gl.uniform3fv(u.u_stops, lab);
+    gl.uniform1f(u.u_n, st.length);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
   // sRGB pixels, top row first.
@@ -634,16 +702,22 @@ document.addEventListener("click", (e) => {
 
 // ---------- the editor ----------
 function swatch(el, color, onChange, extra = "") {
-  el.innerHTML = `<input type="color" value="${hex(color)}" aria-label="Colour"><input type="text" class="mono" value="${hex(color)}" spellcheck="false" aria-label="Hex">${extra}`;
-  const [picker, text] = el.querySelectorAll("input");
-  picker.addEventListener("input", () => { text.value = picker.value; onChange(fromHex(picker.value)); });
+  el.innerHTML = `<button type="button" class="sw-btn" aria-label="Pick a colour" aria-haspopup="dialog" aria-expanded="false" style="background:${hex(color)}"></button><input type="text" class="mono" value="${hex(color)}" spellcheck="false" aria-label="Hex">${extra}`;
+  const btn = el.querySelector(".sw-btn"), text = el.querySelector("input");
+  let current = color;
+  const set = (c) => { current = c; onChange(c); };
+  btn.addEventListener("click", () => openPicker(btn, text, current, set));
   text.addEventListener("change", () => {
-    if (/^#[0-9a-f]{6}$/i.test(text.value)) { picker.value = text.value; onChange(fromHex(text.value)); }
-    else text.value = picker.value;
+    if (!/^#[0-9a-f]{6}$/i.test(text.value)) { text.value = hex(current); return; }
+    const c = fromHex(text.value);
+    btn.style.background = hex(c);
+    set(c);
+    if (pk.open && pk.anchor === btn) setRgb(c, false);
   });
 }
 
 function renderEditor() {
+  closePicker(false);
   const p = table[sel];
   $("#ed-title").textContent = p.name;
   $("#ed-id").textContent = p.id;
@@ -686,7 +760,7 @@ function edit(fn, quiet = false) {
   const p = table[sel];
   fn(p);
   save();
-  if (quiet) { applyInk(); renderList(); renderExport(); refreshChecks(); $("#ed-title").textContent = p.name; $("#vivid-note").hidden = !inkOf(p).vivid; }
+  if (quiet) { applyInk(); renderExport(); refreshSoon(); $("#ed-title").textContent = p.name; $("#vivid-note").hidden = !inkOf(p).vivid; }
   else onPalette();
 }
 function editStops(fn, quiet = false) {
@@ -698,6 +772,203 @@ function editStops(fn, quiet = false) {
   }, quiet);
   if (quiet) $("#ramp").style.background = `linear-gradient(90deg, ${stopsOf(table[sel]).map(hex).join(", ")})`;
 }
+
+// The checks render the field four times; a drag waits until it rests.
+let soon = 0;
+function refreshSoon() { clearTimeout(soon); soon = setTimeout(flushRefresh, 160); }
+function flushRefresh() { clearTimeout(soon); renderList(); refreshChecks(); }
+
+// ---------- colour picker: OKLCH, the space the field blends in ----------
+const CMAX = 0.37;
+function oklabToRgb([L, a, b]) {
+  const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+  const m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3;
+  const s = (L - 0.0894841775 * a - 1.291485548 * b) ** 3;
+  const enc = (v) => (v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1 / 2.4) - 0.055);
+  return [
+    enc(4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s),
+    enc(-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s),
+    enc(-0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s),
+  ];
+}
+const lchToRgb = (L, C, H) => oklabToRgb([L, C * Math.cos((H * Math.PI) / 180), C * Math.sin((H * Math.PI) / 180)]);
+const inGamut = (c) => c.every((v) => v >= -0.0005 && v <= 1.0005);
+function maxChroma(L, H) {
+  let lo = 0, hi = CMAX;
+  for (let i = 0; i < 16; i++) { const m = (lo + hi) / 2; if (inGamut(lchToRgb(L, m, H))) lo = m; else hi = m; }
+  return lo;
+}
+const round3 = (c) => c.map((v) => Math.round(clamp01(v) * 1000) / 1000);
+
+// `want` is the chroma asked for; `C` is what the gamut allows at this lightness and hue.
+const pk = { open: false, anchor: null, text: null, onChange: null, start: null, rgb: [0, 0, 0], L: 0.5, C: 0, H: 280, want: 0 };
+const picker = $("#picker");
+
+function openPicker(anchor, text, color, onChange) {
+  if (pk.open && pk.anchor === anchor) { closePicker(); return; }
+  closePicker(false);
+  Object.assign(pk, { open: true, anchor, text, onChange, start: [...color] });
+  anchor.setAttribute("aria-expanded", "true");
+  picker.hidden = false;
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  for (const cv of picker.querySelectorAll("canvas")) {
+    cv.width = Math.round(cv.clientWidth * dpr);
+    cv.height = Math.round(cv.clientHeight * dpr);
+  }
+  $("#pk-before").style.background = hex(color);
+  $("#pk-before").style.color = luma(color) > 0.55 ? "#000" : "#fff";
+  renderQuick();
+  setRgb(color, false);
+  place();
+  $("#pk-plane").focus();
+}
+function closePicker(refocus = true) {
+  if (!pk.open) return;
+  pk.open = false;
+  picker.hidden = true;
+  pk.anchor.setAttribute("aria-expanded", "false");
+  if (refocus && pk.anchor.isConnected) pk.anchor.focus();
+  flushRefresh();
+}
+function place() {
+  const r = pk.anchor.getBoundingClientRect(), w = picker.offsetWidth, h = picker.offsetHeight;
+  const left = Math.min(Math.max(16, r.left), innerWidth - w - 16);
+  const below = r.bottom + h + 8 <= innerHeight || r.top - h - 8 < 0;
+  picker.style.left = `${left + scrollX}px`;
+  picker.style.top = `${(below ? r.bottom + 8 : r.top - h - 8) + scrollY}px`;
+}
+
+// An exact colour (hex, tuple, a quick pick): lightness, chroma and hue follow from it.
+function setRgb(rgb, emit) {
+  pk.rgb = round3(rgb);
+  const [L, a, b] = oklab(pk.rgb);
+  pk.L = L;
+  pk.C = pk.want = Math.hypot(a, b);
+  if (pk.C > 0.002) pk.H = ((Math.atan2(b, a) * 180) / Math.PI + 360) % 360;
+  show(true, false);
+  if (emit) commit();
+}
+// A move on the plane, the strip or a number: held inside sRGB by lowering chroma.
+function setLch(L, want, H) {
+  const hueMoved = H !== pk.H;
+  pk.L = Math.min(Math.max(L, 0), 1);
+  pk.H = ((H % 360) + 360) % 360;
+  pk.want = Math.min(Math.max(want, 0), CMAX);
+  const max = maxChroma(pk.L, pk.H);
+  pk.C = Math.min(pk.want, max);
+  pk.rgb = round3(lchToRgb(pk.L, pk.C, pk.H));
+  show(hueMoved, pk.want > max + 0.002);
+  commit();
+}
+function commit() {
+  pk.anchor.style.background = hex(pk.rgb);
+  pk.text.value = hex(pk.rgb);
+  pk.onChange(pk.rgb);
+}
+
+function show(planeToo, clamped) {
+  if (planeToo) renderPlane();
+  renderHue();
+  const dot = $("#pk-dot"), bar = $("#pk-bar");
+  dot.style.left = `${(pk.C / CMAX) * 100}%`;
+  dot.style.top = `${(1 - pk.L) * 100}%`;
+  bar.style.left = `${(pk.H / 360) * 100}%`;
+  $("#pk-plane").setAttribute("aria-valuetext", `lightness ${Math.round(pk.L * 100)} %, chroma ${pk.C.toFixed(3)}`);
+  $("#pk-hue").setAttribute("aria-valuenow", String(Math.round(pk.H)));
+  const active = document.activeElement;
+  const put = (id, v) => { if (active !== $(id)) $(id).value = v; };
+  put("#pk-l", (pk.L * 100).toFixed(1));
+  put("#pk-c", pk.C.toFixed(3));
+  put("#pk-h", Math.round(pk.H));
+  put("#pk-hex", hex(pk.rgb));
+  put("#pk-rgb", pk.rgb.map((v) => v.toFixed(3)).join(", "));
+  const now = $("#pk-now");
+  now.style.background = hex(pk.rgb);
+  now.style.color = luma(pk.rgb) > 0.55 ? "#000" : "#fff";
+  $("#pk-read").textContent = `luma ${luma(pk.rgb).toFixed(2)} · on white ${contrast([1, 1, 1], pk.rgb).toFixed(1)}:1 · on black ${contrast([0, 0, 0], pk.rgb).toFixed(1)}:1`;
+  $("#pk-gamut").hidden = !clamped;
+}
+
+function renderPlane() {
+  const cv = $("#pk-plane canvas"), w = cv.width, h = cv.height;
+  const g = cv.getContext("2d"), img = g.createImageData(w, h), d = img.data;
+  for (let y = 0; y < h; y++) {
+    const L = 1 - y / (h - 1), max = maxChroma(L, pk.H);
+    for (let x = 0; x < w; x++) {
+      const C = (x / (w - 1)) * CMAX, i = (y * w + x) * 4;
+      if (C <= max) {
+        const c = lchToRgb(L, C, pk.H);
+        d[i] = clamp01(c[0]) * 255; d[i + 1] = clamp01(c[1]) * 255; d[i + 2] = clamp01(c[2]) * 255;
+      } else {
+        const v = ((x + y) >> 2) % 3 === 0 ? 44 : 27; // hatching past the sRGB edge
+        d[i] = v; d[i + 1] = v + 1; d[i + 2] = v + 4;
+      }
+      d[i + 3] = 255;
+    }
+  }
+  g.putImageData(img, 0, 0);
+}
+function renderHue() {
+  const cv = $("#pk-hue canvas"), w = cv.width, h = cv.height, g = cv.getContext("2d");
+  for (let x = 0; x < w; x++) {
+    const H = (x / (w - 1)) * 360;
+    g.fillStyle = hex(lchToRgb(pk.L, Math.min(Math.max(pk.want, 0.08), maxChroma(pk.L, H)), H));
+    g.fillRect(x, 0, 1, h);
+  }
+}
+function renderQuick() {
+  const p = table[sel];
+  const picks = [...stopsOf(p).map((c, i) => [c, `Stop ${i + 1}`]), [p.ground, "Ground"], [p.accent, "Accent"]];
+  $("#pk-quick").innerHTML = picks.map(([c, name], i) =>
+    `<button type="button" data-q="${i}" title="${name} ${hex(c)}" aria-label="${name} ${hex(c)}" style="background:${hex(c)}"></button>`).join("");
+  $("#pk-quick").onclick = (e) => { const b = e.target.closest("button"); if (b) setRgb(picks[+b.dataset.q][0], true); };
+}
+
+function drag(el, onPoint) {
+  el.addEventListener("pointerdown", (e) => { el.setPointerCapture(e.pointerId); el.focus(); onPoint(e); });
+  el.addEventListener("pointermove", (e) => { if (el.hasPointerCapture(e.pointerId)) onPoint(e); });
+}
+drag($("#pk-plane"), (e) => {
+  const r = $("#pk-plane").getBoundingClientRect();
+  setLch(1 - (e.clientY - r.top) / r.height, ((e.clientX - r.left) / r.width) * CMAX, pk.H);
+});
+drag($("#pk-hue"), (e) => {
+  const r = $("#pk-hue").getBoundingClientRect();
+  setLch(pk.L, pk.want, Math.min(Math.max((e.clientX - r.left) / r.width, 0), 1) * 360);
+});
+$("#pk-plane").addEventListener("keydown", (e) => {
+  const big = e.shiftKey ? 5 : 1;
+  const moves = { ArrowUp: [0.01, 0], ArrowDown: [-0.01, 0], ArrowRight: [0, 0.004], ArrowLeft: [0, -0.004] };
+  const mv = moves[e.key];
+  if (!mv) return;
+  e.preventDefault();
+  setLch(pk.L + mv[0] * big, pk.C + mv[1] * big, pk.H);
+});
+$("#pk-hue").addEventListener("keydown", (e) => {
+  const step = { ArrowRight: 1, ArrowUp: 1, ArrowLeft: -1, ArrowDown: -1 }[e.key];
+  if (!step) return;
+  e.preventDefault();
+  setLch(pk.L, pk.want, pk.H + step * (e.shiftKey ? 10 : 1));
+});
+$("#pk-l").addEventListener("input", (e) => { if (e.target.value !== "") setLch(+e.target.value / 100, pk.want, pk.H); });
+$("#pk-c").addEventListener("input", (e) => { if (e.target.value !== "") setLch(pk.L, +e.target.value, pk.H); });
+$("#pk-h").addEventListener("input", (e) => { if (e.target.value !== "") setLch(pk.L, pk.want, +e.target.value); });
+$("#pk-hex").addEventListener("change", (e) => {
+  const v = e.target.value.trim(), h = v.startsWith("#") ? v : "#" + v;
+  if (/^#[0-9a-f]{6}$/i.test(h)) setRgb(fromHex(h), true); else e.target.value = hex(pk.rgb);
+});
+$("#pk-rgb").addEventListener("change", (e) => {
+  const n = (e.target.value.match(/-?\d*\.?\d+/g) || []).map(Number);
+  if (n.length === 3 && n.every((v) => v >= 0 && v <= 1)) setRgb(n, true);
+  else e.target.value = pk.rgb.map((v) => v.toFixed(3)).join(", ");
+});
+$("#pk-before").addEventListener("click", () => setRgb(pk.start, true));
+$("#pk-done").addEventListener("click", () => closePicker());
+picker.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); closePicker(); } });
+document.addEventListener("pointerdown", (e) => {
+  if (pk.open && !picker.contains(e.target) && e.target !== pk.anchor) closePicker(false);
+});
+addEventListener("resize", () => { if (pk.open) place(); });
 
 // ---------- Rust export ----------
 const f3 = (v) => { const s = (Math.round(v * 1000) / 1000 === v ? v.toFixed(3) : String(v)); return s.includes(".") ? s : s + ".0"; };
