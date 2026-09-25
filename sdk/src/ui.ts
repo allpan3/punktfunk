@@ -56,6 +56,13 @@ export interface PluginUiOptions {
 	 */
 	category?: string;
 	/**
+	 * Which console surfaces the plugin serves. `page`: a page the console opens and lists in the
+	 * nav (the host assumes one when this is absent). `config`: `GET/PUT /__config`, the settings
+	 * form. `game`: `GET/PUT /__game?entry=<id>`, a tab on each library entry's page. Sent only
+	 * when set, so an older host ignores them.
+	 */
+	surfaces?: { page?: boolean; config?: boolean; game?: boolean };
+	/**
 	 * Directory of the built SPA. Requests are served from here first (with an `index.html` SPA
 	 * fallback for navigations); a static miss falls through to [`fetch`]. Accepts a filesystem
 	 * path or a `file:` URL (`new URL("../dist/ui", import.meta.url)`).
@@ -192,6 +199,7 @@ export const servePluginUi = async (
 			port,
 			secret,
 			...(opts.icon !== undefined ? { icon: opts.icon } : {}),
+			...opts.surfaces,
 		},
 		// Sent through the UNTYPED `pf.request` below, so an older host simply ignores the unknown
 		// field rather than rejecting the registration — no runner flag, no version gate.

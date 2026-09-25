@@ -58,9 +58,13 @@ export {
 } from "./sync-engine.js";
 export {
 	deriveConfigJsonSchema,
+	handedPath,
 	httpApiEnv,
 	makeConfigHandler,
+	makeGameHandler,
 	type ServeUiConfig,
+	type ServeUiGame,
 	type ServeUiOptions,
+	type StatusLine,
 	serveUi,
 } from "./ui-server.js";
