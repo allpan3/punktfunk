@@ -203,6 +203,11 @@ impl Capture {
         self.desktop
     }
 
+    /// A mouse button is down on the host: a model flip now would cut the drag.
+    pub fn buttons_held(&self) -> bool {
+        !self.held_buttons.is_empty()
+    }
+
     /// Ctrl+Alt+Shift+M. `None` if the host cannot take absolute events
     /// (gamescope). Pending motion from the old model is dropped, not sent.
     pub fn toggle_desktop(&mut self) -> Option<bool> {
