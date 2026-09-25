@@ -26,6 +26,10 @@ releases input and takes it back when you return. Keys and buttons you were hold
 the host, so nothing sticks. On Linux and Windows, controllers stop reaching the host too until
 you capture again.
 
+With a compatible client and host, held-key snapshots recover a lost key release when
+packets start arriving again. Sequence numbers prevent delayed packets from restoring an
+older key state. A disconnected network can still delay input and releases.
+
 ### Keyboard shortcuts
 
 | Action | Linux · Windows | macOS | iPad keyboard | Android |
@@ -49,7 +53,7 @@ Settings. The macOS **Stream** menu lists them too.
 **macOS:** while input is captured, every other ⌘ chord goes to the host, ⌘Q included. Turn
 **Capture system shortcuts** off to keep them local. ⌘⎋ and ⌃⌘F always stay with the Mac.
 ⌘Space, ⌘Tab, Mission Control and other apps' global shortcuts go to the host too, with no
-permission to grant.
+permission to grant. Captured Control shortcuts such as ⌃C and ⌃R also go to the host.
 
 **Android:** Android keeps **Alt+Tab**, the **Windows** key and the **Language** key for itself.
 To send them, turn on **Punktfunk keyboard shortcuts** under Android's Accessibility settings;

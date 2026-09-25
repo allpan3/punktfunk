@@ -186,6 +186,14 @@ pub const HOST_CAP2_RAMP: u8 = 0x10;
 /// after its first window, and its groups are left alone.
 pub const HOST_CAP2_DELIVERY: u8 = 0x20;
 
+/// [`Welcome::host_caps2`](crate::quic::Welcome::host_caps2): the host reconciles held
+/// keys against [`InputKind::KeysHeld`](crate::input::InputKind::KeysHeld) snapshots, so
+/// a client sends them after keyboard use. Without the bit key state is edge-only and a
+/// lost [`KeyUp`](crate::input::InputKind::KeyUp) holds the key until the session ends.
+/// Keyboard edges and snapshots share a sequence to reject stale datagrams.
+/// Bit 0x40 is reserved for unsequenced snapshots and is not interchangeable
+pub const HOST_CAP2_KEY_STATE: u8 = 0x80;
+
 /// [`Hello::video_codecs`]: H.264 / AVC. The software encode path emits H.264, so a client
 /// that wants to stream from a GPU-less host must advertise this.
 pub const CODEC_H264: u8 = 0x01;
@@ -382,6 +390,7 @@ mod tests {
                 ("HOST_CAP2_SCROLL", HOST_CAP2_SCROLL),
                 ("HOST_CAP2_RAMP", HOST_CAP2_RAMP),
                 ("HOST_CAP2_DELIVERY", HOST_CAP2_DELIVERY),
+                ("HOST_CAP2_KEY_STATE", HOST_CAP2_KEY_STATE),
             ],
         ),
         (
