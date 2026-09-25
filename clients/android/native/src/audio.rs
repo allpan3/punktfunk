@@ -830,7 +830,7 @@ fn plane_counter_key(fmt: SessionAudio) -> &'static str {
 /// `sleep` would make closing a session wait out a reopen backoff — up to two seconds of it with
 /// [`REOPEN_ATTEMPTS`] in play. Teardown latency is a user-visible thing; a settling delay is not
 /// worth spending it.
-fn nap(shutdown: &AtomicBool, total_ms: u64) {
+pub(crate) fn nap(shutdown: &AtomicBool, total_ms: u64) {
     const SLICE_MS: u64 = 25;
     let mut left = total_ms;
     while left > 0 && !shutdown.load(Ordering::Relaxed) {
