@@ -387,7 +387,7 @@ final class ConsoleModel: ObservableObject, ConsoleViewDelegate {
         pads.onTertiary = { [weak self] in self?.fromPad(.tertiary) }
         pads.onBack = { [weak self] in
             guard let self else { return }
-            // `false` = the shell let it go, which at the root is the system's press.
+            // `false` = the shell is at its root. ConsoleView keeps the pad's B from tvOS.
             if !fromPad(.back) { actions.quit() }
         }
         pads.onShoulder = { [weak self] forward in
