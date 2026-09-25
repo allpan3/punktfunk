@@ -145,6 +145,17 @@ pub(crate) fn valid_battlenet_code(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
+/// `gamebar` exe, spawned as one quoted argv element: drive-rooted, `.exe`, no quote or
+/// control character. The shape only — Windows still runs it only if Game Bar lists it.
+pub(crate) fn valid_gamebar_exe(value: &str) -> bool {
+    let b = value.as_bytes();
+    (8..=1024).contains(&b.len())
+        && b[0].is_ascii_alphabetic()
+        && &b[1..3] == b":\\"
+        && value.to_ascii_lowercase().ends_with(".exe")
+        && !value.chars().any(|c| c == '"' || c.is_control())
+}
+
 /// `launcher_ui` values this OS can open (design D4). One kind; a value names
 /// a UI (`heroic` vs `heroic-console`; Windows `playnite` is Fullscreen).
 ///
@@ -225,6 +236,13 @@ mod tests {
         assert!(valid_battlenet_code("wow_classic"));
         assert!(!valid_battlenet_code("Pro\" & calc"));
         assert!(!valid_battlenet_code(""));
+        assert!(valid_gamebar_exe(r"D:\Games\Jürgen's Game\game.EXE"));
+        assert!(!valid_gamebar_exe(r"\\server\share\game.exe"));
+        assert!(!valid_gamebar_exe(r#"C:\Games\x.exe" --flag"#));
+        assert!(!valid_gamebar_exe(r"C:\Games\x.bat"));
+        assert!(!valid_gamebar_exe("C:\\Games\\a\nb.exe"));
+        assert!(!valid_gamebar_exe(r"C:\.exe"));
+        assert!(!valid_gamebar_exe("game.exe"));
     }
 
     #[test]
