@@ -228,7 +228,8 @@ public enum DefaultsKey {
     public static let pointerCapture = "punktfunk.pointerCapture"
     /// iPhone/iPad: how touchscreen fingers drive the host — a `TouchInputMode` raw value:
     /// "trackpad" (default: relative cursor with tap-click / two-finger-scroll gestures),
-    /// "pointer" (the cursor jumps to the finger), or "touch" (real multi-touch passthrough).
+    /// "pointer" (the cursor jumps to the finger), "touch" (real multi-touch passthrough), or
+    /// "off" (fingers reach the host as nothing).
     /// Read live per gesture by `StreamLayerUIView`.
     public static let touchMode = "punktfunk.touchMode"
     // RETIRED: `punktfunk.libraryEnabled`, the "Show game library" switch. Pairing is the only

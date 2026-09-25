@@ -157,7 +157,7 @@ impl Capture {
             scroll_axes: [None; 2],
             touch_slots: HashMap::new(),
             touch_mode,
-            gestures: Gestures::new(touch_mode == TouchMode::Trackpad),
+            gestures: Gestures::new(touch_mode != TouchMode::Pointer),
             grants,
         }
     }
@@ -609,8 +609,8 @@ impl Capture {
 
     /// `wx`/`wy` are physical window pixels (trackpad ballistics); `abs` is the
     /// frame position under the video fit (pointer / passthrough). `Touch` goes on the
-    /// wire; `Trackpad`/`Pointer` drive the gesture engine. Returns run-loop
-    /// intents (`CycleStats`, dial); everything else is sent here.
+    /// wire; `Trackpad`/`Pointer`/`Off` drive the gesture engine. Returns run-loop
+    /// intents (`CycleStats`, dial); everything else is sent here, or dropped under `Off`.
     pub fn dispatch_finger(
         &mut self,
         phase: FingerPhase,
@@ -629,7 +629,7 @@ impl Capture {
                 }
                 Vec::new()
             }
-            TouchMode::Trackpad | TouchMode::Pointer => {
+            TouchMode::Trackpad | TouchMode::Pointer | TouchMode::Off => {
                 // Down/Move only while captured. Up always runs so a lift can
                 // finish a gesture after focus-loss mid-touch.
                 if !self.captured && phase != FingerPhase::Up {
@@ -657,7 +657,7 @@ impl Capture {
         self.release_contacts();
         self.reset_touch_gestures();
         self.touch_mode = mode;
-        self.gestures = Gestures::new(mode == TouchMode::Trackpad);
+        self.gestures = Gestures::new(mode != TouchMode::Pointer);
     }
 
     /// Down in order, up in reverse so modifiers stay held until the last key.
@@ -698,12 +698,14 @@ impl Capture {
     }
 
     /// Track button holds in `held_buttons` so capture release flushes a
-    /// tap-drag. Returns [`Act::CycleStats`] and dial intents to the run loop.
+    /// tap-drag. Returns [`Act::CycleStats`] and dial intents to the run loop;
+    /// under [`TouchMode::Off`] every other act is dropped.
     fn apply_touch_act(&mut self, act: Act) -> Option<Act> {
         match act {
             Act::CycleStats | Act::Dial { .. } | Act::DialCommit | Act::DialCancel => {
                 return Some(act)
             }
+            _ if self.touch_mode == TouchMode::Off => {}
             Act::Button { gs, down } => {
                 if down {
                     self.flush_motion(); // the press lands where the cursor now is

@@ -3569,6 +3569,8 @@ pub(crate) mod tests {
         assert_eq!(ctx.settings.touch_mode, "pointer");
         assert!(adjust(RowId::Touch, 1, false, &mut ctx));
         assert_eq!(ctx.settings.touch_mode, "touch");
+        assert!(adjust(RowId::Touch, 1, false, &mut ctx));
+        assert_eq!(ctx.settings.touch_mode, "off");
         assert!(!adjust(RowId::Touch, 1, false, &mut ctx), "last = thud");
         assert!(adjust(RowId::Touch, 1, true, &mut ctx));
         assert_eq!(ctx.settings.touch_mode, "trackpad");

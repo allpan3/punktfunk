@@ -92,7 +92,7 @@ mod geometry_tests {
 pub struct RingFacts {
     /// Empty means the platform default ring.
     pub overlay_actions: String,
-    /// Touch-model name: `trackpad` / `pointer` / `touch`.
+    /// Touch-model name: `trackpad` / `pointer` / `touch` / `off`.
     pub touch_mode: String,
     pub invert_scroll: bool,
     /// Without this the `touch` model is skipped.

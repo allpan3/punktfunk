@@ -1058,6 +1058,14 @@ final class StreamLayerUIView: UIView {
         mouse.onDial = { [weak self] event in self?.onDial?(event) }
         return mouse
     }()
+    /// The `off` model: the same gestures (twist, keyboard swipe, stats tap) with no `send`,
+    /// so a miss beside the on-screen pad never moves the host cursor.
+    private lazy var mutedMouse: TouchMouse = {
+        let mouse = TouchMouse()
+        mouse.onKeyboardGesture = { [weak self] show in self?.setSoftKeyboardVisible(show) }
+        mouse.onDial = { [weak self] event in self?.onDial?(event) }
+        return mouse
+    }()
     /// The finger route latched at gesture start — a Settings change mid-gesture applies to
     /// the NEXT touch, so one gesture never splits across input models.
     private var fingerRoute: TouchInputMode?
@@ -1076,6 +1084,7 @@ final class StreamLayerUIView: UIView {
     /// Release anything the touch-driven mouse holds and forget gesture state — session stop.
     func resetTouchInput() {
         touchMouse.reset()
+        mutedMouse.reset()
         pencil.reset() // leaves range → the host lifts anything still inked
         fingerRoute = nil
         setSoftKeyboardVisible(false) // a stream that's gone takes its keyboard with it
@@ -1179,7 +1188,7 @@ final class StreamLayerUIView: UIView {
     }
 
     /// Route direct fingers by the touch-input model, latched for the whole gesture:
-    /// passthrough → real wire touches; trackpad/pointer → the TouchMouse gesture engine.
+    /// passthrough → real wire touches; trackpad/pointer/off → a TouchMouse gesture engine.
     private func forwardFingers(_ touches: Set<UITouch>, kind: TouchKind) {
         var mode = fingerRoute ?? TouchInputMode.current(settings)
         if mode == .touch, !touchPassthroughEnabled { mode = .trackpad }
@@ -1193,15 +1202,16 @@ final class StreamLayerUIView: UIView {
             // the dial. Forwarding first is deliberate: a pull that never completes must not
             // have cost the host a contact.
             trackEdgePull(touches, kind: kind)
-        case .trackpad, .pointer:
+        case .trackpad, .pointer, .off:
+            let mouse = mode == .off ? mutedMouse : touchMouse
             switch kind {
-            case .down: touchMouse.began(touches, in: self, trackpad: mode == .trackpad)
-            case .move: touchMouse.moved(touches, in: self)
-            case .up: touchMouse.ended(touches, in: self)
-            case .cancel: touchMouse.cancelled(touches)
+            case .down: mouse.began(touches, in: self, trackpad: mode != .pointer)
+            case .move: mouse.moved(touches, in: self)
+            case .up: mouse.ended(touches, in: self)
+            case .cancel: mouse.cancelled(touches)
             }
         }
-        if touchIDs.isEmpty, touchMouse.isIdle { fingerRoute = nil }
+        if touchIDs.isEmpty, touchMouse.isIdle, mutedMouse.isIdle { fingerRoute = nil }
     }
 
     /// An indirect-pointer touch is a button-held click/drag session: forward its position as

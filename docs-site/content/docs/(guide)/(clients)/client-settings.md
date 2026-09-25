@@ -82,7 +82,7 @@ Touch modes, mouse modes and the in-stream keys are explained on [Input](/docs/i
 
 | Setting | Default | What it does | Where |
 |---|---|---|---|
-| **Touch input** | Trackpad | **Trackpad**, **Direct pointer** or **Touch passthrough**. | Linux, Windows, iPhone, iPad, Android |
+| **Touch input** | Trackpad | **Trackpad**, **Direct pointer**, **Touch passthrough** or **Off**. | Linux, Windows, iPhone, iPad, Android |
 | **Mouse input** | Capture (games) (Android: Desktop) | **Capture** locks the pointer for games; **Desktop** points absolutely. | Linux, Windows, Mac, Android |
 | **Capture pointer for games** | On | Locks a hardware mouse for mouse-look in fullscreen. | iPad |
 | **Capture system shortcuts** | On | While input is captured, Alt+Tab and the Windows key (⌘ shortcuts on a Mac) go to the host. **Ctrl+Alt+Shift+Q** or ⌘⎋ always releases capture. On Linux it needs KDE Plasma, GNOME or a wlroots compositor. | Linux, Windows, Mac |

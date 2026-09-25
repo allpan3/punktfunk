@@ -785,16 +785,17 @@ const CODEC_LABELS: &[&str] = &[
 const DECODERS: &[&str] = &["auto", "native-vulkan", "native-vaapi", "software"];
 /// Touch-input model values (persisted) paired with their display labels below — the
 /// cross-client set (Android/Apple). Only meaningful on a touchscreen (Deck/tablet).
-const TOUCH_MODES: &[&str] = &["trackpad", "pointer", "touch"];
-const TOUCH_MODE_LABELS: &[&str] = &["Trackpad", "Direct pointer", "Touch passthrough"];
+const TOUCH_MODES: &[&str] = &["trackpad", "pointer", "touch", "off"];
+const TOUCH_MODE_LABELS: &[&str] = &["Trackpad", "Direct pointer", "Touch passthrough", "Off"];
 /// The SELECTED touch mode explained — the caption swaps with the choice (the Apple
-/// revamp's dynamic-caption idiom) instead of narrating all three modes at once.
+/// revamp's dynamic-caption idiom) instead of narrating every mode at once.
 /// Combo-row captions must stay ONE line (~66 chars at the default dialog width): a
 /// wrapped subtitle's natural width crushes the selected-value label into an ellipsis.
 const TOUCH_MODE_CAPTIONS: &[&str] = &[
     "Drives the cursor like a laptop trackpad — tap to click",
     "The cursor jumps to your finger — a tap clicks there",
     "Real multi-touch reaches the host — for touch-native apps",
+    "Touches on the stream don't reach the host",
 ];
 /// `video_fit` values + labels + one-line captions, index-aligned.
 const VIDEO_FITS: &[&str] = &["fit", "crop", "stretch"];
@@ -1639,7 +1640,7 @@ pub fn show_scoped(
         TOUCH_MODE_CAPTIONS[0],
         TOUCH_MODE_LABELS,
     );
-    // Dynamic caption: describe the SELECTED mode, not all three at once.
+    // Dynamic caption: describe the SELECTED mode, not every mode at once.
     {
         let w = touch_row.widget().clone();
         touch_row.connect_changed(move |i| {

@@ -108,6 +108,7 @@ const TOUCH_MODES: &[(&str, &str)] = &[
     ("trackpad", "Trackpad"),
     ("pointer", "Direct pointer"),
     ("touch", "Touch passthrough"),
+    ("off", "Off"),
 ];
 /// Physical-mouse presets: `(stored value, display label)` — capture (pointer lock,
 /// relative, for games) vs desktop (uncaptured absolute pointer, for remote desktop

@@ -234,6 +234,7 @@ func spec(_ slot: SlotId, _ cfg: OverlayConfig, _ a: RingActions) -> SlotSpec {
         case .trackpad: icon = "hand.point.up.left"
         case .pointer: icon = "cursorarrow"
         case .touch: icon = "hand.tap"
+        case .off: icon = "hand.raised.slash"
         }
         return SlotSpec(id: "touch_mode", label: "Touch mode", icon: icon, toggle: true,
                         state: m.rawValue.capitalized)

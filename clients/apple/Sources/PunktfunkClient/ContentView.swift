@@ -1284,7 +1284,7 @@ struct ContentView: View {
             touchMode: { TouchInputMode.current(conn.settings) },
             cycleTouchMode: {
                 // Passthrough is skipped toward a host that drops contacts (§5.4).
-                let order: [TouchInputMode] = conn.hostSupportsTouch ? [.trackpad, .pointer, .touch] : [.trackpad, .pointer]
+                let order = TouchInputMode.allCases.filter { $0 != .touch || conn.hostSupportsTouch }
                 let i = order.firstIndex(of: TouchInputMode.current(conn.settings)) ?? 0
                 TouchInputMode.sessionOverride = order[(i + 1) % order.count]
             },

@@ -3178,7 +3178,8 @@ fn ring_command(
                 let next = match (cap.touch_mode(), accepts_touch) {
                     (TouchMode::Trackpad, _) => TouchMode::Pointer,
                     (TouchMode::Pointer, true) => TouchMode::Touch,
-                    _ => TouchMode::Trackpad,
+                    (TouchMode::Pointer, false) | (TouchMode::Touch, _) => TouchMode::Off,
+                    (TouchMode::Off, _) => TouchMode::Trackpad,
                 };
                 cap.set_touch_mode(next);
             }

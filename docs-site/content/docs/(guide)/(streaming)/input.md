@@ -159,7 +159,7 @@ direction**; your saved settings stay as they are.
 
 ## Touch modes
 
-On a touchscreen (Android, iPhone, iPad, Linux, Windows), **Touch input** picks one of three
+On a touchscreen (Android, iPhone, iPad, Linux, Windows), **Touch input** picks one of four
 modes:
 
 - **Trackpad** (default) — your finger moves the host cursor like a laptop touchpad. Lift and
@@ -167,6 +167,8 @@ modes:
 - **Direct pointer** — the cursor jumps to your finger and follows it.
 - **Touch passthrough** — every finger is sent as a real touch, with no gestures. Only for apps
   that understand touch.
+- **Off** — touches on the stream don't reach the host. Use it with the
+  [virtual controller](#virtual-controller), so a tap beside a button can't move the cursor.
 
 Trackpad and Direct pointer share these gestures:
 
@@ -179,6 +181,8 @@ Trackpad and Direct pointer share these gestures:
 | Three-finger tap | Cycle the [stats overlay](/docs/stats) |
 | Three-finger swipe up / down (Android, iPhone, iPad) | Show or hide the on-screen keyboard |
 | Two-finger twist | Open the [quick-action dial](#the-quick-action-dial) |
+
+In **Off**, only the last three work.
 
 Touch passthrough depends on the host:
 
@@ -255,7 +259,8 @@ controller connected, or when the host only lets this device send controller inp
 
 On Android, iPhone and iPad, the dial's **Virtual controller** button draws a controller over the
 stream. The host sees it as one more pad. Fingers on its controls drive the game; fingers
-elsewhere still drive the touch mode. Under **Quick actions** in settings, pick a **Layout**
+elsewhere still drive the touch mode. Set **Touch mode** to **Off** to keep them from reaching
+the host. Under **Quick actions** in settings, pick a **Layout**
 (**Full**, **Sticks and shoulders**, **D-pad and face buttons**), set **Opacity** and **Scale**,
 or use **Edit layout** to move, resize and hide controls, separately for wide and upright screens.
 

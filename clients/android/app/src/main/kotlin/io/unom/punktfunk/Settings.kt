@@ -139,7 +139,8 @@ data class Settings(
      * lift and re-swipe to walk it across), tap to click where it is. [TouchMode.POINTER]: the
      * cursor jumps to the finger (direct pointing). [TouchMode.TOUCH]: real multi-touch
      * passthrough — every finger reaches the host as a touchscreen contact, for apps/games that
-     * understand touch. Mirrors the Apple client's TouchInputMode.
+     * understand touch. [TouchMode.OFF]: fingers reach the host as nothing; the ring twist and
+     * the three-finger gestures still work. Mirrors the Apple client's TouchInputMode.
      */
     val touchMode: TouchMode = TouchMode.TRACKPAD,
     /**
@@ -337,7 +338,7 @@ data class Settings(
 )
 
 /** [Settings.touchMode] values; persisted by name. */
-enum class TouchMode { TRACKPAD, POINTER, TOUCH }
+enum class TouchMode { TRACKPAD, POINTER, TOUCH, OFF }
 
 /**
  * How a physical mouse drives the host — the cross-client mouse model (the Rust `MouseMode`,
@@ -1015,6 +1016,7 @@ val TOUCH_MODE_OPTIONS = listOf(
     TouchMode.TRACKPAD to "Trackpad",
     TouchMode.POINTER to "Direct pointer",
     TouchMode.TOUCH to "Touch passthrough",
+    TouchMode.OFF to "Off",
 )
 
 /** (mode, label) for the physical-mouse model. */

@@ -432,6 +432,7 @@ impl Ring {
                 state: match f.touch_mode.as_str() {
                     "pointer" => "Direct pointer",
                     "touch" => "Touch passthrough",
+                    "off" => "Off",
                     _ => "Trackpad",
                 }
                 .into(),
@@ -441,6 +442,7 @@ impl Ring {
                     match f.touch_mode.as_str() {
                         "pointer" => "Point",
                         "touch" => "Pass",
+                        "off" => "Off",
                         _ => "Track",
                     },
                 )

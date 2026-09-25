@@ -662,6 +662,7 @@ extension SettingsView {
                     Text("Trackpad").tag(TouchInputMode.trackpad.rawValue)
                     Text("Direct pointer").tag(TouchInputMode.pointer.rawValue)
                     Text("Touch passthrough").tag(TouchInputMode.touch.rawValue)
+                    Text("Off").tag(TouchInputMode.off.rawValue)
                 }
             }
             quickActionsRow
@@ -677,7 +678,7 @@ extension SettingsView {
     }
 
     /// The SELECTED touch mode explained — dynamic, so the caption always describes what the
-    /// picker currently does instead of narrating all three modes at once.
+    /// picker currently does instead of narrating every mode at once.
     private var touchModeDescription: String {
         switch TouchInputMode(rawValue: effective.touchMode) ?? .trackpad {
         case .trackpad:
@@ -689,6 +690,8 @@ extension SettingsView {
             return "The host cursor jumps to wherever you touch."
         case .touch:
             return "Real multi-touch reaches the host."
+        case .off:
+            return "Touches on the picture don't reach the host. On-screen controls still work."
         }
     }
     #endif

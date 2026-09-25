@@ -31,6 +31,7 @@ import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DoNotTouch
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Insights
 import androidx.compose.material.icons.filled.Keyboard
@@ -263,6 +264,7 @@ internal fun spec(slot: SlotId, cfg: OverlayConfig, a: RingActions): SlotSpec = 
                 TouchMode.TRACKPAD -> Icons.Filled.TouchApp
                 TouchMode.POINTER -> Icons.Filled.Mouse
                 TouchMode.TOUCH -> Icons.Filled.PanTool
+                TouchMode.OFF -> Icons.Filled.DoNotTouch
             },
             toggle = true, state = m.name.lowercase().replaceFirstChar { it.uppercase() },
         )

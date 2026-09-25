@@ -601,7 +601,7 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
         touchMode = { touchMode },
         cycleTouchMode = {
             // Passthrough is skipped toward a host that drops contacts (§5.4).
-            val order = if (hostAcceptsTouch) TouchMode.entries else listOf(TouchMode.TRACKPAD, TouchMode.POINTER)
+            val order = if (hostAcceptsTouch) TouchMode.entries else TouchMode.entries - TouchMode.TOUCH
             touchMode = order[(order.indexOf(touchMode) + 1) % order.size]
         },
         keyboardGranted = { ui.accessGrants and SessionAccess.KEYBOARD != 0 },
@@ -960,7 +960,8 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
                 },
             )
             // Touch input per the Settings model: trackpad/direct-pointer mouse (the shared gesture
-            // vocabulary) or real multi-touch passthrough — see TouchInput.kt. Passthrough gets no
+            // vocabulary), the same gestures with nothing sent (Off, so a miss beside the pad stays
+            // put), or real multi-touch passthrough — see TouchInput.kt. Passthrough gets no
             // keyboard gesture: its fingers belong to the host verbatim (a swipe there may BE a
             // host-OS gesture), so intercepting three fingers would corrupt real multi-touch.
             // Stylus lane (design/pen-tablet-input.md §7): against a HOST_CAP_PEN host a stylus
@@ -983,10 +984,10 @@ fun StreamScreen(session: ActiveSession, onSessionEnded: (SessionEndReason) -> U
                         touchMode == TouchMode.TOUCH ->
                             streamTouchPassthrough(NativeTouchSink(handle), stylus, ::videoFrame)
                         else -> streamTouchInput(
-                            NativeTouchSink(handle),
+                            if (touchMode == TouchMode.OFF) DroppedTouchSink else NativeTouchSink(handle),
                             stylus,
                             ::videoFrame,
-                            trackpad = touchMode == TouchMode.TRACKPAD,
+                            trackpad = touchMode != TouchMode.POINTER,
                             onCycleStats = { ui.statsVerbosity = ui.statsVerbosity.next() },
                             onKeyboard = showKeyboard,
                             // The two-finger twist turns the quick-action ring, frame by frame.

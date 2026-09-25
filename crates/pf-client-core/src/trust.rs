@@ -1170,16 +1170,25 @@ pub enum TouchMode {
     Pointer,
     /// Multi-touch passthrough: each finger is a host contact, no gesture interpretation.
     Touch,
+    /// Fingers reach the host as nothing. Client gestures (ring twist, stats tap) still
+    /// run, so a miss beside the on-screen pad cannot move the cursor.
+    Off,
 }
 
 impl TouchMode {
-    pub const ALL: [TouchMode; 3] = [TouchMode::Trackpad, TouchMode::Pointer, TouchMode::Touch];
+    pub const ALL: [TouchMode; 4] = [
+        TouchMode::Trackpad,
+        TouchMode::Pointer,
+        TouchMode::Touch,
+        TouchMode::Off,
+    ];
 
     /// Persisted name; unknown / unset → `Trackpad`.
     pub fn from_name(s: &str) -> TouchMode {
         match s {
             "pointer" => TouchMode::Pointer,
             "touch" => TouchMode::Touch,
+            "off" => TouchMode::Off,
             _ => TouchMode::Trackpad,
         }
     }
@@ -1189,6 +1198,7 @@ impl TouchMode {
             TouchMode::Trackpad => "trackpad",
             TouchMode::Pointer => "pointer",
             TouchMode::Touch => "touch",
+            TouchMode::Off => "off",
         }
     }
 
@@ -1197,6 +1207,7 @@ impl TouchMode {
             TouchMode::Trackpad => "Trackpad",
             TouchMode::Pointer => "Direct pointer",
             TouchMode::Touch => "Touch passthrough",
+            TouchMode::Off => "Off",
         }
     }
 }
@@ -1317,7 +1328,7 @@ pub struct Settings {
     pub guide_gesture: String,
     /// Host compositor backend to request (advisory; the host falls back if unavailable).
     pub compositor: String,
-    /// [`TouchMode`] name: `"trackpad"` (default), `"pointer"`, or `"touch"`.
+    /// [`TouchMode`] name: `"trackpad"` (default), `"pointer"`, `"touch"`, or `"off"`.
     /// `default` so older stores load as trackpad.
     #[serde(default = "default_touch_mode")]
     pub touch_mode: String,
@@ -1895,6 +1906,7 @@ mod tests {
         // Unknown name falls back to trackpad.
         assert_eq!(TouchMode::from_name("pointer"), TouchMode::Pointer);
         assert_eq!(TouchMode::from_name("touch"), TouchMode::Touch);
+        assert_eq!(TouchMode::from_name("off"), TouchMode::Off);
         assert_eq!(TouchMode::from_name("bogus"), TouchMode::Trackpad);
         for m in TouchMode::ALL {
             assert_eq!(TouchMode::from_name(m.as_name()), m);

@@ -964,7 +964,7 @@ private fun InputSettings(s: Settings, update: (Settings) -> Unit, onOpenQuickAc
             selected = s.touchMode,
             field = "touch_mode",
             caption = "Trackpad moves the cursor by relative swipes; Direct pointer jumps it " +
-                "to your finger; Passthrough sends real multi-touch.",
+                "to your finger; Passthrough sends real multi-touch; Off ignores touches on the picture.",
         ) { mode -> update(s.copy(touchMode = mode)) }
         Column {
             OverrideBadge("overlay_actions")
