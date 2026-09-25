@@ -62,11 +62,13 @@ struct CursorState {
 impl CursorState {
     /// Blend iff the client draws nothing and a hardware cursor is declared on this adapter —
     /// the declare excludes the pointer from every frame for the WUDFHost's life, and the
-    /// worker is the only shape source. `excluded` is [`registry::any_declared`], read before
-    /// the caller took this monitor's lock.
+    /// worker is the only shape source. Armed whenever a blend could turn on, so a clean plate
+    /// exists when it does. `excluded` is [`registry::any_declared`], read before the caller
+    /// took this monitor's lock.
     fn set_blend(&self, excluded: bool) {
-        self.cell
-            .set_blend(!self.forward_on && self.worker.is_some() && excluded);
+        let armed = self.worker.is_some() && excluded;
+        self.cell.set_armed(armed);
+        self.cell.set_blend(!self.forward_on && armed);
     }
 }
 
