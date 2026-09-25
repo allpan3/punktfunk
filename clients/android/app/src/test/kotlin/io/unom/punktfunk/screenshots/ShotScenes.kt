@@ -553,6 +553,27 @@ internal fun StreamBannerScene(pad: Boolean) {
 }
 
 /**
+ * The companion panel on a dual-screen handheld's lower screen: the real [CompanionPanel] on
+ * [page], with the stream scene's Normal lines and a session where every action is available.
+ */
+@Composable
+internal fun CompanionScene(page: io.unom.punktfunk.CompanionPage) {
+    io.unom.punktfunk.CompanionPanel(
+        pages = io.unom.punktfunk.CompanionPage.entries,
+        page = page,
+        onPage = {},
+        stats = shotLines(StatsVerbosity.NORMAL, 1920, 1080, 120, 119.0, 92.1, loss = false),
+        tier = StatsVerbosity.NORMAL,
+        onTier = {},
+        cfg = io.unom.punktfunk.OverlayConfig.platformDefault(),
+        actions = io.unom.punktfunk.fakeRingActions(),
+        haptics = remember { io.unom.punktfunk.ConsoleHaptics(null) },
+        trackpad = {},
+        pad = {},
+    )
+}
+
+/**
  * The controllers screen with [shotPads] injected — Robolectric enumerates no input devices, and
  * the connected-pad card is the point of the shot. Wrapped in a background [Surface]: the
  * activity provides the dark ground in the app, and without one here the content color falls

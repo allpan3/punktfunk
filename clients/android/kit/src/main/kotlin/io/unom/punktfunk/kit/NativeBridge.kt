@@ -101,6 +101,9 @@ object NativeBridge {
         standard: Int,
     )
 
+    /** One `pf.display` line in the log ring above, as written: the displays and fold features. */
+    external fun nativeLogDisplay(line: String)
+
     /**
      * The machine token of the most recent failed [nativeConnect]/[nativePair], cleared on read
      * (`""` when none) — call right after a `0` handle / `""` fingerprint. A typed host rejection
