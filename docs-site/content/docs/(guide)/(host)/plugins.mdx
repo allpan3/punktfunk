@@ -132,7 +132,8 @@ your whole home, `~/.ssh` and its own config folder.
 
 **Plugins** → **Installed** lists every grant and denial: remove a grant there, or choose
 **Ask again**. The CLI does the same with `grant`, `access` and `revoke`. Use `--write` only when
-the plugin must change files in that folder.
+the plugin must change files in that folder. On Windows, write access can't be given inside
+Program Files or ProgramData: every plugin runs as the same account there.
 
 ## Update and remove
 

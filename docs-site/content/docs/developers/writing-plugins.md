@@ -201,7 +201,8 @@ Don't tell users to widen the runner unit or change ACLs by hand.
 When the operator is the one who knows the folder, a save folder or a config directory, make it a
 `handedPath()` field in `game` or `config`. The console grants each folder the operator adds there
 when the form saves, read-only unless `handedPath({ write: true })`. A folder the plugin fills in
-itself is never granted that way. Write access on a Windows host is refused either way.
+itself is never granted that way. On Windows a plugin's own write request is always refused;
+write access comes only from the operator, and never inside Program Files or ProgramData.
 
 ## Test it
 
