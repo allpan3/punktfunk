@@ -82,6 +82,19 @@ profile() {
       WANDER_PCT=30; WANDER_S=180
       MODE=1920x1080x30; ACHIEVABLE_KBPS=12000
       ;;
+    # The tunnel with a desktop that goes still a minute in: two new frames a second
+    # among repeats, 0.5 % loss. No wander, so a cut is the content's doing or the loss's.
+    wan_still)
+      RATE_KBIT=12500; DELAY_MS=10; BUFFER_MS=450; LOSS_PCT=0.5
+      MODE=1920x1080x30; ACHIEVABLE_KBPS=12000
+      CONTENT=motion-then-still:2
+      ;;
+    # A link with room and 0.5 % random loss: a bring-up ramp that walls under 10 Mbps
+    # here read one lost packet as the link.
+    ramp_loss)
+      RATE_KBIT=245000; DELAY_MS=3; BUFFER_MS=60; LOSS_PCT=0.5
+      MODE=1920x1080x60; ACHIEVABLE_KBPS=60000
+      ;;
     lte_variable)
       RATE_KBIT=30000; DELAY_MS=30; BUFFER_MS=250; LOSS_PCT=0.3
       TRACE="40:8000 75:50000 110:2500 140:18000"
@@ -164,7 +177,7 @@ profile() {
       ;;
     *)
       echo "unknown profile '$1' (lan_1g wifi_tv wifi_tv_probe_damage wan_wg_12 \
-lte_variable nowall_720p policer_20 shared_two_auto shared_both shared_newcomer \
+lte_variable wan_still ramp_loss nowall_720p policer_20 shared_two_auto shared_both shared_newcomer \
 shared_fixed_plus_auto shared_fixed_survivor shared_leaver shared_lone shared_fixed_lone)" >&2
       return 1
       ;;

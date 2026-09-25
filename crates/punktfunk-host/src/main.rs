@@ -632,7 +632,7 @@ fn real_main() -> Result<()> {
                             serve_ramp: !args.iter().any(|a| a == "--no-ramp"),
                         }),
                         None => {
-                            bail!("--content takes steady, idle-then-motion or frame-driven:<fps>")
+                            bail!("--content takes steady, idle-then-motion, frame-driven:<fps> or motion-then-still:<fps>")
                         }
                     }
                 }
@@ -1065,9 +1065,10 @@ PUNKTFUNK1-HOST OPTIONS:
                                  test frames, frames sized from the live Automatic rate, or a
                                  virtual display + NVENC (default: synthetic). synthetic-abr
                                  needs no display and no GPU
-    --content <SCRIPT>           what synthetic-abr encodes: steady, idle-then-motion, or
-                                 frame-driven:<fps> for a source slower than the session
-                                 (default: steady)
+    --content <SCRIPT>           what synthetic-abr encodes: steady, idle-then-motion,
+                                 frame-driven:<fps> for a source slower than the session, or
+                                 motion-then-still:<fps> for a minute of motion, then <fps>
+                                 new frames a second among repeats (default: steady)
     --fill <PCT>                 share of each frame's bit allowance synthetic-abr fills,
                                  1-100 (default: 100)
     --recovery-ms <MS>           how long synthetic-abr takes to answer a keyframe request.
