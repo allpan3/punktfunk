@@ -874,7 +874,8 @@ public final class StreamViewController: StreamViewControllerBase {
     private func requestSurfaceMode() {
         guard let connection else { return }
         let settings = connection.settings
-        let target = (onExternal ? ExternalDisplay.streamMode(settings) : nil) ?? settings.streamMode
+        let target = (onExternal ? ExternalDisplay.streamMode(settings) : nil)
+            ?? settings.streamMode(native: NativeDisplay.mode)
         let live = connection.currentMode()
         guard live.width != target.width || live.height != target.height
             || live.refreshHz != target.hz

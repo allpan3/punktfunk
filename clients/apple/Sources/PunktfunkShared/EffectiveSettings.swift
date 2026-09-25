@@ -371,11 +371,16 @@ public enum PresetSelection: Hashable, Sendable {
 
 extension EffectiveSettings {
     /// The mode a session asks the host for: the configured size at the render scale, capped at
-    /// the codec's per-axis limit, at the configured refresh.
-    public var streamMode: (width: UInt32, height: UInt32, hz: UInt32) {
+    /// the codec's per-axis limit, at the configured refresh. A zero width, height or refresh is
+    /// the console's Native and takes `native`'s; a native refresh counts as at least 30.
+    public func streamMode(
+        native: (width: Int, height: Int, hz: Int)
+    ) -> (width: UInt32, height: UInt32, hz: UInt32) {
         let mode = RenderScale.apply(
-            baseWidth: width, baseHeight: height, scale: renderScale,
+            baseWidth: width == 0 ? native.width : width,
+            baseHeight: height == 0 ? native.height : height, scale: renderScale,
             maxDimension: RenderScale.maxDimension(codec: codec))
-        return (mode.width, mode.height, UInt32(clamping: refreshHz))
+        let hz = refreshHz == 0 ? max(native.hz, 30) : refreshHz
+        return (mode.width, mode.height, UInt32(clamping: hz))
     }
 }

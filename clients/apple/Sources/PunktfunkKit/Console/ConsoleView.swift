@@ -39,6 +39,9 @@ public final class ConsoleMetalView: ConsolePlatformView {
     private var swipeFrom: CGPoint?
     /// A held remote direction and the timer that repeats it.
     private var held: (press: ObjectIdentifier, timer: Timer)?
+    /// Presses taken on the way down. Their release stays ours, even when the Back one carried
+    /// reached the root in between.
+    private var claimed = Set<ObjectIdentifier>()
 
     public init(bridge: ConsoleBridge, device: MTLDevice, queue: MTLCommandQueue, delegate: ConsoleViewDelegate?) {
         self.bridge = bridge
@@ -220,7 +223,11 @@ public final class ConsoleMetalView: ConsolePlatformView {
     }
 
     public override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        let unclaimed = presses.filter { !claim($0, repeated: false) }
+        let unclaimed = presses.filter { press in
+            guard claim(press, repeated: false) else { return true }
+            claimed.insert(ObjectIdentifier(press))
+            return false
+        }
         if !unclaimed.isEmpty || presses.isEmpty { super.pressesBegan(unclaimed, with: event) }
     }
 
@@ -230,27 +237,14 @@ public final class ConsoleMetalView: ConsolePlatformView {
             bridge.menu(.okUp, from: .keys)
         }
         release(presses)
-        let unclaimed = presses.filter { !claims($0) }
+        let unclaimed = presses.filter { claimed.remove(ObjectIdentifier($0)) == nil }
         if !unclaimed.isEmpty || presses.isEmpty { super.pressesEnded(unclaimed, with: event) }
     }
 
     public override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         release(presses)
-        let unclaimed = presses.filter { !claims($0) }
+        let unclaimed = presses.filter { claimed.remove(ObjectIdentifier($0)) == nil }
         if !unclaimed.isEmpty || presses.isEmpty { super.pressesCancelled(unclaimed, with: event) }
-    }
-
-    /// Whether this press is the console's at all — the same answer `claim` acts on, so a press
-    /// we took on the way down is not handed to the system on the way up.
-    private func claims(_ press: UIPress) -> Bool {
-        if press.key != nil { return key(for: press) != nil }
-        switch press.type {
-        case .select, .upArrow, .downArrow, .leftArrow, .rightArrow, .playPause: return true
-        // Back is ours only while there is something to go back to: at the root the press
-        // belongs to the system, which is what takes a TV player Home.
-        case .menu: return !bridge.atRoot
-        default: return false
-        }
     }
 
     /// A press from the pad the poller reads. GameController makes a controller current before
@@ -261,9 +255,13 @@ public final class ConsoleMetalView: ConsolePlatformView {
     }
 
     /// Hand the press to the console. `false` = not ours, let the system have it. The pad's
-    /// own presses are claimed like the remote's but do nothing.
+    /// own presses are claimed but do nothing: the poller already acted on them, B included.
+    /// Its Home button, not B, takes a pad player Home.
     private func claim(_ press: UIPress, repeated: Bool) -> Bool {
-        if fromPad(press) { return claims(press) }
+        if fromPad(press) {
+            return [.select, .upArrow, .downArrow, .leftArrow, .rightArrow, .playPause, .menu]
+                .contains(press.type)
+        }
         if let key = key(for: press) {
             let shift = press.key?.modifierFlags.contains(.shift) ?? false
             bridge.key(key, shift: shift, repeated: repeated)
@@ -277,6 +275,7 @@ public final class ConsoleMetalView: ConsolePlatformView {
         case .leftArrow: event = .left
         case .rightArrow: event = .right
         case .playPause: event = .secondary
+        // At the root the remote's Menu is the system's, which takes a TV player Home.
         case .menu where !bridge.atRoot: event = .back
         default: return false
         }
