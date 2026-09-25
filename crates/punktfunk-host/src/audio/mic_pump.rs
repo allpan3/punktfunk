@@ -21,9 +21,17 @@ pub const MIC_CHANNELS: u32 = 2;
 /// One `0xCB` uplink frame (`punktfunk_core::quic::decode_mic_datagram`).
 /// `seq`/`pts_ns` ride with the Opus payload so de-jitter can reorder, conceal, and track cadence.
 pub struct MicFrame {
+    /// Sending session ([`mic_source_id`]). One pump has one decoder: one source at a time.
+    pub source: u64,
     pub seq: u32,
     pub pts_ns: u64,
     pub opus: Vec<u8>,
+}
+
+/// A fresh [`MicFrame::source`] for a session's uplink.
+pub fn mic_source_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Drop-newest bound on the host-lifetime queue: 12 × 5–20 ms ≈ 60–240 ms of slack.
@@ -190,6 +198,11 @@ where
         let mut over_since: Option<Instant> = None;
         let mut last_trim = Instant::now();
         let mut last_log = Instant::now();
+        // The session whose uplink the decoder follows, and its last frame. Another session's
+        // frames wait until it has been quiet for `stale_gap`: two Opus streams through one
+        // decoder and one sequence chain garble both.
+        let mut floor: Option<(u64, Instant)> = None;
+        let mut floor_drops: u64 = 0;
         'pump: loop {
             // Soonest of heartbeat and a parked reorder hold aging out.
             let timeout = jitter
@@ -223,6 +236,18 @@ where
                     }
                     let now = Instant::now();
                     for frame in batch.drain(..) {
+                        match floor {
+                            Some((s, at)) if s != frame.source => {
+                                if now.duration_since(at) <= tuning.stale_gap {
+                                    floor_drops += 1;
+                                    continue;
+                                }
+                                jitter.reset_stream();
+                                let _ = decoder.reset_state();
+                            }
+                            _ => {}
+                        }
+                        floor = Some((frame.source, now));
                         jitter.ingest(now, frame, &mut deliveries);
                     }
                     // Traffic that is only late duplicates never hits the timeout arm; still flush an expired hold.
@@ -338,6 +363,8 @@ where
                         reorders = js.reorders,
                         late = js.late_drops,
                         drained = drain_drops,
+                        // Frames from a second session while another held the mic.
+                        other_session = floor_drops,
                         trimmed,
                         reprimes = bs.reprimes,
                         overflow_ms = bs.overflow_dropped * 1000 / SAMPLE_RATE as u64,
@@ -347,6 +374,7 @@ where
                 last_log = Instant::now();
                 frames_seen = 0;
                 drain_drops = 0;
+                floor_drops = 0;
                 trimmed = 0;
             }
         }
@@ -522,10 +550,48 @@ mod pump_tests {
     /// `pts_ns = seq * 20 ms`; payload from [`opus_frame`].
     fn mic_frame(seq: u32) -> MicFrame {
         MicFrame {
+            source: 1,
             seq,
             pts_ns: seq as u64 * 20_000_000,
             opus: opus_frame(),
         }
+    }
+
+    /// One decoder follows one session. A second session's frames wait until the first has
+    /// gone quiet for `stale_gap`, then take over; interleaving the two garbled both.
+    #[test]
+    fn a_second_session_waits_until_the_first_goes_quiet() {
+        let h = start(0);
+        wait_until("pump polled", || h.polled.load(Ordering::Acquire));
+        let frame = 960 * MIC_CHANNELS as usize;
+        let other = |seq| MicFrame {
+            source: 2,
+            ..mic_frame(seq)
+        };
+        for seq in 0..5 {
+            h.tx.send(mic_frame(seq)).unwrap();
+            h.tx.send(other(seq)).unwrap();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        wait_until("first session pushed", || {
+            h.pushed.load(Ordering::SeqCst) >= 5 * frame
+        });
+        std::thread::sleep(Duration::from_millis(40));
+        assert_eq!(
+            h.pushed.load(Ordering::SeqCst),
+            5 * frame,
+            "only the floor's frames"
+        );
+        std::thread::sleep(Duration::from_millis(120)); // > stale_gap
+        for seq in 5..8 {
+            h.tx.send(other(seq)).unwrap();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        wait_until("second session took over", || {
+            h.pushed.load(Ordering::SeqCst) >= 8 * frame
+        });
+        drop(h.tx);
+        h.join.join().unwrap();
     }
 
     /// A backlog the pump drains is skipped, not concealed: only the kept frames reach the mic.

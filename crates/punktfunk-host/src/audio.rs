@@ -334,7 +334,7 @@ pub(crate) mod capture_policy;
 
 mod mic_jitter;
 mod mic_pump;
-pub use mic_pump::{MicFrame, MicPump};
+pub use mic_pump::{mic_source_id, MicFrame, MicPump};
 
 /// Apps playing audio on the host right now, lowercased. Empty where the host cannot list them.
 /// Blocks on a PipeWire round trip; call it off the async runtime.

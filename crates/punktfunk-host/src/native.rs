@@ -1985,6 +1985,7 @@ pub(crate) async fn run_admitted(
         let n = &*counters_dp;
         // Per-class counts; one warn on the first drop; totals at end-of-stream.
         let denied = GrantDrops::new();
+        let mic_source = crate::audio::mic_source_id();
         // Full queue: drop, never block (would stall mic + this reader). Disconnected ends the loop.
         let offer = |tx: &std::sync::mpsc::SyncSender<ClientInput>, item: ClientInput| match tx
             .try_send(item)
@@ -2009,6 +2010,7 @@ pub(crate) async fn run_admitted(
                 n.input_mic.fetch_add(1, Ordering::Relaxed);
                 // Bounded `try_send`: never block this loop. seq + pts ride for de-jitter.
                 let _ = mic_tx.try_send(crate::audio::MicFrame {
+                    source: mic_source,
                     seq,
                     pts_ns: pts,
                     opus: opus.to_vec(),
