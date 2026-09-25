@@ -32,6 +32,19 @@ pub(crate) struct PluginUi {
     pub secret: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    /// Serves a page the console opens and lists in the nav. Absent means yes, as before the flag.
+    #[serde(default = "yes")]
+    pub page: bool,
+    /// Serves `GET/PUT /__config`, the plugin-wide settings form.
+    #[serde(default)]
+    pub config: bool,
+    /// Serves `GET/PUT /__game?entry=<id>`, a tab on each library entry's page.
+    #[serde(default)]
+    pub game: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -69,6 +82,12 @@ pub(crate) struct PluginUiPublic {
     pub port: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    /// See [`PluginUi::page`].
+    pub page: bool,
+    /// See [`PluginUi::config`].
+    pub config: bool,
+    /// See [`PluginUi::game`].
+    pub game: bool,
 }
 
 /// Listing row. Never carries the secret — the browser reaches the UI only through the console proxy.
@@ -97,6 +116,9 @@ struct StoredUi {
     port: u16,
     secret: String,
     icon: Option<String>,
+    page: bool,
+    config: bool,
+    game: bool,
 }
 
 /// `expires_at` is monotonic [`Instant`] — a wall-clock jump must not expire a live lease.
@@ -182,6 +204,9 @@ impl PluginRegistry {
                 ui: s.ui.as_ref().map(|u| PluginUiPublic {
                     port: u.port,
                     icon: u.icon.clone(),
+                    page: u.page,
+                    config: u.config,
+                    game: u.game,
                 }),
                 category: s.category.clone(),
             })
@@ -257,6 +282,9 @@ pub(crate) fn register_ui_for_test(id: &str, port: u16, secret: &str) {
                 port,
                 secret: secret.to_string(),
                 icon: None,
+                page: true,
+                config: false,
+                game: false,
             }),
             category: None,
         },
@@ -376,6 +404,9 @@ fn validate_ui(u: PluginUi) -> Result<StoredUi, String> {
         port: u.port,
         secret: u.secret,
         icon,
+        page: u.page,
+        config: u.config,
+        game: u.game,
     })
 }
 
@@ -555,6 +586,9 @@ mod tests {
                 port,
                 secret: secret.into(),
                 icon: Some("gamepad-2".into()),
+                page: true,
+                config: false,
+                game: false,
             }),
             category: None,
         }
@@ -606,6 +640,28 @@ mod tests {
         assert!(validate(reg("x", 49321, "tooshort")).is_err());
         assert!(validate(reg("x", 49321, "bad secret with spaces!!")).is_err());
         assert!(validate(reg("   ", 49321, SECRET)).is_err());
+    }
+
+    #[test]
+    fn ui_flags_default_to_a_page_only() {
+        let old: PluginUi =
+            serde_json::from_value(serde_json::json!({"port": 49321, "secret": SECRET})).unwrap();
+        assert!(old.page && !old.config && !old.game);
+        let tab: PluginUi = serde_json::from_value(
+            serde_json::json!({"port": 49321, "secret": SECRET, "page": false, "game": true}),
+        )
+        .unwrap();
+        assert!(!tab.page && !tab.config && tab.game);
+        let r = PluginRegistry::new();
+        r.upsert("p", validate(reg("T", 49321, SECRET)).unwrap());
+        let mut flagged = reg("T", 49321, SECRET);
+        flagged.ui.as_mut().unwrap().game = true;
+        assert!(
+            r.upsert("p", validate(flagged).unwrap()),
+            "a flag change is visible"
+        );
+        let ui = r.snapshot().0.remove(0).ui.unwrap();
+        assert!(ui.page && ui.game && !ui.config);
     }
 
     #[test]
