@@ -508,8 +508,9 @@ impl InputInjector for WlrootsInjector {
                     // Absolute motion maps onto the bound output; only this arm depends on it.
                     self.retarget();
                     let t = self.now_ms(); // `retarget` may have consumed time releasing buttons
-                    let x = event.x.clamp(0, w as i32) as u32;
-                    let y = event.y.clamp(0, h as i32) as u32;
+                                           // `x == w` would map onto the edge, which a neighbouring head owns.
+                    let x = event.x.clamp(0, w as i32 - 1) as u32;
+                    let y = event.y.clamp(0, h as i32 - 1) as u32;
                     self.pointer.motion_absolute(t, x, y, w, h);
                     self.pointer.frame();
                 }

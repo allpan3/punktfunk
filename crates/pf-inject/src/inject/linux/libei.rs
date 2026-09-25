@@ -916,8 +916,8 @@ impl EiState {
                         // region. `sane_region` rejects gamescope's INT32_MAX "raw"
                         // region (a center tap would become x≈1e9). Else output hint,
                         // then raw client pixels.
-                        let nx = (ev.x as f32 / w).clamp(0.0, 1.0);
-                        let ny = (ev.y as f32 / h).clamp(0.0, 1.0);
+                        let nx = (ev.x as f32 / w).clamp(0.0, crate::ABS_EDGE);
+                        let ny = (ev.y as f32 / h).clamp(0.0, crate::ABS_EDGE);
                         let anchor = crate::absolute_anchor();
                         if let Some(a) = anchor
                             .as_ref()
@@ -1035,8 +1035,8 @@ impl EiState {
                 let h = (ev.flags & 0xffff) as f32;
                 match slot.interface::<ei::Touchscreen>() {
                     Some(t) if w > 0.0 && h > 0.0 => {
-                        let nx = (ev.x as f32 / w).clamp(0.0, 1.0);
-                        let ny = (ev.y as f32 / h).clamp(0.0, 1.0);
+                        let nx = (ev.x as f32 / w).clamp(0.0, crate::ABS_EDGE);
+                        let ny = (ev.y as f32 / h).clamp(0.0, crate::ABS_EDGE);
                         // Same region ladder as MouseMoveAbs so touch and pointer
                         // land on the same monitor.
                         let anchor = crate::absolute_anchor();

@@ -155,6 +155,11 @@ pub(crate) fn aim_gen() -> u64 {
     AIM_GEN.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Largest normalised absolute position. A client may send `x == w` (a touch on the far edge);
+/// mapped as 1.0 that lands one pixel past the head, on the neighbouring monitor.
+#[cfg(target_os = "linux")]
+pub(crate) const ABS_EDGE: f32 = 1.0 - 1.0 / 65536.0;
+
 /// Streamed head's mode, published beside the aim at capture bring-up.
 static STREAM_EXTENT: std::sync::RwLock<Option<(u16, u16)>> = std::sync::RwLock::new(None);
 

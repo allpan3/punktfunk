@@ -403,8 +403,8 @@ impl InputInjector for KwinFakeInjector {
                 if w > 0 && h > 0 {
                     self.refresh_geometry();
                     let (lx, ly, lw, lh) = self.logical_target(w, h);
-                    let nx = (event.x as f64 / w as f64).clamp(0.0, 1.0);
-                    let ny = (event.y as f64 / h as f64).clamp(0.0, 1.0);
+                    let nx = (event.x as f64 / w as f64).clamp(0.0, f64::from(crate::ABS_EDGE));
+                    let ny = (event.y as f64 / h as f64).clamp(0.0, f64::from(crate::ABS_EDGE));
                     self.fake
                         .pointer_motion_absolute(lx + nx * lw, ly + ny * lh);
                 }
@@ -450,8 +450,8 @@ impl InputInjector for KwinFakeInjector {
                 if w > 0 && h > 0 {
                     self.refresh_geometry();
                     let (lx, ly, lw, lh) = self.logical_target(w, h);
-                    let nx = (event.x as f64 / w as f64).clamp(0.0, 1.0);
-                    let ny = (event.y as f64 / h as f64).clamp(0.0, 1.0);
+                    let nx = (event.x as f64 / w as f64).clamp(0.0, f64::from(crate::ABS_EDGE));
+                    let ny = (event.y as f64 / h as f64).clamp(0.0, f64::from(crate::ABS_EDGE));
                     let x = lx + nx * lw;
                     let y = ly + ny * lh;
                     if event.kind == InputKind::TouchDown {
