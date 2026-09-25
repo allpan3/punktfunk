@@ -281,13 +281,15 @@ fn windows_protected(canonical: &Path) -> bool {
     false
 }
 
-/// The safety refusals for a requested path, in order; `None` means the path is a directory
-/// the host could in principle grant. Coverage, sticky denial, and caps are the caller's
-/// business and are checked after this.
+/// The safety refusals for a path, in order; `None` means the path is a directory the host
+/// could in principle grant. `operator` is true for a grant the operator makes (CLI, console)
+/// and false for a plugin's request or manifest. Coverage, sticky denial, and caps are the
+/// caller's business and are checked after this.
 fn refusal_rule(
     raw: &Path,
     canonical: &Path,
     write: bool,
+    operator: bool,
     policy: &PathPolicy,
     facts: PathFacts,
 ) -> Option<&'static str> {
@@ -343,7 +345,7 @@ fn refusal_rule(
     if protected {
         return Some("protected_path");
     }
-    if write && !write_owned(canonical, policy, facts) {
+    if write && !write_owned(canonical, operator, policy, facts) {
         return Some("write_not_owned");
     }
     None
@@ -361,16 +363,23 @@ fn punktfunk_dot_config(home: &Path, canonical: &Path) -> bool {
         .is_some_and(|n| n.starts_with("punktfunk"))
 }
 
-/// May a plugin hold WRITE on `canonical`? Runtime write requests stay Linux-only: on
-/// Windows the ACL story is not verified, so they are refused outright.
+/// May a plugin hold WRITE on `canonical`? On Windows only the operator grants it, and never in
+/// a tree Windows or installed software runs from: every plugin shares the LocalService ACE.
 #[cfg(windows)]
-fn write_owned(_canonical: &Path, _policy: &PathPolicy, _facts: PathFacts) -> bool {
-    false
+fn write_owned(canonical: &Path, operator: bool, _policy: &PathPolicy, _facts: PathFacts) -> bool {
+    operator
+        && ![
+            r"C:\Program Files",
+            r"C:\Program Files (x86)",
+            r"C:\ProgramData",
+        ]
+        .iter()
+        .any(|root| within(canonical, Path::new(root)))
 }
 
 /// The operator's own tree, or a mount they own — either means no one else's files change.
 #[cfg(unix)]
-fn write_owned(canonical: &Path, policy: &PathPolicy, facts: PathFacts) -> bool {
+fn write_owned(canonical: &Path, _operator: bool, policy: &PathPolicy, facts: PathFacts) -> bool {
     if !policy.home.as_os_str().is_empty() && within(canonical, &policy.home) {
         return true;
     }
@@ -380,7 +389,7 @@ fn write_owned(canonical: &Path, policy: &PathPolicy, facts: PathFacts) -> bool 
 }
 
 #[cfg(not(any(unix, windows)))]
-fn write_owned(canonical: &Path, policy: &PathPolicy, _facts: PathFacts) -> bool {
+fn write_owned(canonical: &Path, _operator: bool, policy: &PathPolicy, _facts: PathFacts) -> bool {
     !policy.home.as_os_str().is_empty() && within(canonical, &policy.home)
 }
 
@@ -614,8 +623,9 @@ impl AccessStore {
                     is_dir: false,
                     owner_uid: None,
                 };
-                let reason_str = refusal_rule(raw_path, raw_path, write, &self.policy, facts)
-                    .unwrap_or("not_directory");
+                let reason_str =
+                    refusal_rule(raw_path, raw_path, write, false, &self.policy, facts)
+                        .unwrap_or("not_directory");
                 return outcome(raw.to_string(), &format!("refused:{reason_str}"));
             }
             Err(_) => return outcome(raw.to_string(), "refused:not_absolute"),
@@ -625,12 +635,12 @@ impl AccessStore {
         // A repost returns pending even at the cap — but a stale row under a path that is
         // refused today answers refused, never pending.
         if let Some(row) = pending.iter().find(|p| same_path(&p.path, &canon)) {
-            return match refusal_rule(raw_path, &canonical, row.write, &self.policy, facts) {
+            return match refusal_rule(raw_path, &canonical, row.write, false, &self.policy, facts) {
                 Some(rule) => outcome(canon, &format!("refused:{rule}")),
                 None => outcome(canon, "pending"),
             };
         }
-        if let Some(rule) = refusal_rule(raw_path, &canonical, write, &self.policy, facts) {
+        if let Some(rule) = refusal_rule(raw_path, &canonical, write, false, &self.policy, facts) {
             return outcome(canon, &format!("refused:{rule}"));
         }
         if covers(declared, &entry.grants, &canonical, write, &self.policy) {
@@ -816,25 +826,25 @@ impl AccessStore {
             self.load_access()
         };
         let declared = manifests.values().flat_map(|m| {
-            let reads = m.reads.iter().map(|p| (p.as_str(), false));
-            reads.chain(m.writes.iter().map(|p| (p.as_str(), true)))
+            let reads = m.reads.iter().map(|p| (p.as_str(), false, false));
+            reads.chain(m.writes.iter().map(|p| (p.as_str(), true, false)))
         });
         let granted = access
             .values()
-            .flat_map(|a| a.grants.iter().map(|g| (g.path.as_str(), g.write)));
+            .flat_map(|a| a.grants.iter().map(|g| (g.path.as_str(), g.write, true)));
         // A missing root is the drop-in's `-` prefix's business, and a root may be a file.
-        let allowed = |spelled: &Path, real: &Path, write: bool| {
+        let allowed = |spelled: &Path, real: &Path, write: bool, operator: bool| {
             let facts = PathFacts {
                 is_dir: true,
                 ..path_facts(real)
             };
-            refusal_rule(spelled, real, write, &self.policy, facts).is_none()
+            refusal_rule(spelled, real, write, operator, &self.policy, facts).is_none()
         };
         let mut roots = Vec::new();
-        for (p, write) in declared.chain(granted) {
+        for (p, write, operator) in declared.chain(granted) {
             let spelled = home_path(p, &self.policy);
             let real = spelled.canonicalize().unwrap_or_else(|_| spelled.clone());
-            if !allowed(&spelled, &real, write) {
+            if !allowed(&spelled, &real, write, operator) {
                 continue;
             }
             if real != spelled {
@@ -842,7 +852,7 @@ impl AccessStore {
                     .ancestors()
                     .skip(1)
                     .find(|a| a.canonicalize().is_ok_and(|c| c == *a));
-                if let Some(dir) = holder.filter(|d| allowed(d, d, false)) {
+                if let Some(dir) = holder.filter(|d| allowed(d, d, false, operator)) {
                     roots.push(RunnerRoot {
                         path: dir.to_path_buf(),
                         write: false,
@@ -876,7 +886,7 @@ impl AccessStore {
         }
         let canonical = dir.canonicalize()?;
         let facts = path_facts(&canonical);
-        if let Some(rule) = refusal_rule(&canonical, &canonical, write, &self.policy, facts) {
+        if let Some(rule) = refusal_rule(&canonical, &canonical, write, true, &self.policy, facts) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("'{}' can't be granted ({rule})", canonical.display()),
@@ -1170,7 +1180,7 @@ mod tests {
             is_dir: true,
             owner_uid: None,
         };
-        let rule = |p: &str| refusal_rule(Path::new(p), Path::new(p), false, &f.policy, dir);
+        let rule = |p: &str| refusal_rule(Path::new(p), Path::new(p), false, false, &f.policy, dir);
         assert_eq!(rule("/run/media/deck/SD/Emulation/roms"), None);
         assert_eq!(rule("/run/media/mmcblk0p1"), None);
         assert_eq!(rule("/run/media"), Some("protected_path"));
@@ -1733,7 +1743,7 @@ mod tests {
         };
         let outside = Path::new("/mnt/elsewhere");
         // A foreign uid outside home fails the pure rule; the host's own uid passes.
-        let rule = refusal_rule(outside, outside, true, &f.policy, facts);
+        let rule = refusal_rule(outside, outside, true, false, &f.policy, facts);
         #[cfg(unix)]
         assert_eq!(rule, Some("write_not_owned"));
         #[cfg(windows)]
