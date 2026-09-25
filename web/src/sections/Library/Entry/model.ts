@@ -108,6 +108,15 @@ export function withStored(
 	};
 }
 
+/** A custom entry's draft, from its stored row only. The catalog's art is rewritten to the
+ * art proxy, and a proxy path saved back as art points at nothing. */
+export function formFromStored(row: CustomEntry): FormState {
+	return withStored(
+		formFrom({ ...row, art: row.art ?? {}, store: row.store ?? "custom" }),
+		row,
+	);
+}
+
 /** The draft as the API body. `update_custom` replaces title, art, launch, role, icon and meta
  * wholesale, so every one of them is sent every time. */
 export function toInput(f: FormState): CustomInput {
