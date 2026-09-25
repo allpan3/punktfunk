@@ -238,9 +238,9 @@ impl IddPushCapturer {
             );
             return;
         }
-        // Delivery starts the worker declared; restore the model this session negotiated.
+        // Delivery starts the worker declared; restore the model this session runs.
         if let Some(fwd) = self.cursor_forward.as_ref()
-            && let Err(e) = fwd(!self.composite_cursor)
+            && let Err(e) = fwd(self.driver_forward())
         {
             tracing::warn!(
                 composite = self.composite_cursor,
@@ -259,7 +259,8 @@ impl Capturer for IddPushCapturer {
     fn set_cursor_forward(&mut self, on: bool) {
         // Capture model: the declared hardware cursor stays excluded (no working un-declare);
         // the driver blends it into the frames it encodes. `composite_forced` cannot turn off
-        // — no client draws.
+        // — no client draws. Under the secure desktop the driver stays stood down; dismissal
+        // applies the model chosen here.
         let composite = (!on && self.cursor_shared.is_some()) || self.composite_forced;
         if self.composite_cursor != composite {
             self.composite_cursor = composite;
@@ -274,7 +275,7 @@ impl Capturer for IddPushCapturer {
             );
             if let (Some(_), Some(fwd)) =
                 (self.cursor_shared.as_ref(), self.cursor_forward.as_ref())
-                && let Err(e) = fwd(!composite)
+                && let Err(e) = fwd(self.driver_forward())
             {
                 tracing::warn!(
                     composite,
