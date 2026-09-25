@@ -447,8 +447,9 @@ impl Driver {
         self.probe.ramp_summary()
     }
 
-    /// A measured link capacity. Never lowers the climb ceiling: a
-    /// congested-moment measurement must not shrink what was negotiated.
+    /// A measured link capacity. The first one binds up or down — the rate the
+    /// Welcome resolved is not evidence about the link — and later ones only
+    /// raise: a congested moment must not shrink what a measurement proved.
     pub fn set_ceiling(&mut self, kbps: u32) {
         self.abr.set_ceiling(kbps);
     }
