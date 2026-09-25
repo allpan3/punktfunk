@@ -2294,13 +2294,24 @@ pub(crate) async fn run_admitted(
     let launch_for_dp = launch_target.as_ref().and(hello.launch.clone());
     #[cfg(not(target_os = "windows"))]
     let launch_for_dp = launch_target.as_ref().and_then(|t| t.command.clone());
+    // Stats label: cert-fingerprint prefix, else peer IP (anonymous TOFU/--open).
+    let client_label = conn
+        .peer_fingerprint()
+        .map(|fp| fingerprint_hex(&fp)[..12].to_string())
+        .unwrap_or_else(|| conn.remote_address().ip().to_string());
     // Reconnect inside the game's window: cancel pending termination. Data plane re-adopts via
     // `launchreg` (carries the original launch instant). Matched on (this client, this title).
+    let fp = conn.peer_fingerprint().map(hex::encode);
     if let Some(target) = launch_target.as_ref() {
-        let fp = conn.peer_fingerprint().map(hex::encode);
         // `readopt` already logged leftover processes.
         let _reprieved = crate::gamelease::readopt(fp.as_deref(), target.game.id.as_deref());
     }
+    // Stamp and claim before prep: a nested gamescope starts the game with its display, so the
+    // hold below must know already whether this session spawns. A re-dial adopts the original.
+    let fresh_stamp = crate::gamelease::launch_clock();
+    let launch_claim = launch_target.as_ref().map(|t| {
+        crate::launchreg::claim(fp.as_deref(), t.game.id.as_deref(), t.launcher, fresh_stamp)
+    });
     // Custom-title prep before the display opens. Drop undoes in reverse. `block_in_place`:
     // operator code is blocking and this is a multi-thread runtime.
     let _prep = hello.launch.as_deref().and_then(|id| {
@@ -2321,6 +2332,22 @@ pub(crate) async fn run_admitted(
         (!cmds.is_empty())
             .then(|| tokio::task::block_in_place(|| crate::hooks::run_prep(&cmds, &env)))
     });
+    // A spawn waits for whoever holds `game.launching`. An adopted game is already running.
+    if let Some(t) = launch_target
+        .as_ref()
+        .filter(|_| launch_claim.as_ref().is_some_and(|c| c.must_spawn()))
+    {
+        let game = crate::events::GameRefPayload {
+            app: t.game.id.clone(),
+            title: t.game.title.clone(),
+            store: t.game.store.clone(),
+            client: client_label.clone(),
+            fingerprint: fp.clone(),
+            plane: crate::events::Plane::Native,
+            preset: session_preset.clone(),
+        };
+        tokio::task::block_in_place(|| crate::holds::launching(game));
+    }
     // Welcome/acks/HUD speak wire budget. Encoder opens get the derived video rate (`EncDerive`).
     // PyroWave: budget == encoder rate (bpp pin).
     let bitrate_kbps = welcome.bitrate_kbps;
@@ -2356,11 +2383,6 @@ pub(crate) async fn run_admitted(
     // Absent ⇒ single-slice. Some TV-SoC decoders wedge on multi-slice AUs.
     let multi_slice = hello.video_caps & punktfunk_core::quic::VIDEO_CAP_MULTI_SLICE != 0;
     let stats_dp = stats;
-    // Stats label: cert-fingerprint prefix, else peer IP (anonymous TOFU/--open).
-    let client_label = conn
-        .peer_fingerprint()
-        .map(|fp| fingerprint_hex(&fp)[..12].to_string())
-        .unwrap_or_else(|| conn.remote_address().ip().to_string());
     // The title's `audio.sessions`, over every session on this display. Lifted with the session.
     let _audio_policy = hello
         .launch
@@ -2583,6 +2605,8 @@ pub(crate) async fn run_admitted(
                         client_name,
                         launch: launch_for_dp,
                         launch_target,
+                        launch_claim,
+                        fresh_stamp,
                         launch_outcome: launch_outcome_dp,
                         client_hdr,
                         join_live,

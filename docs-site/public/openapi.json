@@ -7755,6 +7755,25 @@
           },
           {
             "type": "object",
+            "description": "Fires before the host spawns a launched game, never on adopt. Plugins and hooks that\nhold this stage run first ([`crate::holds`]).",
+            "required": [
+              "game",
+              "kind"
+            ],
+            "properties": {
+              "game": {
+                "$ref": "#/components/schemas/GameRefPayload"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "game.launching"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
             "description": "Fires once the host has seen the game process, not merely spawned its launcher.",
             "required": [
               "game",
@@ -8659,7 +8678,7 @@
           "debounce_ms": {
             "type": "integer",
             "format": "int64",
-            "description": "Minimum interval between firings, in milliseconds. 0 = fire every time.",
+            "description": "Minimum interval between firings, in milliseconds. 0 = fire every time. A `hold` ignores it.",
             "minimum": 0
           },
           "filter": {
@@ -8679,6 +8698,10 @@
               "null"
             ],
             "description": "HMAC secret file (`X-Punktfunk-Signature: sha256=<hex>`). Warns if world-readable."
+          },
+          "hold": {
+            "type": "boolean",
+            "description": "The launch waits for this hook, up to `timeout_s`. Only with `on: game.launching`."
           },
           "on": {
             "type": "string",
@@ -10258,6 +10281,22 @@
               "null"
             ],
             "description": "Plugin kind, not a UI field. Console hides `library` from the nav (those plugins already have\nGame sources); omit the field to keep a nav page."
+          },
+          "hold_timeout_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "How long a hold may take, 1–120 000 ms. Absent means 30 000.",
+            "minimum": 0
+          },
+          "holds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Stages this plugin holds (`game.launching`). The host POSTs the event to `/__hold` on\n`ui.port` and waits for a 2xx. Needs `ui`."
           },
           "title": {
             "type": "string"
