@@ -35,7 +35,7 @@ pub(super) struct ControlTask {
     /// ClipState/ClipOffer share the fetch-data event plane.
     pub(super) clip_event_tx: std::sync::mpsc::SyncSender<ClipEventCore>,
     /// Host [`CursorShape`] → [`NativeClient::next_cursor_shape`].
-    pub(super) cursor_shape_tx: std::sync::mpsc::SyncSender<crate::quic::CursorShape>,
+    pub(super) cursor_shape_tx: crate::client::planes::ShapeSender,
     /// Bumped on every ACCEPTED mode switch (`clock_gen` pattern). The pump
     /// resets bitrate-controller state that belonged to the old mode.
     pub(super) mode_gen: Arc<AtomicU32>,
@@ -353,9 +353,9 @@ impl ControlTask {
                         );
                         *launch_outcome.lock().unwrap_or_else(|e| e.into_inner()) = Some(o);
                     } else if let Ok(shape) = crate::quic::CursorShape::decode(&msg) {
-                        // Pointer bitmap changed. try_send: overflow drops newest;
-                        // the next shape change resends.
-                        let _ = cursor_shape_tx.try_send(shape);
+                        // Pointer bitmap changed. Overflow evicts the oldest: the state
+                        // names this one, and the host sends it only once.
+                        cursor_shape_tx.send(shape);
                     } else {
                         tracing::warn!(
                             tag = ?msg.first(),
