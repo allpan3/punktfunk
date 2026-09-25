@@ -41,9 +41,9 @@ const RAMP_START_KBPS: u32 = 5_000;
 const RAMP_STEP_BYTES: u64 = 16_000_000;
 /// Delivered ÷ offered under this is a wall.
 const RAMP_WALL_PCT: u64 = 90;
-/// Loss a refused step may carry and still be asked a second time. At the
-/// ramp's step sizes this is one packet — what independent loss puts in a
-/// dozen — where a policer's step arrives a tenth short or worse.
+/// Loss a refused step may carry and still be asked a second time: one
+/// packet — what independent loss puts in the first step's dozen — or this
+/// share of a larger step. A policer's step arrives a tenth short or worse.
 const RAMP_LOSS_SLACK_PCT: u64 = 5;
 /// What a wall licenses. A wall measured once is a snapshot of a link that
 /// moves — Wi-Fi by ±30 % — and the 30 % held back is what a 100 ms airtime
@@ -190,9 +190,9 @@ pub struct RampSummary {
 
 /// What one settled step says.
 enum Verdict {
-    /// The link did not carry it. `timing_only` = what went missing is
-    /// inside [`RAMP_LOSS_SLACK_PCT`], so the reading rests on when the
-    /// packets arrived rather than on how many.
+    /// The link did not carry it. `timing_only` = what went missing is one
+    /// packet or inside [`RAMP_LOSS_SLACK_PCT`], so the reading rests on when
+    /// the packets arrived rather than on how many.
     Refused {
         delivered_kbps: u32,
         timing_only: bool,
@@ -382,8 +382,9 @@ impl Ramp {
 
     /// A step the link did not carry.
     ///
-    /// A step the link thinned by more than [`RAMP_LOSS_SLACK_PCT`] is
-    /// decisive: it dropped them, and no second reading makes that untrue.
+    /// A step the link thinned by more than one packet and more than
+    /// [`RAMP_LOSS_SLACK_PCT`] is decisive: it dropped them, and no second
+    /// reading makes that untrue.
     /// Inside the slack the verdict rests on WHEN the packets arrived, and a
     /// few milliseconds of scheduling on a 25 ms window is the difference
     /// between 0.86 and 0.91. So the same rate goes out once more and only a
@@ -450,8 +451,9 @@ impl Ramp {
         let delivered = r.delivered_packets * offered_span;
         let offered = u64::from(r.wire_packets_sent) * interval;
         if delivered * 100 < offered * RAMP_WALL_PCT {
-            let timing_only = r.delivered_packets * 100
-                >= u64::from(r.wire_packets_sent) * (100 - RAMP_LOSS_SLACK_PCT);
+            let sent = u64::from(r.wire_packets_sent);
+            let timing_only = r.delivered_packets + 1 >= sent
+                || r.delivered_packets * 100 >= sent * (100 - RAMP_LOSS_SLACK_PCT);
             tracing::info!(
                 target_kbps = step.target_kbps,
                 delivered_kbps,
@@ -1282,6 +1284,9 @@ mod tests {
         for (sent, delivered, again) in [
             (24u32, 24u64, true),
             (24, 23, true),
+            // The first step's dozen: one packet is 8 % of it.
+            (12, 11, true),
+            (12, 10, false),
             (60, 53, false),
             (112, 55, false),
         ] {
