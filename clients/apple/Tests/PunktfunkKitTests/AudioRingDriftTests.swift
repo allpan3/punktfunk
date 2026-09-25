@@ -9,6 +9,7 @@
 // its own comment called that "one audible blip".
 
 #if !os(tvOS)
+import AVFoundation
 import XCTest
 
 @testable import PunktfunkKit
@@ -1515,6 +1516,28 @@ final class AudioRingDriftTests: XCTestCase {
             XCTAssertEqual(
                 empty.bufferedMS, 0, "\(channels)ch: an over-capacity write is dropped, not wrapped")
         }
+    }
+
+    /// 7.1 follows `kAudioChannelLayoutTag_WAVE_7_1`: wire back pair on the rear speakers, side
+    /// pair on the side ones. Side/back swapped put the back content on the side speakers.
+    func testSevenOneLabelsFollowWave71() throws {
+        let wire = try XCTUnwrap(wireChannelLayout(channels: 8))
+        let offset = try XCTUnwrap(
+            MemoryLayout<AudioChannelLayout>.offset(of: \.mChannelDescriptions))
+        let labels = withExtendedLifetime(wire) { () -> [AudioChannelLabel] in
+            let layout = wire.layout
+            let descs = (UnsafeRawPointer(layout) + offset)
+                .assumingMemoryBound(to: AudioChannelDescription.self)
+            return (0..<Int(layout.pointee.mNumberChannelDescriptions)).map {
+                descs[$0].mChannelLabel
+            }
+        }
+        XCTAssertEqual(labels, [
+            kAudioChannelLabel_Left, kAudioChannelLabel_Right, kAudioChannelLabel_Center,
+            kAudioChannelLabel_LFEScreen, kAudioChannelLabel_RearSurroundLeft,
+            kAudioChannelLabel_RearSurroundRight, kAudioChannelLabel_LeftSurround,
+            kAudioChannelLabel_RightSurround,
+        ])
     }
 
     /// A trim drops whole frames. An odd sync target at 44.1 kHz puts the headroom line mid-frame;

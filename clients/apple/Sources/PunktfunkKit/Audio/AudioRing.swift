@@ -1122,10 +1122,9 @@ struct DroughtConceal {
 /// CoreAudio channel layout for the canonical wire order FL FR FC LFE RL RR [SL SR]. nil for
 /// stereo (the standard layout is correct). For 5.1/7.1 we list explicit channel labels via
 /// `kAudioChannelLayoutTag_UseChannelDescriptions` — preset tags (DTS_5_1 etc.) don't reliably
-/// match Moonlight's order. NB the 7.1 mapping (verified against the WASAPI 0x63F + SPA orderings):
-/// wire idx 4-5 = RL/RR = the WAVE *back* pair → LeftSurround/RightSurround; idx 6-7 = SL/SR = the
-/// WAVE *side* pair → LeftSurroundDirect/RightSurroundDirect. (Using RearSurround* for 6-7 would
-/// swap side/back vs the Windows/Linux clients.)
+/// match Moonlight's order. 7.1 follows `kAudioChannelLayoutTag_WAVE_7_1` (WASAPI 0x63F):
+/// wire 4-5, the WAVE *back* pair, are RearSurround*; 6-7, the *side* pair, are Left/RightSurround.
+/// 5.1 keeps Left/RightSurround for its back pair: that is where a 5.1 device has speakers.
 func wireChannelLayout(channels: Int) -> AVAudioChannelLayout? {
     let labels: [AudioChannelLabel]
     switch channels {
@@ -1139,8 +1138,8 @@ func wireChannelLayout(channels: Int) -> AVAudioChannelLayout? {
         labels = [
             kAudioChannelLabel_Left, kAudioChannelLabel_Right, kAudioChannelLabel_Center,
             kAudioChannelLabel_LFEScreen,
-            kAudioChannelLabel_LeftSurround, kAudioChannelLabel_RightSurround, // wire RL/RR (back)
-            kAudioChannelLabel_LeftSurroundDirect, kAudioChannelLabel_RightSurroundDirect, // wire SL/SR (side)
+            kAudioChannelLabel_RearSurroundLeft, kAudioChannelLabel_RearSurroundRight, // wire RL/RR (back)
+            kAudioChannelLabel_LeftSurround, kAudioChannelLabel_RightSurround, // wire SL/SR (side)
         ]
     default:
         return nil
