@@ -316,6 +316,9 @@ impl Encoder for TrackedEncoder {
     fn bitrate_retarget_is_synchronous(&self) -> bool {
         self.inner.bitrate_retarget_is_synchronous()
     }
+    fn retarget_settled(&self) -> bool {
+        self.inner.retarget_settled()
+    }
     fn applied_bitrate_bps(&self) -> Option<u64> {
         self.inner.applied_bitrate_bps()
     }

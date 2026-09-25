@@ -817,6 +817,11 @@ impl Encoder for RemotePyroWave {
         true
     }
 
+    fn retarget_settled(&self) -> bool {
+        // Synchronous, as above: a retarget has settled once `reconfigure_bitrate` returns.
+        true
+    }
+
     fn applied_bitrate_bps(&self) -> Option<u64> {
         // PyroWave applies the requested rate as a per-frame byte budget with no internal clamp
         // to report.

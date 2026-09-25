@@ -200,6 +200,7 @@ impl StreamState {
         // Covers the in-place Windows resize, which swaps the encoder without
         // `adopt_pipeline`: the new one has been handed nothing yet.
         self.retargeted = false;
+        self.fec_pending = None;
         self.adopt_built_bitrate(built_bitrate);
         self.cur_mode = new_mode;
         self.next = std::time::Instant::now();
