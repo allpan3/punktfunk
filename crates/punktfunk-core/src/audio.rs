@@ -930,7 +930,9 @@ impl JitterPolicy {
         };
         if let Some(keep) = keep {
             // Wedged: discard down to the line and restart the drift clock from what is left,
-            // so the trim is not counted as drift. Faded like any other drop.
+            // so the trim is not counted as drift. Faded like any other drop. Whole frames:
+            // a ms line at 44.1 kHz can fall mid-frame, and a split frame swaps channels.
+            let keep = keep - keep % self.channels as usize;
             out.drop_front = depth - keep;
             out.hard_trim = true;
             out.crossfade = self.crossfade_samples().min(keep);
@@ -967,9 +969,11 @@ impl JitterPolicy {
             self.under_run = 0;
         }
         // Shed is no longer buffered; insert is. Reflect both now so the next callback does
-        // not re-fire on a stale average.
-        self.depth_avg =
-            (self.depth_avg - out.drop_front as f32 + out.insert_front as f32).max(0.0);
+        // not re-fire on a stale average. A trim already restarted it at `keep`.
+        if !out.hard_trim {
+            self.depth_avg =
+                (self.depth_avg - out.drop_front as f32 + out.insert_front as f32).max(0.0);
+        }
 
         if !self.primed && depth.saturating_sub(out.drop_front) >= target {
             self.primed = true;
@@ -2069,6 +2073,31 @@ mod tests {
             left <= JitterTuning::AAUDIO.hard_cap_ms as usize * pm,
             "trim must land at or under the hard cap"
         );
+    }
+
+    /// A trim drops whole frames. 25 ms at 44.1 kHz stereo is 2 205 samples, half a frame;
+    /// dropping to it would play every later sample on the wrong channel.
+    #[test]
+    fn a_trim_never_splits_a_frame() {
+        for ch in [2u8, 6, 8] {
+            for sync in [None, Some(2_851)] {
+                let mut p = JitterPolicy::new_at_rate(JitterTuning::AAUDIO, ch, 44_100);
+                p.set_sync_target(sync);
+                let depth = 100 * 441 / 10 * ch as usize;
+                let want = 96 * ch as usize;
+                p.step(depth, want);
+                p.note_read(false);
+                let s = p.step(depth, want);
+                assert!(s.hard_trim, "{ch}ch {sync:?}: {s:?}");
+                assert_eq!(s.drop_front % ch as usize, 0, "{ch}ch {sync:?}: {s:?}");
+                // What was kept is what the drift clock restarts from.
+                assert_eq!(
+                    p.avg_depth_ms(),
+                    p.depth_ms(depth - s.drop_front),
+                    "{ch}ch {sync:?}"
+                );
+            }
+        }
     }
 
     /// One transient drain must not manufacture a fresh target's worth of silence.

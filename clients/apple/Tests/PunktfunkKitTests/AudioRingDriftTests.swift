@@ -1516,5 +1516,21 @@ final class AudioRingDriftTests: XCTestCase {
                 empty.bufferedMS, 0, "\(channels)ch: an over-capacity write is dropped, not wrapped")
         }
     }
+
+    /// A trim drops whole frames. An odd sync target at 44.1 kHz puts the headroom line mid-frame;
+    /// trimming to it would play every later sample on the wrong channel.
+    ///
+    /// Mirrors `a_trim_never_splits_a_frame`.
+    func testATrimNeverSplitsAFrame() {
+        let ring = AudioRing(seconds: 1, channels: channels, rateHz: 44_100)
+        ring.setSyncTarget(2_851)
+        let feed = [Float](repeating: 0.5, count: 100 * 441 / 10 * channels)
+        feed.withUnsafeBufferPointer { ring.write($0.baseAddress!, count: $0.count) }
+        var scratch = [Float](repeating: 0, count: 441 * channels) // 5 ms
+        scratch.withUnsafeMutableBufferPointer { ring.read(into: $0.baseAddress!, count: $0.count) }
+        feed.withUnsafeBufferPointer { ring.write($0.baseAddress!, count: 441 * channels) }
+        XCTAssertLessThan(ring.stats.bufferedMS, 80, "the backlog must have been trimmed")
+        XCTAssertEqual(ring.bufferedSamples % channels, 0, "the trim split a frame")
+    }
 }
 #endif

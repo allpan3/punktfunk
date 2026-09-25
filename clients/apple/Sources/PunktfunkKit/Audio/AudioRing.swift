@@ -493,8 +493,9 @@ final class AudioRing: @unchecked Sendable {
         }
         if let keep {
             // Crossfaded, like the smooth shed — see `dropFront`. Restart the drift clock from
-            // what is left, so the trim is not counted as drift.
-            dropFront(depth - keep)
+            // what is left, so the trim is not counted as drift. Whole frames: a ms line at
+            // 44.1 kHz can fall mid-frame, and a split frame swaps channels.
+            dropFront(depth - (keep - keep % channels))
             depthAvg = Double(writeIdx - readIdx)
             overRun = 0
             underRun = 0
