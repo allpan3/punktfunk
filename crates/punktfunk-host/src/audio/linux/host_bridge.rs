@@ -5,8 +5,8 @@
 //!
 //! * Playthrough (`audio.output_mode = host_and_client`): link the stream
 //!   sink's monitor ports to that output, channel by channel, so the host
-//!   plays what the clients hear. The links belong to this connection and
-//!   die with it.
+//!   plays what the clients hear. The links belong to this connection;
+//!   parking the capturer takes them down.
 //! * Voice chat on the host (`PUNKTFUNK_AUDIO_VOICE_CHAT=host`): pin voice
 //!   apps' output streams to that output (`target.object` on the `default`
 //!   metadata, as `pactl move-sink-input` does) so the clients never hear
@@ -20,6 +20,30 @@
 use pipewire as pw;
 use pw::proxy::ProxyT;
 use std::collections::{HashMap, HashSet};
+use std::sync::{LazyLock, Mutex};
+
+/// Voice pins held per node id by every bridge in this process: an isolated and a shared
+/// session can pin the same app, and only the last to let go may unpin it.
+static PIN_HOLDS: LazyLock<Mutex<HashMap<u32, u32>>> = LazyLock::new(Mutex::default);
+
+fn hold_pin(id: u32) {
+    *PIN_HOLDS.lock().unwrap().entry(id).or_default() += 1;
+}
+
+/// `true` = no other bridge still holds `id`'s pin.
+fn release_pin(id: u32) -> bool {
+    let mut holds = PIN_HOLDS.lock().unwrap();
+    match holds.get_mut(&id) {
+        Some(n) if *n > 1 => {
+            *n -= 1;
+            false
+        }
+        _ => {
+            holds.remove(&id);
+            true
+        }
+    }
+}
 
 struct NodeInfo {
     name: String,
@@ -48,7 +72,8 @@ pub(super) struct HostBridge {
     links: Vec<(u32, u32, pw::link::Link, pw::proxy::ProxyListener)>,
     /// Voice streams pinned to `host`, by node id.
     routed: HashSet<u32>,
-    metadata: Option<pw::metadata::Metadata>,
+    /// The `default` metadata and its global id; WirePlumber re-creates it on restart.
+    metadata: Option<(u32, pw::metadata::Metadata)>,
 }
 
 impl HostBridge {
@@ -128,28 +153,69 @@ impl HostBridge {
             pw::types::ObjectType::Metadata
                 if self.metadata.is_none() && props.get("metadata.name") == Some("default") =>
             {
-                self.metadata = registry.bind::<pw::metadata::Metadata, _>(global).ok();
+                self.metadata = registry
+                    .bind::<pw::metadata::Metadata, _>(global)
+                    .ok()
+                    .map(|m| (global.id, m));
             }
             _ => {}
         }
     }
 
+    /// A re-created host output (modeset, reconnect) has a new serial, and a restarted
+    /// WirePlumber a new metadata: either way every pin is written again on the next sync.
     pub(super) fn on_remove(&mut self, id: u32) {
+        let host_gone = self
+            .nodes
+            .get(&id)
+            .is_some_and(|n| self.host.as_deref() == Some(n.name.as_str()));
+        let metadata_gone = self.metadata.as_ref().is_some_and(|(m, _)| *m == id);
+        if metadata_gone {
+            self.metadata = None;
+        }
+        if host_gone || metadata_gone {
+            for r in self.routed.drain() {
+                release_pin(r);
+            }
+        }
         self.nodes.remove(&id);
         self.ports.remove(&id);
-        self.routed.remove(&id);
+        if self.routed.remove(&id) {
+            release_pin(id);
+        }
         self.links.retain(|(out, inp, ..)| *out != id && *inp != id);
     }
 
     /// The claim reports the host output after every claim. A change drops the
     /// old links and pins; the next [`sync`](Self::sync) rebuilds them.
-    pub(super) fn set_host(&mut self, host: Option<String>) {
+    pub(super) fn set_host(&mut self, core: &pw::core::CoreRc, host: Option<String>) {
         if self.host == host {
             return;
         }
-        self.links.clear();
-        self.routed.clear();
+        self.drop_links(core);
+        for r in self.routed.drain() {
+            release_pin(r);
+        }
         self.host = host;
+    }
+
+    /// Proxies this bridge created, whose errors are theirs alone (a refused link).
+    pub(super) fn owns_proxy(&self, id: u32) -> bool {
+        self.links
+            .iter()
+            .any(|(.., link, _)| link.upcast_ref().id() == id)
+            || self
+                .metadata
+                .as_ref()
+                .is_some_and(|(_, m)| m.upcast_ref().id() == id)
+    }
+
+    /// Destroyed on the server: a dropped proxy leaves the link up until the connection ends,
+    /// and a parked capturer's connection lives on.
+    fn drop_links(&mut self, core: &pw::core::CoreRc) {
+        for (.., link, _) in self.links.drain(..) {
+            let _ = core.destroy_object(link);
+        }
     }
 
     pub(super) fn sync(&mut self, core: &pw::core::CoreRc) {
@@ -241,7 +307,9 @@ impl HostBridge {
     }
 
     fn pin(&mut self, host_id: u32, serial: Option<&str>) {
-        let Some(md) = &self.metadata else { return };
+        let Some((_, md)) = &self.metadata else {
+            return;
+        };
         let host_name = self.nodes[&host_id].name.as_str();
         // pipewire-pulse pins by `object.serial`; a name is what older WirePlumber matched.
         let (type_, value) = match serial {
@@ -258,21 +326,25 @@ impl HostBridge {
                 target = host_name,
                 "voice-chat stream kept on the host output"
             );
-            self.routed.insert(*id);
+            if self.routed.insert(*id) {
+                hold_pin(*id);
+            }
         }
     }
 
-    /// Undo the pins so the apps follow the default again. `true` = something
-    /// was written and the caller must flush before disconnecting.
-    pub(super) fn clear(&mut self) -> bool {
-        self.links.clear();
-        let Some(md) = &self.metadata else {
-            self.routed.clear();
-            return false;
-        };
-        let wrote = !self.routed.is_empty();
+    /// Take the links down and undo the pins no other bridge holds, so the apps follow the
+    /// default again. `true` = something was written and the caller must flush before
+    /// disconnecting.
+    pub(super) fn clear(&mut self, core: &pw::core::CoreRc) -> bool {
+        self.drop_links(core);
+        let mut wrote = false;
         for id in self.routed.drain() {
-            md.set_property(id, "target.object", None, None);
+            if release_pin(id) {
+                if let Some((_, md)) = &self.metadata {
+                    md.set_property(id, "target.object", None, None);
+                    wrote = true;
+                }
+            }
         }
         wrote
     }

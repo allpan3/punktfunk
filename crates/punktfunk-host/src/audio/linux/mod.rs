@@ -276,7 +276,11 @@ impl PwAudioCapturer {
         match ready_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(Ok(())) => {}
             Ok(Err(e)) => return Err(e),
-            Err(_) => return Err(anyhow!("pipewire audio init timed out")),
+            Err(_) => {
+                // The thread may still come up; it must not outlive this error with a live sink.
+                let _ = quit_tx.send(Terminate);
+                return Err(anyhow!("pipewire audio init timed out"));
+            }
         }
         // Routing claim starts with the session; release is `idle()` or Drop.
         let claimed = match &sink_name {
@@ -367,6 +371,8 @@ impl AudioCapturer for PwAudioCapturer {
             self.claimed = false;
             stream_sink::release(name);
         }
+        // No session to route for: pins and playthrough links come down until `drain`.
+        let _ = self.host.send(None);
     }
 }
 
@@ -944,7 +950,7 @@ fn pw_thread(
             let core = core.clone();
             let quit_seq = quit_seq.clone();
             move |_| {
-                if bridge.borrow_mut().clear() {
+                if bridge.borrow_mut().clear(&core) {
                     if let Ok(seq) = core.sync(0) {
                         *quit_seq.borrow_mut() = Some(seq);
                         return;
@@ -958,7 +964,11 @@ fn pw_thread(
             let core = core.clone();
             move |host| {
                 let mut b = bridge.borrow_mut();
-                b.set_host(host);
+                // Parked (`idle`): nothing to route to until the next claim.
+                if host.is_none() {
+                    b.clear(&core);
+                }
+                b.set_host(&core, host);
                 b.sync(&core);
             }
         });
@@ -979,7 +989,13 @@ fn pw_thread(
             })
             .error({
                 let mainloop = mainloop.clone();
+                let bridge = bridge.clone();
                 move |id, _seq, res, message| {
+                    // A refused playthrough link is that link's failure, not the capture's.
+                    if bridge.try_borrow().is_ok_and(|b| b.owns_proxy(id)) {
+                        tracing::warn!(id, res, message, "host bridge object refused");
+                        return;
+                    }
                     tracing::warn!(id, res, message, "pipewire core error — audio capture ends");
                     mainloop.quit();
                 }
