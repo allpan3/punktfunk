@@ -196,7 +196,9 @@ fn run_worker(monitor_v: usize, view_v: usize, data_v: isize, stop: HANDLE, cell
     let shape_dst = (view_v + CURSOR_SHAPE_OFFSET) as *mut u8;
     let mut shape_buf = vec![0u8; CURSOR_SHAPE_BYTES];
     let mut last_shape_id: u32 = 0;
-    let mut query_warned = false;
+    // Consecutive failed queries: ~100 ms at the poll rate before the blend drops the pointer.
+    const QUERY_FAILS_HIDE: u32 = 3;
+    let mut query_fails: u32 = 0;
     let mut published = false;
     // The pool's copy of the latest publish; its position outlives shape-less ticks.
     let mut image: Option<CursorImage> = None;
@@ -228,16 +230,23 @@ fn run_worker(monitor_v: usize, view_v: usize, data_v: isize, stop: HANDLE, cell
         let st =
             unsafe { wdk_iddcx::IddCxMonitorQueryHardwareCursor3(monitor, &in_args, &mut out) };
         if !nt_success(st) {
-            if !query_warned {
-                query_warned = true;
+            query_fails += 1;
+            if query_fails == 1 {
                 dbglog!(
                     "[pf-vd] cursor: query failed 0x{:08x} (logged once)",
                     st as u32
                 );
             }
+            // A lost declare answers STATUS_NOT_SUPPORTED for good: past a few polls, stop the
+            // pool blending a pointer frozen where it last was.
+            if query_fails == QUERY_FAILS_HIDE {
+                // SAFETY: `shm` points at the mapped CursorShm for the worker's lifetime.
+                let hdr = unsafe { core::ptr::read_volatile(shm) };
+                cell.publish(&mut image, &hdr, None, false);
+            }
             continue;
         }
-        query_warned = false;
+        query_fails = 0;
         if !published {
             published = true;
             // The raw position: monitor-relative per the IddCx docs; this line shows it.
