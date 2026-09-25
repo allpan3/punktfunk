@@ -3,8 +3,8 @@
 //!
 //! `blend` is the render model: on while the client draws no pointer and a hardware cursor is
 //! declared on the adapter, which excludes the pointer from every frame for the WUDFHost's
-//! life. The image is frame-relative (the desktop position minus the host-stamped origin) so
-//! the pool can draw it without knowing where the monitor sits.
+//! life. The image is frame-relative as IddCx reports it: "screen co-ordinates" of this
+//! monitor, negative past its top-left, so the pool never needs to know where it sits.
 //!
 //! A hardware cursor moves without DWM composing, so while the pool blends, a publish that
 //! changes what the client would see is DAMAGE: the cell marks itself dirty and wakes the
@@ -154,8 +154,8 @@ impl CursorCell {
         let Some(img) = image.as_mut() else {
             return;
         };
-        img.x = hdr.x - hdr.origin_x;
-        img.y = hdr.y - hdr.origin_y;
+        img.x = hdr.x;
+        img.y = hdr.y;
         img.visible = visible;
         let changed = {
             let mut slot = crate::registry::lock(&self.image);

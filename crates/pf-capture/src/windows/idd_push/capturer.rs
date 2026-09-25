@@ -337,7 +337,6 @@ impl Capturer for IddPushCapturer {
         // monitor composes SDR whatever the session negotiated. Re-assert before the encoder
         // re-opens, or it opens for FP16 against a BGRA surface the pool can only refuse.
         self.display_hdr = self.pin_negotiated_depth();
-        self.refresh_cursor_origin();
         self.redeliver_cursor_channel();
         true
     }

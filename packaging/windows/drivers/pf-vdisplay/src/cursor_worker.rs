@@ -8,8 +8,8 @@
 //! shape + position + visibility into the host-created section; the host polls it at its
 //! encode-tick pace (no event crosses the process boundary).
 //!
-//! Coordinates are published VERBATIM in the OS's desktop space (`IDARG_OUT_QUERY_HWCURSOR::X/Y`
-//! = the shape's top-left, can be negative); the host subtracts its monitor's desktop origin.
+//! Coordinates are published VERBATIM (`IDARG_OUT_QUERY_HWCURSOR::X/Y` = the shape's top-left
+//! in this monitor's "screen co-ordinates", negative past its top-left edge).
 //! Shape pixels are the OS's 32-bpp rows at `Pitch` — BGRA for ALPHA cursors, color+mask for
 //! MASKED_COLOR — copied raw; the host converts.
 //!
@@ -240,7 +240,13 @@ fn run_worker(monitor_v: usize, view_v: usize, data_v: isize, stop: HANDLE, cell
         query_warned = false;
         if !published {
             published = true;
-            dbglog!("[pf-vd] cursor: publishes live");
+            // The raw position: monitor-relative per the IddCx docs; this line shows it.
+            dbglog!(
+                "[pf-vd] cursor: publishes live (x={} y={} posvalid={})",
+                out.X,
+                out.Y,
+                out.PositionValid
+            );
         }
         // Log each distinct SHAPE (human-paced): type (1=masked_color, 2=alpha), dims,
         // visibility. Shows which cursors reach us (does VSCode's hand arrive?) and their
@@ -267,7 +273,7 @@ fn run_worker(monitor_v: usize, view_v: usize, data_v: isize, stop: HANDLE, cell
         let visible = out.IsCursorVisible != 0;
         let mut shape = None;
         // SAFETY: exclusive writer (single worker per section); plain volatile field writes,
-        // then one volatile read of the header for the host-stamped origin and scale.
+        // then one volatile read of the header for the host-stamped scale.
         let hdr = unsafe {
             core::ptr::addr_of_mut!((*shm).visible).write_volatile(u32::from(visible));
             // v3 `X`/`Y` are only meaningful when `PositionValid`; otherwise keep the prior
