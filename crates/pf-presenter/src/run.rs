@@ -1264,13 +1264,16 @@ fn run_inner(mut opts: SessionOpts, mut mode: ModeCtl) -> Result<Option<Outcome>
                     .as_ref()
                     .is_some_and(|cap| cap.captured() && cap.desktop());
                 chan.pump(c, &mouse, desktop_active, cursor_scale);
-                // Tell the host who renders the pointer. It may composite only while we hold a
-                // grabbed, hidden pointer: a released cursor over a composited one is a frozen
-                // twin. Relative mode from the host's hint counts as ours too — its pointer is
-                // hidden, and only the state it keeps forwarding can clear the hint.
+                // We draw the pointer while released (a released cursor over a composited one is
+                // a frozen twin), in desktop mode, or relative on the host's hint: only the state
+                // it keeps forwarding can clear the hint. Without the pointer grant the host
+                // pointer is someone else's, so the host draws it.
                 let hint_relative = !st.hint_override && st.last_hint == Some(true);
                 let client_draws = match st.capture.as_ref() {
-                    Some(cap) => !cap.captured() || cap.desktop() || hint_relative,
+                    Some(cap) => {
+                        (!cap.captured() || cap.desktop() || hint_relative)
+                            && cap.grants() & punktfunk_core::quic::GRANT_POINTER != 0
+                    }
                     None => true,
                 };
                 if chan.negotiated() && st.sent_client_draws != Some(client_draws) {
