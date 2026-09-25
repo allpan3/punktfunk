@@ -863,8 +863,9 @@ impl AccessStore {
         roots
     }
 
-    /// The CLI's direct grant: an existing directory the host would grant on request, ACL
-    /// applied before it is recorded. Re-granting the same path updates it.
+    /// The operator's direct grant (CLI, console form): an existing directory the host would
+    /// grant on request, ACL applied before it is recorded. Re-granting updates it, and a
+    /// pending request for the same path is answered by it.
     pub fn grant(&self, id: &str, dir: &Path, write: bool, by: &str) -> io::Result<Vec<Grant>> {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         if !dir.is_dir() {
@@ -900,7 +901,7 @@ impl AccessStore {
             g.by = by.to_string();
         } else {
             entry.grants.push(Grant {
-                path,
+                path: path.clone(),
                 write,
                 at: now_rfc3339(),
                 by: by.to_string(),
@@ -908,6 +909,14 @@ impl AccessStore {
         }
         let grants = entry.grants.clone();
         self.write_access(&access)?;
+        let mut pending = self.load_pending();
+        if let Some(rows) = pending.get_mut(id) {
+            let before = rows.len();
+            rows.retain(|p| !same_path(&p.path, &path));
+            if rows.len() != before {
+                self.write_pending(&pending)?;
+            }
+        }
         Ok(grants)
     }
 
@@ -1437,6 +1446,19 @@ mod tests {
             .decide("demo", &raw, Decision::Allow, "console")
             .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn a_direct_grant_answers_the_pending_request() {
+        let f = fixture();
+        let dir = f.dir("home/Games/celeste");
+        let raw = dir.to_str().unwrap().to_string();
+        assert_eq!(f.request(&raw), "pending");
+        let grants = f.store().grant("demo", &dir, true, "console").unwrap();
+        assert!(grants[0].write);
+        let snap = f.store().snapshot_for("demo").unwrap();
+        assert!(snap.pending.is_empty());
+        assert_eq!(snap.grants.len(), 1);
     }
 
     #[test]

@@ -3611,7 +3611,7 @@
           "plugin-access"
         ],
         "summary": "Grant, deny, or forget an access request",
-        "description": "`allow` turns a pending request into a grant (the platform ACL lands first, so a failed\ngrant stores nothing); `deny` remembers the no; `forget` removes a grant or denial.",
+        "description": "`allow` turns a pending request into a grant (the platform ACL lands first, so a failed\ngrant stores nothing), or with `write` set grants a path the operator handed over;\n`deny` remembers the no; `forget` removes a grant or denial.",
         "operationId": "decidePluginAccess",
         "parameters": [
           {
@@ -7204,6 +7204,13 @@
           "path": {
             "type": "string",
             "description": "The path as it appears in the request or grant list."
+          },
+          "write": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "With `allow`: grant the path directly, pending request or not, read-write when true.\nA file grants its folder. The same refusals apply as to a request."
           }
         }
       },
