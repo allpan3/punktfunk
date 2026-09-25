@@ -31,6 +31,8 @@ enum Action {
     Details,
     Unpin,
     Pair,
+    /// Forget the host's identity and keep the host: the next connect asks for a PIN.
+    Unpair,
     /// Save a discovered host.
     AddHost,
     /// The presets, for one launch of this title.
@@ -228,7 +230,16 @@ impl CardMenu {
             .unwrap_or_default()
     }
 
-    fn actions(&self, store: &dyn SettingsStore) -> Vec<Action> {
+    /// The rows this menu offers. A TV has no clipboard, so no Copy link.
+    fn actions(&self, store: &dyn SettingsStore, tv: bool) -> Vec<Action> {
+        let mut rows = self.all_actions(store);
+        if tv {
+            rows.retain(|a| *a != Action::CopyLink);
+        }
+        rows
+    }
+
+    fn all_actions(&self, store: &dyn SettingsStore) -> Vec<Action> {
         let host = match (&self.subject, self.mode) {
             (_, Mode::ConnectWith) => {
                 return std::iter::once(Action::Preset(None))
@@ -297,6 +308,9 @@ impl CardMenu {
             a.push(Action::MakeDefault);
         }
         a.push(Action::Pair);
+        if host.paired {
+            a.push(Action::Unpair);
+        }
         if host.can_wake && !host.online {
             a.push(Action::Wake);
         }
@@ -316,7 +330,7 @@ impl CardMenu {
             Action::SpeedTest | Action::Clipboard | Action::Edit | Action::MakeDefault => {
                 "Connection"
             }
-            Action::Pair => "Pairing",
+            Action::Pair | Action::Unpair => "Pairing",
             Action::Wake | Action::Host(_) => "Power",
             Action::SendLogs => "Logs",
             _ => "Remove",
@@ -335,6 +349,7 @@ impl CardMenu {
             Action::Details => "info",
             Action::Unpin | Action::Pin(_) => "pin",
             Action::Pair => "lock",
+            Action::Unpair => "log-out",
             Action::AddHost => "plus",
             Action::BindPreset => "settings",
             Action::SpeedTest => "gauge",
@@ -377,6 +392,10 @@ impl CardMenu {
             Action::Unpin => "Unpin card".into(),
             Action::Pair if self.host().paired => "Pair again\u{2026}".into(),
             Action::Pair => "Pair\u{2026}".into(),
+            Action::Unpair if self.armed == Some(Action::Unpair) => {
+                "Unpair \u{2014} press again".into()
+            }
+            Action::Unpair => "Unpair".into(),
             Action::AddHost => "Add host".into(),
             Action::PlayWith => "Play with preset\u{2026}".into(),
             Action::Play => match &self.subject {
@@ -473,7 +492,7 @@ impl CardMenu {
                 _ => {}
             }
         }
-        let actions = self.actions(ctx.store);
+        let actions = self.actions(ctx.store, ctx.tv);
         let (msg, pulse) = self.list.menu(ev, actions.len());
         self.dispatch(msg, pulse, &actions, ctx, fx)
     }
@@ -490,7 +509,7 @@ impl CardMenu {
                 self.strip_focus = false;
             }
         }
-        let actions = self.actions(ctx.store);
+        let actions = self.actions(ctx.store, ctx.tv);
         let (msg, pulse) = self.list.pointer(p, actions.len());
         if matches!(msg, ListMsg::None) && pulse.is_none() {
             return false;
@@ -719,6 +738,17 @@ impl CardMenu {
                 fx.cmds.push(ConsoleCmd::SetClipboard { key, on });
                 fx.pop();
             }
+            Action::Unpair if self.armed != Some(Action::Unpair) => {
+                self.armed = Some(Action::Unpair)
+            }
+            Action::Unpair => {
+                fx.cmds.push(ConsoleCmd::UnpairHost { key });
+                fx.toast = Some(format!(
+                    "Unpaired {}. The next connect asks for a PIN.",
+                    self.host().name
+                ));
+                fx.pop();
+            }
             Action::Forget if self.armed != Some(Action::Forget) => {
                 self.armed = Some(Action::Forget)
             }
@@ -792,7 +822,6 @@ impl CardMenu {
                     .into()
             }
             (Subject::Host(h), _) if !h.saved => "Found on this network.".into(),
-            (Subject::Host(h), Mode::Details) => format!("{}:{}", h.addr, h.port),
             (Subject::Host(_), _) => String::new(),
             (Subject::Game { .. }, Mode::Details) => String::new(),
             (Subject::Game { host, .. }, _) => format!("On {}.", host.name),
@@ -825,10 +854,21 @@ impl CardMenu {
         };
         let strip_top = list_rect.top;
         list_rect.top += strip_h as f32;
-        let actions = self.actions(ctx.store);
+        let actions = self.actions(ctx.store, ctx.tv);
         let rows: Vec<RowSpec> = actions
             .iter()
-            .map(|&a| RowSpec::action(self.label(a, ctx), self.enabled(a)).with_icon(self.icon(a)))
+            .map(|&a| {
+                let row =
+                    RowSpec::action(self.label(a, ctx), self.enabled(a)).with_icon(self.icon(a));
+                // The address sits on the row that edits it.
+                match (a, &self.subject) {
+                    (Action::Edit, Subject::Host(h)) => RowSpec {
+                        value: Some(format!("{}:{}", h.addr, h.port)),
+                        ..row
+                    },
+                    _ => row,
+                }
+            })
             .collect();
         let active = !self.strip_focus;
         self.list
@@ -933,6 +973,7 @@ mod tests {
             screen: None,
             pads: &[],
             deck: false,
+            tv: false,
             fallback_ui: false,
             pyrowave_ok: true,
             av1_ok: true,
@@ -949,7 +990,7 @@ mod tests {
     }
 
     fn rows(s: &CardMenu) -> Vec<Action> {
-        s.actions(crate::store::file_store())
+        s.actions(crate::store::file_store(), false)
     }
 
     fn label(s: &CardMenu, a: Action) -> String {
@@ -1449,5 +1490,45 @@ mod tests {
         let mut fx = Outbox::default();
         run_action(&mut s, Action::MakeDefault, &mut fx);
         assert_eq!(crate::store::file_store().load().default_host, None);
+    }
+
+    /// A TV has no clipboard: Copy link leaves every menu, and nothing else does.
+    #[test]
+    fn a_tv_offers_no_copy_link() {
+        let menu = CardMenu::for_host(&host());
+        let desk = menu.actions(crate::store::file_store(), false);
+        let tv = menu.actions(crate::store::file_store(), true);
+        assert!(desk.contains(&Action::CopyLink));
+        assert!(!tv.contains(&Action::CopyLink));
+        assert_eq!(desk.len(), tv.len() + 1);
+    }
+
+    /// A paired host's Pairing tab offers Unpair beside Pair again; it arms, then sends one
+    /// UnpairHost. An unpaired host has nothing to forget.
+    #[test]
+    fn unpair_arms_then_forgets_the_identity() {
+        let pairing = |h: &HostRow| -> Vec<Action> {
+            let d = details(h);
+            let sections = d.sections(crate::store::file_store());
+            let tab = sections.iter().position(|s| *s == "Pairing");
+            rows(&CardMenu {
+                tab: tab.expect("a Pairing tab"),
+                ..d
+            })
+        };
+        assert_eq!(pairing(&host()), vec![Action::Pair, Action::Unpair]);
+        let unpaired = HostRow {
+            paired: false,
+            ..host()
+        };
+        assert_eq!(pairing(&unpaired), vec![Action::Pair]);
+
+        let mut s = details(&host());
+        let mut fx = Outbox::default();
+        run_action(&mut s, Action::Unpair, &mut fx);
+        assert!(fx.cmds.is_empty(), "the first press only arms");
+        assert_eq!(label(&s, Action::Unpair), "Unpair \u{2014} press again");
+        run_action(&mut s, Action::Unpair, &mut fx);
+        assert_eq!(fx.cmds, vec![ConsoleCmd::UnpairHost { key: "aa".into() }]);
     }
 }

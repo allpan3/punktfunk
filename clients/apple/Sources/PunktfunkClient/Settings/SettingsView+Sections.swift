@@ -617,8 +617,8 @@ extension SettingsView {
         // preset scope rather than rendering an empty group.
         if !inPresetScope {
             Section("Library") {
-                described("How the controller-optimized library arranges titles: Shelf is the "
-                    + "coverflow, Grid shows more at once.") {
+                described("How the controller-optimized library arranges titles: Shelf is one "
+                    + "row of covers, Grid shows more at once.") {
                     settingPicker(
                         "Library view",
                         options: LibraryArrangement.all.map { (label: $0.label, tag: $0.stored) },
@@ -1052,7 +1052,7 @@ extension SettingsView {
                     described("The background of the controller-optimized screens.") {
                         settingPicker(
                             "Background",
-                            options: GamepadPalette.all.map { (label: $0.name, tag: $0.id) },
+                            options: ConsoleBridge.palettes.map { (label: $0.name, tag: $0.id) },
                             selection: $uiPalette)
                     }
                     #endif

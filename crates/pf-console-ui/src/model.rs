@@ -186,6 +186,40 @@ struct ConsoleState {
     /// One-shot toast. The shell `take`s it on the next sync — unlike [`PairPhase`]
     /// there is no modal state, so a take-once string is the whole protocol.
     notice: Option<String>,
+    /// What the host bundles, for the Licences screen. Kept once sent.
+    licenses: Option<Arc<Vec<LicenseSection>>>,
+    /// The latest controller reading while the input test is on.
+    pad_test: Option<PadTestState>,
+    /// Keyboards, mice and the like: listed on the Controllers tab, never sent as a pad.
+    other_devices: Vec<OtherDevice>,
+}
+
+/// One reading of the controller under test. `held` names buttons by Xbox position: `A` `B`
+/// `X` `Y` `LB` `RB` `LT` `RT` `Back` `Start` `Guide` `LS` `RS` `Up` `Down` `Left` `Right`.
+/// `axes` are `LX` `LY` `RX` `RY` (−1…1, +y down) and `LT` `RT` (0…1).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PadTestState {
+    #[serde(default)]
+    pub held: Vec<String>,
+    #[serde(default)]
+    pub axes: Vec<(String, f32)>,
+}
+
+/// An input device that is not a controller: `kind` is `keyboard`, `mouse` or `other`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OtherDevice {
+    pub name: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub detail: String,
+}
+
+/// One block of a host's bundled licences: a heading, then its text as the file has it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LicenseSection {
+    pub heading: String,
+    pub text: String,
 }
 
 /// Service threads write; the shell polls per frame. Cheap locks; no GPU data.
@@ -208,6 +242,30 @@ impl ConsoleShared {
     pub(crate) fn hosts_snapshot(&self) -> (Vec<HostRow>, u64) {
         let s = self.0.lock().unwrap();
         (s.hosts.clone(), s.hosts_gen)
+    }
+
+    pub fn set_pad_test(&self, state: PadTestState) {
+        self.0.lock().unwrap().pad_test = Some(state);
+    }
+
+    pub(crate) fn take_pad_test(&self) -> Option<PadTestState> {
+        self.0.lock().unwrap().pad_test.take()
+    }
+
+    pub fn set_other_devices(&self, devices: Vec<OtherDevice>) {
+        self.0.lock().unwrap().other_devices = devices;
+    }
+
+    pub(crate) fn other_devices(&self) -> Vec<OtherDevice> {
+        self.0.lock().unwrap().other_devices.clone()
+    }
+
+    pub fn set_licenses(&self, sections: Vec<LicenseSection>) {
+        self.0.lock().unwrap().licenses = Some(Arc::new(sections));
+    }
+
+    pub(crate) fn licenses(&self) -> Option<Arc<Vec<LicenseSection>>> {
+        self.0.lock().unwrap().licenses.clone()
     }
 
     pub fn set_pair(&self, phase: PairPhase) {
@@ -376,6 +434,37 @@ pub enum ConsoleCmd {
     /// input; the console never sees the pixels. Desktop raises none.
     OpenPlatformScreen {
         id: String,
+    },
+    /// Forget a saved host's identity and keep the record: its pin and paired flag clear, so
+    /// the next connect asks for a PIN again. `key` as in [`Self::ForgetHost`].
+    UnpairHost {
+        key: String,
+    },
+    /// Create or replace one preset. `overrides` is a [`SettingsOverlay`] in the shared
+    /// presets file's spelling; the host persists it and pushes its catalog back.
+    ///
+    /// [`SettingsOverlay`]: pf_client_core::presets::SettingsOverlay
+    SavePreset {
+        id: String,
+        name: String,
+        overrides: serde_json::Value,
+    },
+    /// Remove one preset; a host bound or pinned to it falls back as a dangling id does.
+    DeletePreset {
+        id: String,
+    },
+    /// The input test is on screen (`true`) or gone. While on, the host sends
+    /// [`PadTestState`]s and keeps the pad out of menu moves, so every button can be tried.
+    PadTest {
+        on: bool,
+    },
+    /// The Licences screen opened: send this host's [`LicenseSection`]s.
+    LoadLicenses,
+    /// The answer to a [`crate::screens::prompt::Prompt`]: the row picked, or `None` for
+    /// Back. Only a host that raised the prompt receives one.
+    PromptAnswer {
+        id: String,
+        choice: Option<usize>,
     },
     /// Platform-only pad work. `action` is [`crate::screens::players::PadAction::id`];
     /// `pad_key` indexes [`crate::screens::Ctx::pads`] and is empty when the pad list

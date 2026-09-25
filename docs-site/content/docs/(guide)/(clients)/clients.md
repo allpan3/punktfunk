@@ -46,7 +46,7 @@ or run `punktfunk-client --browse --fullscreen`.
 
 A WinUI 3 app for x64 and Arm64 with hardware decode (Vulkan Video or D3D11VA), HDR, WASAPI audio
 and SDL3 controllers. **Punktfunk Console** in the Start menu is the controller interface for a TV or
-HTPC.
+HTPC, on x64; the Arm64 build has no console yet.
 
 ## Android app (phone + Android TV)
 

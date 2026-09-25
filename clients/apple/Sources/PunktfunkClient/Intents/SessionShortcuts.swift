@@ -52,8 +52,8 @@ struct ConnectToHostIntent: AppIntent {
 /// Jump straight into a host's game library — no session. Foregrounds the app and routes the
 /// `browse` route through the same `.onOpenURL` path a widget tap uses, which drives the one
 /// `libraryTarget` every surface shares — so the shortcut lands in whichever library presentation
-/// the current mode owns: the gamepad console's library screen when the gamepad UI is active, the
-/// touch/desktop library otherwise. A session starts only when a title is picked there.
+/// the current mode owns: the console's shelf when the console is up, the touch/desktop library
+/// otherwise. A session starts only when a title is picked there.
 struct OpenLibraryIntent: AppIntent {
     static let title: LocalizedStringResource = "Open Game Library"
     static let description = IntentDescription(

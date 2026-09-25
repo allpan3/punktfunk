@@ -1006,7 +1006,9 @@ impl SimpleComponent for HostsPage {
         console_btn.set_tooltip_text(Some("Console UI — the controller-driven couch interface"));
         console_btn.set_action_name(Some("win.console"));
         let menu = gio::Menu::new();
-        menu.append(Some("Console UI"), Some("win.console"));
+        if cfg!(feature = "console") {
+            menu.append(Some("Console UI"), Some("win.console"));
+        }
         menu.append(Some("Preferences"), Some("win.preferences"));
         menu.append(Some("Keyboard Shortcuts"), Some("win.shortcuts"));
         menu.append(Some("About Punktfunk"), Some("win.about"));
@@ -1018,7 +1020,9 @@ impl SimpleComponent for HostsPage {
             .build();
         // Packed after the menu so the hamburger stays rightmost (pack_end fills inward).
         header.pack_end(&menu_btn);
-        header.pack_end(&console_btn);
+        if cfg!(feature = "console") {
+            header.pack_end(&console_btn);
+        }
 
         let toolbar = adw::ToolbarView::new();
         toolbar.add_top_bar(&header);

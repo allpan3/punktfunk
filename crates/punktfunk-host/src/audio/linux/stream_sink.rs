@@ -8,7 +8,8 @@
 //! that drops HDMI cannot flip the default under capture.
 //!
 //! Refcounted, latest-wins: concurrent sessions each hold a claim; the newest
-//! routes to *its* sink, and only the last release restores. A `join` session
+//! routes to *its* sink, the newest leaving hands the default to the next
+//! newest, and only the last release restores. A `join` session
 //! claims the sink it taps, so the owner leaving first restores nothing under
 //! it. The ledger lock is held across the metadata round-trip so a stale
 //! restore cannot overwrite a fresh claim.
@@ -40,10 +41,18 @@ enum Restore {
     Delete,
 }
 
+/// What a release writes: the newest remaining claim's sink, or the pre-claim default.
+#[derive(Debug, PartialEq)]
+enum Release {
+    Repoint(String),
+    Restore(Restore),
+}
+
 /// Claim bookkeeping, split from PipeWire I/O so the restore rules unit-test
 /// on every platform.
 struct Ledger {
-    holders: u32,
+    /// Held claims' sink names, oldest first; the last one is the configured default.
+    claims: Vec<String>,
     restore: Option<Restore>,
     /// `node.name` the operator heard on before the first claim: the host
     /// bridge's playthrough and voice-chat target. Kept across releases.
@@ -53,7 +62,7 @@ struct Ledger {
 impl Ledger {
     const fn new() -> Ledger {
         Ledger {
-            holders: 0,
+            claims: Vec::new(),
             restore: None,
             host: None,
         }
@@ -71,9 +80,9 @@ impl Ledger {
     }
 
     /// Count a new claim. `true` = first holder; caller must [`note_previous`].
-    fn on_claim(&mut self) -> bool {
-        self.holders += 1;
-        self.holders == 1
+    fn on_claim(&mut self, sink: &str) -> bool {
+        self.claims.push(sink.to_owned());
+        self.claims.len() == 1
     }
 
     /// Apply the staleness rule to what the first claim found.
@@ -84,13 +93,16 @@ impl Ledger {
         });
     }
 
-    /// Count a release. Last holder returns the restore action.
-    fn on_release(&mut self) -> Option<Restore> {
-        self.holders = self.holders.saturating_sub(1);
-        if self.holders == 0 {
-            self.restore.take()
-        } else {
-            None
+    /// Count a release. The newest leaving re-points to the next newest; the last holder
+    /// returns the restore action. An older holder leaving writes nothing.
+    fn on_release(&mut self, sink: &str) -> Option<Release> {
+        let i = self.claims.iter().rposition(|c| c == sink)?;
+        let newest = i + 1 == self.claims.len();
+        self.claims.remove(i);
+        match self.claims.last() {
+            None => self.restore.take().map(Release::Restore),
+            Some(top) if newest && top != sink => Some(Release::Repoint(top.clone())),
+            Some(_) => None,
         }
     }
 }
@@ -114,7 +126,7 @@ pub(super) fn host_sink() -> Option<String> {
 /// are not rerouted (legacy behaviour).
 pub(super) fn claim(sink_name: &str) {
     let mut ledger = LEDGER.lock().unwrap();
-    let first = ledger.on_claim();
+    let first = ledger.on_claim(sink_name);
     // Latest claim wins: even with an existing holder, route to the newest session's sink.
     match set_configured_sink(Some(&format!(r#"{{"name":"{sink_name}"}}"#))) {
         Ok(seen) => {
@@ -139,11 +151,24 @@ pub(super) fn claim(sink_name: &str) {
     }
 }
 
-/// Release one claim; the last restore writes the pre-claim default back.
-pub(super) fn release() {
+/// Release `sink_name`'s claim. The newest leaving hands the default to the next newest
+/// session's sink; the last release writes the pre-claim default back.
+pub(super) fn release(sink_name: &str) {
     let mut ledger = LEDGER.lock().unwrap();
-    let Some(restore) = ledger.on_release() else {
-        return;
+    let restore = match ledger.on_release(sink_name) {
+        None => return,
+        Some(Release::Restore(r)) => r,
+        Some(Release::Repoint(top)) => {
+            match set_configured_sink(Some(&format!(r#"{{"name":"{top}"}}"#))) {
+                Ok(_) => tracing::info!(
+                    sink = top,
+                    "default sink back on the remaining stream session"
+                ),
+                Err(e) => tracing::warn!(error = %format!("{e:#}"),
+                    "default sink not handed back — host apps may keep playing to the ended session"),
+            }
+            return;
+        }
     };
     let value = match &restore {
         Restore::Value(v) => Some(v.as_str()),
@@ -346,45 +371,63 @@ mod tests {
     #[test]
     fn claim_release_roundtrip() {
         let mut l = Ledger::new();
-        assert!(l.on_claim(), "first claim must save the previous value");
+        assert!(l.on_claim("a"), "first claim must save the previous value");
         l.note_previous(Some(r#"{"name":"alsa_output.hdmi"}"#.into()));
         assert_eq!(
-            l.on_release(),
-            Some(Restore::Value(r#"{"name":"alsa_output.hdmi"}"#.into()))
+            l.on_release("a"),
+            Some(Release::Restore(Restore::Value(
+                r#"{"name":"alsa_output.hdmi"}"#.into()
+            )))
         );
     }
 
     #[test]
     fn nested_claims_restore_once() {
         let mut l = Ledger::new();
-        assert!(l.on_claim());
+        assert!(l.on_claim("a"));
         l.note_previous(Some(r#"{"name":"alsa_output.hdmi"}"#.into()));
         assert!(
-            !l.on_claim(),
+            !l.on_claim("a"),
             "second claim must not overwrite the saved value"
         );
-        assert_eq!(l.on_release(), None, "inner release must not restore");
+        assert_eq!(l.on_release("a"), None, "inner release must not restore");
         assert_eq!(
-            l.on_release(),
-            Some(Restore::Value(r#"{"name":"alsa_output.hdmi"}"#.into()))
+            l.on_release("a"),
+            Some(Release::Restore(Restore::Value(
+                r#"{"name":"alsa_output.hdmi"}"#.into()
+            )))
         );
+    }
+
+    /// The newest session leaving hands the default to the one still streaming; an older one
+    /// leaving writes nothing, since the default is not its sink.
+    #[test]
+    fn the_newest_leaving_repoints_to_the_next_newest() {
+        let mut l = Ledger::new();
+        assert!(l.on_claim("a"));
+        l.note_previous(None);
+        assert!(!l.on_claim("b"));
+        assert_eq!(l.on_release("b"), Some(Release::Repoint("a".into())));
+        assert!(!l.on_claim("c"));
+        assert_eq!(l.on_release("a"), None, "c still holds the default");
+        assert_eq!(l.on_release("c"), Some(Release::Restore(Restore::Delete)));
     }
 
     /// A leftover `punktfunk-speaker-*` name must not become the restore target.
     #[test]
     fn stale_own_claim_degrades_to_delete() {
         let mut l = Ledger::new();
-        assert!(l.on_claim());
+        assert!(l.on_claim("a"));
         l.note_previous(Some(r#"{"name":"punktfunk-speaker-4242-0"}"#.into()));
-        assert_eq!(l.on_release(), Some(Restore::Delete));
+        assert_eq!(l.on_release("a"), Some(Release::Restore(Restore::Delete)));
     }
 
     #[test]
     fn unset_previous_deletes() {
         let mut l = Ledger::new();
-        assert!(l.on_claim());
+        assert!(l.on_claim("a"));
         l.note_previous(None);
-        assert_eq!(l.on_release(), Some(Restore::Delete));
+        assert_eq!(l.on_release("a"), Some(Release::Restore(Restore::Delete)));
     }
 
     /// The host output is the elected sink's bare name; a stale punktfunk
@@ -409,9 +452,9 @@ mod tests {
     #[test]
     fn unbalanced_release_is_harmless() {
         let mut l = Ledger::new();
-        assert_eq!(l.on_release(), None);
+        assert_eq!(l.on_release("a"), None);
         assert!(
-            l.on_claim(),
+            l.on_claim("a"),
             "ledger must stay usable after an unbalanced release"
         );
     }

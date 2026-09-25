@@ -31,6 +31,9 @@ public final class ConsoleBridge {
         case knownHosts = 13
         case pads = 14
         case navigate = 15
+        case prompt = 16
+        case licenses = 17
+        case padTest = 18
     }
 
     /// A discrete menu event, as the shell numbers them.
@@ -150,4 +153,16 @@ public final class ConsoleBridge {
         defer { punktfunk_console_string_free(raw) }
         return String(cString: raw)
     }
+
+    /// The console's background palettes in cycle order: the `ui_palette` choices.
+    public static let palettes: [(id: String, name: String)] = {
+        guard let raw = punktfunk_console_palettes() else { return [] }
+        defer { punktfunk_console_string_free(raw) }
+        let data = Data(String(cString: raw).utf8)
+        let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: String]] ?? []
+        return rows.compactMap { row in
+            guard let id = row["id"], let name = row["name"] else { return nil }
+            return (id, name)
+        }
+    }()
 }

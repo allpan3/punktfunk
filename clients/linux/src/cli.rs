@@ -48,12 +48,14 @@ pub fn deep_link_arg() -> Option<String> {
     })
 }
 
-/// Fullscreen the shell — the Gaming-Mode fallback for a bare launch (streams and the
-/// console library exec the session binary, which handles its own fullscreen). Gaming Mode
-/// means gamescope, never `SteamDeck`: that variable says which MACHINE this is, so it is set
-/// in desktop mode too, where a fullscreen shell is just wrong.
-pub fn fullscreen_mode() -> bool {
-    arg_flag("--fullscreen") || pf_client_core::gamescope::under_gamescope()
+/// A bare launch under Gaming Mode opens the console, not the desktop shell. Gaming Mode
+/// means gamescope, never `SteamDeck`: that variable names the machine, so it is set in
+/// desktop mode too.
+pub fn couch_launch() -> bool {
+    cfg!(feature = "console")
+        && pf_client_core::gamescope::under_gamescope()
+        && deep_link_arg().is_none()
+        && shot_scene().is_none()
 }
 
 /// Split `host[:port]`: no colon defaults the port to 9777; a colon with an unparsable
@@ -77,8 +79,9 @@ fn parse_host_port(target: &str) -> (String, Option<u16>) {
 
 /// `--connect` / `--browse`: streams and the console library live in the
 /// `punktfunk-session` Vulkan binary — replace this process with it, forwarding the
-/// relevant argv verbatim. This keeps the Decky wrapper (which launches the SHELL with
-/// these flags) working unchanged until it's repointed at the session binary.
+/// relevant argv verbatim. With neither flag (a [`couch_launch`]) it opens the console home.
+/// This keeps the Decky wrapper (which launches the SHELL with these flags) working unchanged
+/// until it's repointed at the session binary.
 pub fn exec_session() -> glib::ExitCode {
     use std::os::unix::process::CommandExt as _;
     let forward = [
@@ -107,6 +110,9 @@ pub fn exec_session() -> glib::ExitCode {
                 }
             }
         }
+    }
+    if !arg_flag("--browse") && arg_value("--connect").is_none() {
+        cmd.arg("--browse");
     }
     let err = cmd.exec(); // only returns on failure
     eprintln!("exec punktfunk-session: {err}");

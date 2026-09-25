@@ -5,8 +5,8 @@
 //! ported from the GTK launcher and tested here. Geometry, the 4×4 card transform, and
 //! the mesh-gradient palettes sit alongside.
 //!
-//! Rendering is `skia_overlay`. Palette ids and the derived 16-cell meshes are pinned by
-//! `clients/shared/console-vectors.json`, and by `GamepadPalette.kt` / `.swift`.
+//! Rendering is `skia_overlay`. [`PALETTES`] is the one palette table; native pickers read
+//! its ids and names over their bridge.
 
 use skia_safe::{ConditionallySend, Image};
 use std::collections::{HashMap, VecDeque};
@@ -411,23 +411,13 @@ pub const MESH_COLORS: [(f64, f64, f64); 16] = [
     (0.075, 0.060, 0.160),
 ];
 
-/// Four interior control points; the 12 boundary points stay pinned (a drifting edge exposes black).
-/// Each row is `(base_ux, base_uy, amplitude, speed_x, speed_y, phase)` in UV / rad·s⁻¹ —
-/// Swift `meshPoints(at:)` `wob()`. Periods ~90–130 s, out of phase so the warp does not loop.
-pub const MESH_INTERIOR: [(f64, f64, f64, f64, f64, f64); 4] = [
-    (0.333, 0.333, 0.11, 0.049, 0.063, 0.4),
-    (0.667, 0.333, 0.10, 0.055, 0.052, 2.1),
-    (0.333, 0.667, 0.10, 0.058, 0.049, 3.6),
-    (0.667, 0.667, 0.12, 0.047, 0.061, 5.0),
-];
-
 // --- Background palettes -------------------------------------------------------------------
 
 /// One background colour family.
 ///
 /// `stops` is several distinct hues, not one hue at several brightnesses. The 4×4 mesh
 /// samples that ramp diagonally with [`CELL_RAMP`]. [`Palette::accent`] is the focus wash;
-/// [`Palette::light`] flips ink ([`crate::theme::Ink`]). Apple and Android tables share these ids.
+/// [`Palette::light`] flips ink ([`crate::theme::Ink`]).
 pub struct Palette {
     /// The stored `ui_palette` value (see `trust::Settings::ui_palette`).
     pub id: &'static str,
@@ -435,8 +425,6 @@ pub struct Palette {
     /// Colour ramp, dark end first: the field's gradient ([`field_sksl`]) and the mesh.
     /// `None` = [`MESH_COLORS`] verbatim for the mesh and [`VIOLET_FIELD`] for the field.
     pub stops: Option<&'static [(f64, f64, f64)]>,
-    /// Two dominant colours; the native pickers' backdrop pairs (`console-vectors.json`).
-    pub pair: [(f64, f64, f64); 2],
     /// The field's ground — what the corners settle onto and what the calm mix lifts toward.
     pub ground: (f64, f64, f64),
     pub accent: (f64, f64, f64),
@@ -446,22 +434,21 @@ pub struct Palette {
 
 /// Per-cell ramp offset on top of the diagonal `0.5·(x + y)`. Nudges stop a pure diagonal from banding.
 #[rustfmt::skip]
-const CELL_RAMP: [f64; 16] = [
+pub(crate) const CELL_RAMP: [f64; 16] = [
      0.10, -0.06,  0.04, -0.12,
     -0.08,  0.14, -0.10,  0.06,
      0.06, -0.12,  0.16, -0.04,
     -0.10,  0.08, -0.06,  0.12,
 ];
 
-/// Brand default, 19 more dark fields, then 16 pale. Dark → light is cycle order.
-/// Adding a row here is not enough: Apple and Android tables must gain the same `ui_palette` id.
+/// Brand default, 19 more dark fields, then 16 pale. Dark → light is cycle order. An `id` is a
+/// stored `ui_palette` value: renaming one orphans saved choices.
 #[rustfmt::skip]
 pub const PALETTES: [Palette; 36] = [
     // --- dark fields (white ink) ---
     Palette {
         // The brand default: a bright periwinkle field with lavender pools, still white ink.
         id: "violet", name: "Violet", stops: None,
-        pair: [(0.780, 0.630, 0.980), (0.450, 0.440, 0.950)],
         ground: (0.510, 0.470, 0.960), accent: (0.525, 0.471, 0.961), light: false,
     },
     Palette {
@@ -472,7 +459,6 @@ pub const PALETTES: [Palette; 36] = [
             (0.00, 0.00, 0.00), (0.00, 0.00, 0.00), (0.01, 0.02, 0.10),
             (0.045, 0.016, 0.115), (0.12, 0.024, 0.13),
         ]),
-        pair: [(0.120, 0.024, 0.130), (0.010, 0.020, 0.100)],
         ground: (0.000, 0.000, 0.000), accent: (0.525, 0.471, 0.961), light: false,
     },
     Palette {
@@ -482,7 +468,6 @@ pub const PALETTES: [Palette; 36] = [
             (0.00, 0.00, 0.00), (0.00, 0.00, 0.00), (0.00, 0.00, 0.00),
             (0.00, 0.00, 0.00), (0.00, 0.00, 0.00),
         ]),
-        pair: [(0.000, 0.000, 0.000), (0.000, 0.000, 0.000)],
         ground: (0.000, 0.000, 0.000), accent: (0.525, 0.471, 0.961), light: false,
     },
     Palette {
@@ -491,7 +476,6 @@ pub const PALETTES: [Palette; 36] = [
             (0.06, 0.07, 0.11), (0.15, 0.18, 0.25), (0.30, 0.31, 0.35),
             (0.45, 0.42, 0.38), (0.60, 0.56, 0.49),
         ]),
-        pair: [(0.300, 0.310, 0.360), (0.160, 0.190, 0.270)],
         ground: (0.055, 0.055, 0.070), accent: (0.78, 0.80, 0.86), light: false,
     },
     Palette {
@@ -501,7 +485,6 @@ pub const PALETTES: [Palette; 36] = [
             (0.06, 0.08, 0.11), (0.14, 0.18, 0.24), (0.24, 0.30, 0.38),
             (0.40, 0.44, 0.48), (0.60, 0.58, 0.52),
         ]),
-        pair: [(0.240, 0.300, 0.380), (0.140, 0.180, 0.240)],
         ground: (0.060, 0.080, 0.110), accent: (0.60, 0.80, 1.00), light: false,
     },
     Palette {
@@ -511,7 +494,6 @@ pub const PALETTES: [Palette; 36] = [
             (0.05, 0.02, 0.16), (0.05, 0.11, 0.36), (0.08, 0.24, 0.60),
             (0.14, 0.42, 0.80), (0.36, 0.76, 0.86),
         ]),
-        pair: [(0.080, 0.240, 0.600), (0.140, 0.420, 0.800)],
         ground: (0.030, 0.050, 0.160), accent: (0.40, 0.72, 1.00), light: false,
     },
     Palette {
@@ -521,7 +503,6 @@ pub const PALETTES: [Palette; 36] = [
             (0.02, 0.00, 0.10), (0.14, 0.02, 0.50), (0.30, 0.10, 0.95),
             (0.10, 0.45, 1.00), (0.20, 0.90, 1.00),
         ]),
-        pair: [(0.300, 0.100, 0.950), (0.100, 0.450, 1.000)],
         ground: (0.020, 0.000, 0.100), accent: (0.45, 0.85, 1.00), light: false,
     },
     Palette {
@@ -531,7 +512,6 @@ pub const PALETTES: [Palette; 36] = [
             (0.01, 0.05, 0.14), (0.02, 0.18, 0.40), (0.02, 0.40, 0.62),
             (0.05, 0.66, 0.72), (0.55, 0.92, 0.80),
         ]),
-        pair: [(0.020, 0.400, 0.620), (0.050, 0.660, 0.720)],
         ground: (0.010, 0.050, 0.140), accent: (0.45, 0.95, 0.90), light: false,
     },
     Palette {
@@ -541,7 +521,6 @@ pub const PALETTES: [Palette; 36] = [
             (0.02, 0.07, 0.11), (0.03, 0.24, 0.28), (0.05, 0.46, 0.40),
             (0.14, 0.60, 0.72), (0.44, 0.42, 0.86),
         ]),
-        pair: [(0.050, 0.460, 0.400), (0.140, 0.600, 0.720)],
         ground: (0.020, 0.070, 0.110), accent: (0.36, 0.90, 0.78), light: false,
     },
     Palette {
@@ -551,7 +530,6 @@ pub const PALETTES: [Palette; 36] = [
             (0.02, 0.07, 0.10), (0.03, 0.22, 0.19), (0.05, 0.40, 0.34),
             (0.16, 0.58, 0.46), (0.60, 0.84, 0.52),
         ]),
-        pair: [(0.050, 0.400, 0.340), (0.160, 0.580, 0.460)],
         ground: (0.020, 0.070, 0.100), accent: (0.52, 0.90, 0.62), light: false,
     },
     Palette {
@@ -561,7 +539,6 @@ pub const PALETTES: [Palette; 36] = [
             (0.01, 0.07, 0.04), (0.02, 0.26, 0.12), (0.04, 0.50, 0.22),
             (0.16, 0.74, 0.34), (0.60, 0.92, 0.40),
         ]),
-        pair: [(0.040, 0.500, 0.220), (0.160, 0.740, 0.340)],
         ground: (0.010, 0.070, 0.040), accent: (0.55, 1.00, 0.55), light: false,
     },
     Palette {
@@ -571,7 +548,6 @@ pub const PALETTES: [Palette; 36] = [
             (0.10, 0.02, 0.10), (0.34, 0.03, 0.12), (0.62, 0.06, 0.20),
             (0.86, 0.20, 0.28), (0.98, 0.52, 0.32),
         ]),
-        pair: [(0.620, 0.060, 0.200), (0.860, 0.200, 0.280)],
         ground: (0.080, 0.020, 0.060), accent: (1.00, 0.42, 0.42), light: false,
     },
     Palette {
@@ -581,7 +557,6 @@ pub const PALETTES: [Palette; 36] = [
             (0.06, 0.00, 0.20), (0.40, 0.02, 0.16), (0.80, 0.06, 0.30),
             (1.00, 0.28, 0.48), (1.00, 0.62, 0.56),
         ]),
-        pair: [(0.800, 0.060, 0.300), (1.000, 0.280, 0.480)],
         ground: (0.080, 0.000, 0.060), accent: (1.00, 0.50, 0.62), light: false,
     },
     Palette {
@@ -591,7 +566,6 @@ pub const PALETTES: [Palette; 36] = [
             (0.06, 0.01, 0.02), (0.42, 0.02, 0.04), (0.86, 0.12, 0.02),
             (1.00, 0.45, 0.02), (1.00, 0.85, 0.20),
         ]),
-        pair: [(0.860, 0.120, 0.020), (1.000, 0.450, 0.020)],
         ground: (0.060, 0.010, 0.020), accent: (1.00, 0.72, 0.20), light: false,
     },
     Palette {
@@ -601,7 +575,6 @@ pub const PALETTES: [Palette; 36] = [
             (0.08, 0.05, 0.04), (0.36, 0.15, 0.08), (0.66, 0.32, 0.14),
             (0.85, 0.56, 0.26), (0.50, 0.78, 0.62),
         ]),
-        pair: [(0.660, 0.320, 0.140), (0.850, 0.560, 0.260)],
         ground: (0.070, 0.050, 0.040), accent: (1.00, 0.70, 0.36), light: false,
     },
     Palette {
@@ -611,7 +584,6 @@ pub const PALETTES: [Palette; 36] = [
             (0.10, 0.02, 0.10), (0.36, 0.16, 0.02), (0.66, 0.36, 0.04),
             (0.88, 0.58, 0.08), (0.92, 0.86, 0.36),
         ]),
-        pair: [(0.660, 0.360, 0.040), (0.880, 0.580, 0.080)],
         ground: (0.100, 0.040, 0.020), accent: (1.00, 0.80, 0.30), light: false,
     },
     Palette {
@@ -621,7 +593,6 @@ pub const PALETTES: [Palette; 36] = [
             (0.08, 0.04, 0.14), (0.26, 0.10, 0.34), (0.50, 0.20, 0.48),
             (0.78, 0.38, 0.50), (0.96, 0.62, 0.48),
         ]),
-        pair: [(0.500, 0.200, 0.480), (0.780, 0.380, 0.500)],
         ground: (0.070, 0.040, 0.120), accent: (1.00, 0.62, 0.56), light: false,
     },
     Palette {
@@ -631,7 +602,6 @@ pub const PALETTES: [Palette; 36] = [
             (0.08, 0.02, 0.16), (0.28, 0.06, 0.48), (0.52, 0.14, 0.78),
             (0.78, 0.30, 0.92), (1.00, 0.55, 0.80),
         ]),
-        pair: [(0.520, 0.140, 0.780), (0.780, 0.300, 0.920)],
         ground: (0.080, 0.020, 0.160), accent: (0.85, 0.55, 1.00), light: false,
     },
     Palette {
@@ -641,7 +611,6 @@ pub const PALETTES: [Palette; 36] = [
             (0.05, 0.00, 0.12), (0.40, 0.00, 0.60), (0.90, 0.05, 0.55),
             (0.15, 0.35, 0.95), (0.30, 0.95, 0.55),
         ]),
-        pair: [(0.900, 0.050, 0.550), (0.150, 0.350, 0.950)],
         ground: (0.050, 0.000, 0.120), accent: (0.40, 1.00, 0.70), light: false,
     },
     Palette {
@@ -651,7 +620,6 @@ pub const PALETTES: [Palette; 36] = [
             (0.02, 0.10, 0.12), (0.02, 0.42, 0.42), (0.95, 0.45, 0.10),
             (0.98, 0.20, 0.45), (0.40, 0.10, 0.55),
         ]),
-        pair: [(0.020, 0.420, 0.420), (0.950, 0.450, 0.100)],
         ground: (0.020, 0.080, 0.100), accent: (1.00, 0.60, 0.30), light: false,
     },
     // --- pale fields (dark ink) ---
@@ -662,7 +630,6 @@ pub const PALETTES: [Palette; 36] = [
             (0.99, 0.95, 0.88), (0.91, 0.94, 0.98), (0.98, 0.91, 0.94),
             (0.99, 0.97, 0.89), (0.90, 0.94, 0.99),
         ]),
-        pair: [(0.910, 0.940, 0.980), (0.990, 0.970, 0.890)],
         ground: (0.970, 0.960, 0.940), accent: (0.42, 0.30, 0.28), light: true,
     },
     Palette {
@@ -672,7 +639,6 @@ pub const PALETTES: [Palette; 36] = [
             (0.76, 0.87, 1.00), (0.62, 0.78, 0.99), (0.72, 0.76, 0.99),
             (0.84, 0.82, 1.00), (0.86, 0.98, 0.96),
         ]),
-        pair: [(0.620, 0.780, 0.990), (0.840, 0.820, 1.000)],
         ground: (0.920, 0.950, 1.000), accent: (0.12, 0.30, 0.62), light: true,
     },
     Palette {
@@ -682,7 +648,6 @@ pub const PALETTES: [Palette; 36] = [
             (0.45, 0.70, 1.00), (0.60, 0.80, 1.00), (0.75, 0.85, 1.00),
             (0.85, 0.80, 1.00), (0.95, 0.85, 1.00),
         ]),
-        pair: [(0.600, 0.800, 1.000), (0.850, 0.800, 1.000)],
         ground: (0.780, 0.880, 1.000), accent: (0.10, 0.20, 0.55), light: true,
     },
     Palette {
@@ -692,7 +657,6 @@ pub const PALETTES: [Palette; 36] = [
             (0.84, 0.76, 0.99), (0.74, 0.70, 0.99), (0.88, 0.74, 0.98),
             (0.98, 0.82, 0.94), (0.96, 0.94, 1.00),
         ]),
-        pair: [(0.740, 0.700, 0.990), (0.980, 0.820, 0.940)],
         ground: (0.950, 0.920, 0.990), accent: (0.44, 0.24, 0.66), light: true,
     },
     Palette {
@@ -702,7 +666,6 @@ pub const PALETTES: [Palette; 36] = [
             (0.60, 0.35, 0.95), (0.55, 0.50, 1.00), (0.65, 0.65, 1.00),
             (0.85, 0.60, 0.98), (1.00, 0.70, 0.90),
         ]),
-        pair: [(0.550, 0.500, 1.000), (0.850, 0.600, 0.980)],
         ground: (0.800, 0.720, 1.000), accent: (0.25, 0.05, 0.55), light: true,
     },
     Palette {
@@ -712,7 +675,6 @@ pub const PALETTES: [Palette; 36] = [
             (1.00, 0.50, 0.80), (1.00, 0.62, 0.85), (0.92, 0.70, 0.95),
             (0.70, 0.75, 1.00), (0.60, 0.85, 1.00),
         ]),
-        pair: [(1.000, 0.620, 0.850), (0.700, 0.750, 1.000)],
         ground: (1.000, 0.780, 0.900), accent: (0.55, 0.05, 0.35), light: true,
     },
     Palette {
@@ -722,7 +684,6 @@ pub const PALETTES: [Palette; 36] = [
             (1.00, 0.58, 0.62), (1.00, 0.68, 0.56), (1.00, 0.80, 0.64),
             (0.99, 0.88, 0.72), (1.00, 0.96, 0.80),
         ]),
-        pair: [(1.000, 0.680, 0.560), (0.990, 0.880, 0.720)],
         ground: (1.000, 0.900, 0.800), accent: (0.68, 0.14, 0.22), light: true,
     },
     Palette {
@@ -732,7 +693,6 @@ pub const PALETTES: [Palette; 36] = [
             (1.00, 0.30, 0.60), (1.00, 0.42, 0.55), (1.00, 0.55, 0.45),
             (1.00, 0.70, 0.45), (1.00, 0.85, 0.60),
         ]),
-        pair: [(1.000, 0.420, 0.550), (1.000, 0.700, 0.450)],
         ground: (1.000, 0.720, 0.660), accent: (0.50, 0.00, 0.20), light: true,
     },
     Palette {
@@ -742,7 +702,6 @@ pub const PALETTES: [Palette; 36] = [
             (1.00, 0.45, 0.60), (1.00, 0.60, 0.44), (1.00, 0.72, 0.52),
             (1.00, 0.82, 0.58), (0.98, 0.92, 0.72),
         ]),
-        pair: [(1.000, 0.600, 0.440), (1.000, 0.820, 0.580)],
         ground: (1.000, 0.820, 0.660), accent: (0.60, 0.16, 0.10), light: true,
     },
     Palette {
@@ -752,7 +711,6 @@ pub const PALETTES: [Palette; 36] = [
             (1.00, 0.40, 0.70), (1.00, 0.55, 0.60), (1.00, 0.75, 0.40),
             (0.80, 0.90, 0.50), (0.55, 0.85, 0.95),
         ]),
-        pair: [(1.000, 0.550, 0.600), (0.800, 0.900, 0.500)],
         ground: (1.000, 0.800, 0.750), accent: (0.55, 0.05, 0.30), light: true,
     },
     Palette {
@@ -762,7 +720,6 @@ pub const PALETTES: [Palette; 36] = [
             (1.00, 0.86, 0.44), (0.98, 0.96, 0.56), (0.70, 0.94, 0.64),
             (0.84, 0.97, 0.78), (0.98, 0.99, 0.90),
         ]),
-        pair: [(0.980, 0.960, 0.560), (0.700, 0.940, 0.640)],
         ground: (1.000, 0.980, 0.860), accent: (0.30, 0.36, 0.08), light: true,
     },
     Palette {
@@ -772,7 +729,6 @@ pub const PALETTES: [Palette; 36] = [
             (1.00, 0.60, 0.10), (1.00, 0.75, 0.10), (1.00, 0.88, 0.20),
             (0.95, 0.95, 0.40), (0.75, 0.92, 0.60),
         ]),
-        pair: [(1.000, 0.750, 0.100), (1.000, 0.880, 0.200)],
         ground: (1.000, 0.880, 0.400), accent: (0.40, 0.22, 0.00), light: true,
     },
     Palette {
@@ -782,7 +738,6 @@ pub const PALETTES: [Palette; 36] = [
             (1.00, 0.55, 0.25), (1.00, 0.72, 0.30), (1.00, 0.90, 0.40),
             (0.85, 0.95, 0.50), (0.60, 0.92, 0.70),
         ]),
-        pair: [(1.000, 0.720, 0.300), (0.850, 0.950, 0.500)],
         ground: (1.000, 0.850, 0.600), accent: (0.45, 0.18, 0.02), light: true,
     },
     Palette {
@@ -792,7 +747,6 @@ pub const PALETTES: [Palette; 36] = [
             (0.72, 0.84, 0.70), (0.80, 0.90, 0.76), (0.90, 0.94, 0.80),
             (0.96, 0.96, 0.84), (0.99, 0.97, 0.90),
         ]),
-        pair: [(0.800, 0.900, 0.760), (0.960, 0.960, 0.840)],
         ground: (0.940, 0.960, 0.900), accent: (0.18, 0.36, 0.24), light: true,
     },
     Palette {
@@ -802,7 +756,6 @@ pub const PALETTES: [Palette; 36] = [
             (0.30, 0.80, 0.40), (0.55, 0.90, 0.40), (0.80, 0.95, 0.45),
             (0.95, 0.95, 0.55), (1.00, 0.90, 0.65),
         ]),
-        pair: [(0.550, 0.900, 0.400), (0.950, 0.950, 0.550)],
         ground: (0.850, 0.950, 0.600), accent: (0.10, 0.35, 0.12), light: true,
     },
     Palette {
@@ -812,7 +765,6 @@ pub const PALETTES: [Palette; 36] = [
             (0.20, 0.75, 0.80), (0.35, 0.85, 0.85), (0.55, 0.92, 0.80),
             (0.70, 0.95, 0.70), (0.92, 0.98, 0.75),
         ]),
-        pair: [(0.350, 0.850, 0.850), (0.700, 0.950, 0.700)],
         ground: (0.750, 0.950, 0.900), accent: (0.02, 0.30, 0.35), light: true,
     },
 ];
@@ -822,7 +774,7 @@ pub fn palette(id: &str) -> &'static Palette {
     PALETTES.iter().find(|p| p.id == id).unwrap_or(&PALETTES[0])
 }
 
-/// Sample a ramp at `t` ∈ [0, 1], linear between neighbouring stops. Swift and Kotlin copies must match.
+/// Sample a ramp at `t` ∈ [0, 1], linear between neighbouring stops.
 pub fn ramp(stops: &[(f64, f64, f64)], t: f64) -> (f64, f64, f64) {
     match stops.len() {
         0 => (0.0, 0.0, 0.0),
@@ -848,12 +800,6 @@ impl Palette {
         };
         mesh_colors_of(stops)
     }
-
-    /// Four blob colours for Android's mesh approximation, spread across the ramp.
-    pub fn blob_colors(&self) -> [(f64, f64, f64); 4] {
-        let stops = self.stops.unwrap_or(&VIOLET_BLOBS);
-        core::array::from_fn(|i| ramp(stops, 0.15 + 0.25 * i as f64))
-    }
 }
 
 /// 16 mesh cells from any 5-stop ramp, including the runtime OS field (`shell::build_mesh_os`).
@@ -863,15 +809,6 @@ pub(crate) fn mesh_colors_of(stops: &[(f64, f64, f64)]) -> [(f64, f64, f64); 16]
         ramp(stops, 0.5 * (x + y) + CELL_RAMP[i])
     })
 }
-
-/// Pre-palette Android / legacy-Apple blob colours, so `violet` stays bit-identical there.
-const VIOLET_BLOBS: [(f64, f64, f64); 5] = [
-    (0.53, 0.47, 0.96),
-    (0.24, 0.20, 0.72),
-    (0.62, 0.30, 0.80),
-    (0.22, 0.38, 0.86),
-    (0.53, 0.47, 0.96),
-];
 
 /// The brand default's field ramp: the mockup's lavender → periwinkle → magenta.
 pub const VIOLET_FIELD: [(f64, f64, f64); 3] =
@@ -1832,78 +1769,6 @@ mod tests {
         assert!(settings.extra.is_empty(), "no empty list left behind");
     }
 
-    /// Parity with `clients/shared/console-vectors.json` (`include_str!`: missing file fails compile).
-    ///
-    /// Three copies: here, `GamepadPalette.kt`, `GamepadPalette.swift`. The file pins the
-    /// 36 palettes and the derived 16-cell mesh each one produces.
-    #[test]
-    fn shared_console_vectors() {
-        let raw = include_str!("../../../clients/shared/console-vectors.json");
-        let file: serde_json::Value =
-            serde_json::from_str(raw).expect("console-vectors.json must parse");
-        let nums = |v: &serde_json::Value| -> Vec<f64> {
-            v.as_array()
-                .expect("array")
-                .iter()
-                .map(|n| n.as_f64().expect("number"))
-                .collect()
-        };
-        let close = |what: &str, a: f64, b: f64| {
-            assert!(
-                (a - b).abs() < 1e-6,
-                "{what}: vectors say {b}, this client computes {a}"
-            );
-        };
-
-        assert_eq!(nums(&file["cell_ramp"]), CELL_RAMP.to_vec(), "CELL_RAMP");
-
-        let interior = file["mesh_interior"].as_array().expect("mesh_interior");
-        assert_eq!(interior.len(), MESH_INTERIOR.len(), "mesh interior count");
-        for (w, p) in interior.iter().zip(MESH_INTERIOR.iter()) {
-            let w = nums(w);
-            let got = [p.0, p.1, p.2, p.3, p.4, p.5];
-            for (i, (a, b)) in got.iter().zip(w.iter()).enumerate() {
-                close(&format!("mesh_interior[{i}]"), *a, *b);
-            }
-        }
-
-        let want = file["palettes"].as_array().expect("palettes");
-        assert_eq!(want.len(), PALETTES.len(), "palette count");
-        for (w, p) in want.iter().zip(PALETTES.iter()) {
-            let id = w["id"].as_str().expect("id");
-            assert_eq!(id, p.id, "palette order");
-            assert_eq!(w["name"].as_str().expect("name"), p.name, "{id} name");
-            assert_eq!(w["light"].as_bool().expect("light"), p.light, "{id} light");
-            let g = nums(&w["ground"]);
-            close(&format!("{id} ground.r"), p.ground.0, g[0]);
-            close(&format!("{id} ground.g"), p.ground.1, g[1]);
-            close(&format!("{id} ground.b"), p.ground.2, g[2]);
-            let a = nums(&w["accent"]);
-            close(&format!("{id} accent.r"), p.accent.0, a[0]);
-            close(&format!("{id} accent.g"), p.accent.1, a[1]);
-            close(&format!("{id} accent.b"), p.accent.2, a[2]);
-
-            let mesh = p.mesh_colors();
-            let wm = w["mesh"].as_array().expect("mesh");
-            assert_eq!(wm.len(), mesh.len(), "{id} mesh cells");
-            for (i, (c, wc)) in mesh.iter().zip(wm.iter()).enumerate() {
-                let wc = nums(wc);
-                close(&format!("{id} mesh[{i}].r"), c.0, wc[0]);
-                close(&format!("{id} mesh[{i}].g"), c.1, wc[1]);
-                close(&format!("{id} mesh[{i}].b"), c.2, wc[2]);
-            }
-            let blobs = p.blob_colors();
-            let wb = w["blobs"].as_array().expect("blobs");
-            assert_eq!(wb.len(), blobs.len(), "{id} blob count");
-            for (i, (c, wc)) in blobs.iter().zip(wb.iter()).enumerate() {
-                let wc = nums(wc);
-                close(&format!("{id} blob[{i}].r"), c.0, wc[0]);
-                close(&format!("{id} blob[{i}].g"), c.1, wc[1]);
-                close(&format!("{id} blob[{i}].b"), c.2, wc[2]);
-            }
-        }
-    }
-
     /// Poster bytes stay for the fetch: any screen takes what it lacks, in the order it asks,
     /// as often as it asks; the next fetch starts clean.
     #[test]
@@ -2603,24 +2468,6 @@ mod tests {
         assert!(focal > 1.0 && scale > 0.8, "{focal} {scale}");
     }
 
-    /// Every palette's pair vs `backdrop_pairs` in `console-vectors.json`.
-    #[test]
-    fn backdrop_pairs_match_the_shared_vectors() {
-        let raw = include_str!("../../../clients/shared/console-vectors.json");
-        let file: serde_json::Value = serde_json::from_str(raw).unwrap();
-        let rows = file["backdrop_pairs"].as_array().expect("backdrop_pairs");
-        assert_eq!(rows.len(), PALETTES.len());
-        for (row, p) in rows.iter().zip(&PALETTES) {
-            assert_eq!(row["id"], p.id);
-            for (want, got) in row["pair"].as_array().unwrap().iter().zip(p.pair) {
-                let want: Vec<f64> = (want.as_array().unwrap().iter())
-                    .map(|v| v.as_f64().unwrap())
-                    .collect();
-                assert_eq!(want, vec![got.0, got.1, got.2], "{}", p.id);
-            }
-        }
-    }
-
     #[test]
     fn violet_is_the_untouched_shipped_field() {
         assert_eq!(PALETTES[0].id, "violet");
@@ -2681,10 +2528,9 @@ mod tests {
         }
     }
 
-    /// Ids, order and the light/dark split are the cross-client contract — the Apple and
-    /// Android tables must match this exactly.
+    /// Ids are stored `ui_palette` values, and their order is the cycle order.
     #[test]
-    fn table_matches_the_other_clients() {
+    fn ids_and_order_hold() {
         let ids: Vec<&str> = PALETTES.iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
@@ -2780,7 +2626,7 @@ mod tests {
             1.05 / (luma((lin(c.0), lin(c.1), lin(c.2))) + 0.05)
         };
         for p in &PALETTES {
-            for c in p.mesh_colors().iter().chain(p.blob_colors().iter()) {
+            for c in p.mesh_colors().iter() {
                 for v in [c.0, c.1, c.2] {
                     assert!((0.0..=1.0).contains(&v), "{} {c:?}", p.id);
                 }
@@ -2807,7 +2653,7 @@ mod tests {
         }
     }
 
-    /// The ramp is the shared sampling rule the Swift and Kotlin ports reproduce.
+    /// The ramp samples linearly between stops and clamps outside them.
     #[test]
     fn ramp_interpolates_between_stops() {
         let stops = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, 1.0)];

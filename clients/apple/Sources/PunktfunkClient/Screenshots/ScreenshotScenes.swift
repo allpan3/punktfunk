@@ -362,7 +362,7 @@ enum ShotMock {
         #endif
     }
 
-    /// A believable shelf for the library coverflow: the demo host's titles (`DemoMode.games`)
+    /// A believable shelf for the library: the demo host's titles (`DemoMode.games`)
     /// plus the Steam launcher, which stays artless by design and renders its brand mark.
     static let games: [GameEntry] = DemoMode.games + {
         let json = """

@@ -12,7 +12,7 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     // Which LAYER this surface is editing (SettingsView+Scope): the global defaults, or one
-    // preset's overrides. A TV picks it in its Editing pane; the gamepad UI never edits presets.
+    // preset's overrides. A TV picks it in its Editing pane.
     @ObservedObject var presets = PresetStore.shared
     @State var scope: SettingsScope = .defaults
     /// The preset editor (create / duplicate / edit), when it is open, and the preset a delete

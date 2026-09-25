@@ -242,6 +242,8 @@ final class AudioRing: @unchecked Sendable {
     /// no timestamps, so the drain thread (which has both a packet's `pts_ns` and the video leg)
     /// hands the number back for reporting. Mirrors `NativeClient::audio_av_offset_ms`.
     private var avOffsetMS = 0
+    /// Device output latency behind the ring, ns (`noteOutputLatency`).
+    private var outputLatencyNsValue: Int64 = 0
     /// Drought concealment the drain thread has synthesized this session, ms — STORED here for the
     /// same reason `avOffsetMS` is: the ring cannot compute it, but it is where the numbers a
     /// listener's complaint needs can be read under one lock.
@@ -438,6 +440,20 @@ final class AudioRing: @unchecked Sendable {
         avOffsetMS = ms
     }
 
+    /// What the output device adds after a sample leaves the ring (HAL latency, a Bluetooth
+    /// link). Set by the engine side on every start; the drain counts it as audio already queued.
+    func noteOutputLatency(ns: Int64) {
+        lock.lock()
+        defer { lock.unlock() }
+        outputLatencyNsValue = max(0, ns)
+    }
+
+    var outputLatencyNs: Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return outputLatencyNsValue
+    }
+
     /// Store the drain thread's running drought concealment (`DroughtConceal.totalMS`) for
     /// reporting. Concealment that nobody can see is concealment that hides the bug it is
     /// covering: a healthy `underruns` bought with a climbing `plc_ms` is a link in trouble, not
@@ -493,8 +509,9 @@ final class AudioRing: @unchecked Sendable {
         }
         if let keep {
             // Crossfaded, like the smooth shed — see `dropFront`. Restart the drift clock from
-            // what is left, so the trim is not counted as drift.
-            dropFront(depth - keep)
+            // what is left, so the trim is not counted as drift. Whole frames: a ms line at
+            // 44.1 kHz can fall mid-frame, and a split frame swaps channels.
+            dropFront(depth - (keep - keep % channels))
             depthAvg = Double(writeIdx - readIdx)
             overRun = 0
             underRun = 0
@@ -898,6 +915,8 @@ struct AvSync {
     private var observations = 0
     /// Set once an observation lands outside `saneLimitMS`, for reporting.
     private(set) var implausible = false
+    /// Last depth offered outside the deadband; what the deadband keeps asking for.
+    private var held: Int?
 
     /// `channels` is the negotiated interleaved channel count (2/6/8), `rateHz` the negotiated
     /// sample rate — every rate on the lossless ladder, exactly, for the reason `AudioRing.init`
@@ -931,6 +950,8 @@ struct AvSync {
         /// How much audio is already queued AHEAD of this frame, in interleaved samples —
         /// everything that must play before it does.
         let bufferedAhead: Int
+        /// Device output latency past the ring, ns (`AudioRing.outputLatencyNs`). 0 = unknown.
+        var outputLatencyNs: Int64 = 0
         /// The video plane's current end-to-end figure in ns: `displayed + clockOffset − pts`, as
         /// `LatencyMeter` already computes it per presented frame. `nil` while nothing has reached
         /// the glass recently — no reference, no correction.
@@ -954,7 +975,7 @@ struct AvSync {
         // keeps every 48/96 kHz session bit-identical to the shipped behaviour, and the ≤ 1 ms it
         // discards is an order of magnitude inside `deadbandMS`, which is the resolution this loop
         // acts on at all. The conversion itself is now exact at every rate.
-        let bufferedNs = Int64(samplesMs(o.bufferedAhead)) * 1_000_000
+        let bufferedNs = Int64(samplesMs(o.bufferedAhead)) * 1_000_000 + max(0, o.outputLatencyNs)
         // Overflow-reporting arithmetic, NOT the wrapping `&+`/`&-` the meters use. Every term is
         // a nanosecond count on the same epoch (~1.8e18), so the DIFFERENCE is tiny while the
         // operands sit within a factor of five of `Int64.max` — and a garbage `pts_ns` would wrap
@@ -990,14 +1011,19 @@ struct AvSync {
     var offsetMS: Int { Int(offsetAvgNs / 1_000_000) }
 
     /// The ring depth that would place audio with the picture, given where the ring is now.
-    /// `nil` while unsettled or inside the deadband — the caller then leaves the ring alone.
+    /// `nil` while unsettled: the caller runs unsynchronised. Inside the deadband, the last
+    /// request again: a ring that reached its depth stays there, where `nil` would drop it to
+    /// the floor and shed what the insert just built.
     ///
     /// Audio late (offset > 0) means there is too much queued: aim shallower. Audio early means
     /// aim deeper.
-    func desiredDepth(currentDepth: Int) -> Int? {
-        guard settled else { return nil }
+    mutating func desiredDepth(currentDepth: Int) -> Int? {
+        guard settled else {
+            held = nil
+            return nil
+        }
         let offsetMs = offsetAvgNs / 1_000_000
-        guard abs(offsetMs) >= Double(Self.deadbandMS) else { return nil }
+        guard abs(offsetMs) >= Double(Self.deadbandMS) else { return held }
         // One millisecond of samples as a float, so a fractional offset scales smoothly. The
         // division is done on the CONSTANT, not on the product: `x * 96000.0 / 1000.0` rounds twice
         // and can land one ulp — and so one sample — away from the `x * 96.0` every shipped 48 kHz
@@ -1006,7 +1032,8 @@ struct AvSync {
         // 0.23 % short. Mirrors `AvSync::desired_depth`.
         let perMs = Double(audioInterleavedPerSec(rateHz: rateHz, channels: channels)) / 1_000
         let delta = Int(offsetMs * perMs)
-        return max(0, currentDepth - delta)
+        held = max(0, currentDepth - delta)
+        return held
     }
 }
 
@@ -1113,10 +1140,9 @@ struct DroughtConceal {
 /// CoreAudio channel layout for the canonical wire order FL FR FC LFE RL RR [SL SR]. nil for
 /// stereo (the standard layout is correct). For 5.1/7.1 we list explicit channel labels via
 /// `kAudioChannelLayoutTag_UseChannelDescriptions` — preset tags (DTS_5_1 etc.) don't reliably
-/// match Moonlight's order. NB the 7.1 mapping (verified against the WASAPI 0x63F + SPA orderings):
-/// wire idx 4-5 = RL/RR = the WAVE *back* pair → LeftSurround/RightSurround; idx 6-7 = SL/SR = the
-/// WAVE *side* pair → LeftSurroundDirect/RightSurroundDirect. (Using RearSurround* for 6-7 would
-/// swap side/back vs the Windows/Linux clients.)
+/// match Moonlight's order. 7.1 follows `kAudioChannelLayoutTag_WAVE_7_1` (WASAPI 0x63F):
+/// wire 4-5, the WAVE *back* pair, are RearSurround*; 6-7, the *side* pair, are Left/RightSurround.
+/// 5.1 keeps Left/RightSurround for its back pair: that is where a 5.1 device has speakers.
 func wireChannelLayout(channels: Int) -> AVAudioChannelLayout? {
     let labels: [AudioChannelLabel]
     switch channels {
@@ -1130,8 +1156,8 @@ func wireChannelLayout(channels: Int) -> AVAudioChannelLayout? {
         labels = [
             kAudioChannelLabel_Left, kAudioChannelLabel_Right, kAudioChannelLabel_Center,
             kAudioChannelLabel_LFEScreen,
-            kAudioChannelLabel_LeftSurround, kAudioChannelLabel_RightSurround, // wire RL/RR (back)
-            kAudioChannelLabel_LeftSurroundDirect, kAudioChannelLabel_RightSurroundDirect, // wire SL/SR (side)
+            kAudioChannelLabel_RearSurroundLeft, kAudioChannelLabel_RearSurroundRight, // wire RL/RR (back)
+            kAudioChannelLabel_LeftSurround, kAudioChannelLabel_RightSurround, // wire SL/SR (side)
         ]
     default:
         return nil
