@@ -153,7 +153,7 @@ punktfunk-host punktfunk1-host --source virtual
 |---|---|
 | `--port <N>` | QUIC port (default `9777`). |
 | `--source <SRC>` | `synthetic` (default, test frames), `synthetic-abr` (frames sized from the live bitrate; no display or GPU needed) or `virtual` (a real virtual display). |
-| `--content <SCRIPT>` | What `synthetic-abr` encodes: `steady` (default), `idle-then-motion`, or `frame-driven:<fps>`. |
+| `--content <SCRIPT>` | What `synthetic-abr` encodes: `steady` (default), `idle-then-motion`, `frame-driven:<fps>`, or `motion-then-still:<fps>` (a minute of motion, then `<fps>` new frames a second among repeats). |
 | `--fill <PCT>` | Share of each frame's bit budget `synthetic-abr` fills, 1–100 (default 100). |
 | `--recovery-ms <MS>` | How long `synthetic-abr` takes to answer a keyframe request (default 0). |
 | `--keyframe-answer <KIND>` | `idr` (default) or `wave:<n>`: answer only every n-th keyframe request with one. |
