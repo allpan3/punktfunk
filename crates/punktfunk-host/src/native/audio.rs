@@ -331,9 +331,9 @@ pub(super) fn audio_thread(
     let mut resume_fade = false;
     // Interleaved: `frames × channels` so the curve spans whole frames.
     let edge_fade_samples = (rate_hz as u64 * EDGE_FADE_US / 1_000_000) as usize * want as usize;
-    // Bonus-send threshold: observed capture quantum plus one protocol frame. Up to that
+    // Bonus-send threshold: recent capture quantum plus one protocol frame. Up to that
     // is a chunk being paced out; past it, audio arrived faster than the schedule.
-    let mut max_chunk_len: usize = 0;
+    let mut max_chunk_len = crate::audio::capture_policy::RecentMax::<usize>::default();
     // Reopen on capture-thread death (or a failed first open). Empty chunks from a quiet
     // sink are not death. Encoder and `seq` survive reopens so the client sees a gap, not
     // a restart. Throttled by `INJECTOR_REOPEN_BACKOFF`.
@@ -483,15 +483,14 @@ pub(super) fn audio_thread(
             // cadence instead of accumulating graph drift.
             let arrival_ns = now_ns();
             acc.extend_from_slice(&chunk);
-            max_chunk_len = max_chunk_len.max(chunk.len());
+            max_chunk_len.note(chunk.len(), last_chunk_at);
             // How big the graph's buffers really are, so the infill threshold is one chunk plus
             // one frame and never the middle of a legitimately long cycle — see
             // `InfillPolicy::after`.
-            infill.note_quantum(std::time::Duration::from_nanos(pcm::frame_duration_ns(
-                chunk.len(),
-                rate_hz,
-                want,
-            )));
+            infill.note_quantum(
+                std::time::Duration::from_nanos(pcm::frame_duration_ns(chunk.len(), rate_hz, want)),
+                last_chunk_at,
+            );
             let queued_frames = (acc.len() / want as usize) as u64;
             // Session rate, not the 48 kHz module constant: at 96 kHz that divisor would
             // put the anchor a whole buffer occupancy too early.
@@ -556,7 +555,7 @@ pub(super) fn audio_thread(
             }
             // Second frame in this slot if remaining backlog exceeds one chunk plus one
             // frame. Decided on what is left AFTER this frame; never twice in a row.
-            let bonus = !infilled && !bonus_taken && acc.len() >= max_chunk_len + frame_len;
+            let bonus = !infilled && !bonus_taken && acc.len() >= max_chunk_len.get() + frame_len;
             pace_due = match pace_due {
                 Some(due) if bonus => Some(due), // same slot again for the next frame
                 other => Some(other.unwrap_or_else(std::time::Instant::now) + frame_interval),
