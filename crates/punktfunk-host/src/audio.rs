@@ -84,6 +84,12 @@ pub trait AudioCapturer: Send {
         SAMPLE_RATE
     }
 
+    /// Whether a parked capturer still matches the audio settings it opened under. `false`:
+    /// drop it and open fresh. Linux fixes its capture mode and host bridge at open.
+    fn reusable(&self) -> bool {
+        true
+    }
+
     /// Drop buffered chunks on reuse so a new stream does not hear idle capture. Linux
     /// stream-sink also re-claims the default sink here (pair: [`idle`](Self::idle)). Default: no-op.
     fn drain(&mut self) {}

@@ -253,7 +253,7 @@ fn run(
     // Always 48 kHz: GameStream Opus has no rate field, and libopus tops out here.
     // Hi-res `0xD3` is native-only (`design/hi-res-audio.md`).
     let mut cap = match audio_cap.lock().unwrap().take() {
-        Some(mut c) if c.channels() == want => {
+        Some(mut c) if c.channels() == want && c.reusable() => {
             c.drain(); // previous session's buffer would play first
             c
         }
@@ -261,7 +261,7 @@ fn run(
             tracing::info!(
                 have = c.channels(),
                 want,
-                "audio capturer channel count changed — reopening"
+                "parked audio capturer no longer fits (channels or audio settings) — reopening"
             );
             drop(c);
             audio::open_audio_capture(want, SAMPLE_RATE).context("open audio capture")?

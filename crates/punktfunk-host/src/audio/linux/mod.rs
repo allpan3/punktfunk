@@ -81,6 +81,28 @@ fn capture_mode() -> CaptureMode {
     capture_mode_from(std::env::var("PUNKTFUNK_STREAM_SINK").ok().as_deref())
 }
 
+/// What an open read from the audio settings. A parked capturer serves the next session only
+/// while this still holds: a keep-host session must not inherit a sink claim.
+#[derive(Debug, PartialEq)]
+struct OpenPolicy {
+    mode: CaptureMode,
+    output: pf_host_config::AudioOutputMode,
+    voice: pf_host_config::VoiceChatRoute,
+    voice_apps: Vec<String>,
+}
+
+impl OpenPolicy {
+    fn now() -> OpenPolicy {
+        let cfg = pf_host_config::config();
+        OpenPolicy {
+            mode: capture_mode(),
+            output: cfg.audio_output_mode,
+            voice: cfg.audio_voice_chat,
+            voice_apps: cfg.audio_voice_apps.clone(),
+        }
+    }
+}
+
 /// Env grammar without process-global mutation, so the three modes are testable.
 /// Unrecognised values (and unset) are NullSink: a typo must not kill audio.
 fn capture_mode_from(value: Option<&str>) -> CaptureMode {
@@ -163,6 +185,8 @@ pub struct PwAudioCapturer {
     /// this is the resampled stream, not the node upstream — the hi-res gate
     /// reads that from [`monitor_rate`], not here.
     negotiated_rate: Arc<AtomicU32>,
+    /// Settings this capturer opened under; see [`AudioCapturer::reusable`].
+    policy: OpenPolicy,
 }
 
 impl PwAudioCapturer {
@@ -190,10 +214,11 @@ impl PwAudioCapturer {
         );
         anyhow::ensure!(rate_hz > 0, "audio capture rate must be positive");
         let target = sink_override.filter(|_| tap).map(str::to_string);
+        let policy = OpenPolicy::now();
         let mode = if target.is_some() {
             CaptureMode::Monitor
         } else {
-            capture_mode()
+            policy.mode
         };
         // Unique per capturer: overlapping instances must not alias, and a
         // fresh name gets unity WirePlumber volume, not the previous run's.
@@ -271,6 +296,7 @@ impl PwAudioCapturer {
             claimed,
             active,
             negotiated_rate,
+            policy,
         })
     }
 }
@@ -314,6 +340,10 @@ impl AudioCapturer for PwAudioCapturer {
 
     fn sample_rate(&self) -> u32 {
         self.negotiated_rate.load(Ordering::Relaxed)
+    }
+
+    fn reusable(&self) -> bool {
+        self.policy == OpenPolicy::now()
     }
 
     fn drain(&mut self) {

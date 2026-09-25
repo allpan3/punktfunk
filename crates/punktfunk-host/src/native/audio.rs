@@ -237,7 +237,8 @@ pub(super) fn audio_thread(
     };
     let mut target = resolve();
     // Reuse the parked capturer only when channels AND rate match: a mismatch garbles the
-    // encoder and drifts the sample clock against the wire. Isolated sessions never adopt
+    // encoder and drifts the sample clock against the wire. The audio settings must still
+    // match too: a keep-host session must not inherit a sink claim. Isolated sessions never adopt
     // the parked shared capturer (the match cannot see the wrong sink). A failed first open
     // enters the same reopen-with-backoff loop as a mid-session death.
     let cached = if target.is_none() {
@@ -246,7 +247,9 @@ pub(super) fn audio_thread(
         None
     };
     let capturer = match cached {
-        Some(mut c) if c.channels() == want as u32 && c.sample_rate() == rate_hz => {
+        Some(mut c)
+            if c.channels() == want as u32 && c.sample_rate() == rate_hz && c.reusable() =>
+        {
             c.drain(); // discard audio captured between sessions (also re-claims routing)
             Some(c)
         }
