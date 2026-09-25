@@ -959,10 +959,12 @@ impl BitrateController {
         self.idle_windows = 0;
     }
 
-    /// Is a lift being judged right now? While it is, the delay baseline is
-    /// held still.
+    /// Is a lift being judged right now? While it is, the window's delay is
+    /// the lift's to answer. Not before the lifted rate runs: until then no
+    /// judge is reading the delay, and a queue filling must still cut.
     fn lift_probing(&self) -> bool {
-        self.lift.is_some_and(|p| !p.settled)
+        self.lift
+            .is_some_and(|p| !p.settled && self.current_kbps > p.cap_kbps)
     }
 
     /// How far over the frozen reference the delay may go before the lift is
@@ -2176,6 +2178,32 @@ mod tests {
             out,
             Some(10_350),
             "a standing rise at a lifted rate retreats"
+        );
+    }
+
+    /// Until the lifted rate runs nothing judges the lift, so the delay is the
+    /// ordinary verdict's: a queue filling at the old rate still cuts.
+    #[test]
+    fn a_queue_before_the_lift_runs_still_cuts() {
+        let start = Instant::now();
+        let (mut c, mut t, rate) = lifted_cap(start, 10_000, false);
+        // 30 ms over a 10 ms floor: past the 25 ms rise the verdict reads.
+        let queue = 40_000;
+        let mut out = None;
+        for _ in 0..BAD_WINDOWS_TO_DECREASE {
+            let at = ticks(start, t);
+            t += 1;
+            assert!(c.lift.is_some(), "the lift is still waiting for its rate");
+            out = out.or(c.on_window(&WindowSample {
+                owd_mean_us: Some(queue),
+                delay: Some(trend(queue, DRAIN_FALL_US)),
+                actual_kbps: rate,
+                ..WindowSample::at(at)
+            }));
+        }
+        assert!(
+            out.is_some_and(|k| k < rate),
+            "the queue went unanswered: {out:?}"
         );
     }
 

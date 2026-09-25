@@ -141,10 +141,11 @@ impl Baselines {
     /// `draining` says the last link cut is still emptying the queue it
     /// caused, which is the one thing a delay rise can mean that the rate
     /// must not answer again, `link_vouches` is the same vouching the run
-    /// gives, read off this window instead of its history, and `freeze_owd`
-    /// holds the delay baseline still while a lift is being judged — a
-    /// baseline that learns the rise it is supposed to detect detects
-    /// nothing.
+    /// gives, read off this window instead of its history, `freeze_owd`
+    /// hands the window's delay to the lift being judged — the baseline holds
+    /// still and the verdict is the lift's, because a baseline that learns the
+    /// rise it is supposed to detect detects nothing — and `still` says the
+    /// source drew too few frames for its loss to be the rate's doing.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn score(
         &mut self,
