@@ -237,7 +237,9 @@ impl Presenter {
         unsafe { ext.set_hdr_metadata(&[self.swapchain], &[md]) };
         tracing::debug!(from_host = self.hdr_meta.is_some(), "HDR metadata pushed");
     }
-    /// SDR↔HDR10 flip. Video intermediate is 10-bit: PQ in 8 bits bands.
+    /// SDR↔HDR10 flip. Video intermediate is 10-bit: PQ in 8 bits bands. A driver that refuses
+    /// the HDR10 swapchain it advertised loses `hdr10_format` for good: back to SDR, where PQ
+    /// frames tone-map.
     pub(super) fn set_hdr_mode(&mut self, window: &sdl3::video::Window, on: bool) -> Result<()> {
         let target = if on {
             self.hdr10_format.expect("caller checked availability")
@@ -289,6 +291,14 @@ impl Presenter {
         self.scale = crate::scale::ScalePass::new(&self.device, target.format)?;
         self.format = target;
         self.hdr_active = on;
-        self.recreate_swapchain(window)
+        match self.recreate_swapchain(window) {
+            Err(e) if on => {
+                tracing::warn!(error = %format!("{e:#}"),
+                    "HDR10 swapchain refused — staying SDR and tone-mapping PQ");
+                self.hdr10_format = None;
+                self.set_hdr_mode(window, false)
+            }
+            r => r,
+        }
     }
 }
