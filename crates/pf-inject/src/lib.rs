@@ -28,7 +28,7 @@ pub use keymap::vk_to_evdev;
 #[path = "inject/hidout_dedup.rs"]
 pub mod hidout_dedup;
 
-/// Normalized scroll ([`InputKind::Scroll`]) → per-backend primitive plans.
+/// Scroll, normalized and legacy → per-backend primitive plans.
 /// Pure and ungated so tests on any platform assert the same mapping the
 /// injectors execute.
 #[path = "inject/scroll.rs"]
@@ -38,6 +38,16 @@ pub mod scroll;
 /// thread that created it.
 pub trait InputInjector {
     fn inject(&mut self, event: &InputEvent) -> Result<()>;
+
+    /// When the injector next needs [`InputInjector::on_deadline`] with no event arriving
+    /// (a held scroll stop).
+    fn deadline(&self) -> Option<std::time::Instant> {
+        None
+    }
+
+    fn on_deadline(&mut self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Preferred injection backend. Variants are per-OS so [`open`] cannot name a backend the

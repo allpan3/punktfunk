@@ -10,7 +10,7 @@
 use super::{gs_button_to_evdev, vk_to_evdev, InputEvent, InputInjector};
 use crate::scroll::{AxisSource, ScrollBackend, ScrollMapper, ScrollOp};
 use anyhow::{bail, Context, Result};
-use punktfunk_core::input::{InputKind, PRECISE_PX_PER_DETENT, SCROLL_FLAG_PRECISE};
+use punktfunk_core::input::InputKind;
 use std::io::Write;
 use std::os::fd::{AsFd, FromRawFd};
 use wayland_client::backend::WaylandError;
@@ -29,8 +29,6 @@ use wayland_protocols_wlr::virtual_pointer::v1::client::{
     zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
 };
 use xkbcommon::xkb;
-
-const SCROLL_HORIZONTAL: u32 = 1;
 
 /// v4 is the first `wl_output` with `name`; bind that high to match the streamed head.
 const WL_OUTPUT_MAX: u32 = 4;
@@ -166,13 +164,7 @@ pub struct WlrootsInjector {
     xkb_state: xkb::State,
     _keymap_file: std::fs::File, // compositor mmaps this memfd; drop would unmap it
     text: Option<TextKeyboard>,
-    /// Undelivered wheel remainder in 120-units, (horizontal, vertical). `axis_discrete` counts
-    /// WHOLE steps, so a high-res wheel's sub-detent deltas would floor to nothing one at a
-    /// time; holding the remainder makes them add up into real clicks instead. Integer, because
-    /// a float store drifts — ten 0.1 detents sum to 0.9999999999999999 and never fire.
-    wheel_rem: (i32, i32),
-    /// Normalized-scroll lowering; its sub-detent residue is per axis AND source,
-    /// so it never mixes with the legacy `wheel_rem` store.
+    /// Scroll lowering, legacy and normalized; holds the sub-detent residue.
     scroll: ScrollMapper,
 }
 
@@ -289,7 +281,6 @@ impl WlrootsInjector {
             xkb_state,
             _keymap_file: file,
             text: None,
-            wheel_rem: (0, 0),
             scroll: ScrollMapper::new(ScrollBackend::Wlr),
         })
     }
@@ -511,50 +502,10 @@ impl InputInjector for WlrootsInjector {
                     self.pointer.frame();
                 }
             }
-            InputKind::MouseScroll => {
-                let horizontal = event.code == SCROLL_HORIZONTAL;
-                let axis = if horizontal {
-                    wl_pointer::Axis::HorizontalScroll
-                } else {
-                    wl_pointer::Axis::VerticalScroll
-                };
-                // Vertical up is positive on the wire and negative on the Wayland axis;
-                // horizontal right is already positive (moonlight-qt/Sunshine pass it
-                // unnegated).
-                let delta = if horizontal {
-                    event.x
-                } else {
-                    event.x.saturating_neg()
-                };
-                if event.flags & SCROLL_FLAG_PRECISE != 0 {
-                    // A measured distance, not clicks: `Finger` with no `axis_discrete` is what
-                    // wl_pointer asks of a continuous device, and it is what keeps the app from
-                    // expanding each detent into a whole scroll step.
-                    self.pointer.axis_source(wl_pointer::AxisSource::Finger);
-                    self.pointer
-                        .axis(t, axis, f64::from(delta) / 120.0 * PRECISE_PX_PER_DETENT);
-                } else {
-                    // A notched wheel: 15 px per detent is libinput's own figure, and the
-                    // coupled `axis_discrete` is what the app counts clicks from.
-                    let rem = if horizontal {
-                        &mut self.wheel_rem.0
-                    } else {
-                        &mut self.wheel_rem.1
-                    };
-                    let steps = take_detents(rem, delta);
-                    if steps == 0 {
-                        return Ok(()); // sub-detent: held until it completes a click
-                    }
-                    self.pointer.axis_source(wl_pointer::AxisSource::Wheel);
-                    self.pointer
-                        .axis_discrete(t, axis, f64::from(steps) * 15.0, steps);
-                }
-                self.pointer.frame();
-            }
-            // Normalized scroll lowers through the shared mapper; its Frame
-            // ops draw the frame boundaries (a stop never shares one with a
-            // delta).
-            InputKind::Scroll => {
+            // Legacy and normalized scroll lower through the shared mapper;
+            // its Frame ops draw the frame boundaries (a stop never shares one
+            // with a delta).
+            InputKind::MouseScroll | InputKind::Scroll => {
                 let ops = self.scroll.plan(event);
                 self.emit_scroll_ops(t, ops);
             }
@@ -582,6 +533,20 @@ impl InputInjector for WlrootsInjector {
             // No virtual-touch protocol here; touch is libei only.
             InputKind::TouchDown | InputKind::TouchMove | InputKind::TouchUp => {}
         }
+        self.pump()
+    }
+
+    fn deadline(&self) -> Option<std::time::Instant> {
+        self.scroll.stop_due()
+    }
+
+    fn on_deadline(&mut self) -> Result<()> {
+        let ops = self.scroll.flush_due(std::time::Instant::now());
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let t = self.now_ms();
+        self.emit_scroll_ops(t, ops);
         self.pump()
     }
 }
@@ -657,35 +622,9 @@ fn memfd_with(s: &str) -> Result<std::fs::File> {
     Ok(f)
 }
 
-/// Add a 120-unit `delta` to a wheel axis's remainder and take out the WHOLE detents.
-/// `axis_discrete` counts clicks, so a high-res wheel's sub-detent deltas would each floor to
-/// nothing; carrying the remainder lets them accumulate into real clicks instead of vanishing.
-fn take_detents(rem: &mut i32, delta: i32) -> i32 {
-    *rem = rem.saturating_add(delta);
-    let steps = *rem / 120; // truncates toward zero, so either sign unwinds the store
-    *rem -= steps * 120;
-    steps
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Sub-detent deltas must add up rather than floor away one at a time — a high-res wheel
-    /// sends tenths, and flooring each would scroll nothing at all.
-    #[test]
-    fn sub_detent_wheel_deltas_accumulate_into_whole_clicks() {
-        let mut rem = 0;
-        for _ in 0..9 {
-            assert_eq!(take_detents(&mut rem, 12), 0); // a tenth of a detent each
-        }
-        assert_eq!(take_detents(&mut rem, 12), 1);
-        assert_eq!(rem, 0, "a completed click leaves no residue");
-        // Direction changes unwind the same store instead of stranding it.
-        assert_eq!(take_detents(&mut rem, -300), -2);
-        assert_eq!(take_detents(&mut rem, -60), -1);
-        assert_eq!(rem, 0);
-    }
 
     const KEY_LEFTMETA: u16 = 125;
     const KEY_A: u16 = 30;

@@ -149,8 +149,9 @@ the stream fullscreen and in front.
 ## Scrolling
 
 Wheels, touchpads, touchscreens and controllers all scroll the host, with no setting to tune.
-On GNOME, Sway and Hyprland hosts a touchpad or touchscreen flick hands off to the desktop's own
-glide; on KDE, gamescope and Windows hosts the glide your device produced is sent instead.
+A flick's glide is the one your device produced, on every host. On GNOME, Sway and Hyprland a
+touchpad scrolls host apps by the pixel, like a local one. KDE, gamescope and Windows take only
+wheel steps from a remote device, so apps there move a touchpad scroll in lines or ticks.
 
 **Invert scroll direction** reverses every scroll you send, the controller mouse's included. To
 flip it for one stream, open the dial's centre sheet and choose **Input → Invert scroll
