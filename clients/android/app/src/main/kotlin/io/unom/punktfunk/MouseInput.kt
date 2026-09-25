@@ -11,6 +11,9 @@ import io.unom.punktfunk.kit.isExternalDevice
 /** How long after a mouse Back edge a system Back is that button's own echo. */
 private const val BACK_ECHO_MS = 300L
 
+/** How long after the capture-engaging DOWN its own BUTTON_PRESS may still arrive. */
+private const val ENGAGE_PRESS_MS = 100L
+
 /** True when any connected input device is a pointer (USB/BT mouse, or a touchpad driving one). */
 fun hasPhysicalMouse(): Boolean = InputDevice.getDeviceIds().any { id ->
     InputDevice.getDevice(id)?.supportsSource(InputDevice.SOURCE_MOUSE) == true
@@ -159,8 +162,10 @@ class MouseForwarder(
             MotionEvent.ACTION_DOWN -> {
                 if (captureWanted && !captured && !userReleased) {
                     // The engaging click: grab the pointer and swallow the click (desktop
-                    // parity — the click that captures never reaches the host). The paired
-                    // BUTTON_RELEASE is dropped by the held-set guard in [button].
+                    // parity — the click that captures never reaches the host). Its
+                    // BUTTON_PRESS follows as its own event and is dropped in [press]; the
+                    // paired BUTTON_RELEASE falls to the held-set guard.
+                    engageClickAt = SystemClock.uptimeMillis()
                     onRequestCapture?.invoke()
                     return true
                 }
@@ -370,7 +375,14 @@ class MouseForwarder(
      */
     fun backIsMouseEcho(): Boolean = SystemClock.uptimeMillis() - lastBackAt < BACK_ECHO_MS
 
+    /** When a primary DOWN engaged capture; its own BUTTON_PRESS follows within [ENGAGE_PRESS_MS]. */
+    private var engageClickAt = 0L
+
     private fun press(b: Int, down: Boolean) {
+        if (b == 1 && down && SystemClock.uptimeMillis() - engageClickAt < ENGAGE_PRESS_MS) {
+            engageClickAt = 0L
+            return
+        }
         if (b == 4) lastBackAt = SystemClock.uptimeMillis()
         if (down) {
             // add() is false when the button is already held — the second delivery of a button
