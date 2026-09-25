@@ -43,6 +43,8 @@
 	"event_any_pairing": "Any pairing event",
 	"event_any_display": "Any display event",
 	"automation_filter_app_help": "Matches the id the event carries, like steam:570 — the title is shown to help you find it.",
+	"automation_filter_preset": "Settings preset",
+	"automation_filter_preset_help": "The preset the device streamed with, by name or id, like Docked.",
 	"automation_filter_none": "No match — it will still be saved as typed.",
 	"automation_field_debounce": "Minimum gap (ms)",
 	"automation_field_timeout": "Timeout (s)",

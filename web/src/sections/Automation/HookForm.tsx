@@ -301,6 +301,26 @@ export const HookForm: FC<{
 								{m.automation_filter_app_help()}
 							</p>
 						</div>
+						<div className="space-y-2">
+							<Label htmlFor="hook-preset">
+								{m.automation_filter_preset()}
+							</Label>
+							<Input
+								id="hook-preset"
+								value={draft.filter?.preset ?? ""}
+								onChange={(e) =>
+									set({
+										filter: {
+											...draft.filter,
+											preset: e.target.value.trim() || undefined,
+										},
+									})
+								}
+							/>
+							<p className="text-xs text-muted-foreground">
+								{m.automation_filter_preset_help()}
+							</p>
+						</div>
 					</div>
 				)}
 

@@ -12,18 +12,29 @@ export type Plane = S.Schema.Type<typeof Plane>;
 export const DisconnectReason = S.Literals(["quit", "timeout", "error"]);
 export type DisconnectReason = S.Schema.Type<typeof DisconnectReason>;
 
+/** The settings preset a client dialled with. The id is stable across a rename. */
+export const PresetRef = S.Struct({
+	id: S.String,
+	name: S.String,
+});
+export type PresetRef = S.Schema.Type<typeof PresetRef>;
+
 export const ClientRef = S.Struct({
 	name: S.String,
 	fingerprint: S.optional(S.String),
 	plane: Plane,
+	preset: S.optional(PresetRef),
 });
 export type ClientRef = S.Schema.Type<typeof ClientRef>;
 
 export const SessionRef = S.Struct({
 	id: S.Number,
 	client: S.String,
+	fingerprint: S.optional(S.String),
 	mode: S.String,
 	hdr: S.Boolean,
+	plane: S.optional(Plane),
+	preset: S.optional(PresetRef),
 });
 export type SessionRef = S.Schema.Type<typeof SessionRef>;
 
@@ -31,8 +42,10 @@ export const StreamRef = S.Struct({
 	mode: S.String,
 	hdr: S.Boolean,
 	client: S.String,
+	fingerprint: S.optional(S.String),
 	app: S.optional(S.String),
 	plane: Plane,
+	preset: S.optional(PresetRef),
 });
 export type StreamRef = S.Schema.Type<typeof StreamRef>;
 
@@ -51,7 +64,11 @@ export const GameRef = S.Struct({
 	store: S.optional(S.String),
 	/** Client-supplied device name of the session that launched it; may be empty. */
 	client: S.String,
+	/** Stable id of the device that launched it. Absent for an anonymous client. */
+	fingerprint: S.optional(S.String),
 	plane: Plane,
+	/** The preset of the session that launched it. */
+	preset: S.optional(PresetRef),
 });
 export type GameRef = S.Schema.Type<typeof GameRef>;
 

@@ -76,6 +76,9 @@ pub struct HookFilter {
     /// Launched app id/title (`stream.*` events).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app: Option<String>,
+    /// The dialled settings preset, by id or name (`client.*`, `session.*`, `stream.*`, `game.*`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
 }
 
 impl HookFilter {
@@ -99,6 +102,12 @@ impl HookFilter {
         if let Some(want) = &self.app {
             if kind.app() != Some(want.as_str()) {
                 return false;
+            }
+        }
+        if let Some(want) = &self.preset {
+            match kind.preset() {
+                Some(p) if p.id == *want || p.name.eq_ignore_ascii_case(want) => {}
+                _ => return false,
             }
         }
         true
@@ -1019,6 +1028,7 @@ mod tests {
                     fingerprint: Some("9f86d081".into()),
                     app: Some("steam:570".into()),
                     plane: Plane::Native,
+                    preset: None,
                 },
             },
         }
@@ -1179,6 +1189,7 @@ mod tests {
                 name: "Deck".into(),
                 fingerprint: Some("AB12CD".into()),
                 plane: Plane::Native,
+                preset: None,
             },
         };
         let f = HookFilter {
@@ -1186,6 +1197,33 @@ mod tests {
             ..Default::default()
         };
         assert!(f.matches(&connected));
+    }
+
+    #[test]
+    fn a_preset_filter_matches_by_id_or_name() {
+        let docked = EventKind::ClientConnected {
+            client: ClientRef {
+                name: "Deck".into(),
+                fingerprint: Some("ab12cd".into()),
+                plane: Plane::Native,
+                preset: Some(crate::events::PresetRef {
+                    id: "3f9a0c11e2b4".into(),
+                    name: "Docked".into(),
+                }),
+            },
+        };
+        let by = |want: &str| HookFilter {
+            preset: Some(want.into()),
+            ..Default::default()
+        };
+        assert!(by("3f9a0c11e2b4").matches(&docked));
+        assert!(by("docked").matches(&docked), "a name matches in any case");
+        assert!(!by("Handheld").matches(&docked));
+        // No preset on the event: a preset filter never matches it.
+        assert!(!by("Docked").matches(&sample_event().kind));
+        // It rides the event JSON, so a hook's env names it.
+        let json = serde_json::to_value(&docked).unwrap();
+        assert_eq!(json["client"]["preset"]["name"], "Docked");
     }
 
     #[test]

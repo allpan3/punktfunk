@@ -56,6 +56,24 @@ pub enum DisconnectReason {
     Error,
 }
 
+/// The settings preset a client dialled with ([`punktfunk_core::quic::EXT_TAG_PRESET`]). The
+/// id is the client's own and stable across a rename, so it is what a hook or plugin keys on
+/// together with the device fingerprint; the name is for people.
+#[derive(Serialize, Deserialize, ToSchema, Clone, Debug, PartialEq, Eq)]
+pub struct PresetRef {
+    pub id: String,
+    pub name: String,
+}
+
+impl From<punktfunk_core::quic::SessionPreset> for PresetRef {
+    fn from(p: punktfunk_core::quic::SessionPreset) -> Self {
+        PresetRef {
+            id: p.id,
+            name: p.name,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
 pub struct ClientRef {
     /// Display name: the trust-store name (a console rename wins), else the name the client
@@ -65,6 +83,9 @@ pub struct ClientRef {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
     pub plane: Plane,
+    /// The preset the client dialled with. Absent for plain settings and on GameStream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<PresetRef>,
 }
 
 /// Plane-neutral A/V session (distinct from a video [`StreamRef`]).
@@ -81,6 +102,9 @@ pub struct SessionRef {
     pub hdr: bool,
     /// Which plane serves it, as `stream.*` and `game.*` also report.
     pub plane: Plane,
+    /// See [`ClientRef::preset`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<PresetRef>,
 }
 
 /// Why a session ended, in the client's own words
@@ -253,6 +277,9 @@ pub struct StreamRef {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app: Option<String>,
     pub plane: Plane,
+    /// See [`ClientRef::preset`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<PresetRef>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
@@ -269,6 +296,9 @@ pub struct GameRefPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
     pub plane: Plane,
+    /// The preset of the session that launched it. See [`ClientRef::preset`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<PresetRef>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema, Clone, Copy, Debug, PartialEq, Eq)]
@@ -503,6 +533,24 @@ impl EventKind {
             EventKind::GameRunning { game }
             | EventKind::GameWindow { game, .. }
             | EventKind::GameExited { game, .. } => game.fingerprint.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// The dialled preset, on the events that carry a client, session, stream or game.
+    pub fn preset(&self) -> Option<&PresetRef> {
+        match self {
+            EventKind::ClientConnected { client }
+            | EventKind::ClientDisconnected { client, .. } => client.preset.as_ref(),
+            EventKind::SessionStarted { session } | EventKind::SessionEnded { session, .. } => {
+                session.preset.as_ref()
+            }
+            EventKind::StreamStarted { stream } | EventKind::StreamStopped { stream } => {
+                stream.preset.as_ref()
+            }
+            EventKind::GameRunning { game }
+            | EventKind::GameWindow { game, .. }
+            | EventKind::GameExited { game, .. } => game.preset.as_ref(),
             _ => None,
         }
     }
@@ -780,6 +828,7 @@ mod tests {
                     fingerprint: Some(FP_SNAPSHOT.into()),
                     app: Some("steam:570".into()),
                     plane: Plane::Native,
+                    preset: None,
                 },
             },
         };
@@ -797,6 +846,7 @@ mod tests {
                     name: "Deck".into(),
                     fingerprint: Some("b1c2".into()),
                     plane: Plane::Gamestream,
+                    preset: None,
                 },
                 reason: DisconnectReason::Timeout,
             },
@@ -842,6 +892,7 @@ mod tests {
                     client: "Living Room TV".into(),
                     fingerprint: Some(FP_SNAPSHOT.into()),
                     plane: Plane::Native,
+                    preset: None,
                 },
             },
         };
@@ -863,6 +914,7 @@ mod tests {
                     client: String::new(),
                     fingerprint: None,
                     plane: Plane::Gamestream,
+                    preset: None,
                 },
                 reason: GameEndReason::Terminated,
             },
@@ -886,6 +938,7 @@ mod tests {
                     mode: mode_str(1920, 1080, 30),
                     hdr: false,
                     plane: Plane::Native,
+                    preset: None,
                 },
                 summary: Box::new(SessionSummary {
                     id: 3,
@@ -950,6 +1003,7 @@ mod tests {
                     mode: mode_str(0, 0, 0),
                     hdr: false,
                     plane: Plane::Native,
+                    preset: None,
                 },
                 summary: Box::new(SessionSummary {
                     id: 4,
@@ -1095,6 +1149,7 @@ mod tests {
                 client: "Deck".into(),
                 fingerprint: Some("ab12".into()),
                 plane: Plane::Native,
+                preset: None,
             },
         };
         assert_eq!(running.name(), "game.running");
@@ -1116,6 +1171,7 @@ mod tests {
                 client: String::new(),
                 fingerprint: None,
                 plane: Plane::Gamestream,
+                preset: None,
             },
             reason: GameEndReason::Exited,
         };
