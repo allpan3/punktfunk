@@ -19,6 +19,9 @@ pub const INPUT_WIRE_LEN: usize = 1 + 1 + 4 + 4 + 4 + 4;
 /// quantizer and the single outbound legacy/inversion seam.
 pub mod scroll;
 
+/// Sequence keyboard events and reconcile lost releases without a timing assumption
+pub mod key_state;
+
 /// `#[repr(u8)]` so the C ABI sees a byte tag.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,6 +83,64 @@ pub enum InputKind {
     /// host advertised `HOST_CAP2_SCROLL`; the client's outbound seam converts
     /// to [`MouseScroll`](Self::MouseScroll) for older hosts.
     Scroll = 16,
+    /// Every key the client holds right now, one VK per byte ([`keys_held_codes`]).
+    /// Key edges are one lossy datagram each, so a dropped [`KeyUp`](Self::KeyUp) leaves
+    /// the host pressing a key the user let go of, and the focused app repeats it until
+    /// the next edge. The host releases what it holds that a newer snapshot omits. Sent only
+    /// when the host advertised
+    /// [`HOST_CAP2_KEY_STATE`](crate::quic::HOST_CAP2_KEY_STATE); older hosts ignore the
+    /// tag and keep edge-only key state. `flags` carries the shared keyboard sequence.
+    KeysHeld = 17,
+}
+
+/// VK slots in one [`InputKind::KeysHeld`] event: `code`/`x`/`y`, one key per byte.
+pub const KEYS_HELD_MAX: usize = 12;
+
+/// Snapshot cadence, including the empty state after keyboard use
+pub const KEY_STATE_INTERVAL_MS: u64 = 100;
+
+/// A key edge's `x` carries its sequence in the same space as [`InputKind::KeysHeld`]
+pub const KEY_FLAG_SEQUENCE: u32 = 1;
+
+/// Pack held VKs into a [`InputKind::KeysHeld`] event, `code` first, low byte first.
+/// Zero is the empty slot, so VK 0 (not a key) is skipped. Keys past [`KEYS_HELD_MAX`]
+/// are dropped, which fills every slot — [`keys_held_codes`] reports that as saturated.
+pub fn keys_held_event(seq: u32, keys: impl IntoIterator<Item = u8>) -> InputEvent {
+    let mut w = [0u32; 3];
+    let mut n = 0;
+    for vk in keys {
+        if vk == 0 || n == KEYS_HELD_MAX {
+            continue;
+        }
+        w[n / 4] |= (vk as u32) << (8 * (n % 4));
+        n += 1;
+    }
+    InputEvent {
+        kind: InputKind::KeysHeld,
+        _pad: [0; 3],
+        code: w[0],
+        x: w[1] as i32,
+        y: w[2] as i32,
+        flags: seq,
+    }
+}
+
+/// Held VKs from a [`InputKind::KeysHeld`] event and how many there are. A count of
+/// [`KEYS_HELD_MAX`] is saturated: the client held at least that many, so a key the
+/// snapshot omits is not proof of a release and must stay held.
+pub fn keys_held_codes(ev: &InputEvent) -> ([u8; KEYS_HELD_MAX], usize) {
+    let w = [ev.code, ev.x as u32, ev.y as u32];
+    let mut out = [0u8; KEYS_HELD_MAX];
+    let mut n = 0;
+    for i in 0..KEYS_HELD_MAX {
+        let vk = (w[i / 4] >> (8 * (i % 4))) as u8;
+        if vk == 0 {
+            break;
+        }
+        out[n] = vk;
+        n += 1;
+    }
+    (out, n)
 }
 
 /// Pack [`InputKind::GamepadRemove`] `flags` (`seq << 24 | pad`) — same layout as
@@ -272,6 +333,7 @@ impl InputKind {
             14 => GamepadArrival,
             15 => TextInput,
             16 => Scroll,
+            17 => KeysHeld,
             _ => return None,
         })
     }
@@ -473,6 +535,42 @@ pub struct GamepadFrame {
 mod tests {
     use super::*;
 
+    // Preserve the sequence and VK list through the fixed-size input wire format
+    #[test]
+    fn keys_held_roundtrip_over_the_wire() {
+        let ev = keys_held_event(u32::MAX, [0x41u8, 0xA0, 0x11]);
+        let dec = InputEvent::decode(&ev.encode()).expect("decode");
+        assert_eq!(dec.kind, InputKind::KeysHeld);
+        assert_eq!(dec.flags, u32::MAX);
+        let (codes, n) = keys_held_codes(&dec);
+        assert_eq!((&codes[..n], n), (&[0x41u8, 0xA0, 0x11][..], 3));
+    }
+
+    // An empty snapshot represents every key released
+    #[test]
+    fn keys_held_empty_snapshot_is_the_all_released_state() {
+        let (_, n) = keys_held_codes(&keys_held_event(1, []));
+        assert_eq!(n, 0);
+    }
+
+    /// VK 0 is not a key, and it is the empty slot — a client that tracked one must not
+    /// truncate the snapshot at it.
+    #[test]
+    fn keys_held_skips_a_zero_code() {
+        let (codes, n) = keys_held_codes(&keys_held_event(1, [0u8, 0x41, 0x42]));
+        assert_eq!((&codes[..n], n), (&[0x41u8, 0x42][..], 2));
+    }
+
+    /// The saturated case the host reads as "absence proves nothing": the count is the
+    /// wire maximum, so keys past it were dropped.
+    #[test]
+    fn keys_held_saturates_at_the_wire_maximum() {
+        let many: Vec<u8> = (1..=20).collect();
+        let (codes, n) = keys_held_codes(&keys_held_event(1, many));
+        assert_eq!(n, KEYS_HELD_MAX);
+        assert_eq!(codes[KEYS_HELD_MAX - 1], KEYS_HELD_MAX as u8);
+    }
+
     #[test]
     fn input_wire_roundtrip() {
         let e = InputEvent {
@@ -505,12 +603,13 @@ mod tests {
             };
             assert_eq!(InputEvent::decode(&e.encode()), Some(e));
         }
-        // 17 is one past the last valid kind.
+        // 18 is one past the last valid kind.
         assert_eq!(InputKind::from_u8(13), Some(InputKind::GamepadRemove));
         assert_eq!(InputKind::from_u8(14), Some(InputKind::GamepadArrival));
         assert_eq!(InputKind::from_u8(15), Some(InputKind::TextInput));
         assert_eq!(InputKind::from_u8(16), Some(InputKind::Scroll));
-        assert_eq!(InputKind::from_u8(17), None);
+        assert_eq!(InputKind::from_u8(17), Some(InputKind::KeysHeld));
+        assert_eq!(InputKind::from_u8(18), None);
     }
 
     #[test]

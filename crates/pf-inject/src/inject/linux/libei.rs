@@ -643,6 +643,7 @@ fn kind_bit(kind: InputKind) -> u32 {
         InputKind::GamepadArrival => 14,
         InputKind::TextInput => 15,
         InputKind::Scroll => 16,
+        InputKind::KeysHeld => 17,
     };
     1 << i
 }
@@ -898,6 +899,8 @@ impl EiState {
             // Keycodes against the server's keymap — no committed-text path
             // (`HOST_CAP_TEXT_INPUT` is not advertised on this backend).
             InputKind::TextInput => return,
+            // Held-key snapshot: the host turns one into key ups before the injector.
+            InputKind::KeysHeld => return,
         };
         self.injected += 1;
         let n = self.injected;
@@ -1078,7 +1081,8 @@ impl EiState {
             | InputKind::GamepadAxis
             | InputKind::GamepadRemove
             | InputKind::GamepadArrival
-            | InputKind::TextInput => emitted = false,
+            | InputKind::TextInput
+            | InputKind::KeysHeld => emitted = false,
         }
 
         if emitted {

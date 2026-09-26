@@ -883,8 +883,10 @@ pub(super) fn input_thread(
     } else {
         std::time::Duration::from_millis(500)
     };
-    // Injector is host-lifetime: matching ups for whatever is still held go out at session end.
+    // Injector is host-lifetime: matching ups for whatever is still held go out at session end,
+    // or when a `KeysHeld` snapshot drops the key.
     let mut held = crate::inject::held::HeldInput::default();
+    let mut key_state = punktfunk_core::input::key_state::KeyStateReceiver::default();
     let mut pen = PenSession::new();
     loop {
         // A reconnect or steal sets `stop` while this connection is still open and
@@ -1085,7 +1087,28 @@ pub(super) fn input_thread(
                             }
                         }
                     }
-                    _ => {
+                    InputKind::KeysHeld => {
+                        // What the client holds right now. Key edges are one lossy datagram
+                        // each, so a lost up would otherwise leave the key pressed here and
+                        // the focused app repeating it until the next edge for that key.
+                        for code in key_state.releases(&ev, held.keys()) {
+                            tracing::debug!(
+                                code,
+                                "input: client no longer holds this key — releasing it"
+                            );
+                            let up = InputEvent {
+                                kind: InputKind::KeyUp,
+                                _pad: [0; 3],
+                                code,
+                                x: 0,
+                                y: 0,
+                                flags: 0,
+                            };
+                            held.note(&up);
+                            let _ = inj_tx.send(up);
+                        }
+                    }
+                    _ if key_state.accept(&ev) => {
                         // Track press/release so a mid-press disconnect can be undone below.
                         held.note(&ev);
                         let mut ev = ev;
@@ -1096,6 +1119,7 @@ pub(super) fn input_thread(
                         // Host-lifetime injector. Send error = service gone; input is lossy.
                         let _ = inj_tx.send(ev);
                     }
+                    _ => {} // Stale keyboard edges must not undo newer state
                 }
             }
             // Grant missed: drop. Dispatch already counted; no second counter.

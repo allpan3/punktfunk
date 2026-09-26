@@ -169,10 +169,14 @@ pub(super) async fn run_pump(args: WorkerArgs) {
     // older host reads the whole flags word as the pad index.
     let gamepad_snapshots = host_caps & crate::quic::HOST_CAP_GAMEPAD_STATE != 0;
     let pad_audio_arrivals = host_caps & crate::quic::HOST_CAP_PAD_AUDIO != 0;
+    // Held-key snapshots heal a lost KeyUp; an older host ignores the tag, so sending
+    // them blind would only burn datagrams.
+    let key_state = negotiated.host_caps2 & crate::quic::HOST_CAP2_KEY_STATE != 0;
     tokio::spawn(input_task::run(
         conn.clone(),
         input_rx,
         gamepad_snapshots,
+        key_state,
         pad_audio_arrivals,
         pad_audio_caps,
         input_task::MouseArgs {
