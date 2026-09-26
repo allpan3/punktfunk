@@ -75,14 +75,14 @@ public final class SessionAudio {
     /// not the ring, so the drain thread never has to be re-pointed). Guarded by `stateLock`:
     /// the start paths run on `engineQueue`, while `stats` reads from the main thread.
     private var ring: AudioRing?
-    /// Every engine build, start, stop and rebuild runs here, serially — and NOT on the main
-    /// thread. macOS captures and sends input from the main thread, so the seconds a
-    /// voice-processing start can take (~1.9 s measured in the 2026-08-14 field loop) would
-    /// freeze the stream's input for exactly that long — the recovery must never make the main
-    /// thread wait on the audio server. The main queue keeps only the trigger bookkeeping
-    /// (debounce, backoff, retry ladder), which is cheap by construction.
-    private let engineQueue = DispatchQueue(
-        label: "io.unom.punktfunk.audio.engines", qos: .userInitiated)
+    /// Every engine build, start, stop, rebuild and release runs here, serially, and never on the
+    /// main thread: a voice-processing start can block on the audio server for seconds, and macOS
+    /// captures and sends input from the main thread. The main queue keeps only the trigger
+    /// bookkeeping (debounce, backoff, retry ladder).
+    private let engineQueue: DispatchQueue
+    /// Stopped engines waiting to be freed. Every engine this session drops goes through it: a
+    /// bare release races the IO unit's listener block (see `RetiredEngines`).
+    private let retired: RetiredEngines
     /// The video plane's end-to-end meter (capture→on-glass), if the owner wired one — the
     /// reference the A/V sync loop steers the ring against. `nil` leaves the loop inert and the
     /// ring exactly as it was before sync existed, which is also what the stage-1 fallback
@@ -154,6 +154,10 @@ public final class SessionAudio {
 
     public init(connection: PunktfunkConnection) {
         self.connection = connection
+        let engineQueue = DispatchQueue(
+            label: "io.unom.punktfunk.audio.engines", qos: .userInitiated)
+        self.engineQueue = engineQueue
+        retired = RetiredEngines(queue: engineQueue)
     }
 
     /// Backstop for an owner dropping us without stop() — unblocks the drain thread
@@ -489,6 +493,7 @@ public final class SessionAudio {
                         self.playbackEngine = nil
                         self.stateLock.unlock()
                         playback?.stop()
+                        if let playback { self.retired.retire(playback) }
                         self.startCombined(
                             speakerUID: speakerUID, micUID: micUID, micChannel: micChannel)
                     } else {
@@ -574,9 +579,9 @@ public final class SessionAudio {
         }
     }
 
-    /// Stop and release every engine we own, leaving the ring, the drain thread, the observers and
-    /// the audio session alone — the teardown half shared by `stop()` and a rebuild. Safe from any
-    /// thread; the engines are taken under the lock before any of them is touched.
+    /// Stop every engine we own and park it in `retired`, leaving the ring, the drain thread, the
+    /// observers and the audio session alone — the teardown half shared by `stop()` and a rebuild.
+    /// Safe from any thread; the engines are taken under the lock before any of them is touched.
     private func tearDownEngines() {
         stateLock.lock()
         let capture = captureEngine
@@ -594,6 +599,9 @@ public final class SessionAudio {
         if let combined {
             combined.inputNode.removeTap(onBus: 0)
             combined.stop()
+        }
+        for engine in [capture, playback, combined].compactMap({ $0 }) {
+            retired.retire(engine)
         }
     }
 
@@ -668,6 +676,7 @@ public final class SessionAudio {
     /// that told us it stopped is definitive, while the default device moving might not concern us
     /// at all.
     private func hardwareMoved(_ reason: AudioDeviceWatcher.Reason, posted: AnyObject?) {
+        retired.noteHardwareSignal()
         guard !flag.isStopped else { return }
         switch reason {
         case .engineConfiguration:
@@ -688,20 +697,17 @@ public final class SessionAudio {
         }
     }
 
-    /// Restart the engines if — and only if — playback is down. The conservative trigger: it is
-    /// what a route change (iOS/tvOS) and the macOS backstop get to do, since a HEALTHY engine
-    /// that followed the change on its own must not be interrupted for it. Safe from any thread.
+    /// Restart the engines if — and only if — playback is down: a HEALTHY engine that followed
+    /// the change on its own must not be interrupted for it. Safe from any thread.
     ///
     /// The liveness check runs on `engineQueue`, BEHIND any start or rebuild in flight. A
-    /// voice-processing start takes about a second and posts route changes of its own, so a check
-    /// made on the main queue found the engines mid-swap, read that as "stopped", and scheduled
-    /// the rebuild that would trigger the next one — the iPad mic-on loop, one rebuild per
-    /// backoff step for the whole session.
+    /// voice-processing start posts route changes of its own, and a check that meets the engines
+    /// mid-swap reads "stopped" and schedules the rebuild that triggers the next one.
     ///
-    /// Gated on a start having been ATTEMPTED rather than on an engine existing, which is the
-    /// difference between recovering a session whose very first `startPlayback` failed — no
-    /// output device at the moment it connected — and leaving it silent for good.
+    /// Gated on a start having been ATTEMPTED rather than on an engine existing, so a session
+    /// whose very first `startPlayback` failed (no output device yet) is still recovered.
     private func reviveStoppedEngines(_ reason: String) {
+        retired.noteHardwareSignal()
         engineQueue.async { [weak self] in
             guard let self, !self.flag.isStopped else { return }
             self.stateLock.lock()
@@ -730,6 +736,7 @@ public final class SessionAudio {
     /// serves all of it. The floor between rebuilds keeps a device that renegotiates in a loop
     /// from spinning the session. Main thread.
     private func scheduleEngineRebuild(reason: String) {
+        retired.noteHardwareSignal()
         guard !rebuildQueued else { return }
         rebuildQueued = true
         let delay = rebuildBackoff.delay(now: ProcessInfo.processInfo.systemUptime)
@@ -1154,6 +1161,7 @@ public final class SessionAudio {
             try engine.start()
         } catch {
             log.error("playback engine failed to start: \(error.localizedDescription)")
+            retired.retire(engine)
             return
         }
         noteOutputFormat(engine, wireRateHz: wireRateHz)
@@ -1161,6 +1169,7 @@ public final class SessionAudio {
         if flag.isStopped {
             stateLock.unlock()
             engine.stop() // stop() already ran — don't strand a started engine
+            retired.retire(engine)
             return
         }
         playbackEngine = engine
@@ -1238,6 +1247,7 @@ public final class SessionAudio {
                 engines, no echo cancellation
                 """)
             noteCombinedFailure()
+            retired.retire(engine)
             startPlayback(speakerUID: speakerUID)
             startCapture(micUID: micUID, micChannel: micChannel)
             return
@@ -1253,6 +1263,7 @@ public final class SessionAudio {
 
         guard let (ring, source, format) = makePlaybackChain() else {
             // Playback impossible (logged) — keep the uplink alive, as the split path would.
+            retired.retire(engine)
             startCapture(micUID: micUID, micChannel: micChannel)
             return
         }
@@ -1289,6 +1300,7 @@ public final class SessionAudio {
             // echo cancellation: fall back to the split path — own engine, no voice processor —
             // rather than dropping the uplink for the session.
             engine.stop()
+            retired.retire(engine)
             noteCombinedFailure()
             startPlayback(speakerUID: speakerUID)
             startCapture(micUID: micUID, micChannel: micChannel)
@@ -1300,6 +1312,7 @@ public final class SessionAudio {
             log.error("combined engine failed to start: \(error.localizedDescription)")
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
+            retired.retire(engine)
             noteCombinedFailure()
             // Same rule: a working mic without echo cancellation beats no mic at all.
             startPlayback(speakerUID: speakerUID)
@@ -1311,6 +1324,7 @@ public final class SessionAudio {
             stateLock.unlock()
             input.removeTap(onBus: 0)
             engine.stop() // stop() already ran — don't strand a started engine (or a hot mic)
+            retired.retire(engine)
             return
         }
         combinedEngine = engine
@@ -1353,6 +1367,7 @@ public final class SessionAudio {
         guard installMicTap(on: engine.inputNode, micUID: micUID, micChannel: micChannel) else {
             log.error("mic uplink unavailable — this session sends no microphone audio")
             engine.stop()
+            retired.retire(engine)
             return
         }
         do {
@@ -1360,6 +1375,7 @@ public final class SessionAudio {
         } catch {
             log.error("capture engine failed to start: \(error.localizedDescription)")
             input.removeTap(onBus: 0)
+            retired.retire(engine)
             return
         }
         stateLock.lock()
@@ -1369,6 +1385,7 @@ public final class SessionAudio {
             stateLock.unlock()
             input.removeTap(onBus: 0)
             engine.stop()
+            retired.retire(engine)
             return
         }
         captureEngine = engine
