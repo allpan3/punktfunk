@@ -33,6 +33,10 @@ jobs:
       - name: Install Rust targets
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
+      # The xcode-27 image ships Xcode without its Metal toolchain; Glur compiles shaders.
+      - name: Install the Metal toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
+
       - name: Build the Rust xcframework
         run: bash scripts/build-xcframework.sh
 
