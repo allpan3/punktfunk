@@ -520,6 +520,7 @@ struct ContentView: View {
             stream: model.connection.map { CGSize(width: Int($0.width), height: Int($0.height)) },
             captured: model.mouseCaptured,
             isFullscreen: $isFullscreen, appDriven: $appDrivenFullscreen, edge: fullscreenEdge))
+        .fullscreenToolbarOnHover()
         #endif
         // A game launched from the library just exited, so the session ended on purpose: put the
         // player back in that host's library rather than on host selection. Set on the outer Group

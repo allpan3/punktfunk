@@ -76,6 +76,9 @@ struct FullscreenController: NSViewRepresentable {
             defer { Self.applyChrome(window, streaming: stream != nil, captured: captured, edge: edge) }
             let isFull = window.styleMask.contains(.fullScreen)
             if isFullscreen.wrappedValue != isFull { isFullscreen.wrappedValue = isFull }
+            // Restored in fullscreen, the window keeps AppKit's title-bar window over the top
+            // of the screen (see `FullscreenToolbarOnHover`), so fullscreen is never saved.
+            if window.isRestorable == isFull { window.isRestorable = !isFull }
             if edge.stream != stream {
                 edge.stream = stream
                 edge.wantsPanel = Self.coversHousing(window.screen, stream)
@@ -248,5 +251,27 @@ private enum PanelFrame {
         }
         return windows
     }()
+}
+
+/// In native fullscreen AppKit holds the title bar in a separate window. A window that enters
+/// fullscreen with a toolbar attached keeps that window over the top of the screen after the
+/// toolbar goes: it draws nothing, but pointer moves over it do not reach the stream.
+/// `.onHover` hides it with the menu bar. It has no effect on a window restored in fullscreen,
+/// which is why `FullscreenController` keeps a fullscreen window out of the saved state.
+/// macOS 14 has no such modifier.
+private struct FullscreenToolbarOnHover: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 15, *) {
+            content.windowToolbarFullScreenVisibility(.onHover)
+        } else {
+            content
+        }
+    }
+}
+
+extension View {
+    func fullscreenToolbarOnHover() -> some View {
+        modifier(FullscreenToolbarOnHover())
+    }
 }
 #endif
