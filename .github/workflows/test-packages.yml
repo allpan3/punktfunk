@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 env:
-  HOTFIX: 1
+  HOTFIX: 2
 
 concurrency:
   group: test-packages-${{ github.ref }}
